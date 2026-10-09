@@ -1,10 +1,10 @@
 // nevpt2.energy:shared -- what the SC (energy.cpp) and PC (energy_pc.cpp)
-// classes share: the slab walk, the RDM-only intermediates PC's
+// classes share: the RDM-only intermediates PC's
 // metrics and Hamiltonians are built from, and the Sijrs class, which PC reuses
 // whole. An internal partition: nothing here is exported, so these have module
 // linkage -- reachable from every unit that does `import :shared;` and from no
-// importer of nevpt2.energy. energy.cpp defines the functions; forBatches, a
-// template, is defined here. It imports the primary interface for the types its
+// importer of nevpt2.energy. energy.cpp defines the functions. (The slab walk,
+// forBatches, is nevpt2.energy_finish's.) It imports the primary interface for the types its
 // declarations name (DeviceTensor, ActiveIntegralsDevice, IntegralSource); the
 // primary interface does not import it back (cmake/README.md,
 // "add_cxx_module_library").
@@ -15,14 +15,8 @@ import nevpt2.energy;
 
 namespace nevpt2 {
 
-// Calls f(b0, b1) for consecutive [b0, b1) covering [0, n), each at most
-// `batch` long (batch <= 0: one piece). n == 0 calls nothing. Every class's
-// slab walk, SC and PC.
-template <class F>
-void forBatches(int64_t n, int64_t batch, F&& f) {
-  int64_t step = batch > 0 ? batch : std::max(n, int64_t{1});
-  for (int64_t b0 = 0; b0 < n; b0 += step) f(b0, std::min(n, b0 + step));
-}
+// forBatches, the slab walk every class runs, is nevpt2.energy_finish's
+// (re-exported by nevpt2.energy).
 
 // PC-NEVPT2 solves with the metric S and Hamiltonian K that the SC einsums
 // contract to a scalar (docs/pc-nevpt2.md, "PC-NEVPT2 on the device: the design"), so

@@ -1,7 +1,7 @@
 // nevpt2.energy:pc_solve -- PC-NEVPT2's per-class solve: the d x d GEMM and
 // symmetric eigendecomposition on DeviceResources' handles, the
-// S^-1/2 K S^-1/2 solve built from them, and the denominator check and
-// finish the classes share.
+// S^-1/2 K S^-1/2 solve built from them. (The denominator check and finish
+// the classes share are nevpt2.energy_finish's.)
 // An internal partition: nothing here is exported, so it is reachable from the
 // units that `import :pc_solve;` and from no importer of nevpt2.energy.
 // (Used by energy_pc_classes.cppm.)
@@ -171,29 +171,8 @@ Result<ClassSolve> solveClass(const DeviceTensor& S, const DeviceTensor& K, cons
   return cs;
 }
 
-// Marks `r` refused when a denominator is not positive (H_D must be positive
-// on the kept range; the measured floor is 0.83 Eh -- docs/pc-nevpt2.md,
-// "The singular-metric convention").
-void checkDenominator(PcClassResult& r, double minDen) {
-  r.spectrum.minDenominator = minDen;
-  if (!(minDen > 0.0)) {
-    r.status = PcStatus::Refused;
-    r.why = std::format("a denominator lambda_k + Delta_t = {:.3e} is not positive", minDen);
-  }
-}
-
-// The external-index finish Sr and Si share: E = -sum_t sum_k Y[t,k]^2 /
-// (lambda_k + Delta_t), factor 1, over the slab's tuples t (b0 + row).
-void finishSingle(const Tensor& y, const std::vector<double>& lambda,
-                  const std::vector<double>& delta, double& e, double& minDen) {
-  const int64_t nt = std::ssize(delta), m = std::ssize(lambda);
-  for (int64_t t = 0; t < nt; ++t)
-    for (int64_t k = 0; k < m; ++k) {
-      const double den = lambda[k] + delta[t];
-      minDen = std::min(minDen, den);
-      const double yk = y(t, k);
-      e -= yk * yk / den;
-    }
-}
+// The denominator check (checkDenominator) and the Sr/Si finish
+// (finishSingle) the classes share are pure host arithmetic:
+// nevpt2.energy_finish's, re-exported by nevpt2.energy.
 
 }  // namespace nevpt2

@@ -92,11 +92,11 @@ and no importer may see: its declarations have module linkage, so they are
 reachable from every unit that does `import :<part>;`. Two kinds:
 
 - *Shared* declarations several units need, defined in one of them:
-  `nevpt2.energy:shared` (`src/energy/energy_shared.cppm`), the slab walk and
+  `nevpt2.energy:shared` (`src/energy/energy_shared.cppm`), the
   intermediates SC's `energy.cpp` and PC's `energy_pc.cpp` both use.
 - *Helpers*, moved whole (definitions included) out of the unit that uses
   them: `nevpt2.golden:reader`, `nevpt2.einsum:planner` and `:launch`,
-  `nevpt2.rdm_build:staging`/`:tiles`/`:blas`, and so on — one
+  `nevpt2.rdm_build:staging`/`:blas`, and so on — one
   `<component>_<part>.cppm` each, as many as the helpers split into.
 
 A partition is named for what it provides, never `:internal` or `:detail`.

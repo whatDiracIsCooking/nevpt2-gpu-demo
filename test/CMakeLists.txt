@@ -54,6 +54,8 @@ add_subdirectory(utils)
 
 add_subdirectory(error_handling)
 add_subdirectory(link_tables)
+add_subdirectory(rdm_plan)
+add_subdirectory(energy_finish)
 add_subdirectory(rdm)
 add_subdirectory(tensor)
 add_subdirectory(device_tensor)

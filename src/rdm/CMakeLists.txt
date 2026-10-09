@@ -12,6 +12,16 @@ add_cxx_module_library(
   LINK_PUBLIC nevpt2::common
 )
 
+# nevpt2.rdm_plan -- the RDM build's pure host index arithmetic: the tile plan
+# (tileWidthForCount, planTiles), the consume GEMM's chunking (evenChunks) and
+# its permuted integral copy (permuteEriConsume). No GPU, so the unit tier
+# tests it card-free (test/rdm_plan/); nevpt2.rdm_build imports it.
+add_cxx_module_library(
+  NAME nevpt2.rdm_plan
+  PRIMARY_INTERFACE rdm_plan.cppm
+  LINK_PUBLIC nevpt2::common
+)
+
 # nevpt2.rdm_build -- the tiled, device-resident dm3/f3ac/f3ca build both
 # demos run (it touches only the ACTIVE h2e, so density fitting does not
 # change it). The --cublas digest lives in ../cublas and is linked privately:
@@ -20,14 +30,14 @@ add_cxx_module_library(
 add_cxx_module_library(
   NAME nevpt2.rdm_build
   PRIMARY_INTERFACE rdm_build.cppm
-  PARTITIONS rdm_build_staging.cppm rdm_build_tiles.cppm rdm_build_blas.cppm
+  PARTITIONS rdm_build_staging.cppm rdm_build_blas.cppm
   IMPLEMENTATION rdm_build.cpp
   # device_tensor (re-exports nevpt2.tensor and nevpt2.device_resources): the result
   # is DeviceTensors.
   LINK_PUBLIC nevpt2::wwr nevpt2::device_tensor
   # wwr::extension::blas: the wwrblasStatus_t specializations that let
   # nevpt2::gpuCheck check a BLAS status.
-  LINK_PRIVATE nevpt2::common nevpt2::link_tables nevpt2::profile
+  LINK_PRIVATE nevpt2::common nevpt2::link_tables nevpt2::rdm_plan nevpt2::profile
     nevpt2::cublas_emul wwr::blas wwr::extension::blas
 )
 

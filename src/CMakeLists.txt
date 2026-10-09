@@ -48,6 +48,7 @@
 #   golden   nevpt2.golden       the .nevpt2gold reader               (tensor)
 #   cublas   nevpt2.cublas_emul  --cublas digest; real on CUDA, refusing stubs on HIP (device)
 #   rdm      nevpt2.link_tables  Knowles-Handy link tables (no GPU)
+#            nevpt2.rdm_plan     tile plan, consume chunking / permuted eri (no GPU)
 #            nevpt2.rdm_build    the tiled dm3/f3ac/f3ca build        (device, cublas)
 #            + device library: rdm_launch.cu (#includes kernels.cu)
 #            + device library: rdm_accumulate.cu
@@ -56,7 +57,9 @@
 #   einsum   nevpt2.einsum       device einsum planner/launcher       (device_tensor)
 #            nevpt2.einsum.plan  einsum_plan.h, shared host/device (INTERFACE)
 #            + device library: device_einsum.cu
-#   energy   nevpt2.energy       the eight class energies, over slabs of an
+#   energy   nevpt2.energy_finish  slab walk, SC/PC finish arithmetic, PC
+#                                result types                (tensor; no GPU)
+#            nevpt2.energy       the eight class energies, over slabs of an
 #                                IntegralSource: SC, and PC (one eigensolve
 #                                per class on DeviceResources' solver
 #                                handle, the same slabs)              (einsum)
