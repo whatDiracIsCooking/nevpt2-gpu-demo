@@ -78,7 +78,10 @@ devtools/cpp-tier.sh --preset asan
 Every sanitizer option defaults OFF, so `default`, `hip` and the other
 presets are unaffected. Each sanitizer preset is a Debug build in its own
 `build-<preset>/` directory, and its test preset runs only the entries
-labelled `small` plus the canaries that build registered.
+labelled `small`, the whole unit tier (`unit`) and the canaries that build
+registered. The `compute-sanitizer` test preset drops the `death` suites:
+`EXPECT_DEATH` forks, and compute-sanitizer does not follow the child. Those
+suites still run under the four host presets.
 
 **What a change touching streams, allocation or frees must be clean under:**
 `asan`, `ubsan`, `hip-asan`, and `compute-sanitizer` with memcheck and with
@@ -249,7 +252,32 @@ demo carry on to print `PASS:`, and LSan reports at exit, after `PASS:`, so
 either would pass on the regex alone. Every demo entry also carries a
 `FAIL_REGULAR_EXPRESSION` on the tools' own report lines
 (`ERROR SUMMARY: [1-9]`, `RACECHECK SUMMARY: [1-9]`, `ERROR: ...Sanitizer`,
-`runtime error:`).
+`runtime error:`). Every unit-tier suite entry carries the same expression
+(`cmake/add_gtest_suite_tests.cmake`). gtest's exit code already fails a
+suite whose assertion fails, but a sanitizer report that leaves the exit code
+alone would not.
+
+### The unit tier under the sanitizers
+
+Every unit-tier suite runs in each sanitizer preset. A `REQUIRES_GPU` suite
+runs under compute-sanitizer and a host-only one runs bare
+(`test/CMakeLists.txt`). Last run 2026-10-09: CUDA on the RTX 3080, HIP on
+the RX 9060 XT, each preset's own Debug build, memcheck with the leak check.
+**No suite needed a fix and no LSan suppression was added.**
+
+| preset | entries run | unit entries | result |
+|---|---:|---:|---|
+| `asan` | 59 | 43 | all pass, canary green |
+| `ubsan` | 59 | 43 | all pass, canary green |
+| `compute-sanitizer`, memcheck + leak check | 58 | 40 (the 3 `death` suites dropped) | all pass, 3 canaries green; every GPU suite reports `LEAK SUMMARY: 0 bytes leaked in 0 allocations`, `ERROR SUMMARY: 0 errors` |
+| `compute-sanitizer`, initcheck | 56 | 40 | all pass, canary green |
+| `hip-asan` | 58 | 43 | all pass, canary green |
+| `hip-ubsan` | 58 | 43 | all pass, canary green |
+
+The 43 unit entries are 33 suites plus 10 `<target>.SuiteListIsComplete`
+guards. Under the sanitizers the unit tier adds 4.5–9 s of `sec*proc`
+(ctest's label summary) to each preset. The `small` golden entries dominate
+each run.
 
 ### Wall times
 

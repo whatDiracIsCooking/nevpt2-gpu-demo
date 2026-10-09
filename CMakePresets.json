@@ -188,8 +188,8 @@
       "name": "sanitizer",
       "hidden": true,
       "inherits": "base",
-      "description": "Every sanitizer test preset runs the `small` CAS(4,4)/CAS(8,8) entries and the canaries its build registered, nothing else (docs/testing.md, 'Sanitizers').",
-      "filter": { "include": { "label": "small|sanitizer_canary" } }
+      "description": "Every sanitizer test preset runs the `small` CAS(4,4)/CAS(8,8) entries, the GoogleTest unit tier (`unit`) and the canaries its build registered, nothing else (docs/testing.md, 'Sanitizers').",
+      "filter": { "include": { "label": "small|sanitizer_canary|unit" } }
     },
     {
       "name": "asan",
@@ -212,7 +212,11 @@
       "name": "compute-sanitizer",
       "inherits": "sanitizer",
       "configurePreset": "compute-sanitizer",
-      "description": "The small cases + the configured tool's canaries, each under compute-sanitizer."
+      "description": "The small cases, the unit tier and the configured tool's canaries; the entries that touch the GPU run under compute-sanitizer. Drops the `death` suites: EXPECT_DEATH forks, and compute-sanitizer does not follow a forked child.",
+      "filter": {
+        "include": { "label": "small|sanitizer_canary|unit" },
+        "exclude": { "label": "death" }
+      }
     },
     {
       "name": "hip-asan",
