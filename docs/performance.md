@@ -218,6 +218,24 @@ is the recommendation at CAS(12,12). With `--cublas`, tiling both fits the
 build in memory and keeps each digest operand under cuBLAS's engagement
 ceiling. The ceiling lies somewhere between widths 10,673 and 21,345.
 
+The ceiling depends on `M` as well as on `K`. Probing one GEMM in isolation
+(`probe_emul_bits` at `max_mantissa_bits=53`, RTX 3080, 2026-10-09):
+
+| `M` × `N` (row-major digest shape) | engaged | declined (`bits=-1`) |
+|---|---|---|
+| 20,736 × 144 (CAS(12,12)'s `n⁴` × `n²`) | `K` = 10,673, 21,345, 25,000 | `K` = 30,000 |
+| 1 × 1 | `K` = 1,048,576 and 1,048,577 | `K` = 1,500,000 and above |
+| 10,000 × 100 (CAS(10,10)'s; `--tiles 3` is `K` = 21,168) | `K` = 2,000 and 21,168 | not probed |
+
+In isolation, width 21,345 engaged. Under compute-sanitizer memcheck, the
+declined 1 × 1 probe shows the mechanism: inside `digest_gemm`, cuBLAS's own
+workspace `cudaMallocAsync` fails with `out of memory`, and cuBLAS then falls
+back to native fp64. So a decline is a failed workspace allocation, and the
+ceiling may depend on free device memory as well as on the shape. That
+would fit the demo declining only once at width 21,345, but nobody has
+measured it. `test/cublas/` relies on the 1 × 1 row for its declined case
+(`K` = 4,000,000) and on the 10,000 × 100 row for its engaged case.
+
 ### The int8 Ozaki digest (`--ozaki`)
 
 `--ozaki` (`src/ozaki/`) is a hand-written version of the same int8 scheme,

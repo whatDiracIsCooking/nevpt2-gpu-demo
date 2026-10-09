@@ -147,6 +147,18 @@ match the golden to 1e-7. memcheck and initcheck stay unscoped, because a bad
 argument of ours *does* fault inside a vendor kernel. synccheck runs
 unscoped too, cuBLAS included, and is clean.
 
+**The compute-sanitizer build leaves out `--cublas`'s declined case.**
+`CublasEmulDeclineTests` (`test/cublas/`) asserts that `probe_emul_bits`
+returns -1 on a shape cuBLAS declines. cuBLAS declines because its own
+workspace `cudaMallocAsync` fails with `out of memory` (see
+[`performance.md`](performance.md), "The cuBLAS fixed-point-emulation digest
+(`--cublas`)"). memcheck reports each such failed call as an API error, 4 for
+that case's two GEMMs, so the entry cannot be clean under it. Nothing we do
+causes that failure, and the check is not loosened. The suite is compiled out
+of the `compute-sanitizer` build and runs in every other build on the CUDA
+card. The engaged cases (`CublasEmulDigestTests`, `CublasEmulProbeTests`) run
+under memcheck and initcheck, and both report them clean.
+
 **What the tier has caught.** initcheck found `--cublas`'s engaged-bits probe
 reading uninitialized device memory (6,528 errors at CAS(4,4), inside
 cuBLAS's `max_scale_pack_ker`): it ran on freshly allocated operands. The
@@ -273,19 +285,23 @@ the RX 9060 XT, each preset's own Debug build, memcheck with the leak check.
 |---|---:|---:|---|
 | `asan` | 95 | 79 | all pass, canary green |
 | `ubsan` | 95 | 79 | all pass, canary green |
-| `compute-sanitizer`, memcheck + leak check | 94 | 75 (the 4 `death` suites dropped) | all pass, 4 `sanitizer_canary` entries green; all 30 GPU unit entries report `LEAK SUMMARY: 0 bytes leaked in 0 allocations`, `ERROR SUMMARY: 0 errors` |
-| `compute-sanitizer`, initcheck | 91 | 75 | all pass, canary green |
+| `compute-sanitizer`, memcheck + leak check | 103 | 84 (the 5 `death` suites dropped) | all pass, 4 `sanitizer_canary` entries green; all 36 GPU unit entries report `LEAK SUMMARY: 0 bytes leaked in 0 allocations`, `ERROR SUMMARY: 0 errors` |
+| `compute-sanitizer`, initcheck | 100 | 84 | all pass, canary green |
 | `hip-asan` | 100 | 85 | all pass, canary green |
 | `hip-ubsan` | 100 | 85 | all pass, canary green |
 
-The two `hip-*` rows were re-run last, after the `REQUIRES_GPU`
-`profile_tests` joined the tier: their 85 unit entries are 67 suites (5 of
-them `death`, which run there) plus 18 `<target>.SuiteListIsComplete`
-guards. The four CUDA rows predate it: they were re-run after the
-`REQUIRES_GPU` `device_resources_tests` joined the tier, and their 79 unit
-entries are 62 suites (4 of them `death`) plus 17 guards, compute-sanitizer's
-75 being those less the 4 `death` suites. In the four CUDA rows the
-unit tier adds 15–21 s of `sec*proc` (ctest's label summary) to each preset.
+The two `compute-sanitizer` rows were re-run last, after `cublas_emul_tests`
+joined the tier. Their build has 89 unit entries: 70 suites (5 of them
+`death`) plus 19 `<target>.SuiteListIsComplete` guards. The 84 that ran are
+those less the 5 `death` suites. `CublasEmulDeclineTests` is compiled out of
+that build (above). In both rows the unit tier added 25.6 s of `sec*proc`
+(ctest's label summary). The two `hip-*` rows were re-run after the
+`REQUIRES_GPU` `profile_tests` joined the tier. Their 85 unit entries are 67
+suites (5 of them `death`, which run there) plus 18 guards. The `asan` and
+`ubsan` rows predate both. They were re-run after the `REQUIRES_GPU`
+`device_resources_tests` joined the tier, and their 79 unit entries are 62
+suites (4 of them `death`) plus 17 guards. In those two rows the unit tier
+adds 15–21 s of `sec*proc` to each preset.
 
 ### Wall times
 
