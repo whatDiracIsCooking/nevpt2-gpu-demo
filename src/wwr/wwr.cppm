@@ -132,6 +132,7 @@ using ::wwr::wwrMemcpyDeviceToHost;
 using ::wwr::wwrMemcpyHostToDevice;
 using ::wwr::wwrMemPool_t;
 using ::wwr::wwrMemPoolAttrReservedMemHigh;
+using ::wwr::wwrMemPoolAttrUsedMemCurrent;
 using ::wwr::wwrMemPoolAttrUsedMemHigh;
 using ::wwr::wwrMemPoolGetAttribute;
 using ::wwr::wwrMemsetAsync;

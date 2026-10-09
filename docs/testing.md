@@ -274,11 +274,13 @@ the RX 9060 XT, each preset's own Debug build, memcheck with the leak check.
 | `ubsan` | 59 | 43 | all pass, canary green |
 | `compute-sanitizer`, memcheck + leak check | 58 | 40 (the 3 `death` suites dropped) | all pass, 3 canaries green; every GPU suite reports `LEAK SUMMARY: 0 bytes leaked in 0 allocations`, `ERROR SUMMARY: 0 errors` |
 | `compute-sanitizer`, initcheck | 56 | 40 | all pass, canary green |
-| `hip-asan` | 58 | 43 | all pass, canary green |
-| `hip-ubsan` | 58 | 43 | all pass, canary green |
+| `hip-asan` | 68 | 53 | all pass, canary green |
+| `hip-ubsan` | 68 | 53 | all pass, canary green |
 
 The 43 unit entries are 33 suites plus 10 `<target>.SuiteListIsComplete`
-guards. Under the sanitizers the unit tier adds 4.5–9 s of `sec*proc`
+guards. The two `hip-*` rows were re-run later the same day, after
+`rdm_dm3_tests` and `df_integrals_tests` joined the tier: their 53 are 41
+suites plus 12 guards. The CUDA rows predate both binaries. Under the sanitizers the unit tier adds 4.5–9 s of `sec*proc`
 (ctest's label summary) to each preset. The `small` golden entries dominate
 each run.
 
