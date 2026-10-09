@@ -26,7 +26,8 @@
 #
 # DEATH marks EXPECT_DEATH suites (the abort tier: check, narrowTo). gtest
 # forks per death assertion, so they are slower and noisier than the rest; the
-# label lets a run pick them out or drop them. Name such a suite `...DeathTest`
+# label lets a run pick them out or drop them. The compute-sanitizer test
+# preset drops them: compute-sanitizer does not follow a forked child. Name such a suite `...DeathTest`
 # (gtest runs those first, before any thread exists).
 #
 # THE DRIFT GUARD, `<target>.SuiteListIsComplete`: the suite names here are
@@ -90,7 +91,16 @@ function(add_gtest_suite_tests)
   foreach(_suite IN LISTS _GST_SUITES)
     add_test(NAME ${_suite}
              COMMAND ${_launcher} $<TARGET_FILE:${_GST_TARGET}> --gtest_filter=${_suite}.*)
-    set_tests_properties(${_suite} PROPERTIES LABELS "${_labels}" TIMEOUT ${_timeout})
+    # The golden entries' FAIL_REGULAR_EXPRESSION (root CMakeLists.txt), for
+    # the same reason: a sanitizer report that does not change the exit code
+    # -- compute-sanitizer reporting and letting the process carry on, LSan at
+    # exit -- must still fail the entry. None of these lines can appear in an
+    # unsanitized run.
+    set_tests_properties(${_suite} PROPERTIES
+      LABELS "${_labels}"
+      TIMEOUT ${_timeout}
+      FAIL_REGULAR_EXPRESSION
+        "ERROR SUMMARY: [1-9];RACECHECK SUMMARY: [1-9];ERROR: [A-Za-z]+Sanitizer;runtime error:")
   endforeach()
 
   # The union every call for this target contributes; the guard reads it at

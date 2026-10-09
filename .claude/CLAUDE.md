@@ -177,7 +177,8 @@ before quoting a `--cublas` number.
 
 **The sanitizer tier.** Five presets, each a Debug build in its own
 `build-<preset>/`, whose test preset runs only the `small` CAS(4,4)/CAS(8,8)
-entries plus that sanitizer's canaries. memcheck's `--leak-check full`
+entries, the `unit` tier (less its `death` suites under compute-sanitizer:
+EXPECT_DEATH forks) and that sanitizer's canaries. memcheck's `--leak-check full`
 (`NEVPT2_COMPUTE_SANITIZER_LEAK_CHECK`) is **ON** by default (both demos leak
 0).
 

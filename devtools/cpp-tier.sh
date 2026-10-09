@@ -41,7 +41,9 @@
 #                   --preset asan | ubsan | compute-sanitizer on the CUDA card,
 #                   hip-asan | hip-ubsan on the AMD one, each configuring,
 #                   building and testing its own build-<preset>/ (the small
-#                   CAS(4,4)/CAS(8,8) entries plus that sanitizer's canaries).
+#                   CAS(4,4)/CAS(8,8) entries, the unit tier -- less its
+#                   `death` suites under compute-sanitizer -- and that
+#                   sanitizer's canaries).
 #                   The compute-sanitizer tool is a cache variable, so pick a
 #                   non-default one by configuring first:
 #                     cmake --preset compute-sanitizer \
