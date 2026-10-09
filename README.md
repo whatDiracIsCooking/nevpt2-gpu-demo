@@ -277,7 +277,8 @@ ran, on which card. The local gate, and what to run before claiming a
 result, is in [`docs/testing.md`](docs/testing.md), "No CI, and the local
 gate". The sanitizer presets
 (ASan, UBSan, compute-sanitizer) and their limits are in
-docs/testing.md, "Sanitizers".
+docs/testing.md, "Sanitizers"; host code coverage (`devtools/coverage.sh`)
+and what it cannot see are in docs/testing.md, "Coverage".
 
 ## Documentation
 
@@ -288,7 +289,7 @@ docs/testing.md, "Sanitizers".
 | what it costs, which knobs matter, and what didn't help | [`docs/performance.md`](docs/performance.md) |
 | PC-NEVPT2: the design, accuracy against block2, cost | [`docs/pc-nevpt2.md`](docs/pc-nevpt2.md) |
 | where the reference files come from and why they can be trusted | [`docs/reference-data.md`](docs/reference-data.md) |
-| the test tiers, the sanitizers, and what each can't see | [`docs/testing.md`](docs/testing.md) |
+| the test tiers, the sanitizers, coverage, and what each can't see | [`docs/testing.md`](docs/testing.md) |
 | the method papers and the pinned software versions | [`docs/references.md`](docs/references.md) |
 
 `performance.md`, `pc-nevpt2.md`, `reference-data.md` and `testing.md` are

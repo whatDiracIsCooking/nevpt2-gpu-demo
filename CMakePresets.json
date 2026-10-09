@@ -117,6 +117,29 @@
     },
 
     {
+      "name": "coverage",
+      "inherits": "default",
+      "displayName": "CUDA, Release + source-based coverage (host)",
+      "description": "Release (what `fast` tests) + clang source-based coverage (-fprofile-instr-generate -fcoverage-mapping) on host CXX units; device libraries (every .cu) stay uninstrumented. Its test preset writes one .profraw per process into build-coverage/profraw/; devtools/coverage.sh configures, builds, tests and turns them into a report. Release, not Debug: source-based counters are inserted before the optimizer, so the counts are exact at -O3, and a Debug HIP build compiles device code -O0 too (the --ozaki entry alone then runs for many minutes). Separate build-coverage/ dir.",
+      "binaryDir": "${sourceDir}/build-coverage",
+      "cacheVariables": {
+        "NEVPT2_ENABLE_COVERAGE": "ON",
+        "NEVPT2_TEST_TIMEOUT_MULTIPLIER": "3"
+      }
+    },
+    {
+      "name": "hip-coverage",
+      "inherits": "hip",
+      "displayName": "HIP, Release + source-based coverage (host)",
+      "description": "The coverage preset against ROCm/HIP: the same host CXX units instrumented, every -x hip .cu left alone. Separate build-hip-coverage/ dir.",
+      "binaryDir": "${sourceDir}/build-hip-coverage",
+      "cacheVariables": {
+        "NEVPT2_ENABLE_COVERAGE": "ON",
+        "NEVPT2_TEST_TIMEOUT_MULTIPLIER": "3"
+      }
+    },
+
+    {
       "name": "compile-cuda",
       "inherits": "default",
       "displayName": "CUDA, compile-and-link only",
@@ -144,6 +167,8 @@
     { "name": "compute-sanitizer", "configurePreset": "compute-sanitizer" },
     { "name": "hip-asan",    "configurePreset": "hip-asan" },
     { "name": "hip-ubsan",   "configurePreset": "hip-ubsan" },
+    { "name": "coverage",    "configurePreset": "coverage" },
+    { "name": "hip-coverage", "configurePreset": "hip-coverage" },
     { "name": "compile-cuda", "configurePreset": "compile-cuda" },
     { "name": "compile-hip",  "configurePreset": "compile-hip" }
   ],
@@ -234,6 +259,23 @@
       "configurePreset": "hip-ubsan",
       "description": "The ubsan test preset on ROCm/HIP.",
       "environment": { "UBSAN_OPTIONS": "print_stacktrace=1" }
+    },
+
+    {
+      "name": "coverage",
+      "inherits": "base",
+      "configurePreset": "coverage",
+      "description": "What `fast` runs (every entry not `slow`: the golden cases and the unit tier), each process writing build-coverage/profraw/<pid>.profraw. %p, not a merge pool: one file per process is what makes a parallel ctest -j safe. devtools/coverage.sh empties the directory before and merges it after.",
+      "filter": { "exclude": { "label": "slow" } },
+      "environment": { "LLVM_PROFILE_FILE": "${sourceDir}/build-coverage/profraw/%p.profraw" }
+    },
+    {
+      "name": "hip-coverage",
+      "inherits": "base",
+      "configurePreset": "hip-coverage",
+      "description": "The coverage test preset on ROCm/HIP.",
+      "filter": { "exclude": { "label": "slow" } },
+      "environment": { "LLVM_PROFILE_FILE": "${sourceDir}/build-hip-coverage/profraw/%p.profraw" }
     }
   ]
 }
