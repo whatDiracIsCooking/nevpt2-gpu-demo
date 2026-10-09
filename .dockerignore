@@ -1,0 +1,19 @@
+# The docker build context is the repo root (docker/build.sh sets it there,
+# because the Dockerfiles spell their COPY and bind-mount paths relative to
+# it). Only pyproject.toml + uv.lock are COPYed and only docker/*.sh is
+# bind-mounted, so everything else is context upload for nothing.
+.git/
+build/
+build-*/
+src/build/
+.venv/
+__pycache__/
+.ruff_cache/
+.pytest_cache/
+.slow-tier-reports/
+.log/
+.logs/
+
+# 8.8 MB of binary reference data no image layer needs; the demo reads it from
+# the bind-mounted workspace at run time, not from the image.
+golden/

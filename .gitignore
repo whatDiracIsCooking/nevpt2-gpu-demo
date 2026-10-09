@@ -1,0 +1,48 @@
+# Build trees. Every CMakePresets.json binaryDir matches one of these, and so
+# does the standalone `cmake -S src -B src/build` path README.md documents.
+/build/
+/build-*/
+src/build/
+
+# devtools/cpp-tier.sh run logs (SLOW_TIER_REPORTS in devtools/config.sh).
+/.slow-tier-reports/
+# docker/compose.yaml tees configure/build/test output here instead.
+/.log/
+# .claude/hooks/protect-main.py's decision log.
+/.logs/
+# sccache's compiler cache, if it ever lands in the checkout.
+/.sccache/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# clangd's background index (.cache/clangd/) -- per-machine editor state.
+.cache/
+
+# The CAS(14,14) golden is deliberately NOT committed: 71 MB xz (95 MB raw),
+# past GitHub's 50 MB warning threshold, and reproducible offline in one
+# command. See docs/reference-data.md, "CAS(14,14)".
+golden/*cas1414*
+
+# The salicylaldimine CAS(8,8)/6-31G** goldens likewise: 145 MB / 166 MB raw,
+# 67 / 70 MB xz (cvcv alone is (28*125)^2 doubles), bit-identical on
+# regeneration in ~2.5 min each. See docs/reference-data.md, "Salicylaldimine
+# CAS(8,8)".
+golden/salicylaldimine_*
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Personal Claude Code overrides; the committed settings.json is the shared one.
+.claude/settings.local.json
+.claude/worktrees/
+
+# Scratch space; never committed.
+.temp

@@ -1,0 +1,55 @@
+{
+  "//": "THE development container: clang-20 + libc++, CMake 4.2, Ninja, sccache, uv, and the CUDA 13 toolkit. Drive it with devtools/devcontainer.sh, never `docker run` by hand -- that script resolves the ${localEnv:...} values below (the host .git path) and refuses rather than silently mounting the wrong thing. PROJECT_NAME is duplicated here because JSON cannot source shell; devtools/doctor.sh checks that it still agrees with devtools/config.sh.",
+  "name": "nevpt2",
+  "image": "nevpt2:cuda",
+
+  "workspaceFolder": "/workspaces/nevpt2",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/nevpt2,type=bind,consistency=cached",
+
+  "runArgs": [
+    "--gpus", "all",
+    "--shm-size", "8g",
+    "--security-opt", "seccomp=unconfined"
+  ],
+
+  "//mounts": "The first entry is the host .git dir: a git worktree's .git is a FILE pointing at the parent repo's real git dir, which lives OUTSIDE the workspace bind, so without it every git command inside fails with 'not a repository'. devtools/devcontainer.sh resolves and exports NEVPT2_GIT_DIR; the /dev/null fallback keeps a bare `devcontainer up` from erroring. The second is your host ~/.claude, a bind too -- see `//claude` below. The rest are named volumes prefixed with PROJECT_NAME so `worktree.sh gc` recognises them as this project's; they survive a rebuild, anything outside them does not. EVERY NAMED-VOLUME TARGET BELOW (binds are exempt) MUST ALSO APPEAR IN docker/Dockerfile.base's `install -d -o 1000 -g 1000` LIST: docker seeds a fresh named volume from what the IMAGE holds at the target, ownership included, so a target the image does not have gets a root-owned mount point that uid 1000 cannot write -- which is how `uv sync` came to die on `/home/ubuntu/.cache/uv/CACHEDIR.TAG: Permission denied`. It holds for `build` too, even though that one is nested inside the workspace bind. There is deliberately NO /tmp/pytest volume: this project has no Python test suite (devtools/doctor.sh says why it does not even check for pytest).",
+  "mounts": [
+    "source=${localEnv:NEVPT2_GIT_DIR:/dev/null},target=${localEnv:NEVPT2_GIT_DIR:/dev/null},type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.claude,target=/home/ubuntu/.claude,type=bind,consistency=cached",
+    "source=nevpt2-sccache-${devcontainerId},target=/home/ubuntu/.sccache,type=volume",
+    "source=nevpt2-build-${devcontainerId},target=/workspaces/nevpt2/build,type=volume",
+    "source=nevpt2-uvcache-${devcontainerId},target=/home/ubuntu/.cache/uv,type=volume"
+  ],
+
+  "//claude": "Used only when the image was built with INSTALL_CLAUDE_CODE=1 (off by default; docker/install-claude-code.sh). Without it nothing reads the bind, and devtools/devcontainer.sh at most creates an empty ~/.claude on your host. Kept unconditional because JSON cannot make a mount optional, and an empty directory is cheaper than a second variant per backend. With it: your HOST ~/.claude, bound in, and it is what keeps `claude` in here logged in. Claude Code keeps its OAuth session in .credentials.json inside that directory, so sharing the directory shares the login and the container never shows the auth prompt -- `devtools/devcontainer.sh shell` then `claude` just runs. uid 1000 on both sides makes it writable: `updateRemoteUserUID` below matches the container user to you. THREE things this deliberately is not. (1) NOT a named volume: a volume would keep the container's config to itself, but you would then log in once per worktree per variant, and removing that login is the entire point. (2) NOT a bind of ~/.claude.json: a single-FILE bind is a mount point, and `rename()` onto a mount point is EBUSY, so a config rewritten atomically (temp file, rename over) would fail inside the container. The container keeps its own ~/.claude.json instead. MEASURED on the first `claude` in a fresh container: it prints a one-time 'Claude configuration file not found at /home/ubuntu/.claude.json -- a backup file exists at ...' notice (the backup it names is one of YOURS, since .claude/backups/ came in with the bind), restores its own copy from that backup, and is silent on every run after. Noisy once per container, and never a login: the `claude -p` that printed it answered on that same run. (3) NOT subject to the `install -d` invariant in docker/Dockerfile.base that the volumes above are: a bind takes the HOST path's ownership, not the image's. That invariant is still why this was broken before: `install -d -o 1000 /a/b/c` chowns only `c`, so the image's /home/ubuntu/.claude was root-owned with ubuntu-owned plugins/ and backups/ inside it, claude could not write .credentials.json, and every single run asked you to log in again. devtools/devcontainer.sh creates the host directory before the CLI runs, for the same reason it creates the sccache store: docker would otherwise create a missing bind source as root.",
+
+  "//containerEnv": "DISABLE_AUTOUPDATER is load-bearing next to the ~/.claude bind above, not a preference. The GPU Dockerfiles pin CLAUDE_CODE_VERSION and devtools/doctor.sh asserts the binary on PATH still matches that pin, but npm's global prefix in here is /usr and root-owned, so an update the container's claude starts can only half-happen. Setting it HERE rather than in config is what makes it hold whoever's host ~/.claude gets bound in. GH_TOKEN is read from the HOST env when the container is CREATED, so export it before `devtools/devcontainer.sh up`/`rebuild` -- an export afterwards never reaches a running container. Unset on the host, it arrives as an empty string, which devtools/doctor.sh warns about. docker/Dockerfile.base installs gh and the system-level settings that make it git's push credential. NEVPT2_GIT_USER_NAME/_EMAIL are the third piece of that flow and the one the image cannot supply: a push authenticates and the repo is visible, but nothing in here gives a commit an AUTHOR, so the first `git commit` inside failed with 'Author identity unknown'. devtools/devcontainer.sh resolves them from `git var GIT_AUTHOR_IDENT` on the host -- git's own answer, so a host with only user.email set still resolves through the /etc/passwd GECOS fallback -- and .devcontainer/git-identity.sh applies them below. They are deliberately NOT spelled GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL: an unset host value arrives as an empty string, and an empty GIT_AUTHOR_NAME is worse than none (`fatal: empty ident name`, and it beats a good user.name in config), so git never reads these names directly.",
+  "containerEnv": {
+    "NEVPT2_GPU_BACKEND": "CUDA",
+    "CMAKE_PRESET": "default",
+    "CTEST_PRESET": "fast",
+    "SCCACHE_DIR": "/home/ubuntu/.sccache",
+    "UV_PROJECT_ENVIRONMENT": "/opt/venv",
+    "DISABLE_AUTOUPDATER": "1",
+    "GH_TOKEN": "${localEnv:GH_TOKEN}",
+    "NEVPT2_GIT_USER_NAME": "${localEnv:NEVPT2_GIT_USER_NAME}",
+    "NEVPT2_GIT_USER_EMAIL": "${localEnv:NEVPT2_GIT_USER_EMAIL}"
+  },
+
+  "remoteUser": "ubuntu",
+  "updateRemoteUserUID": true,
+
+  "//postCreateCommand": "Two steps, both cheap and both idempotent, because this re-runs on every `rebuild`. `uv sync --frozen` is cheap when the lock has not moved and is what makes the two offline PySCF tools runnable in here. .devcontainer/git-identity.sh writes the NEVPT2_GIT_USER_* values above into the CONTAINER's own ~/.gitconfig -- `git config --global`, never --local, because --local would write the host repo's .git/config through the git-dir bind. Both are `|| true`: a stale lock or a host with no identity should cost you one broken tool, not a container that refuses to come up. The cwd is workspaceFolder, which is why the script is named relative.",
+  "postCreateCommand": "uv sync --frozen || true; .devcontainer/git-identity.sh || true",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "llvm-vs-code-extensions.vscode-clangd",
+        "ms-python.python",
+        "charliermarsh.ruff"
+      ]
+    }
+  }
+}

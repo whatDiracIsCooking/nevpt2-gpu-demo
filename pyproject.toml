@@ -1,0 +1,57 @@
+# The Python tier is two OFFLINE tools, not a runtime dependency of the demo:
+#
+# reference_data/
+#   generate_golden.py        runs PySCF once to produce a .nevpt2gold file
+#   pyscf_contract_time.py    times PySCF's NEVPTcontract on a golden file,
+#                             the CPU side of the head-to-head in README.md
+#   block2_pc_probe.py        runs block2's SC/PC-NEVPT2 on the golden state
+#
+# The C++/HIP demo imports neither, and the committed goldens mean neither has
+# to run to build or test anything. Their dependencies live here so `uv sync`
+# reproduces the environment that generated the committed reference data.
+#
+# uv.lock is the only place versions live -- after editing this file run
+# `uv lock` and commit the result; never `uv pip install`.
+[project]
+name = "nevpt2-golden"
+version = "0.1.0"
+description = "Offline PySCF tooling for the SC-NEVPT2 GPU demo's golden reference data"
+readme = "README.md"
+# 3.12 is what the reference box ships (Ubuntu 24.04) and what
+# docker/Dockerfile.base's uv environment resolves against.
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=1.26",
+    "pyscf>=2.6",
+    # block2's ic-MRPT module (pyblock2.icmr) is the reference for
+    # partially-contracted NEVPT2, which PySCF does not implement
+    # (docs/pc-nevpt2.md, "The block2 reference").
+    "block2>=0.5",
+    # The linux-x86_64 block2 wheel links libmkl_intel_lp64.so.2 and declares
+    # these in ITS metadata, but uv locks block2 from metadata that lacks them
+    # (the sdist / macOS wheel), so without this line the import fails with
+    # "libmkl_intel_lp64.so.2: cannot open shared object file".
+    "mkl<=2024.2.2; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "intel-openmp; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[dependency-groups]
+# pre-commit is a real dependency: .pre-commit-config.yaml drives it, and
+# docker/Dockerfile.base's venv smoke test runs `ruff --version` and
+# `pre-commit --version` through the venv shebang to catch a venv that works
+# for root and not for uid 1000. No pytest: there is no Python test suite.
+dev = [
+    "ruff>=0.6",
+    "pre-commit>=3.7",
+]
+
+[tool.ruff]
+# The C++/HIP trees and the build outputs are not Python.
+exclude = ["src", "build", "build-*", "deps", ".venv"]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# Deliberately narrow: errors, pyflakes, import order, pyupgrade, bugbear.
+# No formatter hook -- see .pre-commit-config.yaml.
+select = ["E", "F", "I", "UP", "B"]

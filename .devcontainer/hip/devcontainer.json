@@ -1,0 +1,57 @@
+{
+  "//": "The ROCm variant: the same toolchain as the CUDA one with ROCm and NO CUDA at all. Needs an AMD card and the amdgpu kernel driver. It pins CMAKE_PRESET/CTEST_PRESET to `hip` in containerEnv, so devtools/cpp-tier.sh needs no flag in here. Drive it with `devtools/devcontainer.sh --hip up`.",
+  "name": "nevpt2-hip",
+  "image": "nevpt2:hip",
+
+  "workspaceFolder": "/workspaces/nevpt2",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/nevpt2,type=bind,consistency=cached",
+
+  "//runArgs": "/dev/kfd is the ROCm compute driver interface and /dev/dri carries the render nodes; BOTH are required and neither is passed in by default the way --gpus all handles NVIDIA. The --group-add values MUST be numeric HOST gids: `--group-add render` would resolve the name INSIDE the container, where it has a different id or does not exist, and the run then fails at the first device call with 'hipErrorNoDevice (no ROCm-capable device is detected)' -- which reads exactly like a box with no GPU. devtools/devcontainer.sh resolves ROCM_GROUPS from devtools/config.sh and exports NEVPT2_RENDER_GID / NEVPT2_VIDEO_GID; the literals after the colon are only a fallback for opening this file without that script, and are the Ubuntu 24.04 defaults.",
+  "runArgs": [
+    "--device", "/dev/kfd",
+    "--device", "/dev/dri",
+    "--group-add", "${localEnv:NEVPT2_RENDER_GID:109}",
+    "--group-add", "${localEnv:NEVPT2_VIDEO_GID:44}",
+    "--shm-size", "8g",
+    "--security-opt", "seccomp=unconfined"
+  ],
+
+  "//mounts": "Same set as ../cuda/devcontainer.json, which carries the full explanation, except that the build volume lands on build-hip to match the `hip` preset's binaryDir. The two binds -- the host git dir and your host ~/.claude, the latter being what keeps `claude` in here logged in -- are identical to the CUDA variant's, and the `//claude` note over there is the one that explains the second. The invariant from over there applies here too, and only to the volumes: every NAMED-VOLUME target must be pre-created uid 1000 in docker/Dockerfile.base's `install -d` list, or docker mounts it root-owned and uid 1000 cannot write it. A bind takes its HOST path's ownership instead, so it is exempt.",
+  "mounts": [
+    "source=${localEnv:NEVPT2_GIT_DIR:/dev/null},target=${localEnv:NEVPT2_GIT_DIR:/dev/null},type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.claude,target=/home/ubuntu/.claude,type=bind,consistency=cached",
+    "source=nevpt2-sccache-${devcontainerId},target=/home/ubuntu/.sccache,type=volume",
+    "source=nevpt2-build-hip-${devcontainerId},target=/workspaces/nevpt2/build-hip,type=volume",
+    "source=nevpt2-uvcache-${devcontainerId},target=/home/ubuntu/.cache/uv,type=volume"
+  ],
+
+  "//containerEnv": "DISABLE_AUTOUPDATER pins off an updater that cannot succeed in here anyway (npm prefix /usr, root-owned) and would break the CLAUDE_CODE_VERSION pin doctor.sh checks; ../cuda/devcontainer.json carries the full note. GH_TOKEN comes from the host env at create time, and NEVPT2_GIT_USER_NAME/_EMAIL are the git identity a commit in here needs; same note.",
+  "containerEnv": {
+    "NEVPT2_GPU_BACKEND": "HIP",
+    "CMAKE_PRESET": "hip",
+    "CTEST_PRESET": "hip",
+    "SCCACHE_DIR": "/home/ubuntu/.sccache",
+    "UV_PROJECT_ENVIRONMENT": "/opt/venv",
+    "DISABLE_AUTOUPDATER": "1",
+    "GH_TOKEN": "${localEnv:GH_TOKEN}",
+    "NEVPT2_GIT_USER_NAME": "${localEnv:NEVPT2_GIT_USER_NAME}",
+    "NEVPT2_GIT_USER_EMAIL": "${localEnv:NEVPT2_GIT_USER_EMAIL}"
+  },
+
+  "remoteUser": "ubuntu",
+  "updateRemoteUserUID": true,
+
+  "//postCreateCommand": "Identical to ../cuda/devcontainer.json's, which carries the note: the second step applies the git identity from containerEnv above into the container's own ~/.gitconfig.",
+  "postCreateCommand": "uv sync --frozen || true; .devcontainer/git-identity.sh || true",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "llvm-vs-code-extensions.vscode-clangd",
+        "ms-python.python",
+        "charliermarsh.ruff"
+      ]
+    }
+  }
+}

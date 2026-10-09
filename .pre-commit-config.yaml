@@ -1,0 +1,34 @@
+# Commit-time lint. Deliberately cheap: the expensive tiers (nvcc, a GPU) are
+# devtools/cpp-tier.sh's job and run by hand, because a gate costing minutes
+# gets bypassed.
+#
+# Install from whichever checkout you commit on -- the hook bakes an absolute
+# INSTALL_PYTHON into one file shared by every worktree, so installing from the
+# wrong side makes commits fail with `No module named 'pre_commit'`.
+#
+#   pre-commit install
+#
+# There is NO formatter hook, for Python or C++: ruff only reports, and
+# clang-format is run by hand.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.0
+    hooks:
+      - id: ruff
+        name: ruff (lint only, no --fix)
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        # The goldens are binary.
+        exclude: '^golden/'
+      - id: end-of-file-fixer
+        exclude: '^golden/'
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        # The committed goldens are 1.1 MB and 7.7 MB; the CAS(14,14) one is
+        # 71 MB and gitignored. This catches it being force-added by mistake.
+        args: ["--maxkb=10240"]

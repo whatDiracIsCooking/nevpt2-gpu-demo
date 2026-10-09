@@ -1,0 +1,10 @@
+# LeakSanitizer suppressions for the asan / hip-asan test presets
+# (LSAN_OPTIONS=suppressions=...). Only leaks INSIDE a vendor runtime belong
+# here -- never one of ours. Each entry says what it was measured against.
+#
+# ROCm 7.2.4, RX 9060 XT (gfx1200): every hip-asan run of either demo reports
+# ~6 KB in ~105 host allocations made by the HSA runtime / HIP runtime's own
+# initialization and never released at exit (stacks entirely inside these two
+# libraries, below our first hip* call). The CUDA runtime reports none.
+leak:libhsa-runtime64.so
+leak:libamdhip64.so

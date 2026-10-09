@@ -1,0 +1,59 @@
+{
+  "//": "The BOTH-VENDORS variant: the same toolchain as ../cuda/ and ../hip/ with CUDA 13 AND ROCm in one ~40GB image, and -- the point of this file -- device access to BOTH cards at once, so an NVIDIA and an AMD GPU are usable from one container without switching variants. Needs `docker/build.sh combined` to have tagged nevpt2:combined, an NVIDIA GPU with nvidia-container-toolkit, AND an AMD card with the amdgpu kernel driver; on a box with only one vendor's card prefer that vendor's variant -- docker refuses --device=/dev/kfd outright on a host that has no such node, so this config does not even start there. Drive it with `devtools/devcontainer.sh --combined up`, never `docker run` by hand -- that script resolves the ${localEnv:...} values below (the host .git path, the ROCm group gids) and refuses rather than silently mounting the wrong thing. PROJECT_NAME is duplicated here because JSON cannot source shell; devtools/doctor.sh checks that it still agrees with devtools/config.sh.",
+  "name": "nevpt2-combined",
+  "image": "nevpt2:combined",
+
+  "workspaceFolder": "/workspaces/nevpt2",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/nevpt2,type=bind,consistency=cached",
+
+  "//runArgs": "BOTH vendors' GPU plumbing, and the two halves work by entirely different mechanisms -- which is why neither implies the other and a both-vendors container has to say both. NVIDIA: `--gpus all` adds nothing to HostConfig.Devices; it records a DeviceRequest that the nvidia-container-toolkit's OCI hook honours at container START, injecting /dev/nvidia* and the driver libraries. (That is also why devtools/devcontainer.sh restarts the container after `docker update` applies CPUSET/CPUS: regenerating the device cgroup drops a hook-injected GPU while leaving its nodes visible, and nvidia-smi then fails with `Failed to initialize NVML: Unknown Error`. See apply_cpu_limits there.) AMD: nothing hooks anything -- /dev/kfd (the ROCm compute driver interface) and /dev/dri (the render nodes) are passed as plain devices, BOTH required, and they keep their HOST ownership. So the --group-add values MUST be numeric HOST gids: `--group-add render` would resolve the name INSIDE the container, where docker/install-rocm.sh made `render` gid 110, and the first device call then fails with `hipErrorNoDevice (no ROCm-capable device is detected)` -- which reads exactly like a box with no AMD GPU. devtools/devcontainer.sh resolves ROCM_GROUPS from devtools/config.sh and exports NEVPT2_RENDER_GID / NEVPT2_VIDEO_GID; the literals after the colon are only a fallback for opening this file without that script (a direct `devcontainer up`, or VS Code `Reopen in Container`), and are this box's values, which are also the Ubuntu 24.04 defaults. A last-known-good gid, never a group NAME -- a name there is precisely the silent wrong answer the numeric form exists to avoid.",
+  "runArgs": [
+    "--gpus", "all",
+    "--device", "/dev/kfd",
+    "--device", "/dev/dri",
+    "--group-add", "${localEnv:NEVPT2_RENDER_GID:109}",
+    "--group-add", "${localEnv:NEVPT2_VIDEO_GID:44}",
+    "--shm-size", "8g",
+    "--security-opt", "seccomp=unconfined"
+  ],
+
+  "//mounts": "The union of ../cuda/devcontainer.json's set and ../hip/devcontainer.json's -- ../cuda/ carries the full explanation of every entry. Both build volumes are here, not one: this image can configure either backend, the `default` preset builds into build/ and the `hip` preset into build-hip/, and a CMake cache records absolute paths, so the two must not share a directory. The two binds -- the host git dir and your host ~/.claude, the latter being what keeps `claude` in here logged in -- are identical to both siblings'. The invariant from ../cuda/ applies here and only to the volumes: EVERY NAMED-VOLUME TARGET BELOW MUST ALSO APPEAR IN docker/Dockerfile.base's `install -d -o 1000 -g 1000` LIST (both build targets already do), or docker seeds the fresh volume from an image that has nothing at the target, mounts it root-owned, and uid 1000 cannot write it. A bind takes its HOST path's ownership instead, so it is exempt.",
+  "mounts": [
+    "source=${localEnv:NEVPT2_GIT_DIR:/dev/null},target=${localEnv:NEVPT2_GIT_DIR:/dev/null},type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.claude,target=/home/ubuntu/.claude,type=bind,consistency=cached",
+    "source=nevpt2-sccache-${devcontainerId},target=/home/ubuntu/.sccache,type=volume",
+    "source=nevpt2-build-${devcontainerId},target=/workspaces/nevpt2/build,type=volume",
+    "source=nevpt2-build-hip-${devcontainerId},target=/workspaces/nevpt2/build-hip,type=volume",
+    "source=nevpt2-uvcache-${devcontainerId},target=/home/ubuntu/.cache/uv,type=volume"
+  ],
+
+  "//containerEnv": "NEVPT2_GPU_BACKEND/CMAKE_PRESET/CTEST_PRESET name the CUDA backend, matching devtools/config.sh's default -- a build targets exactly one backend and this image does not change that; what it changes is that switching costs an environment variable instead of a container: `CMAKE_PRESET=hip CTEST_PRESET=hip devtools/cpp-tier.sh` in here runs the ROCm tier against the AMD card in the same shell that just ran the CUDA one, and each lands in its own build volume above. The rest is identical to both siblings: DISABLE_AUTOUPDATER pins off an updater that cannot succeed in here (npm prefix /usr, root-owned) and would break the CLAUDE_CODE_VERSION pin doctor.sh checks; GH_TOKEN comes from the host env at CREATE time, so export it before `up`/`rebuild`; NEVPT2_GIT_USER_NAME/_EMAIL are the git identity a commit in here needs. ../cuda/devcontainer.json carries the full notes.",
+  "containerEnv": {
+    "NEVPT2_GPU_BACKEND": "CUDA",
+    "CMAKE_PRESET": "default",
+    "CTEST_PRESET": "fast",
+    "SCCACHE_DIR": "/home/ubuntu/.sccache",
+    "UV_PROJECT_ENVIRONMENT": "/opt/venv",
+    "DISABLE_AUTOUPDATER": "1",
+    "GH_TOKEN": "${localEnv:GH_TOKEN}",
+    "NEVPT2_GIT_USER_NAME": "${localEnv:NEVPT2_GIT_USER_NAME}",
+    "NEVPT2_GIT_USER_EMAIL": "${localEnv:NEVPT2_GIT_USER_EMAIL}"
+  },
+
+  "remoteUser": "ubuntu",
+  "updateRemoteUserUID": true,
+
+  "//postCreateCommand": "Identical to both siblings', which carry the note: the second step applies the git identity from containerEnv above into the CONTAINER's own ~/.gitconfig.",
+  "postCreateCommand": "uv sync --frozen || true; .devcontainer/git-identity.sh || true",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "llvm-vs-code-extensions.vscode-clangd",
+        "ms-python.python",
+        "charliermarsh.ruff"
+      ]
+    }
+  }
+}

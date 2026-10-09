@@ -1,0 +1,235 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 4, "minor": 2, "patch": 0 },
+
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+
+    {
+      "name": "default",
+      "inherits": "base",
+      "displayName": "CUDA (RTX 3080, sm_86)",
+      "description": "The default backend. src/ with NEVPT2_GPU_BACKEND=CUDA: nvcc -> a host binary with every kernel linked in (rdm_launch/kernels.cu, rdm_accumulate, f3_digest, f3_scatter, device_einsum) on WarpWraps' wwr* runtime names.",
+      "vendor": {
+        "nevpt2": {
+          "//": "NOT a cacheVariables entry, and that is the point: `cacheVariables` is a free-form map where EVERY key becomes a -D, so a `//`-prefixed note in there is not a comment -- it is a cache variable literally named `//CUDAToolkit_ROOT`, and CMake reports it on every single configure as `Manually-specified variables were not used by the project`. A spurious warning on every configure is one people stop reading. `vendor` is the spec's own escape hatch: CMake checks that it is a map and otherwise ignores it.",
+          "CUDAToolkit_ROOT": "PINNED ON PURPOSE. This box carries six CUDA installs (12.1, 12.9, 13.0, plus the cuda/cuda-12/cuda-13 symlinks) and find_package(CUDAToolkit) picked 12.9 on its own -- which has no CUBLAS_COMPUTE_64F_EMULATED_FIXEDPOINT, so the --cublas digest failed to compile while everything else succeeded. /usr/local/cuda is the conventional 'current' symlink and is 13.0 here and in docker/Dockerfile.cuda. Override with -DCUDAToolkit_ROOT=... for a different toolkit."
+        }
+      },
+      "cacheVariables": {
+        "NEVPT2_GPU_BACKEND": "CUDA",
+        "CUDA_ARCH": "sm_86",
+        "CUDAToolkit_ROOT": "/usr/local/cuda"
+      }
+    },
+    {
+      "name": "workstation",
+      "inherits": "default",
+      "displayName": "CUDA, into build-workstation/",
+      "description": "The SAME configuration as `default` into a different build dir, so a host build and a container build can coexist without reconfiguring each other -- a CMake cache records absolute paths, and the two mount the workspace at different ones.",
+      "binaryDir": "${sourceDir}/build-workstation"
+    },
+    {
+      "name": "debug",
+      "inherits": "default",
+      "displayName": "CUDA, -O0 -g",
+      "binaryDir": "${sourceDir}/build-debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+
+    {
+      "name": "hip",
+      "inherits": "base",
+      "displayName": "HIP / ROCm (RX 9060 XT, gfx1200)",
+      "description": "The same src/ tree with NEVPT2_GPU_BACKEND=HIP: -x hip -> a host binary with every kernel linked in (rdm_launch/kernels.cu, rdm_accumulate, f3_digest, f3_scatter, device_einsum) on wwr* names. No --cublas. Needs no CUDA toolkit.",
+      "binaryDir": "${sourceDir}/build-hip",
+      "cacheVariables": {
+        "NEVPT2_GPU_BACKEND": "HIP",
+        "HIP_ARCH": "gfx1200"
+      }
+    },
+
+    {
+      "name": "asan",
+      "inherits": "debug",
+      "displayName": "CUDA, Debug + AddressSanitizer (host)",
+      "description": "Sanitizer tier: Debug + AddressSanitizer on host code -- CXX units and the host side of every .cu (nvcc's host compiler becomes the same clang) -- with device code uninstrumented. Its test preset sets ASAN_OPTIONS=protect_shadow_gap=0, which the CUDA runtime needs under ASan. Separate build-asan/ dir.",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": {
+        "NEVPT2_ENABLE_ASAN": "ON",
+        "NEVPT2_TEST_TIMEOUT_MULTIPLIER": "3"
+      }
+    },
+    {
+      "name": "ubsan",
+      "inherits": "debug",
+      "displayName": "CUDA, Debug + UndefinedBehaviorSanitizer (host)",
+      "description": "Sanitizer tier: Debug + UBSan with -fno-sanitize-recover on host code (CXX and the host side of every .cu), so the first finding aborts the test. Device code uninstrumented. Separate build-ubsan/ dir.",
+      "binaryDir": "${sourceDir}/build-ubsan",
+      "cacheVariables": {
+        "NEVPT2_ENABLE_UBSAN": "ON",
+        "NEVPT2_TEST_TIMEOUT_MULTIPLIER": "3"
+      }
+    },
+    {
+      "name": "compute-sanitizer",
+      "inherits": "debug",
+      "displayName": "CUDA, Debug + compute-sanitizer",
+      "description": "Sanitizer tier: a Debug CUDA build (device code with -lineinfo) whose demo ctest entries each run under NVIDIA compute-sanitizer. NEVPT2_COMPUTE_SANITIZER_TOOL picks the tool (memcheck by default; initcheck, racecheck, synccheck): reconfigure with -D to switch, no rebuild needed. Its test preset runs only the `small` CAS(4,4)/CAS(8,8) entries and the canaries. CUDA only -- a HIP configure refuses the option.",
+      "binaryDir": "${sourceDir}/build-compute-sanitizer",
+      "cacheVariables": {
+        "NEVPT2_COMPUTE_SANITIZER": "ON",
+        "NEVPT2_TEST_TIMEOUT_MULTIPLIER": "10"
+      }
+    },
+    {
+      "name": "hip-asan",
+      "inherits": "hip",
+      "displayName": "HIP, Debug + AddressSanitizer (host)",
+      "description": "The asan preset against ROCm/HIP: Debug + AddressSanitizer on host code (CXX units and the host side of every -x hip .cu); -fno-gpu-sanitize keeps device code uninstrumented (device ASan needs an xnack+ target; gfx1200 has no xnack). Separate build-hip-asan/ dir.",
+      "binaryDir": "${sourceDir}/build-hip-asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NEVPT2_ENABLE_ASAN": "ON",
+        "NEVPT2_TEST_TIMEOUT_MULTIPLIER": "3"
+      }
+    },
+    {
+      "name": "hip-ubsan",
+      "inherits": "hip",
+      "displayName": "HIP, Debug + UndefinedBehaviorSanitizer (host)",
+      "description": "The ubsan preset against ROCm/HIP: Debug + UBSan (-fno-sanitize-recover) on host code, device code uninstrumented. Separate build-hip-ubsan/ dir.",
+      "binaryDir": "${sourceDir}/build-hip-ubsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NEVPT2_ENABLE_UBSAN": "ON",
+        "NEVPT2_TEST_TIMEOUT_MULTIPLIER": "3"
+      }
+    },
+
+    {
+      "name": "compile-cuda",
+      "inherits": "default",
+      "displayName": "CUDA, compile-and-link only",
+      "description": "Compile-and-link only: NEVPT2_BUILD_TESTING=OFF, so no ctest entry is registered. There is NO CI in this project (see docs/testing.md, 'No CI, and the local gate') This is the configuration for checking that the tree still builds without running anything, e.g. on a box with no card.",
+      "binaryDir": "${sourceDir}/build-compile-cuda",
+      "cacheVariables": { "NEVPT2_BUILD_TESTING": "OFF" }
+    },
+    {
+      "name": "compile-hip",
+      "inherits": "hip",
+      "displayName": "HIP, compile-and-link only",
+      "description": "The same shape as compile-cuda for the other backend, and what devtools/cross-backend-check.sh drives (CROSS_CHECK_PRESET). Compiling is the point: src/ is one tree built for both backends, so a CUDA-only spelling outside src/cublas/cublas_emul.cpp (CUDA-only by design) breaks only the HIP side and nothing else catches it. --device-only builds just the nevpt2_device_libraries umbrella.",
+      "binaryDir": "${sourceDir}/build-compile-hip",
+      "cacheVariables": { "NEVPT2_BUILD_TESTING": "OFF" }
+    }
+  ],
+
+  "buildPresets": [
+    { "name": "default",     "configurePreset": "default" },
+    { "name": "workstation", "configurePreset": "workstation" },
+    { "name": "debug",       "configurePreset": "debug" },
+    { "name": "hip",         "configurePreset": "hip" },
+    { "name": "asan",        "configurePreset": "asan" },
+    { "name": "ubsan",       "configurePreset": "ubsan" },
+    { "name": "compute-sanitizer", "configurePreset": "compute-sanitizer" },
+    { "name": "hip-asan",    "configurePreset": "hip-asan" },
+    { "name": "hip-ubsan",   "configurePreset": "hip-ubsan" },
+    { "name": "compile-cuda", "configurePreset": "compile-cuda" },
+    { "name": "compile-hip",  "configurePreset": "compile-hip" }
+  ],
+
+  "testPresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "ignore" }
+    },
+    {
+      "name": "default",
+      "inherits": "base",
+      "configurePreset": "default",
+      "description": "Everything: the golden entries (labelled `gpu`, each needs a real card) and the GoogleTest unit tier (labelled `unit`). Only the host-only unit suites run card-free -- `ctest -LE gpu` selects them, and they prove logic, never an energy."
+    },
+    {
+      "name": "unit",
+      "inherits": "base",
+      "configurePreset": "default",
+      "description": "The GoogleTest unit tier only (test/, label `unit`): one entry per suite plus each binary's <target>.SuiteListIsComplete drift guard. The suites not also labelled `gpu` need no card.",
+      "filter": { "include": { "label": "unit" } }
+    },
+    {
+      "name": "fast",
+      "inherits": "base",
+      "configurePreset": "default",
+      "description": "CAS(10,10) (~2s/run) and the small CAS(4,4)/CAS(8,8) cases; drops the ~47s CAS(12,12) case.",
+      "filter": { "exclude": { "label": "slow" } }
+    },
+    { "name": "workstation", "inherits": "base", "configurePreset": "workstation" },
+    { "name": "debug",       "inherits": "base", "configurePreset": "debug" },
+    {
+      "name": "hip",
+      "inherits": "base",
+      "configurePreset": "hip",
+      "description": "The ROCm runtime tier. Needs /dev/kfd + /dev/dri and the render/video groups -- see devtools/config.sh, ROCM_GROUPS."
+    },
+
+    {
+      "name": "sanitizer",
+      "hidden": true,
+      "inherits": "base",
+      "description": "Every sanitizer test preset runs the `small` CAS(4,4)/CAS(8,8) entries and the canaries its build registered, nothing else (docs/testing.md, 'Sanitizers').",
+      "filter": { "include": { "label": "small|sanitizer_canary" } }
+    },
+    {
+      "name": "asan",
+      "inherits": "sanitizer",
+      "configurePreset": "asan",
+      "description": "The small cases + the ASan canary. protect_shadow_gap=0: the CUDA runtime's address reservations collide with ASan's shadow gap otherwise. LSan suppressions: cmake/nevpt2_lsan.supp (vendor runtimes only).",
+      "environment": {
+        "ASAN_OPTIONS": "protect_shadow_gap=0",
+        "LSAN_OPTIONS": "suppressions=${sourceDir}/cmake/nevpt2_lsan.supp:print_suppressions=0"
+      }
+    },
+    {
+      "name": "ubsan",
+      "inherits": "sanitizer",
+      "configurePreset": "ubsan",
+      "description": "The small cases + the UBSan canary.",
+      "environment": { "UBSAN_OPTIONS": "print_stacktrace=1" }
+    },
+    {
+      "name": "compute-sanitizer",
+      "inherits": "sanitizer",
+      "configurePreset": "compute-sanitizer",
+      "description": "The small cases + the configured tool's canaries, each under compute-sanitizer."
+    },
+    {
+      "name": "hip-asan",
+      "inherits": "sanitizer",
+      "configurePreset": "hip-asan",
+      "description": "The asan test preset on ROCm/HIP. The LSan suppressions matter here: the ROCm runtime leaks ~6 KB of its own at exit.",
+      "environment": {
+        "ASAN_OPTIONS": "protect_shadow_gap=0",
+        "LSAN_OPTIONS": "suppressions=${sourceDir}/cmake/nevpt2_lsan.supp:print_suppressions=0"
+      }
+    },
+    {
+      "name": "hip-ubsan",
+      "inherits": "sanitizer",
+      "configurePreset": "hip-ubsan",
+      "description": "The ubsan test preset on ROCm/HIP.",
+      "environment": { "UBSAN_OPTIONS": "print_stacktrace=1" }
+    }
+  ]
+}

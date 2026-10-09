@@ -1,0 +1,58 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite it as below, and cite the NEVPT2
+  method papers listed under references.
+type: software
+title: "nevpt2-gpu-demo: SC- and PC-NEVPT2 on the GPU, end to end"
+abstract: >-
+  Strongly- and partially-contracted NEVPT2 on the GPU. From a CASCI/CASSCF
+  wavefunction (a CI vector plus MO integrals) it builds the active-space
+  3-RDM and the two integral-contracted 4-RDM intermediates on the device,
+  assembles the eight perturber-class energies there, and checks them against
+  committed PySCF (SC) and block2 (PC) reference data to 1e-7. One source tree
+  builds for NVIDIA (CUDA) or AMD (ROCm/HIP).
+authors:
+  - family-names: Lostica
+    given-names: Michael
+license: MIT
+keywords:
+  - NEVPT2
+  - multireference perturbation theory
+  - quantum chemistry
+  - GPU
+  - CUDA
+  - HIP
+  - ROCm
+references:
+  - type: article
+    title: "Introduction of n-electron valence states for multireference perturbation theory"
+    authors:
+      - family-names: Angeli
+        given-names: Celestino
+      - family-names: Cimiraglia
+        given-names: Renzo
+      - family-names: Evangelisti
+        given-names: Stefano
+      - family-names: Leininger
+        given-names: Thierry
+      - family-names: Malrieu
+        given-names: Jean-Paul
+    journal: "The Journal of Chemical Physics"
+    volume: 114
+    start: 10252
+    year: 2001
+    doi: 10.1063/1.1361246
+  - type: article
+    title: "n-electron valence state perturbation theory: A spinless formulation and an efficient implementation of the strongly contracted and of the partially contracted variants"
+    authors:
+      - family-names: Angeli
+        given-names: Celestino
+      - family-names: Cimiraglia
+        given-names: Renzo
+      - family-names: Malrieu
+        given-names: Jean-Paul
+    journal: "The Journal of Chemical Physics"
+    volume: 117
+    start: 9138
+    year: 2002
+    doi: 10.1063/1.1515317
