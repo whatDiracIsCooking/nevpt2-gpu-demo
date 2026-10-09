@@ -287,18 +287,20 @@ the RX 9060 XT, each preset's own Debug build, memcheck with the leak check.
 | `ubsan` | 95 | 79 | all pass, canary green |
 | `compute-sanitizer`, memcheck + leak check | 103 | 84 (the 5 `death` suites dropped) | all pass, 4 `sanitizer_canary` entries green; all 36 GPU unit entries report `LEAK SUMMARY: 0 bytes leaked in 0 allocations`, `ERROR SUMMARY: 0 errors` |
 | `compute-sanitizer`, initcheck | 100 | 84 | all pass, canary green |
-| `hip-asan` | 100 | 85 | all pass, canary green |
-| `hip-ubsan` | 100 | 85 | all pass, canary green |
+| `hip-asan` | 104 | 89 | all pass, canary green |
+| `hip-ubsan` | 104 | 89 | all pass, canary green |
 
 The two `compute-sanitizer` rows were re-run last, after `cublas_emul_tests`
 joined the tier. Their build has 89 unit entries: 70 suites (5 of them
 `death`) plus 19 `<target>.SuiteListIsComplete` guards. The 84 that ran are
 those less the 5 `death` suites. `CublasEmulDeclineTests` is compiled out of
 that build (above). In both rows the unit tier added 25.6 s of `sec*proc`
-(ctest's label summary). The two `hip-*` rows were re-run after the
-`REQUIRES_GPU` `profile_tests` joined the tier. Their 85 unit entries are 67
-suites (5 of them `death`, which run there) plus 18 guards. The `asan` and
-`ubsan` rows predate both. They were re-run after the `REQUIRES_GPU`
+(ctest's label summary). The two `hip-*` rows were re-run on the same tree,
+with every unit binary in. Their 89 unit entries are 70 suites (6 of them
+`death`, which run there, `CublasEmulStubDeathTest` among them) plus 19
+guards: the HIP build has the `cublas_emul` stub suites where CUDA has the
+digest ones. There the unit tier took 134–154 s of `sec*proc`. The `asan` and
+`ubsan` rows predate `profile_tests` and `cublas_emul_tests`. They were re-run after the `REQUIRES_GPU`
 `device_resources_tests` joined the tier, and their 79 unit entries are 62
 suites (4 of them `death`) plus 17 guards. In those two rows the unit tier
 adds 15–21 s of `sec*proc` to each preset.
