@@ -275,16 +275,16 @@ the RX 9060 XT, each preset's own Debug build, memcheck with the leak check.
 | `ubsan` | 95 | 79 | all pass, canary green |
 | `compute-sanitizer`, memcheck + leak check | 94 | 75 (the 4 `death` suites dropped) | all pass, 4 `sanitizer_canary` entries green; all 30 GPU unit entries report `LEAK SUMMARY: 0 bytes leaked in 0 allocations`, `ERROR SUMMARY: 0 errors` |
 | `compute-sanitizer`, initcheck | 91 | 75 | all pass, canary green |
-| `hip-asan` | 89 | 74 | all pass, canary green |
-| `hip-ubsan` | 89 | 74 | all pass, canary green |
+| `hip-asan` | 100 | 85 | all pass, canary green |
+| `hip-ubsan` | 100 | 85 | all pass, canary green |
 
-The four CUDA rows were re-run last, after the `REQUIRES_GPU`
-`device_resources_tests` joined the tier: their 79 unit entries are 62
-suites (4 of them `death`) plus 17 `<target>.SuiteListIsComplete` guards,
-and compute-sanitizer's 75 are those less the 4 `death` suites. The two
-`hip-*` rows predate it: they were re-run after the host-only
-`pool_threshold_tests` joined the tier, and their 74 are 58 suites (4 of
-them `death`, which run there) plus 16 guards. In the four CUDA rows the
+The two `hip-*` rows were re-run last, after the `REQUIRES_GPU`
+`profile_tests` joined the tier: their 85 unit entries are 67 suites (5 of
+them `death`, which run there) plus 18 `<target>.SuiteListIsComplete`
+guards. The four CUDA rows predate it: they were re-run after the
+`REQUIRES_GPU` `device_resources_tests` joined the tier, and their 79 unit
+entries are 62 suites (4 of them `death`) plus 17 guards, compute-sanitizer's
+75 being those less the 4 `death` suites. In the four CUDA rows the
 unit tier adds 15–21 s of `sec*proc` (ctest's label summary) to each preset.
 
 ### Wall times
