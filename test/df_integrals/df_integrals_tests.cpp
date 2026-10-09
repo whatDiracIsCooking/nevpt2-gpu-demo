@@ -16,6 +16,13 @@
 //                            documents them
 //   DfCreateValidationTests  create() with disagreeing ranks or shapes returns
 //                            an IO Error -- no abort -- and uploads nothing
+//   FullVsDfSlabTests        FullBlockSource over hostBlock's full blocks,
+//                            uploaded into a NevptIntegralsDevice, and
+//                            DfIntegralSource over the same B agree: equal
+//                            extent() for every ExtBlock, and equal slab() for
+//                            every ExtBlock over every [b0, b1) -- SrsiT's
+//                            second-axis batching (a strided view on the
+//                            FullBlockSource side) checked on its own too
 //
 // THE HOST REFERENCE. One symmetric three-index tensor B[L,p,q] = B[L,q,p]
 // over ALL norb = ncore + ncas + nvirt orbitals (core first, then active, then
@@ -43,14 +50,15 @@
 // (nevpt2.test.shared_resources), each slab on its one stream.
 //
 // The fixture (SyntheticDf, makeSyntheticDf, hostBlock, hostSlab, makeSource)
-// is written to be reused by a sibling suite comparing FullBlockSource's
-// slabs, built from hostBlock's full blocks, against these.
+// is shared by FullVsDfSlabTests, which builds FullBlockSource's full blocks
+// from hostBlock.
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules.
 #include <gtest/gtest.h>
 
 import std;
 import nevpt2.df_integrals;
+import nevpt2.einsum;
 import nevpt2.test.shared_resources;
 
 // Not a module unit (gtest is a textual header), so no partition: the helpers
@@ -515,6 +523,117 @@ TEST(DfCreateValidationTests, DisagreeingShapesAreAnIoError) {
   {
     SCOPED_TRACE("B_cv with a different naux");
     expectIoErrorAndNothingUploaded(sys.bAA, sys.bCA, sys.bVA, Tensor({L + 1, c, v}), *res);
+  }
+}
+
+// --- FullVsDfSlabTests -----------------------------------------------------------
+
+// A NevptIntegralsDevice whose external two-electron blocks are hostBlock's
+// full blocks, uploaded: what the integral-direct demo's main() builds from a
+// golden file, here from the same B the DF source is built from. The other
+// fields (h1e, h2e, e_core, ...) stay empty -- FullBlockSource never reads
+// them. Srsi and SrsiT are one field.
+NevptIntegralsDevice uploadFullBlocks(const SyntheticDf& sys, const DeviceResources& res) {
+  NevptIntegralsDevice ints;
+  ints.h2e_v_Sr = uploadTensor(hostBlock(sys, ExtBlock::Sr), res);
+  ints.h2e_v_Si = uploadTensor(hostBlock(sys, ExtBlock::Si), res);
+  ints.cvcv = uploadTensor(hostBlock(sys, ExtBlock::Sijrs), res);
+  ints.h2e_v_Sijr = uploadTensor(hostBlock(sys, ExtBlock::Sijr), res);
+  ints.h2e_v_Srsi = uploadTensor(hostBlock(sys, ExtBlock::Srsi), res);
+  ints.h2e_v_Srs = uploadTensor(hostBlock(sys, ExtBlock::Srs), res);
+  ints.h2e_v_Sij = uploadTensor(hostBlock(sys, ExtBlock::Sij), res);
+  ints.h2e_v1_Sir = uploadTensor(hostBlock(sys, ExtBlock::Sir1), res);
+  ints.h2e_v2_Sir = uploadTensor(hostBlock(sys, ExtBlock::Sir2), res);
+  return ints;
+}
+
+// A slab read back to the host. FullBlockSource's slab along a non-leading
+// axis is a strided view, which downloadTensor (a flat copy) must not read,
+// so it is first packed row-major by the einsum kernel's identity transpose
+// -- the same strided read the energy classes' einsums make of it.
+Tensor downloadSlab(const DeviceTensor& slab, const DeviceResources& res) {
+  if (isContiguous(slab)) return downloadTensor(slab, res.stream());
+  const DeviceTensor packed = deviceTransposeNew(slab, {0, 1, 2, 3}, 1.0, res);
+  return downloadTensor(packed, res.stream());
+}
+
+// Every [b0, b1) with 0 <= b0 < b1 <= n: at these extents (<= 5) at most 15
+// per block, so no batching boundary is left to chance.
+std::vector<std::pair<int64_t, int64_t>> allRanges(int64_t n) {
+  std::vector<std::pair<int64_t, int64_t>> out;
+  for (int64_t b0 = 0; b0 < n; ++b0)
+    for (int64_t b1 = b0 + 1; b1 <= n; ++b1) out.emplace_back(b0, b1);
+  return out;
+}
+
+TEST(FullVsDfSlabTests, ExtentsAgree) {
+  const DeviceResources* res = resourcesOrFail();
+  ASSERT_NE(res, nullptr);
+  const SyntheticDf& sys = standardSystem();
+  const NevptIntegralsDevice ints = uploadFullBlocks(sys, *res);
+  FullBlockSource full(ints);
+  auto df = makeSource(sys, *res);
+  ASSERT_TRUE(df.has_value()) << df.error().message;
+
+  for (const ExtBlock b : kAllBlocks) {
+    SCOPED_TRACE(blockLabel(b));
+    EXPECT_EQ(full.extent(b), df->extent(b));
+    // And the full block FullBlockSource holds is the one DF builds unbatched.
+    EXPECT_EQ(full.block(b).size(), df->fullBlockDoubles(b));
+  }
+}
+
+TEST(FullVsDfSlabTests, EveryBlockEveryRangeAgrees) {
+  // Through the IntegralSource interface the energy classes use, so the
+  // comparison is of the contract, not of either implementation's internals.
+  const DeviceResources* res = resourcesOrFail();
+  ASSERT_NE(res, nullptr);
+  const SyntheticDf& sys = standardSystem();
+  const NevptIntegralsDevice ints = uploadFullBlocks(sys, *res);
+  FullBlockSource fullSrc(ints);
+  auto dfSrc = makeSource(sys, *res);
+  ASSERT_TRUE(dfSrc.has_value()) << dfSrc.error().message;
+  IntegralSource& full = fullSrc;
+  IntegralSource& df = *dfSrc;
+
+  for (const ExtBlock b : kAllBlocks) {
+    for (const auto& [b0, b1] : allRanges(full.extent(b))) {
+      SCOPED_TRACE(std::format("{} [{}, {}) along axis {}", blockLabel(b), b0, b1, batchAxis(b)));
+      const DeviceTensor f = full.slab(b, b0, b1, *res);
+      const DeviceTensor d = df.slab(b, b0, b1, *res);
+      ASSERT_EQ(f.dims, d.dims);
+      expectMatches(downloadSlab(f, *res), downloadSlab(d, *res));
+    }
+  }
+}
+
+TEST(FullVsDfSlabTests, SrsiTBatchesTheSecondAxisInBoth) {
+  // The subtle case: SrsiT is h2e_v_Srsi batched along axis 1. FullBlockSource
+  // returns a strided view there (not contiguous unless the range is the
+  // whole axis); DfIntegralSource builds a packed slab from a different GEMM
+  // operand order. They must agree, and each must equal Srsi's full block
+  // restricted along axis 1 -- not along axis 0.
+  const DeviceResources* res = resourcesOrFail();
+  ASSERT_NE(res, nullptr);
+  const SyntheticDf& sys = standardSystem();
+  const NevptIntegralsDevice ints = uploadFullBlocks(sys, *res);
+  FullBlockSource full(ints);
+  auto df = makeSource(sys, *res);
+  ASSERT_TRUE(df.has_value()) << df.error().message;
+  ASSERT_EQ(batchAxis(ExtBlock::SrsiT), 1);
+
+  const Tensor srsi = hostBlock(sys, ExtBlock::Srsi);
+  for (const auto& [b0, b1] : allRanges(sys.nvirt)) {
+    SCOPED_TRACE(std::format("SrsiT [{}, {})", b0, b1));
+    const DeviceTensor f = full.slab(ExtBlock::SrsiT, b0, b1, *res);
+    EXPECT_FALSE(f.owning()) << "FullBlockSource's slab should be a view of the uploaded block";
+    EXPECT_EQ(isContiguous(f), b1 - b0 == sys.nvirt);
+    const Tensor fh = downloadSlab(f, *res);
+    const Tensor dh = downloadSlab(df->slab(ExtBlock::SrsiT, b0, b1, *res), *res);
+    const Tensor want = restrictAxis(srsi, 1, b0, b1);
+    expectMatches(fh, dh);
+    expectMatches(fh, want);
+    expectMatches(dh, want);
   }
 }
 
