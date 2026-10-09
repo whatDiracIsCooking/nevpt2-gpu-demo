@@ -271,22 +271,21 @@ the RX 9060 XT, each preset's own Debug build, memcheck with the leak check.
 
 | preset | entries run | unit entries | result |
 |---|---:|---:|---|
-| `asan` | 59 | 43 | all pass, canary green |
-| `ubsan` | 59 | 43 | all pass, canary green |
-| `compute-sanitizer`, memcheck + leak check | 86 | 67 (the 4 `death` suites dropped) | all pass, 4 `sanitizer_canary` entries green; all 26 GPU unit entries report `LEAK SUMMARY: 0 bytes leaked in 0 allocations`, `ERROR SUMMARY: 0 errors` |
-| `compute-sanitizer`, initcheck | 83 | 67 | all pass, canary green |
+| `asan` | 95 | 79 | all pass, canary green |
+| `ubsan` | 95 | 79 | all pass, canary green |
+| `compute-sanitizer`, memcheck + leak check | 94 | 75 (the 4 `death` suites dropped) | all pass, 4 `sanitizer_canary` entries green; all 30 GPU unit entries report `LEAK SUMMARY: 0 bytes leaked in 0 allocations`, `ERROR SUMMARY: 0 errors` |
+| `compute-sanitizer`, initcheck | 91 | 75 | all pass, canary green |
 | `hip-asan` | 89 | 74 | all pass, canary green |
 | `hip-ubsan` | 89 | 74 | all pass, canary green |
 
-The 43 unit entries are 33 suites plus 10 `<target>.SuiteListIsComplete`
-guards. The two `hip-*` rows were re-run last, after the host-only
-`pool_threshold_tests` joined the tier: their 74 are 58 suites (4 of them
-`death`, which run there) plus 16 guards. The two
-`compute-sanitizer` rows were re-run after `ozaki_digest_tests` joined
-the tier: their 67 are 56 suites plus 15 guards, less the 4 `death` suites. The `asan` and
-`ubsan` rows predate both binaries. Under the sanitizers the unit tier adds 4.5–9 s of `sec*proc`
-(ctest's label summary) to each preset. The `small` golden entries dominate
-each run.
+The four CUDA rows were re-run last, after the `REQUIRES_GPU`
+`device_resources_tests` joined the tier: their 79 unit entries are 62
+suites (4 of them `death`) plus 17 `<target>.SuiteListIsComplete` guards,
+and compute-sanitizer's 75 are those less the 4 `death` suites. The two
+`hip-*` rows predate it: they were re-run after the host-only
+`pool_threshold_tests` joined the tier, and their 74 are 58 suites (4 of
+them `death`, which run there) plus 16 guards. In the four CUDA rows the
+unit tier adds 15–21 s of `sec*proc` (ctest's label summary) to each preset.
 
 ### Wall times
 
