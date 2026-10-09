@@ -13,6 +13,7 @@ import std;
 import :shared;
 import :pc_solve;
 import :pc_classes;
+import nevpt2.profile;
 // The wwrsolverStatus_t error specializations, which make gpuCheck accept a
 // solver status (the calling unit imports them; nevpt2.wwr does not re-export them).
 import wwr.extension.solver;
@@ -25,6 +26,9 @@ Result<PcEnergyResult> pcEnergiesDevice(const ActiveIntegralsDevice& ai, Integra
                                         const DeviceTensor& f3ac, const DeviceTensor& f3ca,
                                         const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
+  // --profile: the einsum launches below report in the energy table, as the
+  // SC stage's do (energiesDevice).
+  const profile::Section profileSection(profile::kEnergy);
   Tensor ec = downloadTensor(ai.e_core, s);
   Tensor ev = downloadTensor(ai.e_virt, s);
 

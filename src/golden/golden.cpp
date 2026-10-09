@@ -17,6 +17,15 @@ Status GoldenFile::require(const std::initializer_list<std::string_view> names) 
   return {};
 }
 
+Status GoldenFile::checkNdet(const int64_t expected) const {
+  if (ndet != expected)
+    return err_io(std::format(
+        "golden file: header ndet = {}, but CAS({},{}) with {} alpha / {} beta electrons has {} "
+        "determinants",
+        ndet, nelecA + nelecB, ncas, nelecA, nelecB, expected));
+  return {};
+}
+
 const Tensor& GoldenFile::get(const std::string& name) const {
   auto it = arrays.find(name);
   if (it == arrays.end())
@@ -43,6 +52,15 @@ Result<GoldenFile> loadGolden(const std::string& path) {
   if (nArrays < 0)
     return err_io(std::format("golden file: negative array count {} -- {}", nArrays, path));
   for (int64_t a = 0; a < nArrays; ++a) NEVPT2_TRY(readArray(r, g));
+  // The writer stops after the last array, so anything left is a truncated
+  // or miscounted header, not padding.
+  if (r.remaining() != 0)
+    return err_io(std::format("golden file: {} bytes after the last of its {} arrays -- {}",
+                              r.remaining(), nArrays, path));
+  // The header's determinant count is the CI vector's length.
+  if (const auto ci = g.arrays.find("ci"); ci != g.arrays.end() && ci->second.size() != g.ndet)
+    return err_io(std::format("golden file: ci has {} elements but the header says ndet = {} -- {}",
+                              ci->second.size(), g.ndet, path));
   return g;
 }
 

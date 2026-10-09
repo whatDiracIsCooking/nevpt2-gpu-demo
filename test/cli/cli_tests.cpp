@@ -7,7 +7,8 @@
 //   CliFlagTests      parseCommonFlag: which flags it takes, what they set,
 //                     and what it leaves for the app
 //   CliFinalizeTests  finalize: --golden, --tiles >= 1, --ozaki-pairs 0..14,
-//                     the digest conflicts
+//                     --mantissa-bits 1..53 and only with --cublas, the
+//                     digest conflicts
 //   CliUsageTests     usage(): the app's own flags in their place
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
@@ -70,6 +71,7 @@ TEST(CliFlagTests, DefaultsAreRdmBuildOptionsDefaults) {
   EXPECT_EQ(r->rdm.blasDigest, defaults.blasDigest);
   EXPECT_FALSE(r->pc);
   EXPECT_FALSE(r->profile);
+  EXPECT_FALSE(r->mantissaBitsGiven);
   EXPECT_EQ(r->poolThreshold, kDefaultPoolReleaseThreshold);
 }
 
@@ -89,6 +91,7 @@ TEST(CliFlagTests, EveryCommonFlagSetsItsField) {
   EXPECT_EQ(r->rdm.ozakiMaxPairSum, 5);
   EXPECT_TRUE(r->rdm.ozakiCheck);
   EXPECT_EQ(r->rdm.mantissaBits, 40);
+  EXPECT_TRUE(r->mantissaBitsGiven);
   EXPECT_EQ(r->poolThreshold, 1024u);
 }
 
@@ -171,6 +174,39 @@ TEST(CliFinalizeTests, OzakiPairsIsZeroToFourteen) {
     const Status st = finalize(opt, "path.nevpt2gold");
     ASSERT_FALSE(st.has_value()) << pairs;
     EXPECT_EQ(st.error().message, "--ozaki-pairs must be in 0..14");
+  }
+}
+
+TEST(CliFinalizeTests, MantissaBitsNeedsCublas) {
+  CommonOptions opt = withGolden();
+  opt.rdm.mantissaBits = 40;
+  opt.mantissaBitsGiven = true;
+  const Status st = finalize(opt, "path.nevpt2gold");
+  ASSERT_FALSE(st.has_value());
+  EXPECT_EQ(st.error().kind, ErrorKind::InvalidConfig);
+  EXPECT_EQ(st.error().message,
+            "--mantissa-bits sets the --cublas digest's precision; it needs --cublas");
+}
+
+TEST(CliFinalizeTests, MantissaBitsIsOneToFiftyThree) {
+  if (!kHaveCublasEmul) GTEST_SKIP() << "--cublas is refused on this backend";
+  for (const int bits : {1, 53}) {
+    CommonOptions opt = withGolden();
+    opt.rdm.cublas = true;
+    opt.rdm.blasDigest = false;
+    opt.rdm.mantissaBits = bits;
+    opt.mantissaBitsGiven = true;
+    EXPECT_TRUE(finalize(opt, "path.nevpt2gold").has_value()) << bits;
+  }
+  // Refused on range before --cublas is looked at, so on every backend.
+  for (const int bits : {0, -1, 54}) {
+    CommonOptions opt = withGolden();
+    opt.rdm.cublas = true;
+    opt.rdm.mantissaBits = bits;
+    opt.mantissaBitsGiven = true;
+    const Status st = finalize(opt, "path.nevpt2gold");
+    ASSERT_FALSE(st.has_value()) << bits;
+    EXPECT_EQ(st.error().message, "--mantissa-bits must be in 1..53");
   }
 }
 

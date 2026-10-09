@@ -216,7 +216,7 @@ required:
 | `--pc` | also compute PC-NEVPT2 and check it against block2's answer. Needs a file with PC fields (not the CAS(12,12) ones) |
 | `--profile` | print per-phase timing tables (RDM build, energy, and DF integrals in the DF demo) |
 | `--cublas` | **CUDA only**: the fp64-emulated cuBLAS digest. Read the `engaged bits=` line. `DECLINED -> ran native fp64!` means it did not engage, and the timing is meaningless |
-| `--mantissa-bits N` | the maximum mantissa bits for `--cublas`'s emulation (default 53; CUDA only) |
+| `--mantissa-bits N` | the maximum mantissa bits for `--cublas`'s emulation, 1..53 (default 53); refused without `--cublas`, so CUDA only |
 | `--blas-digest` / `--digest-emitted` | choose the digest. The default differs by backend: emitted on CUDA, BLAS on HIP |
 | `--ozaki` | the int8 tensor-core (Ozaki-scheme) digest, on **both** backends. Accurate to fp64 rounding, slower than the default digest on both cards; not usable with `--cublas` |
 | `--ozaki-pairs P` | keep only digit pairs with p + q <= P (0..14; default 14, all 64 pairs). P <= 5 makes cc-pVTZ's PC metric refuse |

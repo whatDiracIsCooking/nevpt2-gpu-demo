@@ -104,6 +104,10 @@ int main(int argc, char** argv) {
   const std::int64_t norb = g.ncas;
   const std::int64_t ndet =
       nevpt2::link_tables::num_strings(norb, g.nelecA) * nevpt2::link_tables::num_strings(norb, g.nelecB);
+  if (const nevpt2::Status st = g.checkNdet(ndet); !st) {
+    nevpt2::report(st.error());
+    return 1;
+  }
 
   std::print("=== SC-NEVPT2 demo ({}/C++): CAS({},{})  ncore={}  n_det={} ===\n",
              nevpt2::kGpuBackendName, norb, g.nelecA + g.nelecB, g.ncore, ndet);
@@ -180,6 +184,10 @@ int main(int argc, char** argv) {
     std::printf("GPU PC energy stage done in %.2fs\n", pcSeconds);
     std::printf("GPU RDM build: %.2fs   GPU PC energy stage: %.2fs   total: %.2fs\n",
                 rdmSeconds, pcSeconds, rdmSeconds + pcSeconds);
+    // --profile: as for the SC stage below; every PC class ends in a
+    // download (a stream sync), so every recorded event pair is complete.
+    nevpt2::profile::printReport(nevpt2::profile::kRdmBuild, rdmSeconds);
+    nevpt2::profile::printReport(nevpt2::profile::kEnergy, pcSeconds);
     nevpt2::printPoolHighWater("for the whole run", *res);
     bool pcOk = nevpt2::printPcReport(*pc, g.get("pc_class_energies"),
                                       g.get("e_pc_total").flat(0), 1e-7);

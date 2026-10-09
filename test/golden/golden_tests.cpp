@@ -6,9 +6,11 @@
 // golden tier owns every numerical claim, and the energies read below are only
 // compared with the values the file was written with.
 //
-//   GoldenLoadErrorTests  a missing path, a truncated file and a bad magic
-//                         each come back as an IO Error -- never an abort
-//   GoldenRequireTests    require() names the first array the file lacks
+//   GoldenLoadErrorTests  a missing path, a truncated file, a bad magic,
+//                         trailing bytes and a ci that is not ndet long each
+//                         come back as an IO Error -- never an abort
+//   GoldenRequireTests    require() names the first array the file lacks;
+//                         checkNdet() refuses a header ndet it does not match
 //   GoldenCas44Tests      the committed golden/n2_ccpvdz_cas44.nevpt2gold:
 //                         header fields and array shapes
 //
@@ -128,6 +130,26 @@ TEST_F(GoldenLoadErrorTests, TruncatedMidFileIsAnIoError) {
                 "golden file");
 }
 
+TEST_F(GoldenLoadErrorTests, TrailingBytesAreAnIoError) {
+  // The real file plus one byte past its last array.
+  const std::string bytes = readAll(std::string(kGoldenCas44)) + '\0';
+  expectIoError(loadGolden(write("trailing.nevpt2gold", bytes)), "1 bytes after the last");
+}
+
+TEST_F(GoldenLoadErrorTests, NdetNotTheCiLengthIsAnIoError) {
+  // The header's ndet (the int64 after the magic and four int32s) bumped by
+  // one: ci still holds the real count.
+  std::string bytes = readAll(std::string(kGoldenCas44));
+  constexpr std::size_t kNdetOffset = 8 + 4 * 4;
+  ASSERT_GT(bytes.size(), kNdetOffset + 8);
+  std::int64_t ndet = 0;
+  std::memcpy(&ndet, bytes.data() + kNdetOffset, 8);
+  ++ndet;
+  std::memcpy(bytes.data() + kNdetOffset, &ndet, 8);
+  expectIoError(loadGolden(write("bad_ndet.nevpt2gold", bytes)),
+                std::format("but the header says ndet = {}", ndet));
+}
+
 // --- GoldenRequireTests -------------------------------------------------------
 
 TEST(GoldenRequireTests, PresentArraysAreOk) {
@@ -156,6 +178,19 @@ TEST(GoldenRequireTests, MissingArrayInTheCommittedGolden) {
   ASSERT_FALSE(s.has_value());
   EXPECT_EQ(s.error().kind, ErrorKind::IO);
   EXPECT_NE(s.error().message.find("no_such_array"), std::string::npos) << s.error().message;
+}
+
+TEST(GoldenRequireTests, CheckNdetRefusesAMismatch) {
+  GoldenFile g;
+  g.ncas = 4;
+  g.nelecA = 2;
+  g.nelecB = 2;
+  g.ndet = 36;
+  EXPECT_TRUE(g.checkNdet(36).has_value());
+  const Status s = g.checkNdet(35);
+  ASSERT_FALSE(s.has_value());
+  EXPECT_EQ(s.error().kind, ErrorKind::IO);
+  EXPECT_NE(s.error().message.find("header ndet = 36"), std::string::npos) << s.error().message;
 }
 
 // --- GoldenCas44Tests ---------------------------------------------------------
