@@ -144,6 +144,12 @@ include(add_device_library)
 # needs. See cmake/nevpt2_sanitizers.cmake.
 include(nevpt2_sanitizers)
 
+# --- coverage (default OFF) -------------------------------------------------------
+# Same placement, same reason: a directory property that must reach WarpWraps'
+# targets and, through test/'s copy, the gtest binaries. See
+# cmake/nevpt2_coverage.cmake.
+include(nevpt2_coverage)
+
 # --- WarpWraps ----------------------------------------------------------------
 include(nevpt2_warpwraps)
 

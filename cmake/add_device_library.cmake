@@ -1,6 +1,6 @@
 # add_device_library -- one kernel file (or a few) as a STATIC device
 # library linked into the binary: WarpWraps' wwr_add_gpu_device_library, plus
-# the two things every device library in this project needs on top of it.
+# the things every device library in this project needs on top of it.
 #
 #   add_device_library(
 #     NAME    <target, dotted: nevpt2.<component>[.<what>].device>
@@ -12,6 +12,8 @@
 #     sets CUDA_STANDARD 20; under HIP it compiles the .cu as a CXX source, which
 #     would otherwise inherit the host's CMAKE_CXX_STANDARD 23. A target
 #     property, not a -std flag, so CMake emits exactly one -std;
+#   - marks the target NEVPT2_DEVICE_LIBRARY, which keeps the coverage
+#     instrumentation off it (cmake/nevpt2_coverage.cmake);
 #   - joins the `nevpt2_device_libraries` umbrella, which is what
 #     `devtools/cross-backend-check.sh --device-only` builds -- so a new kernel
 #     library is covered by being declared, not by someone editing a list.
@@ -49,5 +51,8 @@ function(add_device_library)
       target_compile_options(${ARG_NAME} PRIVATE -fno-gpu-sanitize)
     endif()
   endif()
+  # Read by cmake/nevpt2_coverage.cmake, which leaves device libraries
+  # uninstrumented on both backends (under HIP their sources are CXX units).
+  set_target_properties(${ARG_NAME} PROPERTIES NEVPT2_DEVICE_LIBRARY ON)
   add_dependencies(nevpt2_device_libraries ${ARG_NAME})
 endfunction()

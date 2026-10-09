@@ -23,9 +23,9 @@
 # see CMAKE_PRESET / CTEST_PRESET below.
 #
 # What this project does NOT have, so the scripts carry no knob for it:
-# coverage (COVERAGE_*), an install tier, and a pytest pre-push gate (there
-# is no Python test suite here -- the .py files are offline tools). If you
-# find a script referencing one, it is drift.
+# an install tier, and a pytest pre-push gate (there is no Python test suite
+# here -- the .py files are offline tools). If you find a script referencing
+# one, it is drift.
 
 # --- identity -------------------------------------------------------------
 
@@ -113,6 +113,22 @@ DEVCONTAINER_CONFIG=${DEVCONTAINER_CONFIG:-.devcontainer/cuda/devcontainer.json}
 # Set CTEST_PRESET empty to configure and build without running ctest.
 CMAKE_PRESET=${CMAKE_PRESET:-default}
 CTEST_PRESET=${CTEST_PRESET:-fast}
+
+# --- coverage -------------------------------------------------------------
+
+# devtools/coverage.sh: clang source-based coverage of HOST code
+# (cmake/nevpt2_coverage.cmake). The preset it configures, builds and tests;
+# `hip-coverage` is the same on the AMD card. Like every golden run it needs
+# a card (docs/testing.md, "Coverage").
+COVERAGE_PRESET=${COVERAGE_PRESET:-coverage}
+
+# Files dropped from the report (an llvm-cov -ignore-filename-regex). What is
+# left is src/ and the two demos under apps/. Dropped: WarpWraps (deps/),
+# GoogleTest (_deps/), the suites themselves (test/), system headers -- all
+# instrumented or inlined into the binaries, none of it code this project's
+# coverage is about -- and apps/sanitizer_canary/, which only a sanitizer
+# preset runs, so a coverage run would always count it 0%.
+COVERAGE_IGNORE_REGEX=${COVERAGE_IGNORE_REGEX:-'(^|/)(deps|_deps|test|apps/sanitizer_canary)/|^/usr/'}
 
 # --- cross-backend check --------------------------------------------------
 

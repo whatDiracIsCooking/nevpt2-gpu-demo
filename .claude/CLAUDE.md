@@ -78,7 +78,7 @@ of improvement.** `README.md` is the summary and carries no measured numbers.
 | `src/` | one directory per component, each a module library and/or a device library. Every component is used by both demos except `df_integrals` (the density-fitted demo's alone): `common` (`idivup`/`align_up`; `int64_t` via `int64.h`, the one std using-declaration, so write it bare inside `nevpt2` and `std::int64_t` outside; `narrowTo<To>`, the one checked host narrowing; plus device-only `block_params.h`, `device_index.h` (`idx2`/`idx4`/`idx6`, `gridFor`), `warp_reduce.cuh`, `block_reduce.cuh` via the `nevpt2::common::device` target), `wwr`, `error_handling`, `device_resources` (`DeviceResources`, `DeviceBuffer<T>`/`DeviceBufferView<T>`), `profile`, `tensor`, `golden`, `einsum`, `cublas`, `ozaki` (device library only), `rdm`, `energy` (SC `energy.cpp` and PC `energy_pc.cpp`), `cli` (the flags both demos share), `df_integrals`. docs/architecture.md has the component graph. |
 | `apps/` | `apps/<app>/{main.cppm,CMakeLists.txt}`: `integral_direct/` → `nevpt2_demo`, `density_fit/` → `nevpt2_df_demo` (checked against PySCF's **DF**-NEVPT2, the `*_df` goldens), `sanitizer_canary/` → `nevpt2_sanitizer_canary`. Each `main.cppm` is a module unit nothing imports (`export module nevpt2.app.<app>;`, plain `int main`). |
 | `test/` | the GoogleTest unit tier, added from the root `CMakeLists.txt` only. Host-only suites carry no `gpu` label and run with no card; a suite that needs a card is `REQUIRES_GPU` → `gpu`; `EXPECT_DEATH` suites are also `death`. Each binary has a `<target>.SuiteListIsComplete` drift guard. |
-| `cmake/` | the build's helper layer: `nevpt2_toolchain.cmake` (everything before `project()`), the module/device/gtest macros, `nevpt2_warpwraps.cmake`, and the sanitizer tier (`nevpt2_sanitizers.cmake`, `add_sanitizer_canary`, `nevpt2_lsan.supp`). See `cmake/README.md`. |
+| `cmake/` | the build's helper layer: `nevpt2_toolchain.cmake` (everything before `project()`), the module/device/gtest macros, `nevpt2_warpwraps.cmake`, the sanitizer tier (`nevpt2_sanitizers.cmake`, `add_sanitizer_canary`, `nevpt2_lsan.supp`) and host coverage (`nevpt2_coverage.cmake`). See `cmake/README.md`. |
 | `docs/` | current-state, not chronological; `docs/README.md` is the index. No measured numbers in `architecture.md`, `implementation.md` or `references.md`. **Every measured number lives in exactly one of** `performance.md`, `pc-nevpt2.md`, `reference-data.md`, `testing.md`, at its latest measurement with its card and flags. Code comments and other docs cite them by file and section name (`docs/testing.md, "Sanitizers"`), so a figure added anywhere else is drift. |
 | `deps/WarpWraps` | submodule ([WarpWraps](https://github.com/whatDiracIsCooking/WarpWraps)): `wwr.runtime_api` (host) and `runtime.h` (kernels). `EXCLUDE_FROM_ALL`: only what our targets link is built, and none of its tests register with our ctest. **Required**: `git submodule update --init --recursive`; `src/CMakeLists.txt` refuses to configure without it. |
 | `golden/` | the committed references (docs/reference-data.md has the inventory). Generation is **bit-reproducible only because** `generate_golden.py` forces single-threading and a 1e-12 Davidson tolerance, and builds the molecule **with point-group symmetry** (auto-detected, linear groups mapped by `LINEAR_SUBGROUP`; never hard-code a group). Do not drop any of these to make generation faster: a regenerated file that differs from the committed one means something changed. `_check_degeneracy` and `_check_pc_conditioning` refuse states whose answer would depend on numerical noise. The PC fields are block2's answer (PySCF has no PC); the CAS(12,12) goldens carry none, and CAS(10,12) is the 12-orbital PC case. CAS(14,14) and the salicylaldimine pair are gitignored (too big) — regenerate them. |
@@ -205,6 +205,17 @@ is off or not failing runs. Fix that; never delete the canary. A leaked device
 buffer is a failing test, so fix the leak rather than turning the check off.
 New LSan suppressions go in `cmake/nevpt2_lsan.supp` and must name a vendor
 library, never one of our frames.
+
+**Host coverage.** `devtools/coverage.sh` (CUDA, preset `coverage`) or
+`devtools/coverage.sh --preset hip-coverage` configures a Release build with
+`NEVPT2_ENABLE_COVERAGE`, runs what `fast` runs **serially** (golden entries
+in parallel on one card abort), and prints llvm-cov's table for `src/` +
+`apps/` (`--html DIR`, `--lcov FILE`, `--report-only`). It instruments host
+CXX units only: every `.cu` stays out on both backends
+(`NEVPT2_DEVICE_LIBRARY`), and a process that aborts writes no profile, so
+the abort tier reads as unexecuted. A covered line was run, not checked —
+never quote coverage as a correctness claim. The measured numbers are in
+docs/testing.md, "Coverage".
 
 ## Conventions
 

@@ -1,8 +1,9 @@
 # Testing
 
 How this tree is checked: the two test tiers, why there is no CI, the local
-gate, and the sanitizer tier — what each tool catches, what it cannot, and
-how the tier proves its own tools are on. Every figure names its card.
+gate, the sanitizer tier — what each tool catches, what it cannot, and
+how the tier proves its own tools are on — and host code coverage. Every
+figure names its card.
 
 ## Two tiers
 
@@ -335,3 +336,70 @@ CUDA costs almost nothing.
 - **The large cases.** CAS(10,10) and up are too slow under
   compute-sanitizer. The salicylaldimine goldens stay out too, so the tier
   stays on N2.
+
+## Coverage
+
+clang source-based coverage of **host** code: which lines of `src/` and the
+two demos under `apps/` the `fast` test set executes. It is a map of what the
+tests never reach, not a measure of correctness — a line counted as covered
+was run, not checked. The golden tier stays the only numerical claim.
+
+```bash
+devtools/coverage.sh                          # CUDA: configure, build, ctest, report
+devtools/coverage.sh --preset hip-coverage    # the same on the AMD card
+devtools/coverage.sh --html build-coverage/html --lcov build-coverage/coverage.lcov
+```
+
+The `coverage` / `hip-coverage` presets are **Release** builds with
+`NEVPT2_ENABLE_COVERAGE` (cmake/README.md, "`nevpt2_coverage.cmake`"):
+the configuration `fast` tests. Source-based counters go in before the
+optimizer, so the counts are exact at `-O3`. A Debug build was tried first
+and dropped: on HIP it compiles device code `-O0` too, the CAS(10,10)
+`--digest-emitted` entries took ~104 s each on the RX 9060 XT, and
+`nevpt2_cas1010_ozaki` had not finished after more than ten minutes (5.9 s under Release).
+Each preset's test preset runs what `fast` runs, each process writing
+`build-<preset>/profraw/<pid>.profraw`. The script merges those with
+`llvm-profdata`, finds every binary carrying a coverage map, and reports
+through `llvm-cov`, dropping `COVERAGE_IGNORE_REGEX` (devtools/config.sh:
+`deps/`, `_deps/`, `test/`, `apps/sanitizer_canary/`, system headers).
+
+ctest runs **serially**. Several golden entries at once on one card abort
+(six of them did under `-j4` on the RTX 3080, every one passing when run
+alone), and an aborted entry's host paths would then read as never executed.
+A failing test still produces a report, but the script exits 1.
+
+### What it cannot see
+
+- **No `.cu`, on either backend** — kernels and their launchers alike. There
+  is no llvm-cov for device code, and instrumenting only the host half of a
+  `.cu` would differ by backend (nvcc's host compiler under CUDA, a `-x hip`
+  CXX unit whose device pass would take the flags under HIP). A kernel's
+  correctness is the golden tier's to prove.
+- **Anything on the way to an abort.** A process that ends in `std::abort()`
+  writes no profile: the `check`/`gpuCheck`/`narrowTo` tier, and every
+  `EXPECT_DEATH` child. Those paths read as unexecuted even though the
+  `death` suites exercise them. This is most of what `src/common/common.cppm`
+  misses.
+- **The `slow` entries.** CAS(12,12) and the salicylaldimine cases are not in
+  `fast`, so a path only they reach (large tile counts, for one) is missed.
+
+### Measured
+
+`devtools/coverage.sh`, Release, clang 20.1.8, totals over `src/` + the two
+demos (covered / total):
+
+| card, preset | entries | regions | functions | lines | branches |
+|---|---:|---:|---:|---:|---:|
+| RTX 3080, `coverage` | 76/76 passed | 1338/1500 (89.20%) | 235/241 (97.51%) | 2982/3197 (93.27%) | 770/985 (78.17%) |
+| RX 9060 XT, `hip-coverage` | 71/71 passed | 1316/1495 (88.03%) | 231/241 (95.85%) | 2942/3182 (92.46%) | 751/983 (76.40%) |
+
+Each run merged one profile per entry from 13 instrumented binaries; the
+ctest phase took 44.9 s on the 3080 and 143.5 s on the 9060 XT. A Debug build
+of the CUDA preset gave the identical CUDA totals, as it should. The HIP
+totals are lower mostly because `src/cublas/` there is the refusing stub
+(`--cublas` is rejected at flag parsing on HIP), which nothing calls.
+
+The lowest files are the two demos' `main.cppm` (the error-reporting branches
+of argument and golden-file handling, which no ctest entry provokes) and
+`src/common/common.cppm` (`narrowTo`'s failure path, which aborts).
+

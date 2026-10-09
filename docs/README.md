@@ -10,7 +10,7 @@ is checked.
 | [`performance.md`](performance.md) | What does it cost, and which knobs matter? Where the time goes, scaling with active-space size, the head-to-head against PySCF, the four digests, memory and `--tiles`, the one-stream rule, and what was measured not to help. |
 | [`pc-nevpt2.md`](pc-nevpt2.md) | How is PC-NEVPT2 done on the device, and how well does it agree? The block2 reference, the once-per-class eigensolve and the singular-metric convention, each class, accuracy and cost. |
 | [`reference-data.md`](reference-data.md) | Where do the golden files come from, and why can they be trusted? Why CASCI, the reproducibility and symmetry settings, the PC fields, density fitting, every committed and gitignored case. |
-| [`testing.md`](testing.md) | How is it checked? The golden and unit tiers, why there is no CI, the local gate, and the sanitizer tier with what each tool can and cannot see. |
+| [`testing.md`](testing.md) | How is it checked? The golden and unit tiers, why there is no CI, the local gate, the sanitizer tier with what each tool can and cannot see, and host code coverage. |
 | [`references.md`](references.md) | What is this built on? The literature cited, and the software with where each version is pinned. |
 
 ## Where numbers live

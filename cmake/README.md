@@ -13,6 +13,7 @@ cmake/
 ├── add_device_library.cmake        # function: .cu -> a linked-in STATIC device library
 ├── nevpt2_warpwraps.cmake                 # embeds deps/WarpWraps with add_subdirectory
 ├── nevpt2_sanitizers.cmake                # ASan / UBSan / compute-sanitizer options (all OFF)
+├── nevpt2_coverage.cmake                  # NEVPT2_ENABLE_COVERAGE: host source-based coverage (OFF)
 ├── add_sanitizer_canary.cmake      # function: a canary ctest entry
 ├── nevpt2_check_sanitizer_canary.cmake    # script mode: a canary's verdict
 ├── add_gtest_executable.cmake             # function: one GoogleTest binary under test/
@@ -150,7 +151,10 @@ device-compiled `.cu`: the CUDA language under CUDA, CXX plus `hip::device`'s
   list (the hand-kept list it replaced had already missed `f3_digest`);
 - **keeps the device pass uninstrumented under the host sanitizers on HIP**
   (`-fno-gpu-sanitize` when `NEVPT2_ENABLE_ASAN`/`_UBSAN` is on): gfx1200 cannot
-  take device ASan, and clang would otherwise warn on every unit.
+  take device ASan, and clang would otherwise warn on every unit;
+- **marks the target `NEVPT2_DEVICE_LIBRARY`**, a custom target property that
+  `nevpt2_coverage.cmake`'s compile options test, so no `.cu` is ever
+  coverage-instrumented on either backend.
 
 The host side calls the kernel through a `*_bridge.h` included in the global
 module fragment of the module unit that uses it; a purview declaration would
@@ -225,8 +229,24 @@ were inside cuBLASLt's emulated DGEMM. An include filter
 namespace, and they are not (`kernels.cu`'s sit in the global namespace); the
 exclude keeps every kernel of ours in scope with no naming rule to enforce.
 synccheck runs unscoped (clean). There is no `--require-cuda-init no` (every
-wrapped entry touches CUDA; the host-only unit suites are not wrapped) and no
-coverage.
+wrapped entry touches CUDA; the host-only unit suites are not wrapped).
+
+## `nevpt2_coverage.cmake`
+
+`NEVPT2_ENABLE_COVERAGE` (default OFF; the `coverage` and `hip-coverage`
+presets turn it on) adds `-fprofile-instr-generate -fcoverage-mapping` as a
+directory compile option, in the same place as the sanitizer flags and for the
+same reason: it has to reach WarpWraps' targets and, through
+`test/CMakeLists.txt`'s copy of src/'s directory options, the gtest binaries.
+The option is a generator expression that is true only for a CXX unit whose
+target is **not** `NEVPT2_DEVICE_LIBRARY`. That is how the `.cu` files stay
+uninstrumented under HIP too, where they are CXX units: on both backends the
+report is host module code and nothing else. `-fprofile-instr-generate` is
+also a link option, because every binary links an instrumented library.
+
+It refuses to combine with the sanitizer options. `devtools/coverage.sh`
+does configure, build, ctest, merge and report; docs/testing.md, "Coverage"
+says what the number does and does not mean.
 
 ## `add_sanitizer_canary`
 
