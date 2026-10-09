@@ -55,11 +55,11 @@
 #   --clean         rebuild every object (`--clean-first`), keeping the cache.
 #   --no-test       configure and build only.
 #   --tidy          after a successful build, run clang-tidy over the .cpp
-#                   implementation units using the build's
-#                   compile_commands.json. Reports findings; does NOT fail
-#                   the run, because the tree is not clean yet (see
-#                   .clang-tidy). Off by default so the normal tier stays
-#                   a build-and-test.
+#                   implementation units and apps/*/main.cppm using the
+#                   build's compile_commands.json. Reports findings; does NOT
+#                   fail the run (the comment above the clang-tidy phase in
+#                   this script says why). Off by default so the normal
+#                   tier stays a build-and-test.
 #   --rocm          run the HIP preset against a REAL AMD GPU, from the HOST.
 #                   Re-execs this script inside ROCM_IMAGE with /dev/kfd,
 #                   /dev/dri and the NUMERIC host render/video gids passed
@@ -308,15 +308,18 @@ if [ "$rc" -eq 0 ] && [ "$run_tests" -eq 1 ]; then
 fi
 
 # clang-tidy is deliberately advisory -- run on request (--tidy), never folded
-# into rc. It lints the src/*.cpp implementation units and the apps/*/main.cppm binaries (module
-# units nothing imports, so effectively implementation units); the .cppm interfaces they
-# import are governed by .clang-tidy's Header/ExcludeHeaderFilterRegex, which
-# drops the vendor re-export layer and, together with src/wrappers/.clang-tidy and the
-# gpu*-prefix exemptions, silences the names and signatures that mirror the
-# vendor API by design. With those in place the src/*.cpp + apps/*/main.cppm run is clean today, so
-# folding it into rc is now a small step -- left advisory only because
-# clang-tidy's C++23-module support is still incomplete and can emit the odd
-# false diagnostic on a module construct, which a build gate should not fail on.
+# into rc. It lints the src/*.cpp implementation units and the apps/*/main.cppm
+# binaries (module units nothing imports, so effectively implementation units).
+# There is NO .clang-tidy anywhere in the tree, so it runs clang-tidy's default
+# checks (clang-diagnostic-*, clang-analyzer-*) with the default header filter,
+# which reports only the files named on the command line. clang-tidy exits 0 on
+# warnings, so a run with findings still passes this phase -- read the log.
+# The tree is not clean under those defaults today: the static analyzer
+# reports a few findings nobody has triaged, and some may be false positives.
+# Two reasons it stays advisory: those findings, and clang-tidy's C++23-module
+# support, which is still incomplete and can emit the odd false diagnostic on
+# a module construct -- something a build gate should not fail on. Making it a
+# gate means adding a .clang-tidy and triaging the findings first.
 if [ "$rc" -eq 0 ] && [ "$tidy" -eq 1 ]; then
   if ! command -v clang-tidy >/dev/null 2>&1; then
     echo "cpp-tier: clang-tidy not found -- skipping --tidy" | tee -a "$log"
