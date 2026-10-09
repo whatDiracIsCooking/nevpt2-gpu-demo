@@ -36,6 +36,13 @@ struct GoldenFile {
   // work.
   [[nodiscard]] Status require(std::initializer_list<std::string_view> names) const;
 
+  // An IO Error unless the header's ndet is `expected`, the determinant count
+  // the demo derives from ncas/nelecA/nelecB (it cannot be derived here: the
+  // string counts live in link_tables). loadGolden has already checked that
+  // ci, when present, holds ndet elements, so passing this ties the CI
+  // vector's length to the active space the kernels index it with.
+  [[nodiscard]] Status checkNdet(int64_t expected) const;
+
   // The array `name`. Aborts (check) if it is absent: the demo should have
   // require()d it, so reaching here without it is our bug, not the file's.
   const Tensor& get(const std::string& name) const;
@@ -44,7 +51,8 @@ struct GoldenFile {
 // The parsed file, or an IO Error if it cannot be opened, ends early, has the
 // wrong magic, or carries a malformed array header (a negative or oversized
 // rank, a negative extent, or an element count that overflows or runs past
-// the end of the file).
+// the end of the file), has bytes after its last array, or carries a ci
+// whose length is not the header's ndet.
 [[nodiscard]] Result<GoldenFile> loadGolden(const std::string& path);
 
 }  // namespace nevpt2

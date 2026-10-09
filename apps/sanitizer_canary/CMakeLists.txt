@@ -26,4 +26,4 @@ target_include_directories(nevpt2_sanitizer_canary PRIVATE ${CMAKE_CURRENT_SOURC
 # wwr::backend: selected_backend.h, which the bridge's runtime.h reads on the
 # host side (as for rdm_build.cpp).
 target_link_libraries(nevpt2_sanitizer_canary PRIVATE
-  nevpt2::wwr nevpt2.sanitizer_canary.device wwr::backend)
+  nevpt2::wwr nevpt2::device_resources nevpt2.sanitizer_canary.device wwr::backend)

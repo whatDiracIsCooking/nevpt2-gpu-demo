@@ -120,7 +120,9 @@ kernel on the legacy stream reading a buffer while `cudaFreeAsync` frees it
 on a non-blocking stream, with no ordering between the two, ran clean under
 memcheck **3 out of 3 times**. The deterministic form of that bug — a free
 that comes *before* the read in stream order — is reported every time (the
-`free_before_read` canary). So the tier is strong evidence against "freed
+`free_before_read` canary), and still reported when the buffer is a
+pool-backed `DeviceBuffer` whose freed block the demos' pool keeps mapped
+(the `pool_free_before_read` canary). So the tier is strong evidence against "freed
 before its last reader on the same stream", and **no evidence** against "a
 call left on the legacy stream". That is `devtools/stream-lint.sh --strict`'s
 job (see [`performance.md`](performance.md), "One stream").
@@ -218,6 +220,7 @@ is off or not failing runs: fix that, never delete the canary.
 | `nevpt2_canary_ubsan_signed_overflow` | UBSan (both backends) | `INT_MAX + 1` | `runtime error: signed integer overflow` |
 | `nevpt2_canary_memcheck_device_oob` | memcheck | a kernel reads one past its buffer | `Invalid __global__ read of size 8` |
 | `nevpt2_canary_memcheck_free_before_read` | memcheck | `wwrFreeAsync(buf, S)`, *then* a kernel on S reads `buf` | `Invalid __global__ read of size 8` |
+| `nevpt2_canary_memcheck_pool_free_before_read` | memcheck | the same, through a pool-backed `DeviceBuffer` at the demos' release threshold (the freed block stays in the pool) | `Invalid __global__ read of size 8` |
 | `nevpt2_canary_memcheck_leak` (only with the leak check, the default) | memcheck `--leak-check full` | a 512-byte `wwrMallocAsync` never freed | `Leaked 512 bytes at` |
 | `nevpt2_canary_initcheck_uninit_read` | initcheck | a kernel reads a fresh `wwrMallocAsync` buffer | `Uninitialized __global__ memory read of size 8` |
 | `nevpt2_canary_racecheck_shared_race` | racecheck | thread 0 writes a `__shared__` slot that all 64 threads read, no barrier | `Race reported between` |

@@ -24,6 +24,10 @@ struct CommonOptions {
   bool profile = false;
   bool pc = false;
   std::uint64_t poolThreshold = kDefaultPoolReleaseThreshold;
+  // --mantissa-bits was given: finalize() refuses it without --cublas, the
+  // only digest that reads it (rdm.mantissaBits alone cannot tell an
+  // explicit 53 from the default).
+  bool mantissaBitsGiven = false;
 };
 
 // An integer flag's value (--tiles, --ozaki-pairs, --mantissa-bits, --batch,
@@ -48,7 +52,8 @@ Result<bool> parseCommonFlag(std::span<const std::string_view> args, std::size_t
                              CommonOptions& opt);
 
 // The checks that span flags, once every argument is in: --golden given,
-// --tiles >= 1, --ozaki-pairs in 0..14, --cublas only where the emulated digest is built, and at most
+// --tiles >= 1, --ozaki-pairs in 0..14, --mantissa-bits in 1..53 and only
+// with --cublas, --cublas only where the emulated digest is built, and at most
 // one of --cublas / --blas-digest / --ozaki. Also makes --ozaki take
 // precedence over blasDigest's HIP default. `goldenHint` names the file in
 // the missing-golden message ("path.nevpt2gold").

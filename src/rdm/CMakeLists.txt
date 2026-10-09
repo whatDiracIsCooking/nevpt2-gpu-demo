@@ -37,17 +37,13 @@ add_cxx_module_library(
 # cannot be launched from another TU (the device library builds with separable
 # compilation off). rdm_build.cpp calls them through rdm_kernels_bridge.h.
 # No parallel_for (the launchers keep their own <<<>>>; see rdm_launch.cu), so
-# it links wwr::device for runtime.h directly. nvcc warning 177 ("declared but
-# never referenced") is suppressed; it fired on a host shim kernels.cu no
-# longer has, so the flag may now be unneeded.
+# it links wwr::device for runtime.h directly.
 add_device_library(
   NAME nevpt2.rdm.kernels.device
   SOURCES rdm_launch.cu
   LINK_PRIVATE wwr::device nevpt2::common::device
 )
 target_include_directories(nevpt2.rdm.kernels.device PRIVATE ${NEVPT2_SRC_ROOT})
-target_compile_options(nevpt2.rdm.kernels.device PRIVATE
-  $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=177>)
 
 # rdm_accumulate.cu -- the device-resident launcher's on-device tile-partial
 # accumulate. Its own file, like every kernel added after kernels.cu.

@@ -427,6 +427,14 @@ if(NEVPT2_BUILD_TESTING)
         ARGS device-free-before-read
         EXPECT "Invalid __global__ read of size 8"
         REQUIRES_GPU)
+      # The same bug through the demos' own allocator: a pool-backed
+      # DeviceBuffer, whose freed block the pool keeps mapped.
+      add_sanitizer_canary(
+        NAME nevpt2_canary_memcheck_pool_free_before_read
+        TARGET nevpt2_sanitizer_canary
+        ARGS device-pool-free-before-read
+        EXPECT "Invalid __global__ read of size 8"
+        REQUIRES_GPU)
       # A device allocation never freed: proves --leak-check full
       # is really on, so the demo entries' 0 leaks is a measurement.
       if(NEVPT2_COMPUTE_SANITIZER_LEAK_CHECK)

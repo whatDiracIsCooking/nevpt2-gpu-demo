@@ -19,6 +19,12 @@ namespace nevpt2 {
 // past this is a corrupt header, refused before it sizes a shape vector.
 constexpr int64_t kMaxRank = 16;
 
+// generate_golden.py writes every field little-endian (struct's "<"), and
+// Reader copies bytes straight into host integers and doubles: correct only on
+// a little-endian host, which every host this builds for is.
+static_assert(std::endian::native == std::endian::little,
+              "the golden reader freads little-endian fields in host byte order");
+
 class Reader {
  public:
   static Result<Reader> open(const std::string& path) {

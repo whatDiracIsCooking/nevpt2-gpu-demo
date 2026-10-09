@@ -17,6 +17,8 @@
 //   device-free-before-read memcheck   wwrFreeAsync on S, THEN a kernel on S reads
 //                                      the buffer: the stream-ordered
 //                                      use-after-free the demos could introduce
+//   device-pool-free-before-read memcheck  the same bug through a pool-backed
+//                                      nevpt2::DeviceBuffer, the demos' allocator
 //   device-leak             memcheck   a device allocation never freed (needs
 //                                      --leak-check full)
 //   device-uninit-read      initcheck  a kernel reads device memory nothing wrote
@@ -26,7 +28,9 @@
 // Every GPU call is on one non-blocking stream with stream-ordered allocation,
 // the same shape as the demos, so the canary has nothing for
 // devtools/stream-lint.sh to report. Unlike the demos it allocates with plain
-// wwrMallocAsync/wwrFreeAsync, not a pool-backed nevpt2::DeviceBuffer.
+// wwrMallocAsync/wwrFreeAsync, not a pool-backed nevpt2::DeviceBuffer --
+// except device-pool-free-before-read, which is there to show memcheck still
+// sees a stream-ordered use-after-free through the demos' pool.
 //
 // A module unit nothing imports; see apps/integral_direct/main.cppm.
 module;
@@ -46,7 +50,7 @@ int main(int argc, char** argv) {
   if (argc != 2) {
     std::fprintf(stderr,
                  "usage: %s <host-heap-overflow | host-signed-overflow | device-oob | "
-                 "device-free-before-read | device-leak | device-uninit-read | "
+                 "device-free-before-read | device-pool-free-before-read | device-leak | device-uninit-read | "
                  "device-shared-race | "
                  "device-divergent-barrier>\n",
                  argv[0]);

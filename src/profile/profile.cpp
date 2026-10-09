@@ -12,6 +12,10 @@ namespace nevpt2::profile {
 
 std::size_t begin(std::string_view label, wwrStream_t stream, int64_t outSize,
                   int64_t contractedSize) {
+  // A span outside every Section would land in "", which no caller reports,
+  // so its events would never be read or destroyed.
+  check(!g_section.empty(), std::format("profile span '{}' recorded outside any profile::Section",
+                                        label));
   // Raw events, not WarpWraps' EventWrapper: its default flags disable
   // timing (https://github.com/whatDiracIsCooking/WarpWraps/issues/315), and
   // wwrEventDefault is what makes the pair timeable.

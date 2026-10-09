@@ -8,7 +8,7 @@
 // both events on the stream that work runs on -- res.stream(), the one
 // non-blocking stream; nothing here makes a stream of its own.
 // Spans land in the innermost open Section, so one report() per section gives
-// one table per stage. Off (the default), time() costs one bool check and
+// one table per stage; a span with no Section open is our bug (check). Off (the default), time() costs one bool check and
 // calls through.
 //
 // Events are read back only by report(), which must be called after a

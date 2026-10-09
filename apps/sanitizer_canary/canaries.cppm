@@ -15,6 +15,7 @@ export module nevpt2.app.sanitizer_canary:canaries;
 
 import std;
 import nevpt2.wwr;
+import nevpt2.device_resources;  // device-pool-free-before-read: the demos' pool
 
 // The kernel launchers it calls: extern "C++" attaches them to the global
 // module, so they bind to the .cu's definitions (see
@@ -52,7 +53,34 @@ int hostSignedOverflow() {
   return 0;
 }
 
+// device-free-before-read again, but through the demos' own allocator: a
+// DeviceBuffer drawn from DeviceResources' pool (wwrMallocFromPoolAsync) at
+// the demos' release threshold, which keeps every freed byte in the pool, so
+// the freed range stays mapped. `out` is drawn first, so the pool cannot hand
+// the freed block straight back to it.
+int devicePoolFreeBeforeRead() {
+  nevpt2::Result<std::shared_ptr<nevpt2::DeviceResources>> created =
+      nevpt2::DeviceResources::create(0, nevpt2::kDefaultPoolReleaseThreshold);
+  if (!created) {
+    nevpt2::report(created.error());
+    return 2;
+  }
+  const std::shared_ptr<nevpt2::DeviceResources> res = *std::move(created);
+  nevpt2::DeviceBuffer<double> out(kN, res);
+  const double* stale = nullptr;
+  {
+    const nevpt2::DeviceBuffer<double> in(kN, res);  // zero-filled on the stream
+    stale = in.data();
+  }  // ~DeviceBuffer: wwrFreeAsync on res->stream(), before the read below
+  nevpt2::gpuCheck(nevpt2::canary::launchCopy(res->stream(), stale, out.data(), kN));
+  // Kernel faults surface here (and abort through gpuCheck).
+  nevpt2::gpuCheck(wwr::wwrStreamSynchronize(res->stream()));
+  return 0;
+}
+
 int device(std::string_view mode) {
+  if (mode == "device-pool-free-before-read") return devicePoolFreeBeforeRead();
+
   wwr::wwrStream_t s = nullptr;
   nevpt2::gpuCheck(wwr::wwrStreamCreateWithFlags(&s, wwr::wwrStreamNonBlocking));
   double* out = deviceDoubles(s);

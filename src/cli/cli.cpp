@@ -46,6 +46,7 @@ Result<bool> parseCommonFlag(const std::span<const std::string_view> args, std::
     const Result<int> bits = parseInteger<int>(a, args[++i]);
     if (!bits) return std::unexpected(bits.error());
     opt.rdm.mantissaBits = *bits;
+    opt.mantissaBitsGiven = true;
   } else {
     return false;
   }
@@ -62,6 +63,14 @@ Status finalize(CommonOptions& opt, const std::string_view goldenHint) {
   // side, so 0..14 (14 = all 64 pairs).
   if (opt.rdm.ozakiMaxPairSum < 0 || opt.rdm.ozakiMaxPairSum > 14)
     return err_config("--ozaki-pairs must be in 0..14");
+  // The fp64 significand is 53 bits (the default, bit-identical to native
+  // fp64); below 1 there is nothing left to emulate.
+  if (opt.rdm.mantissaBits < 1 || opt.rdm.mantissaBits > 53)
+    return err_config("--mantissa-bits must be in 1..53");
+  // Only the --cublas digest reads it: anywhere else it would be silently
+  // ignored. On HIP this fires before requireCublasEmul would refuse --cublas.
+  if (opt.mantissaBitsGiven && !opt.rdm.cublas)
+    return err_config("--mantissa-bits sets the --cublas digest's precision; it needs --cublas");
   // --cublas on a build without the emulated digest (HIP): an Unsupported
   // Error from nevpt2.cublas_emul's stub.
   if (opt.rdm.cublas) {
