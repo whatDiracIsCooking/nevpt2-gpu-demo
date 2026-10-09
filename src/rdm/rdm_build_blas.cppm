@@ -1,6 +1,7 @@
 // nevpt2.rdm_build:blas -- the BLAS GEMMs of the RDM build: the f3 consume step
-// (and the permuted integrals and per-backend chunking it is issued
-// with), and the native-fp64 --blas-digest GEMM.
+// (and the per-backend chunk limits it is issued with; the chunking and the
+// permuted integrals themselves are nevpt2.rdm_plan's), and the native-fp64
+// --blas-digest GEMM.
 // An internal partition: nothing here is exported, so it is reachable from the
 // units that `import :blas;` and from no importer of nevpt2.rdm_build.
 // (Used by rdm_build.cpp.)
@@ -8,6 +9,7 @@ module nevpt2.rdm_build:blas;
 
 import std;
 import nevpt2.rdm_build;
+import nevpt2.rdm_plan;  // evenChunks
 import wwr.blas;
 // wwrblasStatus_t's error_type specializations: what lets gpuCheck take a
 // BLAS status.
@@ -54,16 +56,8 @@ namespace nevpt2 {
 // dimension or leading dimension is narrowed to int (until then
 // a checked int narrowing of lda = n^2 * width asked for more --tiles).
 
-// eri is chemists'-order eriF3, row-major [a, x, q, p]; out is [x, a, p, q].
-std::vector<double> permuteEriConsume(const std::vector<double>& eri, int64_t n) {
-  std::vector<double> out(eri.size());
-  int64_t i = 0;
-  for (int64_t x = 0; x < n; ++x)
-    for (int64_t a = 0; a < n; ++a)
-      for (int64_t p = 0; p < n; ++p)
-        for (int64_t q = 0; q < n; ++q) out[i++] = eri[((a * n + x) * n + q) * n + p];
-  return out;
-}
+// The permuted integral copy (permuteEriConsume) and the chunking
+// (evenChunks) are pure host arithmetic, in nevpt2.rdm_plan.
 
 struct ConsumeChunking {
   int64_t maxCols;
@@ -73,15 +67,6 @@ struct ConsumeChunking {
 ConsumeChunking consumeChunking() {
   if (std::string_view(kGpuBackendName) == "CUDA") return {10, 128};
   return {16, std::numeric_limits<int64_t>::max()};
-}
-
-// Split [0, total) into the fewest near-equal chunks of at most `maxLen`.
-// total * (c + 1) stays far inside int64_t: total is n or n^2 here.
-std::vector<std::pair<int64_t, int64_t>> evenChunks(int64_t total, int64_t maxLen) {
-  int64_t count = total / maxLen + (total % maxLen != 0);  // ceil, no overflow at the max
-  std::vector<std::pair<int64_t, int64_t>> out;
-  for (int64_t c = 0; c < count; ++c) out.emplace_back(total * c / count, total * (c + 1) / count);
-  return out;
 }
 
 // order 0 (ca): x is L2's third slot (stride n*w), f its fourth (stride w).

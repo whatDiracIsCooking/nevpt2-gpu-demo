@@ -15,13 +15,13 @@ module nevpt2.rdm_build;
 
 import std;
 import :staging;
-import :tiles;
 import :blas;
 
 import nevpt2.common;
 import nevpt2.cublas_emul;
 import nevpt2.link_tables;
 import nevpt2.profile;
+import nevpt2.rdm_plan;  // the tile plan and permuteEriConsume
 import wwr.blas;
 // wwrblasStatus_t's error_type specializations: what lets gpuCheck take a
 // BLAS status.

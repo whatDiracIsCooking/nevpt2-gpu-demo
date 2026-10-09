@@ -1,6 +1,7 @@
 // nevpt2.energy:sc_finish -- the strongly-contracted finish: a slab's norm/H
-// read back and turned into -sum N/(Delta+H/N) (PySCF's _norm_to_energy),
-// and the orbital-energy slice it is taken against.
+// read back and turned into -sum N/(Delta+H/N) (by nevpt2.energy_finish's
+// normToEnergy, PySCF's _norm_to_energy), and the orbital-energy slice it is
+// taken against.
 // An internal partition: nothing here is exported, so it is reachable from the
 // units that `import :sc_finish;` and from no importer of nevpt2.energy.
 // (Used by energy_sc_classes.cppm and energy.cpp's Sijrs.)
@@ -11,26 +12,11 @@ import nevpt2.energy;
 
 namespace nevpt2 {
 
-// pyscf.mrpt.nevpt2._norm_to_energy verbatim: the strongly-contracted class
-// energy is -sum_k N_k / (Delta_k + H_k/N_k) over perturbers k with
-// non-vanishing norm; the returned norm is the plain sum of N_k.
-std::pair<double, double> normToEnergy(const std::vector<double>& norm,
-                                        const std::vector<double>& h,
-                                        const std::vector<double>& diff) {
-  double normT = 0.0, enerT = 0.0;
-  for (std::size_t k = 0; k < norm.size(); ++k) {
-    normT += norm[k];
-    if (std::fabs(norm[k]) > NUMERICAL_ZERO) {
-      enerT -= norm[k] / (diff[k] + h[k] / norm[k]);
-    }
-  }
-  return {normT, enerT};
-}
+// normToEnergy (PySCF's _norm_to_energy) and forBatches, the slab walk SC and
+// PC share, are pure host arithmetic: nevpt2.energy_finish's, re-exported by
+// nevpt2.energy.
 
 // --- slab plumbing ------------------------------------------------------------
-
-// forBatches, the slab walk, is in energy_shared.cppm (nevpt2.energy:shared;
-// energy_pc.cpp walks the same slabs).
 
 // host[b0:b1) of a rank-1 host tensor (an orbital-energy vector).
 std::vector<double> sliceHost(const Tensor& v, int64_t b0, int64_t b1) {

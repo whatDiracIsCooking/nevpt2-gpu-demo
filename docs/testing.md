@@ -275,13 +275,13 @@ the RX 9060 XT, each preset's own Debug build, memcheck with the leak check.
 | `ubsan` | 59 | 43 | all pass, canary green |
 | `compute-sanitizer`, memcheck + leak check | 70 | 51 (the 3 `death` suites dropped) | all pass, 4 `sanitizer_canary` entries green; all 20 GPU unit entries report `LEAK SUMMARY: 0 bytes leaked in 0 allocations`, `ERROR SUMMARY: 0 errors` |
 | `compute-sanitizer`, initcheck | 67 | 51 | all pass, canary green |
-| `hip-asan` | 68 | 53 | all pass, canary green |
-| `hip-ubsan` | 68 | 53 | all pass, canary green |
+| `hip-asan` | 79 | 64 | all pass, canary green |
+| `hip-ubsan` | 79 | 64 | all pass, canary green |
 
 The 43 unit entries are 33 suites plus 10 `<target>.SuiteListIsComplete`
-guards. The two `hip-*` rows were re-run later the same day, after
-`rdm_dm3_tests` and `df_integrals_tests` joined the tier: their 53 are 41
-suites plus 12 guards. The two `compute-sanitizer` rows were re-run later
+guards. The two `hip-*` rows were re-run last, after the host-only
+`rdm_plan_tests` and `energy_finish_tests` joined the tier: their 64 are 50
+suites (4 of them `death`, which run there) plus 14 guards. The two `compute-sanitizer` rows were re-run later
 still, after `FullVsDfSlabTests` joined `df_integrals_tests`: their 51 are
 the 42 suites plus 12 guards, less the 3 `death` suites. The `asan` and
 `ubsan` rows predate both binaries. Under the sanitizers the unit tier adds 4.5–9 s of `sec*proc`

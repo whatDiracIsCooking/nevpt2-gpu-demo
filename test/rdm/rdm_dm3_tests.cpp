@@ -422,7 +422,7 @@ TEST(Dm3TilingInvarianceTests, EveryTileCountGivesTheSameDm3) {
     SCOPED_TRACE(caseName(c));
     const int64_t ndet =
         link_tables::num_strings(c.norb, c.nelecA) * link_tables::num_strings(c.norb, c.nelecB);
-    // The plan rdm_build:tiles makes (width = ceil(ndet / nTiles)): at least
+    // The plan nevpt2.rdm_plan makes (width = ceil(ndet / nTiles)): at least
     // one count here must leave a short last tile, or that path goes untested.
     bool shortLastTile = false;
     for (int64_t nt : c.tileCounts) shortLastTile |= (ndet % ((ndet + nt - 1) / nt)) != 0;

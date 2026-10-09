@@ -59,13 +59,14 @@ import std;
 // Re-exported: energiesDevice and pcEnergiesDevice take DeviceTensors and the
 // DeviceResources (nevpt2.device_resources, through nevpt2.einsum's nevpt2.device_tensor).
 export import nevpt2.einsum;
+// Re-exported: the class energies' host arithmetic and the PC result types
+// (NUMERICAL_ZERO, PcClassResult, ...) that pcEnergiesDevice's result names.
+export import nevpt2.energy_finish;
 
 export namespace nevpt2 {
 
-// Norms below this are treated as an empty perturber space (no energy
-// contribution) -- pyscf.mrpt.nevpt2's own guard against dividing by a
-// vanishing norm.
-inline constexpr double NUMERICAL_ZERO = 1e-14;
+// NUMERICAL_ZERO, normToEnergy's vanishing-norm guard, is
+// nevpt2.energy_finish's, re-exported above.
 
 //: The eight class labels, fixed order -- the order
 //: pyscf.mrpt.nevpt2.NEVPT.kernel evaluates them in, and generate_golden.py's
@@ -185,29 +186,8 @@ inline constexpr double PC_TAU = 1e-13;
 // generator's PC_MIN_GAP.
 inline constexpr double PC_MIN_GAP = 1e3;
 
-enum class PcStatus {
-  NotYet,   // not computed (the initial value; every class is computed)
-  Done,     // energy computed
-  Refused,  // gap below PC_MIN_GAP, or a non-positive denominator
-};
-
-// S's spectrum for one class, as the gap check saw it.
-struct PcSpectrum {
-  int64_t d = 0;                    // basis dimension
-  int64_t dropped = 0;              // modes with s_k <= PC_TAU * s_max
-  double largestDropped = 0.0;  // max |s_k| / s_max over dropped modes (0 if none)
-  double smallestKept = 0.0;    // min s_k / s_max over kept modes
-  double gap = 0.0;             // smallestKept / (dropped ? largestDropped : PC_TAU)
-  double minDenominator = 0.0;  // min over tuples and modes of lambda_k + Delta_t
-};
-
-struct PcClassResult {
-  PcStatus status = PcStatus::NotYet;
-  double energy = 0.0;
-  bool hasSpectrum = false;  // false for Sijrs (no active index, PC = SC)
-  PcSpectrum spectrum;
-  std::string why;  // for Refused
-};
+// PcStatus, PcSpectrum and PcClassResult (one class's PC result) are
+// nevpt2.energy_finish's, re-exported above.
 
 struct PcEnergyResult {
   std::array<PcClassResult, 8> classes;  // CLASSES order
