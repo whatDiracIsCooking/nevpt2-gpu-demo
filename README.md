@@ -221,6 +221,7 @@ required:
 | `--ozaki` | the int8 tensor-core (Ozaki-scheme) digest, on **both** backends. Accurate to fp64 rounding, slower than the default digest on both cards; not usable with `--cublas` |
 | `--ozaki-pairs P` | keep only digit pairs with p + q <= P (0..14; default 14, all 64 pairs). P <= 5 makes cc-pVTZ's PC metric refuse |
 | `--ozaki-check` | also run each `--ozaki` GEMM natively and print the largest difference (a diagnostic; synchronizes per GEMM) |
+| `--fused-digest` | run a GEMM digest's three GEMMs as one, over the stacked `[R; W_ca; W_ac]`. Needs `--blas-digest`, `--cublas` or `--ozaki`; off by default. Pays most with `--cublas` |
 | `--consume-emitted` | use the emitted kernel for the consume step instead of the GEMM |
 | `--pool-threshold BYTES\|max` | the memory pool's release threshold (default `max`) |
 | `--batch N` | **DF demo only**: slab length along each integral block's batch index (default 8; `0` = one slab per block). A memory lever |

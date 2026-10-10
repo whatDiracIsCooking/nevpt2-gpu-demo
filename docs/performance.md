@@ -148,7 +148,8 @@ checked against the golden at 1e-7. RDM build at CAS(12,12):
 | hand-written int8 Ozaki | `--ozaki` | 63.6s (`--tiles 80`) | 82.9s (`--tiles 80`) |
 
 The rows come from different sessions, so compare within a section below
-rather than across rows.
+rather than across rows. Each GEMM row runs unfused; `--fused-digest`
+(below) takes `--cublas` to 7.5s at `--tiles 80`.
 
 ### Native-fp64 BLAS digest
 
@@ -322,6 +323,53 @@ for each K chunk. With one chunk, that doubles the per-tile working set:
 1633 MB of scratch on top of cc-pVTZ CAS(10,10)'s 1647 MB, and ~3.3 GiB at
 CAS(12,12) `--tiles 40`, which is why the CAS(12,12) runs use `--tiles 80`.
 Smaller chunks shrink it (316 MB with a 4096-wide chunk at cc-pVTZ).
+
+### The fused digest (`--fused-digest`)
+
+The three GEMM-digest calls share their left operand, `L2[n^4, K]`: dm3
+multiplies it by `R`, the two f3 orders by `W_ca` and `W_ac`, each `[n^2,
+K]`. `--fused-digest` consumes both orders first, into a stacked `[R; W_ca;
+W_ac]` buffer, and runs **one** GEMM with `N = 3·n^2`, then one split kernel
+(`f3_scatter.cu`'s `fusedDigestSplit`) folds the `(n^4, 3·n^2)` product into
+the three accumulators. Same FLOPs; `L2` is read, and for `--cublas` and
+`--ozaki` split into slices, once per tile instead of three times, and the
+GEMM is three times wider. It needs a GEMM digest (`--blas-digest`,
+`--cublas` or `--ozaki`) and is **off by default**.
+
+**`--cublas --fused-digest` is the fastest RDM build measured here.**
+Interleaved base/fused pairs, the same session for each card, every run
+PASS and every `--cublas` run `engaged bits=53`:
+
+| case | card | RDM build, base → fused | digest GEMMs, base → fused | pairs |
+|---|---|---:|---:|---:|
+| CAS(10,10) `--tiles 3 --cublas` | RTX 3080 | 0.40–0.42s → 0.35–0.36s (−12%) | 193–198 → 117–131 ms | 5 |
+| CAS(12,12) `--tiles 80 --cublas` | RTX 3080 | 10.28s ×3 → **7.49–7.58s (−27%)** | 7.16–7.21 → 4.33–4.42s | 3 |
+| CAS(12,12) `--tiles 40 --blas-digest` | RTX 3080 | 49.57s, 50.82s → 39.12s, 39.80s (−21%) | 46.6, 47.8 → 36.1, 36.8s | 2 |
+| CAS(10,10) `--tiles 3` (BLAS) | RX 9060 XT | 1.33–1.37s → 1.24–1.25s (−7%) | — | 4 (a cold first pair, 1.71s → 1.30s, left out) |
+| CAS(12,12) `--tiles 40` (BLAS) | RX 9060 XT | 41.68–41.74s → 41.35–41.42s (−0.8%) | 36.65 → 35.73s (one profiled run each) | 3 |
+| CAS(12,12) `--tiles 80 --ozaki` | RX 9060 XT | 82.72s, 83.61s → 78.52s, 78.49s (−5–6%) | — | 2 |
+
+**Where it wins is where an `N = n^2` call was poor.** cuBLAS runs the
+`(n^4, n^2)` digest shape far below the `(n^4, 3·n^2)` one, in native fp64
+as well as emulated; rocBLAS already ran it near its best, so the RX 9060
+XT's BLAS digest barely moves, as expected from "Dropping `R2`" (reading
+`L2` was never its bottleneck). Fused, cuBLAS's native-fp64 BLAS digest
+lands at the emitted digest's ~38.9s (an earlier session, see "The
+digests"); the two were not interleaved, so that is a tie, not a reason to
+change CUDA's default. The emitted digest has no GEMM to fuse.
+
+**Memory:** a second `W` (`n^2 · width`) and the `3·n^6` product in place of
+the `n^6` temp. Pool high-water after the RDM build, used: 3524.1 → 3593.1 MB
+at CAS(12,12) `--tiles 40` (RX 9060 XT, BLAS) and 1812.3 → 1869.6 MB at
+`--tiles 80 --cublas` (RTX 3080). The tile floors were not re-measured with
+it; the extra is ~70 MB, against the ~1 GB other processes hold on the RTX
+3080. The split kernel costs 28 ms per CAS(12,12) build against the two
+scatters' 18 ms.
+
+**It stays opt-in**, as shipped: the `--cublas` win is large and
+repeatable, but `--cublas` is itself opt-in, and nothing on the default
+paths (emitted on CUDA, BLAS on HIP) gains enough to justify a new default
+on two cards' worth of measurement.
 
 ### Consume as a DGEMM
 
