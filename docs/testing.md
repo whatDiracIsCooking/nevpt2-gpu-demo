@@ -277,14 +277,14 @@ alone would not.
 
 Every unit-tier suite runs in each sanitizer preset. A `REQUIRES_GPU` suite
 runs under compute-sanitizer and a host-only one runs bare
-(`test/CMakeLists.txt`). Last run 2026-10-09: CUDA on the RTX 3080, HIP on
+(`test/CMakeLists.txt`). Last run 2026-10-09/10: CUDA on the RTX 3080, HIP on
 the RX 9060 XT, each preset's own Debug build, memcheck with the leak check.
 **No suite needed a fix and no LSan suppression was added.**
 
 | preset | entries run | unit entries | result |
 |---|---:|---:|---|
-| `asan` | 95 | 79 | all pass, canary green |
-| `ubsan` | 95 | 79 | all pass, canary green |
+| `asan` | 106 | 90 | all pass, canary green |
+| `ubsan` | 106 | 90 | all pass, canary green |
 | `compute-sanitizer`, memcheck + leak check | 103 | 84 (the 5 `death` suites dropped) | all pass, 4 `sanitizer_canary` entries green; all 36 GPU unit entries report `LEAK SUMMARY: 0 bytes leaked in 0 allocations`, `ERROR SUMMARY: 0 errors` |
 | `compute-sanitizer`, initcheck | 100 | 84 | all pass, canary green |
 | `hip-asan` | 104 | 89 | all pass, canary green |
@@ -300,10 +300,10 @@ with every unit binary in. Their 89 unit entries are 70 suites (6 of them
 `death`, which run there, `CublasEmulStubDeathTest` among them) plus 19
 guards: the HIP build has the `cublas_emul` stub suites where CUDA has the
 digest ones. There the unit tier took 134–154 s of `sec*proc`. The `asan` and
-`ubsan` rows predate `profile_tests` and `cublas_emul_tests`. They were re-run after the `REQUIRES_GPU`
-`device_resources_tests` joined the tier, and their 79 unit entries are 62
-suites (4 of them `death`) plus 17 guards. In those two rows the unit tier
-adds 15–21 s of `sec*proc` to each preset.
+`ubsan` rows were re-run on that tree too. Their 90 unit entries are 71 suites
+(5 of them `death`) plus 19 guards: the compute-sanitizer build's 70 plus
+`CublasEmulDeclineTests`, which is compiled in everywhere but there. In those
+two rows the unit tier took 20–25 s of `sec*proc`.
 
 ### Wall times
 
