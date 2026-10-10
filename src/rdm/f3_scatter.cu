@@ -47,7 +47,39 @@ struct F3ScatterCaFunctor {
   }
 };
 
+// --fused-digest: the three digest GEMMs as one, C[r, j] = sum_K L2[r, K] *
+// B[j, K] with B = [R; W_ca; W_ac] stacked (j in [0, 3 n^2)), so C is
+// (n^4, 3 n^2) row-major. One thread per (r, col) of an n^2 block folds all
+// three: dm3 is a plain +=, ca the last-two-axes transpose above, ac a +=.
+struct FusedSplitFunctor {
+  const double* const c;
+  double* const dm3;
+  double* const f3ca;
+  double* const f3ac;
+  const int norb;
+
+  __device__ void operator()(const int64_t i) const {
+    const int n2 = norb * norb;
+    const auto [r, col] = splitIdx2(i, n2);
+    const int a = col / norb;
+    const int fr = col % norb;
+    const double* row = c + r * 3 * n2;
+    dm3[i] += row[col];
+    f3ca[idx2(r, fr * norb + a, n2)] += row[n2 + col];
+    f3ac[i] += row[2 * n2 + col];
+  }
+};
+
 }  // namespace
+
+wwrError_t fusedDigestSplit(const wwrStream_t stream, const double* c, double* dm3, double* f3ca,
+                            double* f3ac, const int norb) {
+  const int64_t n = norb;
+  const int64_t n2 = n * n;
+  const int64_t n6 = n2 * n2 * n2;
+  return ::wwr::extension::parallel_for(stream, n6,
+                                        FusedSplitFunctor{c, dm3, f3ca, f3ac, norb});
+}
 
 wwrError_t f3ScatterCa(const wwrStream_t stream, const double* c, double* f3, const int norb) {
   const int64_t n = norb;

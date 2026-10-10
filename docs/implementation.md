@@ -153,6 +153,12 @@ path:
 | `f3ca` | GEMM into a temporary (`beta = 0`), then `f3_scatter.cu`'s permute-scatter `+=` | `f3_digest.cu` adds `+=` into the accumulator directly |
 | `f3ac` | GEMM into a temporary, then `accumulateInplace` (its target index is the source index) | as `f3ca` |
 
+With `--fused-digest` the GEMM column collapses to one call: produce writes
+`R` and both consumes write `W_ca`/`W_ac` into one stacked `[3·n^2, width]`
+operand, a single GEMM (`beta = 0`) writes the `(n^4, 3·n^2)` product into
+the temporary, and `f3_scatter.cu`'s `fusedDigestSplit` adds its three
+column blocks into `dm3`, `f3ca` (with the ca transpose) and `f3ac`.
+
 ### 2.5 Four digest paths, and which is default
 
 The same three digest GEMMs can run four ways. They differ in speed, not in

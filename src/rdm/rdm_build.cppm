@@ -54,6 +54,12 @@ struct RdmBuildOptions {
   // wwrblasDgemm and print the largest elementwise difference at the end of
   // the build. A diagnostic: it synchronizes the stream once per GEMM.
   bool ozakiCheck = false;
+  // --fused-digest: run a GEMM digest's three GEMMs (dm3, f3 ca, f3 ac) as
+  // one, over the stacked [R; W_ca; W_ac] (N = 3 n^2), so L2 is read (and,
+  // for --cublas/--ozaki, split) once per tile instead of three times. Needs
+  // a GEMM digest; the caller rejects it with the emitted one. Costs a second
+  // W (n^2 * width) and an (n^4, 3 n^2) temp in place of the (n^4, n^2) one.
+  bool fusedDigest = false;
 };
 
 // Device-resident results, each an owning (n_act,)*6 DeviceTensor allocated

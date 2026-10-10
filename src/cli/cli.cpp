@@ -24,6 +24,8 @@ Result<bool> parseCommonFlag(const std::span<const std::string_view> args, std::
     opt.rdm.blasDigest = false;
   } else if (a == "--ozaki") {
     opt.rdm.ozaki = true;
+  } else if (a == "--fused-digest") {
+    opt.rdm.fusedDigest = true;
   } else if (a == "--ozaki-check") {
     opt.rdm.ozakiCheck = true;
   } else if (!hasValue) {
@@ -85,6 +87,10 @@ Status finalize(CommonOptions& opt, const std::string_view goldenHint) {
   if (opt.rdm.ozaki && opt.rdm.cublas)
     return err_config("--cublas and --ozaki are two digests; pick one");
   if (opt.rdm.ozaki) opt.rdm.blasDigest = false;
+  // The fused GEMM replaces the GEMM digests' three calls; the emitted
+  // digest has no GEMM to fuse.
+  if (opt.rdm.fusedDigest && !(opt.rdm.cublas || opt.rdm.blasDigest || opt.rdm.ozaki))
+    return err_config("--fused-digest needs a GEMM digest (--blas-digest, --cublas or --ozaki)");
   return {};
 }
 
@@ -93,7 +99,7 @@ std::string usage(const std::string_view prog, const std::string_view goldenHint
   return std::format(
       "usage: {} --golden <{}> {}{}"
       "[--tiles N] [--pc] [--profile] "
-      "[--consume-emitted] [--blas-digest | --digest-emitted] "
+      "[--consume-emitted] [--blas-digest | --digest-emitted] [--fused-digest] "
       "[--cublas] [--mantissa-bits N] [--ozaki [--ozaki-pairs P] [--ozaki-check]] "
       "[--pool-threshold BYTES|max] "
       "(the --cublas family is CUDA-only)\n",

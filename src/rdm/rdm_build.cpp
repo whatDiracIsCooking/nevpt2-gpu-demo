@@ -71,6 +71,12 @@ RdmBuildResult buildRdmsDevice(const RdmBuildOptions& opt, const Tensor& ci, int
   // and it takes precedence over blasDigest.
   bool gemmDigest = cublasArg || opt.blasDigest || opt.ozaki;
   const char* digestTag = cublasArg ? "[cublas]" : (opt.ozaki ? "[ozaki]" : "[blas]");
+  // --fused-digest: the three GEMMs as one (RdmBuildOptions::fusedDigest).
+  check(!opt.fusedDigest || gemmDigest,
+        "RdmBuildOptions::fusedDigest needs a GEMM digest (cli::finalize refuses it otherwise)");
+  const bool fused = opt.fusedDigest;
+  // The GEMM digests' N: n2 per call, or all three blocks at once.
+  const int64_t digestN = fused ? 3 * n2 : n2;
 
   check(opt.nTiles >= 1, "RdmBuildOptions::nTiles >= 1 (each demo's main refuses --tiles < 1)");
   int64_t nK = tileWidthForCount(ndet, opt.nTiles);
@@ -158,6 +164,8 @@ RdmBuildResult buildRdmsDevice(const RdmBuildOptions& opt, const Tensor& ci, int
                                        std::string("digest_f3_ac ") + digestTag};
   const std::string kScatterLabel[2] = {std::string("f3_scatter_ca ") + digestTag,
                                         std::string("f3_scatter_ac ") + digestTag};
+  const std::string kGemmFusedLabel = std::string("digest_fused ") + digestTag;
+  const std::string kSplitFusedLabel = std::string("fused_split ") + digestTag;
   constexpr const char* kFdm2Label[2] = {"fdm2_ca", "fdm2_ac"};
   constexpr const char* kWedgeLabel[2] = {"wedge_ca", "wedge_ac"};
 
@@ -187,24 +195,30 @@ RdmBuildResult buildRdmsDevice(const RdmBuildOptions& opt, const Tensor& ci, int
     // produce/consume/digest overwrites what it reads); the suite has no
     // uninitialized allocation, and docs/performance.md ("The memory pool") measures
     // the cost.
-    DeviceBuffer<double> dR(n2KCount, owner);
+    // --fused-digest: dR holds the stacked GEMM operand [R; W_ca; W_ac], each
+    // block n2 rows at row stride `width` (what produce and consume write), so
+    // the three sit back to back at offsets 0, n2*width, 2*n2*width and form
+    // one (3 n2, width) row-major B. dW is then empty, and dF3C is the
+    // (n4, 3 n2) fused product.
+    DeviceBuffer<double> dR(fused ? 3 * n2KCount : n2KCount, owner);
     DeviceBuffer<double> dL2(n4KCount, owner);
-    DeviceBuffer<double> dW(n2KCount, owner);
+    DeviceBuffer<double> dW(fused ? 0 : n2KCount, owner);
     DeviceBuffer<double> dDm3Tile(gemmDigest ? 0 : n6Count, owner);
-    DeviceBuffer<double> dF3C(gemmDigest ? n6Count : 0, owner);
+    DeviceBuffer<double> dF3C(gemmDigest ? (fused ? 3 : 1) * n6Count : 0, owner);
     // --ozaki: the digit planes + row scales, sized once for the widest tile
     // (every digest call is (n4, n2, width <= nK)). As large as L2 itself
     // (8 int8 planes of n4 * nK), so it doubles the per-tile working set.
     // --ozaki-check adds two (n4, n2) temps and their host copies.
     const std::size_t ozakiBytes =
-        opt.ozaki ? device::ozakiScratchBytes(narrowTo<int>(n4), narrowTo<int>(n2),
+        opt.ozaki ? device::ozakiScratchBytes(narrowTo<int>(n4), narrowTo<int>(digestN),
                                               narrowTo<int>(nK))
                   : 0;
     DeviceBuffer<double> dOzaki((ozakiBytes + 7) / 8, owner);
     const bool ozakiCheck = opt.ozaki && opt.ozakiCheck;
-    DeviceBuffer<double> dChkRef(ozakiCheck ? n6Count : 0, owner);
-    DeviceBuffer<double> dChkOz(ozakiCheck ? n6Count : 0, owner);
-    std::vector<double> hRef(ozakiCheck ? n6Count : 0), hOz(ozakiCheck ? n6Count : 0);
+    const std::size_t chkCount = ozakiCheck ? (fused ? 3 : 1) * n6Count : 0;
+    DeviceBuffer<double> dChkRef(chkCount, owner);
+    DeviceBuffer<double> dChkOz(chkCount, owner);
+    std::vector<double> hRef(chkCount), hOz(chkCount);
     double chkMaxAbsDiff = 0.0, chkMaxRef = 0.0, chkMaxRel = 0.0;
     int chkCalls = 0;
     if (opt.ozaki) {
@@ -214,7 +228,7 @@ RdmBuildResult buildRdmsDevice(const RdmBuildOptions& opt, const Tensor& ci, int
     }
     {
       // Counted, not measured: the per-tile working set the tile count sizes.
-      int64_t doubles = (2 * n2 + n4) * nK;
+      int64_t doubles = ((fused ? 3 : 2) * n2 + n4) * nK;
       std::printf("per-tile transition blocks (R, L2, W; no R2): %.1f MB\n",
                   static_cast<double>(doubles) * 8.0 / (1024.0 * 1024.0));
     }
@@ -236,7 +250,7 @@ RdmBuildResult buildRdmsDevice(const RdmBuildOptions& opt, const Tensor& ci, int
       probed = true;
       // cublasGemmEx-based and 32-bit, like digest_gemm below.
       int bits = probe_emul_bits(blas, res, dL2.data(), dR.data(), dF3C.data(),
-                                 narrowTo<int>(n4), narrowTo<int>(n2),
+                                 narrowTo<int>(n4), narrowTo<int>(digestN),
                                  narrowTo<int>(nK, "use more --tiles"));
       std::printf(
           "cuBLAS fp-emulation digest: max_mantissa_bits=%d, engaged bits=%d%s\n",
@@ -293,6 +307,33 @@ RdmBuildResult buildRdmsDevice(const RdmBuildOptions& opt, const Tensor& ci, int
                                        dRb.data(), dR.data(), dL2.data(), norbK, naK, nbK,
                                        nlaK, nlbK, k0, width));
       });
+      // --fused-digest: consume both orders into the stacked operand, then
+      // one GEMM and one split. The probe runs after the consumes, so it sees
+      // the fused call's own shape with every block of B written.
+      if (fused) {
+        double* const pW[2] = {dR.data() + n2 * width, dR.data() + 2 * n2 * width};
+        for (int o = 0; o < 2; ++o) {
+          if (opt.consumeGemm) {
+            profile::time(kConsumeBlasLabel[o], stream, [&] {
+              consumeGemm(plainBlas, dEriConsume.data(), dL2.data(), pW[o], o, norb, width);
+            });
+          } else {
+            profile::time(kConsumeLabel[o], stream, [&] {
+              gpuCheck(
+                  device::rdmConsume(stream, o, dEri.data(), dL2.data(), pW[o], norbK, width));
+            });
+          }
+        }
+        probeOnce();  // --cublas only, first tile only; outside the profile timer
+        profile::time(kGemmFusedLabel, stream, [&] {
+          digest(dL2.data(), dR.data(), dF3C.data(), n4, digestN, width, /*beta=*/0.0);
+        });
+        profile::time(kSplitFusedLabel, stream, [&] {
+          gpuCheck(device::fusedDigestSplit(stream, dF3C.data(), dDm3Final.data(),
+                                            dFaccFinal[0].data(), dFaccFinal[1].data(), norbK));
+        });
+        continue;
+      }
       probeOnce();  // --cublas only, first tile only; outside the profile timer
       if (gemmDigest) {
         // dm3[pqrs,tu] = sum_K L2[pqrs,K] R[tu,K], winning M=n4,N=n2; beta=1

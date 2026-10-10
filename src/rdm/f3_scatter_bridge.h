@@ -18,4 +18,11 @@ namespace nevpt2::device {
 // wwrSuccess on success.
 wwrError_t f3ScatterCa(wwrStream_t stream, const double* c, double* f3, int norb);
 
+// --fused-digest: fold the one (n^4, 3 n^2) row-major GEMM over the stacked
+// [R; W_ca; W_ac] into all three accumulators -- columns [0, n^2) += into dm3,
+// [n^2, 2 n^2) through f3ScatterCa's transpose into f3ca, [2 n^2, 3 n^2) +=
+// into f3ac. Returns the launch status, wwrSuccess on success.
+wwrError_t fusedDigestSplit(wwrStream_t stream, const double* c, double* dm3, double* f3ca,
+                            double* f3ac, int norb);
+
 }  // namespace nevpt2::device

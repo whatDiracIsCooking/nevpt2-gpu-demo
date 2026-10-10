@@ -70,6 +70,11 @@ of improvement.** `README.md` is the summary and carries no measured numbers.
   truncates, and P <= 5 gets cc-pVTZ's PC Sr/Si refused. Never the default:
   slower than the default digest on both cards (docs/performance.md, "The
   int8 Ozaki digest").
+- **`--fused-digest` runs a GEMM digest's three GEMMs as one** (N = 3n²,
+  over a stacked `[R; W_ca; W_ac]`), on both backends, with `--blas-digest`,
+  `--cublas` or `--ozaki` (refused with the emitted digest). Opt-in; its
+  biggest measured win is with `--cublas` (docs/performance.md, "The fused
+  digest").
 
 ## The tree
 
