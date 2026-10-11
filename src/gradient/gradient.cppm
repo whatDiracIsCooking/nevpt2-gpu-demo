@@ -553,4 +553,20 @@ ScCiSourceResult scCiSourceDevice(const NevptIntegralsDevice& ints, const Tensor
                                   const DeviceTensor& f3ac, const DeviceTensor& f3ca,
                                   const SigmaVectorOptions& sigma, const DeviceResources& res);
 
+// Step 3 above on its own: y_I from the five RDM coefficient tensors
+// g1 = dE/d(dm1), g2, g3, gac = dE/d(f3ac), gca = dE/d(f3ca) and the state
+// `ci` they are differentiated at, as a Tensor of ci's own
+// (nstringsA, nstringsB) shape -- one 3-body sigma over
+// ciSourceSymmetrized(ciSourceFolded(g1, g2, g3, nelecA + nelecB)) plus the
+// forward and dagger 4-body sigmas of each f3 order, summed by
+// ciSourceAddInto. `h2e` is the PHYSICIST-ordered active block the golden
+// carries. Defined in the :ci_source partition and exported so the unit tier
+// can check its shape and accumulation, and the whole fold-symmetrize-sigma
+// chain against an unfolded host reference (test/gradient_plan/'s
+// CiSourceVectorTests); scCiSourceDevice is its one caller in src/.
+Tensor ciSourceVector(const SigmaVectorOptions& opt, const Tensor& ci, int64_t norb,
+                      int64_t nelecA, int64_t nelecB, const Tensor& g1, const Tensor& g2,
+                      const Tensor& g3, const Tensor& gac, const Tensor& gca, const Tensor& h2e,
+                      const DeviceResources& res);
+
 }  // namespace nevpt2

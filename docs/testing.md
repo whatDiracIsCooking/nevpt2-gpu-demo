@@ -610,6 +610,36 @@ quadratic in the CI vector), with negative controls — forward + forward
 instead of forward + dagger, and a `d6` with its last two axes swapped — that
 both miss by more than three decades.
 
+### The dm1/dm2 fold, against an unfolded reference
+
+The duality cannot see one step: `ciSourceFolded` folds the `dm1` and `dm2`
+coefficients onto `dm3`'s diagonals, and both sides of `<u, y> == Edot(u)`
+read the same folded tensor. `test/gradient_plan/`'s `CiSourceFoldTests`
+(host-only, no `gpu` label) check it against `dm1`/`dm2`/`dm3` contracted
+**separately**, rebuilt on the host by forward application of `E_pq` from the
+committed CAS(4,4) and CAS(8,8) CI vectors, as transition forms
+`<a|E..|b>` — the state's own, and the two halves of the derivative along a
+seeded random `u`. Everything is asserted to 1e-12 (elementwise absolute, or
+for an `n^6` contraction relative to `sum |g| |dm|`); measured worst, on the
+build box's host:
+
+| check | CAS(4,4) | CAS(8,8) |
+|---|---:|---:|
+| host `dm1` / `dm2` against the golden's | 1.4e-17 / 4.4e-16 | 4.2e-15 / 1.2e-14 |
+| `sum_t dm3[..,t,t,..] = N dm2`, worst over state and both transition forms | 1.8e-15 | 7.8e-14 |
+| `sum_r dm2[..,r,r] = N dm1`, likewise | 8.9e-16 | 2.3e-14 |
+| fold against unfolded, at the state / along `d/dc` | 8.6e-17 / 1.6e-16 | 9.8e-17 / 1.4e-18 |
+
+`CiSourceFoldNegativeControlTests` feed the same comparison a deliberately
+wrong fold and assert it **fails** by at least 1e-6: dropping `dm1` (it misses
+by 9.5e-5 to 2.9e-3), folding at `N - 1` electrons, the trace of PySCF's
+reordered `dm2` (1.3e-5 to 1.6e-2), and `dm2` on the crossed diagonal
+`d3[p,q,r,t,s,t]` (1.1e-4 to 3.0e-2) — at least seven decades above the 1e-12 tolerance.
+`CiSourceVectorTests` (`gpu`, RTX 3080) run `ciSourceVector` itself at
+CAS(4,4): its `y` agrees elementwise with the unfolded host derivative to
+1.1e-15 relative (bound 1e-10, `test/sigma_vector/`'s), and with the sum of
+its per-tensor parts to 1.4e-16.
+
 ## The analytic gradient against the numerical one
 
 The end-to-end check of the gradient work: the **assembled analytic nuclear
