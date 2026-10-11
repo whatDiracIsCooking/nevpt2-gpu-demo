@@ -1,6 +1,7 @@
 // Suites for nevpt2.sc_amplitudes (src/gradient/sc_amplitudes.cppm) -- the
-// strongly-contracted amplitude T, the gradient multipliers P / Q / R, and the
-// subscript rewriting that differentiates one of nevpt2.energy's class einsums.
+// strongly-contracted amplitude T, the gradient multipliers P / Q / R, the
+// pseudocanonical multipliers z^c, and the subscript rewriting that
+// differentiates one of nevpt2.energy's class einsums.
 //
 // Host-only ON PURPOSE: no device, no kernel, no golden -- so this binary is
 // not REQUIRES_GPU and runs with no card visible. What the pseudodensities
@@ -15,6 +16,11 @@
 //                             guard, and P_k N_k + Q_k H_k == T_k N_k (the
 //                             identity Eq. 40's assembly is checked against)
 //   DotHostTests              sum_k a_k b_k, and the empty case
+//   ScPseudocanonicalTests    Park Eqs. 56-57: the two divisions on a hand
+//                             source term, a degenerate pair whose numerator
+//                             vanishes with the gap left at zero, one whose
+//                             numerator does NOT refused as undetermined, and
+//                             a space too small to have a pair
 //   DerivativeSubscriptsTests the rewriting, on the real strings the eight
 //                             classes use: each operand slot in turn, the
 //                             transposed-core case that makes it worth doing
@@ -180,6 +186,85 @@ TEST(DerivativeSubscriptsTests, OneOperandTerm) {
 TEST(DerivativeSubscriptsTests, MultiIndexOutputAndWhitespace) {
   EXPECT_EQ(derivativeSubscripts("qpij,baij,pqab->ij", 2), "qpij,baij,ij->pqab");
   EXPECT_EQ(derivativeSubscripts("ip, pa,ia->i", 1), "ip,ia,i->pa");
+}
+
+// --- ScPseudocanonicalTests ------------------------------------------------------
+//
+// Park Eqs. 56-57 on hand cases: one division per core and per virtual pair of
+// the source term, the degeneracy that makes it a 0/0, and the refusal when
+// the numerator does not vanish with the gap.
+
+// A (n_mo, n_mo) Y with one antisymmetric entry, as scFullRotationMatrix hands
+// it back.
+Tensor yWith(std::int64_t nmo, std::int64_t p, std::int64_t q, double v) {
+  Tensor y({nmo, nmo});
+  y(p, q) = v;
+  y(q, p) = -v;
+  return y;
+}
+
+TEST(ScPseudocanonicalTests, CoreAndVirtualPairsDivideTheGap) {
+  // 2 core, 1 active, 2 virtual: one pair in each inactive space.
+  const Tensor eCore = Tensor::fromFlat({2}, {-1.0, -0.5});
+  const Tensor eVirt = Tensor::fromFlat({2}, {0.25, 0.75});
+  Tensor y = yWith(5, 0, 1, 0.125);  // the core pair
+  y(3, 4) = 0.0625;                  // and the virtual one
+  y(4, 3) = -0.0625;
+  const Result<ScPseudocanonical> r =
+      scPseudocanonicalMultipliers(y, eCore, eVirt, /*nact=*/1, 1e-6, 1e-10);
+  ASSERT_TRUE(r);
+  // (Y_pq - Y_qp) / 2 is Y_pq for an antisymmetric Y, so z = Y_pq / (eps_p - eps_q).
+  EXPECT_DOUBLE_EQ(r->zCore(0, 1), 0.125 / (-1.0 + 0.5));
+  EXPECT_DOUBLE_EQ(r->zCore(1, 0), -0.125 / (-1.0 + 0.5));
+  EXPECT_DOUBLE_EQ(r->zVirt(0, 1), 0.0625 / (0.25 - 0.75));
+  EXPECT_DOUBLE_EQ(r->zVirt(1, 0), -0.0625 / (0.25 - 0.75));
+  EXPECT_DOUBLE_EQ(r->zCore(0, 0), 0.0);  // the diagonal is not a constraint
+  EXPECT_EQ(r->divided, 2);
+  EXPECT_EQ(r->degenerate, 0);
+  EXPECT_DOUBLE_EQ(r->maxZ, 0.25);
+  EXPECT_DOUBLE_EQ(r->smallestGap, 0.5);
+}
+
+// A degenerate pair in two different irreps: the energy does not move along
+// it, so the numerator vanishes with the gap and the multiplier is a 0/0 the
+// constraint leaves free. Zero is the representative.
+TEST(ScPseudocanonicalTests, DegeneratePairWithAVanishingNumeratorIsZero) {
+  const Tensor eCore = Tensor::fromFlat({2}, {-1.0, -1.0});
+  const Tensor eVirt = Tensor::fromFlat({1}, {0.5});
+  const Tensor y = yWith(4, 0, 1, 1e-18);
+  const Result<ScPseudocanonical> r =
+      scPseudocanonicalMultipliers(y, eCore, eVirt, /*nact=*/1, 1e-6, 1e-10);
+  ASSERT_TRUE(r);
+  EXPECT_DOUBLE_EQ(r->zCore(0, 1), 0.0);
+  EXPECT_EQ(r->divided, 0);
+  EXPECT_EQ(r->degenerate, 1);
+  EXPECT_DOUBLE_EQ(r->maxZ, 0.0);
+}
+
+// The same gap with a numerator that does NOT vanish: the multiplier is not
+// determined, and that is a numerical refusal rather than a large number.
+TEST(ScPseudocanonicalTests, DegeneratePairWithALiveNumeratorIsRefused) {
+  const Tensor eCore = Tensor::fromFlat({2}, {-1.0, -1.0 + 1e-9});
+  const Tensor eVirt = Tensor::fromFlat({1}, {0.5});
+  const Tensor y = yWith(4, 0, 1, 0.125);
+  const Result<ScPseudocanonical> r =
+      scPseudocanonicalMultipliers(y, eCore, eVirt, /*nact=*/1, 1e-6, 1e-10);
+  ASSERT_FALSE(r);
+  EXPECT_EQ(r.error().kind, ErrorKind::Numerical);
+  EXPECT_NE(r.error().message.find("not determined"), std::string::npos);
+  EXPECT_NE(r.error().message.find("core pair (0, 1)"), std::string::npos);
+}
+
+// A space with fewer than two orbitals has no pair, so nothing to divide.
+TEST(ScPseudocanonicalTests, ASpaceWithOneOrbitalHasNoMultiplier) {
+  const Tensor eCore = Tensor::fromFlat({1}, {-1.0});
+  const Tensor eVirt = Tensor::fromFlat({1}, {0.5});
+  const Result<ScPseudocanonical> r = scPseudocanonicalMultipliers(
+      yWith(4, 0, 3, 0.5), eCore, eVirt, /*nact=*/2, 1e-6, 1e-10);
+  ASSERT_TRUE(r);
+  EXPECT_EQ(r->divided, 0);
+  EXPECT_EQ(r->degenerate, 0);
+  EXPECT_DOUBLE_EQ(r->maxZ, 0.0);
 }
 
 // --- ScAmplitudesDeathTest -------------------------------------------------------

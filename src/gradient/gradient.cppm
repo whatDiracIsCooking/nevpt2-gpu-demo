@@ -125,6 +125,10 @@ struct ScClassGradient {
   std::vector<double> rotExt{};      // sum_blocks <D, Xdot>: Eq. 41's half
   std::vector<double> rotAct{};      // sum_G <M_G, Gdot>:    Eqs. 42-43's half
   std::vector<double> rotTangent{};  // the forward tangent, P.Ndot + Q.Hdot
+  // Eq. 39's orbital-energy half, R_t . Deltadot_t -- zero unless the
+  // direction came with the gradient sidecar (scFullRotationDevice), and
+  // shared by both modes: see "The full source term Y_xy" below.
+  std::vector<double> rotEps{};
 };
 
 struct ScGradientResult {
@@ -193,7 +197,10 @@ ScGradientResult scPseudodensityDevice(const NevptIntegralsDevice& ints, const D
 //     inside the generalized Fock matrix: that needs the (xa|cc) and (xa|vv)
 //     integrals the golden does not carry (docs/gradient-theory.md, Sec. 1.3,
 //     which is explicit that "the active block needs only what the golden
-//     already carries" is the easy mistake here).
+//     already carries" is the easy mistake here). The gradient SIDECAR does
+//     carry them, and scFullRotationDevice below reads them -- so this entry
+//     point's functional is kept as it was, which is what makes the two
+//     comparable (see "The full source term Y_xy").
 //
 // So this is the INTEGRAL HALF of the chain rule, dE/dkappa at fixed RDMs,
 // fixed digests and fixed orbital energies -- exact for that functional, in
@@ -274,6 +281,187 @@ Result<Tensor> scActiveRotationMatrix(const NevptIntegralsDevice& ints, const De
                                       const DeviceTensor& dm2, const DeviceTensor& dm3,
                                       const DeviceTensor& f3ac, const DeviceTensor& f3ca,
                                       int64_t chunk, const DeviceResources& res);
+
+// --- The full source term Y_xy ----------------------------------------------
+//
+// Park Eq. 26's orbital source term over the WHOLE `kappa` space -- the
+// core-core, virtual-virtual and mixed blocks on top of the active-active one
+// above -- assembled from the same pseudodensities and the same slab walk,
+// reading the gradient sidecar's one-general-index MO-integral blocks and its
+// full-MO-range `heff` / `f` (docs/gradient-theory.md, Sec. 3.3 and Sec. 3.5;
+// docs/reference-data.md, "The gradient sidecar"). Both directions again,
+// and the adjoint is reported in the pieces it is assembled from:
+//
+//   <kappa, Y> = [ sum_blocks <D, Xdot> + sum_G <M_G, Gdot> ]   the INTEGRAL half
+//              + [ sum_t R_t Deltadot_t ]                       the ORBITAL ENERGIES
+//
+// -- Eq. 28's `h d`, `h^eff d^eff`, `g(...) d` terms in the first bracket and
+// its `f d^Fock` + `g(d^Fock) d^(0)` terms (through Eq. 39's diagonal
+// pseudodensity, which is what R_t is) in the second.
+//
+// WHAT IS NEW HERE, against the active block's entry points above:
+//
+//   * every array the energy reads now moves on EVERY axis, not only its
+//     active ones -- one promotion rule per slot, generated from the block's
+//     space signature out of the sidecar's arrays (gradient_general.cppm);
+//   * the one-electron blocks' core dressing responds (they are h^eff
+//     slices, and the core density is fixed in the MO indices);
+//   * THE ORBITAL ENERGIES RESPOND, which closes one of the two gaps the
+//     active-block work left open: `e_core` / `e_virt` are the generalized
+//     Fock's diagonals, and `deps_p` is computable from the sidecar's `f`
+//     and the restricted integral rows (gradient_general.cppm's header has
+//     the formula). Since `Delta_t` is LINEAR in those vectors, its tangent
+//     is each class's own `delta` construction evaluated at `deps` -- the
+//     same trick that makes a Dyall block's tangent its own `make_*` at the
+//     dotted integrals.
+//
+// AND THE ONE GAP THAT REMAINS, named where it bites: the `f3ac`/`f3ca`
+// digests are still held fixed, so the derivative is exact except for the
+// 4-RDM digests' own `h2e` dependence. That dependence lives on the blocks
+// `h2e` moves under -- the active-active and the two mixed blocks with an
+// active index -- and is EXACTLY ABSENT from the core-core and
+// virtual-virtual blocks (no core or virtual index enters `h2e`), which is
+// why `scPseudocanonicalMultipliers` below divides an exact numerator. The
+// forward route to it is one digest rebuild per direction (the digests are
+// linear in `h2e`, so `buildRdmsDevice` at the dotted `h2e` IS their
+// tangent); reverse mode still needs that contraction's transpose, a kernel
+// this tree does not have. Both modes differentiate the same functional
+// either way, so the duality stays exact (docs/testing.md, "The full orbital
+// source term").
+//
+// THE INTEGRAL HALF IS BIT-FOR-BIT THE ACTIVE BLOCK'S when `kappa` is
+// active-restricted, by construction and not by luck: the intra-active part
+// of every slot's sum is `scActiveRotationDevice`'s own einsum on the stored
+// block, and the general part is the x-outside-its-own-space remainder, which
+// an active-restricted kappa makes an exactly-zero tensor. Adding zero to a
+// double changes no bit. apps/sc_pseudodensity/:kappa_full_check asserts it.
+
+// The gradient sidecar, device-resident: the seventeen one-general-index
+// integral blocks of docs/gradient-theory.md, Sec. 3.3 (as eighteen arrays --
+// `(xc|cc)` is stored on its two independent restricted slices) and the
+// full-MO-range one-electron and Fock matrices of Sec. 3.5 that the source
+// term reads. Names and layouts are the sidecar's own
+// (`generate_golden.py`'s `_gradient_arrays`, `loadGradGold`):
+// `g_xP_QR[x, p, q, r] = (x p | q r)` in chemists' order, with `x` over the
+// full MO range and the rest over the spaces the name spells.
+//
+// `mo_coeff`, `f_h` and `fock_rhf` are in the sidecar and NOT here: they are
+// the AO contraction's and the Z-vector equations' (Sec. 2), not the source
+// term's.
+struct GeneralIntegralsDevice {
+  int64_t ncore = 0, nact = 0, nvirt = 0;
+  int64_t nmo() const { return ncore + nact + nvirt; }
+
+  DeviceTensor h;     // (nmo, nmo) the bare one-electron matrix
+  DeviceTensor heff;  // (nmo, nmo) h + the core dressing: the one-electron blocks' parent
+  DeviceTensor f;     // (nmo, nmo) the generalized Fock, whose diagonal is e_core/e_virt
+
+  DeviceTensor g_xa_aa, g_xv_aa, g_xc_aa;
+  DeviceTensor g_xa_va, g_xv_va, g_xc_va;
+  DeviceTensor g_xa_ca, g_xv_ca, g_xc_ca;
+  DeviceTensor g_xa_cv, g_xv_cv, g_xc_cv;
+  DeviceTensor g_xa_cc, g_xv_cc;
+  DeviceTensor g_xc_cc_j, g_xc_cc_k;  // (x i | j j) and (x j | j i)
+  DeviceTensor g_xa_vv, g_xc_vv;      // (x t | r r) and (x i | r r)
+};
+
+// One direction's answer over the full kappa space, summed over the eight
+// classes. `integral` and `tangentIntegral` are the two modes of the integral
+// half -- the pair the duality gate reads, and the number that is bit-for-bit
+// the active block's for an active-restricted kappa. `eps` is the
+// orbital-energy response, which is ONE contraction (R_t against Deltadot_t)
+// shared by both modes, so it is reported once and added to both.
+struct ScFullRotationPairing {
+  double ext = 0.0;              // sum_blocks <D, Xdot>
+  double act = 0.0;              // sum_G <M_G, Gdot>
+  double integral = 0.0;         // ext + act
+  double eps = 0.0;              // sum_t R_t Deltadot_t
+  double adjoint = 0.0;          // <kappa, Y> = integral + eps
+  double tangentIntegral = 0.0;  // Edot's integral half, P.Ndot + Q.Hdot
+  double tangent = 0.0;          // tangentIntegral + eps
+  bool hasTangent = false;
+};
+
+struct ScFullRotationResult {
+  ScGradientResult grad;                      // the pseudodensity identities, as above
+  std::vector<ScFullRotationPairing> dirs{};  // one per request, in order
+};
+
+// The pseudodensity assembly plus the FULL source term paired against each
+// direction. `dirs`' kappas are (n_mo, n_mo) and antisymmetric; a malformed
+// one, or a sidecar whose shapes do not match the integrals it sits beside,
+// is the CALLER's input and comes back as an Error, reported once at main.
+//
+// Integral-direct only -- full blocks, one slab per block: the promotion rule
+// reads whole blocks (a slab would need the sidecar's arrays sliced along a
+// batch axis too), and a sidecar exists only for cases small enough not to
+// need tiling anyway (docs/reference-data.md, "The gradient sidecar").
+Result<ScFullRotationResult> scFullRotationDevice(const NevptIntegralsDevice& ints,
+                                                  const GeneralIntegralsDevice& gen,
+                                                  const DeviceTensor& dm1,
+                                                  const DeviceTensor& dm2,
+                                                  const DeviceTensor& dm3,
+                                                  const DeviceTensor& f3ac,
+                                                  const DeviceTensor& f3ca,
+                                                  const std::vector<ScRotationRequest>& dirs,
+                                                  const DeviceResources& res);
+
+// Y as a MATRIX on the requested index pairs: `pairs` lists (x, y) with
+// x < y, and the answer carries Y_xy = (1/2) <E_xy - E_yx, Y> there,
+// Y_yx = -Y_xy, and zero everywhere else -- so that sum_xy kappa_xy Y_xy is
+// the pairing with any antisymmetric kappa supported on those pairs. `chunk`
+// pairs share one slab walk.
+//
+// Probing is what a matrix costs, for the reason scActiveRotationMatrix
+// gives: the directly contractible part of the pairing is symmetric in
+// (x, y) and so invisible to an antisymmetric kappa, and everything that is
+// left is a map INTO the integrals. A caller that wants only Park Eqs. 56-57
+// needs the core-core and virtual-virtual pairs alone.
+Result<Tensor> scFullRotationMatrix(const NevptIntegralsDevice& ints,
+                                    const GeneralIntegralsDevice& gen, const DeviceTensor& dm1,
+                                    const DeviceTensor& dm2, const DeviceTensor& dm3,
+                                    const DeviceTensor& f3ac, const DeviceTensor& f3ca,
+                                    const std::vector<std::pair<int64_t, int64_t>>& pairs,
+                                    int64_t chunk, const DeviceResources& res);
+
+// What checks the promotion table, which neither mode of the duality can
+// (they share it). Three families of exact identities, every one of them a
+// rule's OWN source array read back where it must reproduce something the
+// golden or the sidecar already holds:
+//
+//   * every promotion's source array, restricted to the promoted slot's own
+//     space, is the stored block under the permutation that rule uses --
+//     `blocks`, over all sixteen blocks and their slots;
+//   * h^eff rebuilt from `h` and the dressing rules' own Coulomb and exchange
+//     sources is the sidecar's `heff` -- `heff`, per one-electron block;
+//   * the generalized Fock's core and virtual diagonals, rebuilt from `heff`
+//     and the orbital-energy rules' own tied arrays against `dm1`, are the
+//     sidecar's `f` diagonal -- `fock`; and that diagonal is the golden's
+//     `e_core` / `e_virt` -- `eps`, which is (O2)
+//     (docs/gradient-theory.md, Sec. 3.6) seen from this side and is what
+//     says the sidecar belongs to this golden.
+//
+// Each number is a worst case over everything in its family, as a relative
+// Frobenius norm; `worstBlock` names where `blocks` peaked.
+struct ScGeneralCheck {
+  double blocks = 0.0;
+  std::string worstBlock{};
+  double heff = 0.0;
+  double fock = 0.0;
+  double eps = 0.0;
+};
+
+Result<ScGeneralCheck> scGeneralIntegralCheck(const NevptIntegralsDevice& ints,
+                                              const GeneralIntegralsDevice& gen,
+                                              const DeviceTensor& dm1,
+                                              const DeviceResources& res);
+
+// Prints the per-direction table of the full source term -- the adjoint
+// pairing and its three pieces, the forward tangent, and the two against
+// each other -- and returns whether every direction that carries a tangent
+// agrees to `atol`. As printScRotationTable, the PASS/FAIL line is the
+// caller's.
+bool printScFullRotationTable(const ScFullRotationResult& r, double atol);
 
 // Prints the per-class table -- the amplitude energy against `energies`'
 // (nevpt2.energy's own answer for the same state) and against the golden

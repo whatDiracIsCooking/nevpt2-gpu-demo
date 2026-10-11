@@ -99,6 +99,15 @@ struct GradGoldFile {
   // GoldenFile::require's contract, on the sidecar's arrays.
   [[nodiscard]] Status require(std::initializer_list<std::string_view> names) const;
 
+  // An IO Error unless this sidecar's orbital-space partition is the one
+  // `golden` was written with: the same active space and the same core. A
+  // sidecar is a SEPARATE file beside a golden and is found by name, so
+  // pairing it with the wrong one is a plain user mistake -- and one whose
+  // arrays would otherwise be read with the wrong shapes much deeper in.
+  // (The sidecar header carries no determinant count, and the golden carries
+  // no n_mo, so these two are everything the two headers share.)
+  [[nodiscard]] Status checkAgainst(const GoldenFile& golden) const;
+
   // The array `name`. Aborts (check) if it is absent: the caller should have
   // require()d it, so reaching here without it is our bug, not the file's.
   const Tensor& get(const std::string& name) const;

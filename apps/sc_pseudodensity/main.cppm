@@ -24,6 +24,14 @@
 // partition :kappa_check is where that lives, and it prints its own PASS
 // line.
 //
+// WITH --kappa-full IT CHECKS THE WHOLE Y_xy -- core-core, virtual-virtual
+// and mixed as well -- reading the gradient sidecar beside the golden
+// (`<case>.gradgold`, or --gradgold PATH) for the one-general-index integral
+// blocks and the full-MO-range Fock matrices a rotation that leaves the
+// active space needs. Five checks, two finite differences and Park Eqs. 56-57
+// come out of it; the partition :kappa_full_check is where that lives, and it
+// prints its own PASS line too.
+//
 // It is the only caller of nevpt2.gradient; the demos do not link it.
 
 // A module unit, so each binary is apps/<app>/{main.cppm,CMakeLists.txt}.
@@ -43,6 +51,9 @@ export module nevpt2.app.sc_pseudodensity;
 // itself. This binary's own flag (nothing else assembles pseudodensities),
 // and its own PASS line.
 export import :kappa_check;
+// --kappa-full: the same for the WHOLE kappa space, out of the gradient
+// sidecar beside the golden. Its own PASS line as well.
+export import :kappa_full_check;
 
 import std;
 // nevpt2.cli: --golden, --tiles and the rest of the flags the demos take.
@@ -54,10 +65,13 @@ import nevpt2.rdm_build;
 
 int main(int argc, char** argv) {
   constexpr std::string_view kGoldenHint = "path.nevpt2gold";
-  constexpr std::string_view kExtraFlags = "[--kappa-act]";
+  constexpr std::string_view kExtraFlags =
+      "[--kappa-act] [--kappa-full] [--gradgold path.gradgold]";
   const std::vector<std::string_view> args(argv + 1, argv + argc);
   nevpt2::cli::CommonOptions opt;
   bool kappaActArg = false;
+  bool kappaFullArg = false;
+  std::string gradgoldPath;
 
   // The common flags first (nevpt2.cli), then this binary's own; anything
   // else is a usage error.
@@ -70,6 +84,10 @@ int main(int argc, char** argv) {
     if (*used) continue;
     if (args[i] == "--kappa-act") {
       kappaActArg = true;
+    } else if (args[i] == "--kappa-full") {
+      kappaFullArg = true;
+    } else if (args[i] == "--gradgold" && i + 1 < args.size()) {
+      gradgoldPath = std::string(args[++i]);
     } else {
       std::fputs(nevpt2::cli::usage(argv[0], kGoldenHint, kExtraFlags).c_str(), stderr);
       return 1;
@@ -82,6 +100,18 @@ int main(int argc, char** argv) {
   if (opt.pc) {
     std::fputs("error: --pc has no pseudodensity assembly yet (this checks the "
                "strongly-contracted one)\n",
+               stderr);
+    return 1;
+  }
+  if (kappaActArg && kappaFullArg) {
+    std::fputs("error: --kappa-act and --kappa-full are two checks of the same source term; "
+               "pass one\n",
+               stderr);
+    return 1;
+  }
+  if (!gradgoldPath.empty() && !kappaFullArg) {
+    std::fputs("error: --gradgold is the sidecar --kappa-full reads; it does nothing on its "
+               "own\n",
                stderr);
     return 1;
   }
@@ -155,6 +185,35 @@ int main(int argc, char** argv) {
   std::printf("computing the eight SC-NEVPT2 class energies on the GPU...\n");
   const nevpt2::EnergyResult energies =
       nevpt2::energiesDevice(dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, *res);
+
+  // --kappa-full: the WHOLE source term, out of the gradient sidecar beside
+  // the golden -- the path derived from the golden's unless --gradgold gave
+  // one. A missing or malformed sidecar is the user's input, reported once
+  // here (:kappa_full_check).
+  if (kappaFullArg) {
+    if (gradgoldPath.empty()) {
+      static constexpr std::string_view kGoldenSuffix = ".nevpt2gold";
+      gradgoldPath = opt.goldenPath;
+      if (gradgoldPath.ends_with(kGoldenSuffix))
+        gradgoldPath.resize(gradgoldPath.size() - kGoldenSuffix.size());
+      gradgoldPath += ".gradgold";
+    }
+    std::printf("gradient sidecar:  %s\n", gradgoldPath.c_str());
+    nevpt2::Result<nevpt2::GradGoldFile> sidecar = nevpt2::loadGradGold(gradgoldPath);
+    if (!sidecar) {
+      nevpt2::report(sidecar.error());
+      return 1;
+    }
+    const nevpt2::GradGoldFile gg = *std::move(sidecar);
+    const nevpt2::Result<bool> ok = checkKappaFull(g, gg, energies, dInts, dDm1, dDm2, rdm.dm3,
+                                                   rdm.f3ac, rdm.f3ca, *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
 
   // --kappa-act: the active-active orbital source term instead of the
   // identity report -- the adjoint pairing <kappa, Y_act> against the

@@ -49,7 +49,8 @@ module nevpt2.gradient:rdm_adjoint;
 
 import std;
 import nevpt2.gradient;
-import :terms;  // ScActiveAccum / activeAccumOf, addInto
+import :general;  // addTensorInto, the one way this tree adds two device tensors
+import :terms;    // ScActiveAccum / activeAccumOf
 
 namespace nevpt2 {
 
@@ -413,7 +414,7 @@ void adjointA13(const DeviceTensor& m, const DeviceTensor& h1e, const DeviceTens
 void adjointAddRaw(const std::vector<ScActiveAccum>& dActive, const DeviceTensor* block,
                    const DeviceTensor& dst, const wwrStream_t stream) {
   if (const DeviceTensor* m = activeAccumOf(dActive, block); m != nullptr)
-    addInto(*m, dst, stream);
+    addTensorInto(*m, dst, stream);
 }
 
 }  // namespace nevpt2

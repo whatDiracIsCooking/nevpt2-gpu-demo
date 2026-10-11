@@ -24,14 +24,16 @@
 //   Sir    reads one integral block on its DIAGONAL (h2e_v2_Sir[r, a, a, i]),
 //          whose derivative an einsum output cannot spell, so that read is
 //          hoisted into a block of its own.
-// EACH CLASS ALSO CARRIES THE ACTIVE ROTATION, in three lines: the active
-// axes of its external blocks (`:rotation`'s activeAxesOf for a two-electron
-// block, written out for the one-electron ones), a `gdot` lambda that is its
-// own make_* calls with a direction's DOTTED integrals, and `rot`/`gDots`
-// handed to assembleSlab. Everything else -- the per-slab pairing, the
-// product rule, the per-direction bookkeeping -- is generic
-// (gradient_terms.cppm, gradient_rotation.cppm). An RDM-only metric has no
-// tangent and is simply absent from the `gdot` list.
+// EACH CLASS ALSO CARRIES THE ORBITAL ROTATION, in four lines: WHICH blocks
+// its external operands are (`:general`'s RotBlock, from which one table
+// gives both their active axes and their general-range promotion rule), a
+// `gdot` lambda that is its own make_* calls with a direction's DOTTED
+// integrals, a `delta` construction written as a FUNCTION of the orbital
+// energies (so the same formula at the response `deps` is its tangent), and
+// `rot`/`gDots` handed to assembleSlab. Everything else -- the per-slab
+// pairing, the product rule, the per-direction bookkeeping -- is generic
+// (gradient_terms.cppm, gradient_rotation.cppm, gradient_general.cppm). An
+// RDM-only metric has no tangent and is simply absent from the `gdot` list.
 //
 // AND EACH TAKES AN OPTIONAL `adj`: non-null, the class also sweeps its
 // Eqs. 42-43 accumulators one chain rule further in, down to the five RDM
@@ -41,13 +43,17 @@
 // blocks are built and freed per class -- the sweep is a few lines at the end
 // of each walk, in reverse-topological order where a class has nested blocks
 // (Sij's a9 -> hdm3 -> hdm2, Srs's a7 -> rm3 -> rm2, Sijr's a3 -> hdm1).
-// Null, nothing below the Eqs. 42-43 accumulators runs at all.
+// Null, nothing below the Eqs. 42-43 accumulators runs at all. The two are
+// independent of each other: the rotation reads the Eqs. 42-43 accumulators
+// forwards, the sweep reads them backwards, and a caller asks for either,
+// both or neither.
 module nevpt2.gradient:sc_classes;
 
 import std;
 import nevpt2.gradient;
 import :rdm_adjoint;  // ScRdmAdjoint and the per-block adjoint sweeps
 import :rotation;
+import :general;
 import :terms;
 
 namespace nevpt2 {
@@ -55,10 +61,10 @@ namespace nevpt2 {
 // --- Sr: one virtual index --------------------------------------------------
 
 void gradientSr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
-                const Tensor& hostEVirt, const DeviceTensor& dm1, const DeviceTensor& dm2,
-                const DeviceTensor& dm3, const DeviceTensor& f3ac, const DeviceTensor& f3ca,
-                int64_t norb, const ScRotation& rot, ScClassGradient& acc, ScRdmAdjoint* adj,
-                const DeviceResources& dr) {
+                const Tensor& hostECore, const Tensor& hostEVirt, const DeviceTensor& dm1,
+                const DeviceTensor& dm2, const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                const DeviceTensor& f3ca, int64_t norb, const ScRotation& rot,
+                ScClassGradient& acc, ScRdmAdjoint* adj, const DeviceResources& dr) {
   const DeviceTensor& h1e = ai.h1e;
   const DeviceTensor& h2e = ai.h2e;
   const DeviceTensor a16 = make_a16(h1e, h2e, dm3, f3ac, f3ca, norb, dr);
@@ -96,11 +102,16 @@ void gradientSr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
         {"ipqr,pqra,ia->i", {g2, {&a17, kScActive}, g1}, 2.0},
         {"ip,pa,ia->i", {g1, {&a19, kScActive}, g1}, 1.0},
     };
-    const std::vector<double> delta = sliceHost(hostEVirt, b0, b1);
+    // Delta_t = eps_r, as a function of the orbital energies: read at the
+    // real ones for the multipliers, and at `deps` for their response.
+    const auto deltaOf = [&](const Tensor&, const Tensor& ev) {
+      return sliceHost(ev, b0, b1);
+    };
+    const std::vector<double> delta = deltaOf(hostECore, hostEVirt);
     assembleSlab(
         normTerms, hTerms, {b1 - b0}, {&slab, &h1e_v}, dActive,
-        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); }, rot,
-        {activeAxesOf(ExtBlock::Sr), {1}}, gDots, acc, dr);
+        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); },
+        deltaOf, rot, {RotBlock::Sr, RotBlock::H1eSr}, gDots, acc, dr);
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
@@ -127,10 +138,10 @@ void gradientSr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
 // --- Si: one core index (the hole-side metrics, and -e_core as Delta) -------
 
 void gradientSi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
-                const Tensor& hostECore, const DeviceTensor& dm1, const DeviceTensor& dm2,
-                const DeviceTensor& dm3, const DeviceTensor& f3ac, const DeviceTensor& f3ca,
-                int64_t norb, const ScRotation& rot, ScClassGradient& acc, ScRdmAdjoint* adj,
-                const DeviceResources& dr) {
+                const Tensor& hostECore, const Tensor& hostEVirt, const DeviceTensor& dm1,
+                const DeviceTensor& dm2, const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                const DeviceTensor& f3ca, int64_t norb, const ScRotation& rot,
+                ScClassGradient& acc, ScRdmAdjoint* adj, const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const DeviceTensor& h1e = ai.h1e;
   const DeviceTensor& h2e = ai.h2e;
@@ -175,12 +186,17 @@ void gradientSi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
         {"qpir,pqra,ai->i", {g2, {&a23, kScActive}, g1}, 2.0},
         {"pi,pa,ai->i", {g1, {&a25, kScActive}, g1}, 1.0},
     };
-    std::vector<double> delta = sliceHost(hostECore, b0, b1);
-    for (double& x : delta) x = -x;
+    // Delta_t = -eps_i.
+    const auto deltaOf = [&](const Tensor& ec, const Tensor&) {
+      std::vector<double> d = sliceHost(ec, b0, b1);
+      for (double& x : d) x = -x;
+      return d;
+    };
+    const std::vector<double> delta = deltaOf(hostECore, hostEVirt);
     assembleSlab(
         normTerms, hTerms, {b1 - b0}, {&slab, &h1e_v}, dActive,
-        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); }, rot,
-        {activeAxesOf(ExtBlock::Si), {0}}, gDots, acc, dr);
+        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); },
+        deltaOf, rot, {RotBlock::Si, RotBlock::H1eSi}, gDots, acc, dr);
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
@@ -220,11 +236,22 @@ void gradientSi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
 // and (1/2) <g, D> = sum_t P_t N_t = E, Eq. 40 again (the exchanged piece
 // relabels into the straight one).
 //
-// It is also the one class with NO active-rotation source term at all, in
-// either direction: cvcv carries no active index, so nothing it reads moves.
-// Hence no `rot` parameter here.
+// It has NO ACTIVE-ACTIVE rotation source term at all, in either direction:
+// cvcv carries no active index, so an active rotation moves nothing it reads.
+// A GENERAL direction is a different matter -- all four of its labels are
+// core or virtual, and its Delta_t is four orbital energies -- so it carries
+// both halves of the full source term:
+//
+//   the adjoint   <D, gdot>, the pseudodensity above against the direction's
+//                 action on cvcv, plus R_t Deltadot_t;
+//   the tangent   sum_t P_t Ndot_t + R_t Deltadot_t, with
+//                 Ndot = gdot theta + g thetadot and thetadot the same
+//                 2 gdot - gdot(swapped) the norm's own theta is.
+//
+// H_t is identically zero here, so there is no Q term in either.
 void gradientSijrs(IntegralSource& src, int64_t batch, const Tensor& hostECore,
-                   const Tensor& hostEVirt, ScClassGradient& acc, const DeviceResources& dr) {
+                   const Tensor& hostEVirt, const ScRotation& rot, ScClassGradient& acc,
+                   const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const int64_t ncore = hostECore.size(), nvirt = hostEVirt.size();
   if (ncore == 0 || nvirt == 0) return;
@@ -237,13 +264,20 @@ void gradientSijrs(IntegralSource& src, int64_t batch, const Tensor& hostECore,
     const DeviceTensor norm = deviceEinsumNew("iajb,iajb->iajb", {&slab, &theta}, 1.0, dr);
 
     const Tensor hostNorm = downloadTensor(norm, s);
-    std::vector<double> delta;
-    delta.reserve(static_cast<std::size_t>(hostNorm.size()));
-    for (int64_t i = b0; i < b1; ++i)
-      for (int64_t a = 0; a < nvirt; ++a)
-        for (int64_t j = 0; j < ncore; ++j)
-          for (int64_t b = 0; b < nvirt; ++b)
-            delta.push_back(hostEVirt(a) + hostEVirt(b) - hostECore(i) - hostECore(j));
+    // Delta_t = eps_a + eps_b - eps_i - eps_j, as a function of the orbital
+    // energies (assembleSlab's `deltaOf`, written out here because this class
+    // does not go through it).
+    const auto deltaOf = [&](const Tensor& ec, const Tensor& ev) {
+      std::vector<double> d;
+      d.reserve(static_cast<std::size_t>(hostNorm.size()));
+      for (int64_t i = b0; i < b1; ++i)
+        for (int64_t a = 0; a < nvirt; ++a)
+          for (int64_t j = 0; j < ncore; ++j)
+            for (int64_t b = 0; b < nvirt; ++b)
+              d.push_back(ev(a) + ev(b) - ec(i) - ec(j));
+      return d;
+    };
+    const std::vector<double> delta = deltaOf(hostECore, hostEVirt);
     const std::vector<double> noH(delta.size(), 0.0);
     const ScMultipliers m = scMultipliers(hostNorm.data(), noH, delta);
     acc.norm += m.norm;
@@ -254,6 +288,23 @@ void gradientSijrs(IntegralSource& src, int64_t batch, const Tensor& hostECore,
     deviceEinsumAccum("iajb,iajb->iajb", {&p, &slab}, d, 2.0, s);
     deviceEinsumAccum("ibja,ibja->iajb", {&p, &slab}, d, -1.0, s);
     acc.extContraction += 0.5 * dotTensors(slab, d, dr);
+
+    for (std::size_t k = 0; k < rot.size(); ++k) {
+      const ScRotationDir& dir = rot.dirs[k];
+      if (!dir.general) continue;  // an active rotation moves nothing here
+      acc.rotEps[k] += dotHost(m.r, deltaOf(dir.epsCoreDot, dir.epsVirtDot));
+      const ScSlabDots dots = slabDots({&slab}, {RotBlock::Sijrs}, dir, rot.gen, dr);
+      if (dots.ptr[0] == nullptr) continue;
+      const DeviceTensor& gdot = *dots.ptr[0];
+      acc.rotExt[k] += dotTensors(d, gdot, dr);
+      if (!dir.tangent) continue;
+      const DeviceTensor thetaDot = deviceTransposeNew(gdot, {0, 3, 2, 1}, -1.0, dr);
+      deviceEinsumAccum("iajb->iajb", {&gdot}, thetaDot, 2.0, s);
+      const DeviceTensor nDot =
+          deviceEinsumNew("iajb,iajb->iajb", {&gdot, &theta}, 1.0, dr);
+      deviceEinsumAccum("iajb,iajb->iajb", {&slab, &thetaDot}, nDot, 1.0, s);
+      acc.rotTangent[k] += dotHost(m.p, downloadTensor(nDot, s).data());
+    }
   });
 }
 
@@ -266,6 +317,20 @@ void gradientSijrs(IntegralSource& src, int64_t batch, const Tensor& hostECore,
 // in (j, i) -- which is exactly what makes
 //   sum_{r,j,i} Pfull(r,j,i) normT(r,j,i) == sum_perturbers P normSym
 // hold, the diagonal included (normSym(r,i,i) is normT(r,i,i) after its 1/2).
+// Delta_t = eps_r - eps_i - eps_j over the (r, j <= i) triangle, in the order
+// the packing below walks it: the class's `deltaOf`, so that the same formula
+// at the orbital energies' response is Deltadot and lines up with the
+// triangle's own R multipliers.
+std::vector<double> sijrDelta(int64_t nr, int64_t ncore, int64_t b0, const Tensor& ec,
+                              const Tensor& ev) {
+  std::vector<double> out;
+  out.reserve(static_cast<std::size_t>(nr * ncore * (ncore + 1) / 2));
+  for (int64_t r = 0; r < nr; ++r)
+    for (int64_t j = 0; j < ncore; ++j)
+      for (int64_t i = j; i < ncore; ++i) out.push_back(ev(b0 + r) - ec(j) - ec(i));
+  return out;
+}
+
 ScSlabMultipliers sijrMultipliers(const Tensor& normT, const Tensor& hT, int64_t b0,
                                   const Tensor& hostECore, const Tensor& hostEVirt) {
   const int64_t nr = normT.dim(0), ncore = normT.dim(1);
@@ -281,15 +346,15 @@ ScSlabMultipliers sijrMultipliers(const Tensor& normT, const Tensor& hT, int64_t
       normSym(r, kk, kk) *= 0.5;
       hSym(r, kk, kk) *= 0.5;
     }
-  std::vector<double> normTri, hTri, diffTri;
+  std::vector<double> normTri, hTri;
   for (int64_t r = 0; r < nr; ++r)
     for (int64_t j = 0; j < ncore; ++j)
       for (int64_t i = j; i < ncore; ++i) {
         normTri.push_back(normSym(r, j, i));
         hTri.push_back(hSym(r, j, i));
-        diffTri.push_back(hostEVirt(b0 + r) - hostECore(j) - hostECore(i));
       }
-  const ScMultipliers m = scMultipliers(normTri, hTri, diffTri);
+  const ScMultipliers m =
+      scMultipliers(normTri, hTri, sijrDelta(nr, ncore, b0, hostECore, hostEVirt));
   Tensor p({nr, ncore, ncore}), q({nr, ncore, ncore});
   std::size_t k = 0;
   for (int64_t r = 0; r < nr; ++r)
@@ -300,7 +365,9 @@ ScSlabMultipliers sijrMultipliers(const Tensor& normT, const Tensor& hT, int64_t
         q(r, j, i) = m.q[k];
         q(r, i, j) = m.q[k];
       }
-  return ScSlabMultipliers{std::move(p), std::move(q), m.norm, m.energy};
+  // `r` stays in the triangle's own order: it multiplies Deltadot, which
+  // sijrDelta builds there too.
+  return ScSlabMultipliers{std::move(p), std::move(q), m.r, m.norm, m.energy};
 }
 
 void gradientSijr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
@@ -341,7 +408,10 @@ void gradientSijr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
         [&](const Tensor& n, const Tensor& h) {
           return sijrMultipliers(n, h, b0, hostECore, hostEVirt);
         },
-        rot, {activeAxesOf(ExtBlock::Sijr)}, gDots, acc, dr);
+        [&](const Tensor& ec, const Tensor& ev) {
+          return sijrDelta(b1 - b0, ncore, b0, ec, ev);
+        },
+        rot, {RotBlock::Sijr}, gDots, acc, dr);
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
@@ -355,7 +425,7 @@ void gradientSijr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
     const DeviceTensor delta = deviceEye(norb, dr);
     const DeviceTensor mHdm1 = DeviceTensor::zeros(hdm1.dims, dr);
     if (const DeviceTensor* m = activeAccumOf(dActive, &hdm1); m != nullptr)
-      addInto(*m, mHdm1, s);
+      addTensorInto(*m, mHdm1, s);
     if (const DeviceTensor* m = activeAccumOf(dActive, &a3); m != nullptr)
       adjointA3(*m, ai.h1e, ai.h2e, delta, mHdm1, *adj, s);
     adjointHoleDm1(mHdm1, *adj, s);
@@ -366,6 +436,18 @@ void gradientSijr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
 
 // energy_Srsi's symmetrization and packing, verbatim, plus the scatter back --
 // as sijrMultipliers, but over the whole (r, s, i) and symmetric in (r, s).
+// Delta_t = eps_r + eps_s - eps_i over the (r <= s, i) triangle, in the
+// packing order below -- sijrDelta's counterpart, and the class's `deltaOf`.
+std::vector<double> srsiDelta(int64_t nvirt, int64_t ncore, const Tensor& ec,
+                              const Tensor& ev) {
+  std::vector<double> out;
+  out.reserve(static_cast<std::size_t>(nvirt * (nvirt + 1) / 2 * ncore));
+  for (int64_t r = 0; r < nvirt; ++r)
+    for (int64_t ss = r; ss < nvirt; ++ss)
+      for (int64_t i = 0; i < ncore; ++i) out.push_back(ev(r) + ev(ss) - ec(i));
+  return out;
+}
+
 ScSlabMultipliers srsiMultipliers(const Tensor& normT, const Tensor& hT,
                                    const Tensor& hostECore, const Tensor& hostEVirt) {
   const int64_t nvirt = normT.dim(0), ncore = normT.dim(2);
@@ -381,15 +463,15 @@ ScSlabMultipliers srsiMultipliers(const Tensor& normT, const Tensor& hT,
       normSym(r, r, i) *= 0.5;
       hSym(r, r, i) *= 0.5;
     }
-  std::vector<double> normTri, hTri, diffTri;
+  std::vector<double> normTri, hTri;
   for (int64_t r = 0; r < nvirt; ++r)
     for (int64_t ss = r; ss < nvirt; ++ss)
       for (int64_t i = 0; i < ncore; ++i) {
         normTri.push_back(normSym(r, ss, i));
         hTri.push_back(hSym(r, ss, i));
-        diffTri.push_back(hostEVirt(r) + hostEVirt(ss) - hostECore(i));
       }
-  const ScMultipliers m = scMultipliers(normTri, hTri, diffTri);
+  const ScMultipliers m =
+      scMultipliers(normTri, hTri, srsiDelta(nvirt, ncore, hostECore, hostEVirt));
   Tensor p({nvirt, nvirt, ncore}), q({nvirt, nvirt, ncore});
   std::size_t k = 0;
   for (int64_t r = 0; r < nvirt; ++r)
@@ -400,7 +482,7 @@ ScSlabMultipliers srsiMultipliers(const Tensor& normT, const Tensor& hT,
         q(r, ss, i) = m.q[k];
         q(ss, r, i) = m.q[k];
       }
-  return ScSlabMultipliers{std::move(p), std::move(q), m.norm, m.energy};
+  return ScSlabMultipliers{std::move(p), std::move(q), m.r, m.norm, m.energy};
 }
 
 // Its own term list, built per slab from the two slabs: the operands' roles
@@ -431,8 +513,7 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
     return v;
   };
   const std::vector<std::vector<ScGDot>> gDots = rotationTangentBlocks(rot, gdot);
-  const std::vector<std::vector<int>> blockAxes{activeAxesOf(ExtBlock::Srsi),
-                                                activeAxesOf(ExtBlock::SrsiT)};
+  const std::vector<RotBlock> kinds{RotBlock::Srsi, RotBlock::SrsiT};
 
   // Pass 1: the raw per-tuple (r, s, i) norm and H over the WHOLE virtual
   // pair, exactly as energy_Srsi accumulates them -- the symmetrization pairs
@@ -462,7 +543,8 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
       if (!rot.dirs[d].tangent) continue;
       // No pseudodensity yet in this pass, so no pairing: just the dotted
       // slabs the product rule reads (pass 2 does the pairing).
-      const ScSlabDots dots = slabDots({&slab, &slabT}, blockAxes, rot.dirs[d], dr);
+      const ScSlabDots dots =
+          slabDots({&slab, &slabT}, kinds, rot.dirs[d], rot.gen, dr);
       const DeviceTensor normRowsDot = sliceAxis(normTDot[d], 0, b0, b1);
       const DeviceTensor hRowsDot = sliceAxis(hTDot[d], 0, b0, b1);
       evalTermsTangent(srsiTerms(ga, gb, dm1), dots.ptr, gDots[d], normRowsDot, s);
@@ -480,6 +562,11 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
   // perturber's weight multiplies both of its tuples, and the diagonal's
   // halving is already in the packing).
   for (std::size_t d = 0; d < rot.size(); ++d) {
+    // The orbital-energy half, R_t against Deltadot over the SAME triangle
+    // srsiDelta packs -- as assembleSlab does it for the other classes.
+    if (rot.dirs[d].general)
+      acc.rotEps[d] += dotHost(
+          m.r, srsiDelta(nvirt, ncore, rot.dirs[d].epsCoreDot, rot.dirs[d].epsVirtDot));
     if (!rot.dirs[d].tangent) continue;
     acc.rotTangent[d] += dotHost(m.p.data(), downloadTensor(normTDot[d], s).data()) +
                          dotHost(m.q.data(), downloadTensor(hTDot[d], s).data());
@@ -513,7 +600,8 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
     // The external half of the pairing, now that this slab's D exists.
     for (std::size_t d = 0; d < rot.size(); ++d)
       acc.rotExt[d] +=
-          pairSlabDots(slabDots({&slab, &slabT}, blockAxes, rot.dirs[d], dr), dBlocks, dr);
+          pairSlabDots(slabDots({&slab, &slabT}, kinds, rot.dirs[d], rot.gen, dr),
+                       dBlocks, dr);
   });
   acc.extContraction += 0.5 * ext;
   acc.actContraction += activeContraction(dActive, dr);
@@ -536,10 +624,9 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
 // of ours, because our norm and H einsums carry Eqs. 32-33's 1/2 inside the
 // contraction rather than outside M and E.
 void gradientSrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
-                 const Tensor& hostEVirt, const DeviceTensor& dm1, const DeviceTensor& dm2,
-                 const DeviceTensor& dm3, const ScRotation& rot, ScClassGradient& acc,
-                 ScRdmAdjoint* adj,
-                 const DeviceResources& dr) {
+                 const Tensor& hostECore, const Tensor& hostEVirt, const DeviceTensor& dm1,
+                 const DeviceTensor& dm2, const DeviceTensor& dm3, const ScRotation& rot,
+                 ScClassGradient& acc, ScRdmAdjoint* adj, const DeviceResources& dr) {
   const int64_t nvirt = hostEVirt.size();
   if (nvirt == 0) return;
   const auto [rm2, a7] = make_a7(ai.h1e, ai.h2e, dm1, dm2, dm3, dr);
@@ -568,14 +655,19 @@ void gradientSrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
     const std::vector<ScTerm> hTerms{
         {"rsqp,rsba,pqab->rs", {g, g, {&a7, kScActive}}, 0.5},
     };
-    std::vector<double> delta;
-    delta.reserve(static_cast<std::size_t>((b1 - b0) * nvirt));
-    for (int64_t r = b0; r < b1; ++r)
-      for (int64_t ss = 0; ss < nvirt; ++ss) delta.push_back(hostEVirt(r) + hostEVirt(ss));
+    // Delta_t = eps_r + eps_s.
+    const auto deltaOf = [&](const Tensor&, const Tensor& ev) {
+      std::vector<double> d;
+      d.reserve(static_cast<std::size_t>((b1 - b0) * nvirt));
+      for (int64_t r = b0; r < b1; ++r)
+        for (int64_t ss = 0; ss < nvirt; ++ss) d.push_back(ev(r) + ev(ss));
+      return d;
+    };
+    const std::vector<double> delta = deltaOf(hostECore, hostEVirt);
     assembleSlab(
         normTerms, hTerms, {b1 - b0, nvirt}, {&slab}, dActive,
-        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); }, rot,
-        {activeAxesOf(ExtBlock::Srs)}, gDots, acc, dr);
+        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); },
+        deltaOf, rot, {RotBlock::Srs}, gDots, acc, dr);
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
@@ -627,7 +719,7 @@ void gradientSrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
     const DeviceTensor mRm3 =
         DeviceTensor::zeros({norb, norb, norb, norb, norb, norb}, dr);
     if (const DeviceTensor* m = activeAccumOf(dActive, &rm2); m != nullptr)
-      addInto(*m, mRm2, s);
+      addTensorInto(*m, mRm2, s);
     if (const DeviceTensor* m = activeAccumOf(dActive, &a7); m != nullptr)
       adjointA7(*m, ai.h1e, ai.h2e, mRm2, mRm3, s);
     adjointRm3(mRm3, delta, mRm2, *adj, s);
@@ -638,10 +730,9 @@ void gradientSrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
 // --- Sij: a core pair -------------------------------------------------------
 
 void gradientSij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
-                 const Tensor& hostECore, const DeviceTensor& dm1, const DeviceTensor& dm2,
-                 const DeviceTensor& dm3, const ScRotation& rot, ScClassGradient& acc,
-                 ScRdmAdjoint* adj,
-                 const DeviceResources& dr) {
+                 const Tensor& hostECore, const Tensor& hostEVirt, const DeviceTensor& dm1,
+                 const DeviceTensor& dm2, const DeviceTensor& dm3, const ScRotation& rot,
+                 ScClassGradient& acc, ScRdmAdjoint* adj, const DeviceResources& dr) {
   const int64_t ncore = hostECore.size();
   if (ncore == 0) return;
   const DeviceTensor hdm1 = make_hdm1(dm1, dr);
@@ -670,14 +761,19 @@ void gradientSij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
     const std::vector<ScTerm> hTerms{
         {"qpij,baij,pqab->ij", {g, g, {&a9, kScActive}}, 0.5},
     };
-    std::vector<double> delta;
-    delta.reserve(static_cast<std::size_t>((b1 - b0) * ncore));
-    for (int64_t i = b0; i < b1; ++i)
-      for (int64_t j = 0; j < ncore; ++j) delta.push_back(-(hostECore(i) + hostECore(j)));
+    // Delta_t = -(eps_i + eps_j).
+    const auto deltaOf = [&](const Tensor& ec, const Tensor&) {
+      std::vector<double> d;
+      d.reserve(static_cast<std::size_t>((b1 - b0) * ncore));
+      for (int64_t i = b0; i < b1; ++i)
+        for (int64_t j = 0; j < ncore; ++j) d.push_back(-(ec(i) + ec(j)));
+      return d;
+    };
+    const std::vector<double> delta = deltaOf(hostECore, hostEVirt);
     assembleSlab(
         normTerms, hTerms, {b1 - b0, ncore}, {&slab}, dActive,
-        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); }, rot,
-        {activeAxesOf(ExtBlock::Sij)}, gDots, acc, dr);
+        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); },
+        deltaOf, rot, {RotBlock::Sij}, gDots, acc, dr);
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
@@ -694,7 +790,7 @@ void gradientSij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
     const DeviceTensor mHdm2 = DeviceTensor::zeros(hdm2.dims, dr);
     const DeviceTensor mHdm3 = DeviceTensor::zeros(hdm3.dims, dr);
     if (const DeviceTensor* m = activeAccumOf(dActive, &hdm2); m != nullptr)
-      addInto(*m, mHdm2, s);
+      addTensorInto(*m, mHdm2, s);
     if (const DeviceTensor* m = activeAccumOf(dActive, &a9); m != nullptr)
       adjointA9(*m, ai.h1e, ai.h2e, mHdm2, mHdm3, s);
     adjointHdm3(mHdm3, delta, mHdm2, *adj, s);
@@ -762,10 +858,15 @@ void gradientSir(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
         {"rpqi,raib,pqab->ir", {g2, g1, {&a12, kScActive}}, -1.0},
         {"rpqi,rabi,pqab->ir", {g2, g2, {&a13, kScActive}}, 1.0},
     };
-    std::vector<double> delta;  // (c, nr), the terms' own output order
-    delta.reserve(static_cast<std::size_t>(ncore * (b1 - b0)));
-    for (int64_t i = 0; i < ncore; ++i)
-      for (int64_t r = b0; r < b1; ++r) delta.push_back(hostEVirt(r) - hostECore(i));
+    // Delta_t = eps_r - eps_i, over (c, nr) -- the terms' own output order.
+    const auto deltaOf = [&](const Tensor& ec, const Tensor& ev) {
+      std::vector<double> d;
+      d.reserve(static_cast<std::size_t>(ncore * (b1 - b0)));
+      for (int64_t i = 0; i < ncore; ++i)
+        for (int64_t r = b0; r < b1; ++r) d.push_back(ev(r) - ec(i));
+      return d;
+    };
+    const std::vector<double> delta = deltaOf(hostECore, hostEVirt);
     // h1e_v (v, c) carries no active index, and neither does the hoisted
     // trace v2tr (r, i): its active pair IS the contraction, and a trace of
     // two rotated axes against an ANTISYMMETRIC kappa cancels exactly, so
@@ -773,8 +874,9 @@ void gradientSir(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
     // hoisting free for the source term as well as for Eq. 40.
     assembleSlab(
         normTerms, hTerms, {ncore, b1 - b0}, {&slab1, &slab2, &h1e_v, &v2tr}, dActive,
-        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); }, rot,
-        {activeAxesOf(ExtBlock::Sir1), activeAxesOf(ExtBlock::Sir2), {}, {}}, gDots, acc, dr);
+        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); },
+        deltaOf, rot,
+        {RotBlock::Sir1, RotBlock::Sir2, RotBlock::H1eSir, RotBlock::V2tr}, gDots, acc, dr);
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);

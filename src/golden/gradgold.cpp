@@ -21,6 +21,15 @@ Status GradGoldFile::require(const std::initializer_list<std::string_view> names
   return {};
 }
 
+Status GradGoldFile::checkAgainst(const GoldenFile& golden) const {
+  if (nact != golden.ncas || ncore != golden.ncore)
+    return err_io(std::format(
+        "gradient sidecar: its partition is {} core / {} active orbitals, but the golden it "
+        "was given with has {} / {} -- the two files do not describe the same state",
+        ncore, nact, golden.ncore, golden.ncas));
+  return {};
+}
+
 const Tensor& GradGoldFile::get(const std::string& name) const {
   auto it = arrays.find(name);
   if (it == arrays.end())

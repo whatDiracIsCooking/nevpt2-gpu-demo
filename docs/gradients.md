@@ -28,18 +28,20 @@ respect to a nuclear coordinate.
 | the SC energy's derivative w.r.t. the CI vector, `y_I = dE/dc_I` (Park Eq. 48) | **in tree**, both modes, checked against each other exactly (§5) |
 | the SC energy's pseudodensities (Park Eqs. 41–47) | **in tree**, checked by their own algebraic identities (§5.2) |
 | the PC energy's derivative w.r.t. the CI vector | **in tree** (§4.3), checked against a finite difference |
-| the orbital source term `Y_xy = dE/dkappa_xy` (Park Eq. 26) | **the active–active block only** (§6) |
+| the orbital source term `Y_xy = dE/dkappa_xy` (Park Eq. 26) | **in tree over the whole `kappa` space** — active–active, core–core, virtual–virtual and mixed — both modes, checked against each other exactly (§6) |
 | the RDMs' own derivatives w.r.t. the CI vector | **in tree**, host `dm1`/`dm2` and device `dm3`/`f3ac`/`f3ca` (§4.1) |
-| the CI Z-vector equation, the pseudocanonical and selection multipliers, the CPHF solve | **not in tree**. Derived in [`gradient-theory.md`](gradient-theory.md), §2; nothing implements them |
+| the pseudocanonical multipliers `z^c` (Park Eqs. 56–57) | **in tree**, divided out of `Y`'s two inactive blocks, refusing a degeneracy the division cannot resolve (§6) |
+| the CI Z-vector equation, the selection-boundary multipliers, the CPHF solve | **not in tree**. Derived in [`gradient-theory.md`](gradient-theory.md), §2; nothing implements them |
 | derivative MO integrals — the one- and two-electron skeleton derivatives — and the nuclear-repulsion derivative | **not in tree**, and not in the reference data either |
 | a nuclear gradient, a geometry optimisation, or any derivative w.r.t. a coordinate | **not in tree** |
 | a *numerical* nuclear gradient | **offline Python only** — `reference_data/nevpt2_numgrad.py` writes it into the `*.gradgold` sidecar ([`reference-data.md`](reference-data.md), "The numerical gradient"). No binary in `src/` or `apps/` reads it; it is there for the comparison the Z-vector work will make |
 
-Two dependences are **held fixed** by the functional the orbital source term
-differentiates — the `f3ac`/`f3ca` digests and the orbital energies — and the
-core/virtual and mixed blocks of `Y` are not assembled at all. None of the
-three is an approximation to rely on; each is the next piece of work, and §6
-says exactly what it costs to lift.
+**One** dependence is still held fixed by the functional the orbital source
+term differentiates: the `f3ac`/`f3ca` digests. It is not an approximation to
+rely on — §6 says exactly where it bites (only the blocks the active
+two-electron integrals move under, never the two that Eqs. 56–57 read) and
+what it would cost to lift. The orbital energies, which were held fixed with
+it, now move.
 
 ## 2. Forward and reverse, and why the permanent tests are exact
 
@@ -134,18 +136,18 @@ Dependency order; `src/gradient/`'s components are in
 | `nevpt2.sigma_vector` (`src/rdm/`) | the 3-body and integral-contracted 4-body sigma vectors, forward and dagger | `test/sigma_vector/`, against an exact host contraction, with negative controls |
 | `nevpt2.energy`'s `:sc_tangent` partition | `energiesTangentDevice`: the eight SC class energies' tangent in the RDMs | `--sc-tangent`: two exact checks and one finite difference |
 | `nevpt2.energy`'s `:pc_tangent` partition | `pcTangentsDevice`: the PC classes' tangent — the *solve* differentiated | `nevpt2_pc_tangent`: Euler, and a Richardson-verified difference |
-| `nevpt2.sc_amplitudes` (`src/gradient/`) | the amplitude `T`, the multipliers `P`/`Q`/`R`, and `derivativeSubscripts`. Host only | `test/gradient/`, card-free |
+| `nevpt2.sc_amplitudes` (`src/gradient/`) | the amplitude `T`, the multipliers `P`/`Q`/`R`, the pseudocanonical multipliers `z^c` (Park Eqs. 56–57) and `derivativeSubscripts`. Host only | `test/gradient/`, card-free |
 | `nevpt2.kappa_rotation` (`src/gradient/`) | the orbital-rotation parameterisation: antisymmetric `kappa`, `exp(kappa)`, an array's active axes transformed. Host only | `test/gradient/`, card-free |
-| `nevpt2.gradient` (`src/gradient/`) | the SC pseudodensities, the active–active orbital source term, and `y_I = dE/dc_I` | `nevpt2_sc_pseudodensity` (identities, and `--kappa-act`), `nevpt2_demo --gradient-source` (duality) |
+| `nevpt2.gradient` (`src/gradient/`) | the SC pseudodensities, the orbital source term `Y_xy` over the whole `kappa` space, and `y_I = dE/dc_I` | `nevpt2_sc_pseudodensity` (identities, `--kappa-act` and `--kappa-full`), `nevpt2_demo --gradient-source` (duality) |
 | `nevpt2.pc_tangent` (`src/gradient/`) | the PC tangent's finite-difference check: the analytic tangent against re-solves at displaced states | `nevpt2_pc_tangent`; the gate itself in `test/pc_tangent/` |
-| `nevpt2.golden`'s `loadGradGold` | the `*.gradgold` sidecar reader — the MO-integral arrays the *orbital* gradient will read | `test/golden/gradgold_tests.cpp`, host-only |
+| `nevpt2.golden`'s `loadGradGold` | the `*.gradgold` sidecar reader — the one-general-index MO-integral arrays and full-MO-range Fock matrices the core, virtual and mixed blocks of `Y` read — and `checkAgainst`, which says a sidecar and a golden describe one state | `test/golden/gradgold_tests.cpp`, host-only; `--kappa-full` is the consumer |
 
 `nevpt2.gradient` and `nevpt2.pc_tangent` are **leaves**: nothing in `src/`
 imports either. `nevpt2.gradient` is linked by `nevpt2_sc_pseudodensity` and,
 for `--gradient-source` alone, by `nevpt2_demo`; `nevpt2_pc_tangent` is the
 only app linking `nevpt2.pc_tangent`, and `nevpt2_sc_pseudodensity` the only
-one linking `nevpt2.kappa_rotation` (its `--kappa-act` finite difference
-rotates every stored block on the host).
+one linking `nevpt2.kappa_rotation` (its `--kappa-act` and `--kappa-full`
+finite differences rotate stored blocks on the host).
 
 ## 4. Forward mode: the tangent chain
 
@@ -383,28 +385,34 @@ allows. What `y` is *for* is the right-hand side of the decoupled CI Z-vector
 equation ([`gradient-theory.md`](gradient-theory.md), §2.2) — the one
 derivative of `E` the Lagrangian needs in determinant space.
 
-## 6. The orbital source term: the active–active block
+## 6. The orbital source term
 
-Park Eq. 26's `Y_xy = dE/dkappa_xy`, restricted to the active–active block,
-comes out of the same slab walk — and in **both directions**, which is the
-point:
+Park Eq. 26's `Y_xy = dE/dkappa_xy` comes out of the same slab walk — over
+the **whole** `kappa` space, and in **both directions**, which is the point:
 
 | | |
 |---|---|
-| the **adjoint** | `<kappa, Y_act>`: the pseudodensities of §5.2 paired with the direction's action on the very arrays they are conjugate to |
+| the **adjoint** | `<kappa, Y>`: the pseudodensities of §5.2 paired with the direction's action on the very arrays they are conjugate to, plus the orbital energies' response against the multiplier of their sum |
 | the **tangent** | `Edot(kappa)`: the same class terms rerun under the product rule, finished with the Eqs. 36–37 multipliers |
 
 One derivative taken two ways, so holding them equal checks the assembly —
-exact arithmetic, no step size. The third number, a central difference of the
-unmodified energy stage along `exp(h kappa)`, is there because the two
-directions **share** two conventions (the device kappa action, and "a Dyall
-block's tangent is its own builder called with the dotted integrals"), and a
-wrong tangent of an operand cancels between them (§2).
+exact arithmetic, no step size. The central differences of the unmodified
+energy stage along `exp(h kappa)` beside them — one for an active rotation,
+one for a rotation inside the core space and one inside the virtual space —
+are there because the two directions **share** their operand tangents (the
+device kappa action, "a Dyall block's tangent is its own builder called with
+the dotted integrals", and the promotion rule below), and a wrong tangent
+cancels between them (§2).
 
-**What moves, exactly.** An active rotation at fixed CI coefficients moves
-every stored array carrying an active index: the active-space integrals, and
-every external integral block's active slots. Those are all here. Held fixed
-are
+**What moves, exactly.** A rotation at fixed CI coefficients moves every
+stored array that carries an index it touches. For the **active–active** block
+that is the active-space integrals and every external block's active slots;
+for the core, virtual and mixed blocks it is every other slot of every block
+as well, plus the one-electron blocks' core dressing (they are effective
+one-electron matrices, and the core density is fixed in the MO indices, so
+differentiating promotes its two tied labels too) and **the orbital
+energies**, which are the generalized Fock's diagonals. All of that is here.
+Held fixed are
 
 - the **RDMs** — correct, and the derivative's own definition: they are
   functions of the CI vector, which this derivative holds fixed;
@@ -414,34 +422,92 @@ are
   them, and recovering it in reverse mode needs that contraction's
   **transpose** — the 4-RDM against a six-index conjugate density — a kernel
   this tree does not have;
-- the **orbital energies** — likewise this functional's. In the exact
-  derivative they move too, through the active density inside the generalized
-  Fock matrix, which needs integral blocks the golden does not carry
-  ([`gradient-theory.md`](gradient-theory.md), §1.3, which is explicit that
-  "the active block needs only what the golden already carries" is the easy
-  mistake here).
+- and nothing else. The **orbital energies** were held fixed too while only
+  the active block existed, because their response needs integral blocks the
+  golden does not carry ([`gradient-theory.md`](gradient-theory.md), §1.3,
+  which is explicit that "the active block needs only what the golden already
+  carries" is the easy mistake here). The `*.gradgold` sidecar does carry
+  them, and the full-space entry point reads them, so `deps` is now part of
+  both modes.
 
-So this is the **integral half** of the chain rule — exact for that
-functional, in both modes — and the half the core/virtual and mixed blocks'
-work builds on.
+So the derivative is exact except through the digests — and it is exact
+outright on the core–core and virtual–virtual blocks, where neither the
+digests nor the orbital energies move at all: no active two-electron index
+and no orbital energy responds to a rotation that stays inside one inactive
+space. That is what makes Eqs. 56–57 below a division of an exact numerator.
+
+**The core, virtual and mixed blocks are one promotion rule, not a table of
+derivatives.** Every stored two-electron block is a slice of the full MO
+integral tensor in one layout, so the chain rule on it is: for each of the
+four slots, replace that index by a general one and contract it with `kappa`.
+Each right-hand side is one of the sidecar's one-general-index arrays, picked
+by the promoted slot's partner and the other charge distribution — so the
+whole half is four contractions per block, generated from the block's space
+signature, with no derivative transcribed per class
+([`gradient-theory.md`](gradient-theory.md), §3.1 and §3.3). Two places need
+more than the rule: the effective one-electron blocks' core dressing (where
+the Coulomb pair's two promotions collapse and the exchange pair's do **not**
+— they are different integrals, and writing the exchange as twice either one
+is wrong in a way that survives even a rotation inside the core space), and
+the orbital energies, whose response reads the generalized Fock and the
+inventory's restricted rows.
+
+**What checks it, since neither mode can.** Both modes read the same operand
+tangents, so a wrong promotion cancels between them, exactly as a wrong
+operand tangent does for the active block (§2). Three things stand in for the
+finite difference there:
+
+- every promotion rule's source array, restricted to the promoted slot's own
+  space, must be the stored block under the permutation that rule uses — one
+  identity per block per slot, which pins the array choice and the index
+  order; and the effective one-electron matrix and the generalized Fock's
+  diagonal must come back out of the dressing and orbital-energy rules' own
+  sources;
+- a rotation **inside** the core space, or inside the virtual space, keeps
+  every index in its own space, so the displaced integrals are the stored
+  blocks with those axes transformed on the host and the displaced orbital
+  energies are the rotated Fock's diagonal — which means the unmodified
+  energy stage can be rerun and differenced, exactly as for the active block;
+- a **mixed** rotation cannot be displaced that way (its indices leave their
+  spaces, which would need integrals with two general indices) and does not
+  need to be: each promotion is one contraction over the whole general index,
+  so the rows the two intra-space differences exercise are the same code the
+  mixed rows run.
+
+**Park Eqs. 56–57.** The orbital convention diagonalises the generalized Fock
+inside the core space and inside the virtual space, so the energy reads it
+there only on its diagonal and its off-diagonal response has to be pinned by
+that convention instead: one multiplier per pair, and because the matrix is
+diagonal on both spaces the stationarity condition collapses to a division by
+an orbital-energy difference ([`gradient-theory.md`](gradient-theory.md),
+§2.3). Those two blocks of `Y` are what it divides. Every such division is
+singular where its divisor vanishes, and a degenerate pair is not
+hypothetical: an abelian subgroup splits a degenerate set across irreps, so
+both partners keep the same energy. The energy does not move along a rotation
+mixing two irreps, so for such a pair the numerator vanishes too, the
+multiplier is a `0/0` the constraint does not determine, and zero is the right
+representative — while a degenerate pair whose numerator does *not* vanish is
+a **numerical refusal**, not a number.
 
 **The chain rule through the Dyall blocks needs no new term list.** Every
 block builder is linear in the integrals it reads, so a block's tangent is
 that same builder called with the dotted integrals and its integral-free
 operands zeroed.
 
-**Why `Y_act` as a matrix has to be probed.** The class energies are gauge
+**Why `Y` as a matrix has to be probed.** The class energies are gauge
 invariant under a *covariant* rotation of integrals and RDMs together
 ([`gradient-theory.md`](gradient-theory.md), §1.3), which makes the
 directly-contractible part — the pseudodensities paired with one active index
 left open — exactly **symmetric**, hence invisible to an antisymmetric
 `kappa`. All of `Y_act`'s content therefore sits in the chain rule through the
 Dyall blocks, which is a map *into* the integrals, not out of them, and
-reverse mode does not run it backwards for free. So the matrix is assembled by
-probing the same linear functional with the `n (n - 1) / 2` basis directions,
-in chunks, one slab walk per chunk; a caller who wants a *pairing* pays
-nothing extra. `--kappa-act` skips the matrix above a fixed number of basis
-directions — a policy of the check, not a cap in the assembly.
+reverse mode does not run it backwards for free. So a matrix is assembled by
+probing the same linear functional with basis directions, in chunks, one slab
+walk per chunk; a caller who wants a *pairing* pays nothing extra. The
+active-block check skips the matrix above a fixed number of basis directions,
+and the full-space one probes only the index pairs its reader needs — the two
+inactive blocks, for Eqs. 56–57 — both policies of the check, not caps in the
+assembly.
 Park Eqs. 44–47's active-space pseudodensities are not on this path
 and are not completed into Eq. 35's RDM-conjugate form, which has no consumer
 until the full `Y` needs the RDM side too.
@@ -515,6 +581,7 @@ its own, and each prints one `PASS:` line a ctest entry matches
 | `nevpt2_demo --gradient-source` | `y_I = dE/dc_I` in reverse mode, gated on the duality against the forward tangent, plus the Jacobian where `ndet` allows |
 | `nevpt2_sc_pseudodensity` | the Eqs. 40–47 identities for all eight classes |
 | `nevpt2_sc_pseudodensity --kappa-act` | the active–active orbital source term: adjoint against tangent, with a finite difference beside them |
+| `nevpt2_sc_pseudodensity --kappa-full` | the same over the whole `kappa` space, out of the `*.gradgold` sidecar (`--gradgold PATH` overrides the derived path): the duality, the sidecar's promotion table against the arrays it reads, the active block against `--kappa-act`'s own entry point, two intra-space finite differences, and Eqs. 56–57 |
 | `nevpt2_pc_tangent` | the PC tangent: Euler, and a Richardson-verified central difference. `--fd-steps` and `--fd-start-pow` set the sweep |
 
 `--sc-tangent` and `--gradient-source` are the integral-direct demo's alone
@@ -539,14 +606,15 @@ file so the goldens do not grow for every reader that does not want them.
 What it holds, which cases carry one, and how it is generated are in
 [`reference-data.md`](reference-data.md), "The gradient sidecar" and "The
 numerical gradient"; the inventory it implements is
-[`gradient-theory.md`](gradient-theory.md), §3.3 and §3.5. Only the unit tier
-reads it so far.
+[`gradient-theory.md`](gradient-theory.md), §3.3 and §3.5. `--kappa-full` is
+what reads it — the core, virtual and mixed blocks of `Y` are exactly what
+those arrays are for — and only the cases that carry one can run that check.
 
 ## 9. Where the numbers are
 
 | you want | read |
 |---|---|
-| the identities' residuals, the finite-difference plateaus and the step at which round-off takes over, per case, with card and flags | [`testing.md`](testing.md), "The SC pseudodensity identities", "The SC tangent's finite-difference cross-check", "The active-rotation source term", "The CI source term's forward-reverse duality" |
+| the identities' residuals, the finite-difference plateaus and the step at which round-off takes over, per case, with card and flags | [`testing.md`](testing.md), "The SC pseudodensity identities", "The SC tangent's finite-difference cross-check", "The active-rotation source term", "The full orbital source term", "The CI source term's forward-reverse duality" |
 | which ctest entries check the PC tangent, their gate values and what they cost | [`testing.md`](testing.md), "The PC tangent against a finite difference" |
 | the PC tangent's ratios, residuals, step constraints and crossover | [`pc-nevpt2.md`](pc-nevpt2.md), "The tangent with respect to the CI vector" |
 | what the tangent build costs, and the tile floors it needs | [`performance.md`](performance.md), "The tangent RDM build (`--rdm-tangent`)", "Tile floors", "`--tiles` on the CI source term (`--gradient-source`)" |

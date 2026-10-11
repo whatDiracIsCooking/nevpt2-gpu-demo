@@ -5,16 +5,18 @@
 # --gradient-source, the CI source term's forward-reverse duality check.
 
 # nevpt2.sc_amplitudes -- the amplitude T, the multipliers P/Q/R (Park Eqs.
-# 12, 36-38) and the einsum-subscript rewriting that turns a class term into
-# its own derivative. Pure host arithmetic and string handling, so the unit
-# tier tests it card-free (test/gradient/); nevpt2.gradient re-exports it.
+# 12, 36-38), the pseudocanonical multipliers z^c (Eqs. 56-57) and the
+# einsum-subscript rewriting that turns a class term into its own derivative.
+# Pure host arithmetic and string handling, so the unit tier tests it
+# card-free (test/gradient/); nevpt2.gradient re-exports it.
 # nevpt2::energy_finish is where NUMERICAL_ZERO and normToEnergy (whose
 # division the amplitude IS) live -- and, like it, this needs no GPU.
+# error_handling is PUBLIC because Eqs. 56-57 hand back a Result: a
+# degeneracy their division cannot resolve is a numerical refusal.
 add_cxx_module_library(
   NAME nevpt2.sc_amplitudes
   PRIMARY_INTERFACE sc_amplitudes.cppm
-  LINK_PUBLIC nevpt2::energy_finish
-  LINK_PRIVATE nevpt2::error_handling
+  LINK_PUBLIC nevpt2::energy_finish nevpt2::error_handling
 )
 
 # nevpt2.kappa_rotation -- the orbital-rotation parameterisation, host side:
@@ -36,12 +38,15 @@ add_cxx_module_library(
 # IntegralSource, and build the metric / Dyall-Hamiltonian blocks with its own
 # exported make_* functions), and runs entirely through nevpt2.einsum's
 # generic contraction kernel, which nevpt2.energy re-exports -- so there is no
-# device library of its own here. The five internal partitions, which no
-# importer sees, are nevpt2.gradient:rotation (gradient_rotation.cppm, the
-# active-rotation machinery -- :terms imports it, so it is listed first),
-# :terms (the generic term/derivative machinery), :sc_classes (the eight
-# classes), :rdm_adjoint (the chain rule from the metric / Dyall blocks down
-# to the five RDMs) and :ci_source (Park Eq. 48's sigma assembly).
+# device library of its own here. The SIX internal partitions, which no
+# importer sees, are nevpt2.gradient:general (gradient_general.cppm -- the
+# per-block promotion table and the general-range action a core/virtual/mixed
+# rotation needs, which :rotation builds on), :rotation
+# (gradient_rotation.cppm, the rotation machinery), :terms (the generic
+# term/derivative machinery), :sc_classes (the eight classes), :rdm_adjoint
+# (the chain rule from the metric / Dyall blocks down to the five RDMs) and
+# :ci_source (Park Eq. 48's sigma assembly). PARTITIONS is in dependency
+# order.
 #
 # nevpt2::sigma_vector is PUBLIC: scCiSourceDevice takes its
 # SigmaVectorOptions, and the CI source term IS its three sigma entry points
@@ -50,8 +55,8 @@ add_cxx_module_library(
 add_cxx_module_library(
   NAME nevpt2.gradient
   PRIMARY_INTERFACE gradient.cppm
-  PARTITIONS gradient_rotation.cppm gradient_terms.cppm gradient_sc_classes.cppm
-             gradient_rdm_adjoint.cppm gradient_ci_source.cppm
+  PARTITIONS gradient_general.cppm gradient_rotation.cppm gradient_terms.cppm
+             gradient_sc_classes.cppm gradient_rdm_adjoint.cppm gradient_ci_source.cppm
   IMPLEMENTATION gradient.cpp
   LINK_PUBLIC nevpt2::energy nevpt2::sc_amplitudes nevpt2::sigma_vector
 )
