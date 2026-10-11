@@ -104,9 +104,7 @@ void gradientSr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
     };
     // Delta_t = eps_r, as a function of the orbital energies: read at the
     // real ones for the multipliers, and at `deps` for their response.
-    const auto deltaOf = [&](const Tensor&, const Tensor& ev) {
-      return sliceHost(ev, b0, b1);
-    };
+    const auto deltaOf = [&](const Tensor&, const Tensor& ev) { return srDelta(b0, b1, ev); };
     const std::vector<double> delta = deltaOf(hostECore, hostEVirt);
     assembleSlab(
         normTerms, hTerms, {b1 - b0}, {&slab, &h1e_v}, dActive,
@@ -187,11 +185,7 @@ void gradientSi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
         {"pi,pa,ai->i", {g1, {&a25, kScActive}, g1}, 1.0},
     };
     // Delta_t = -eps_i.
-    const auto deltaOf = [&](const Tensor& ec, const Tensor&) {
-      std::vector<double> d = sliceHost(ec, b0, b1);
-      for (double& x : d) x = -x;
-      return d;
-    };
+    const auto deltaOf = [&](const Tensor& ec, const Tensor&) { return siDelta(b0, b1, ec); };
     const std::vector<double> delta = deltaOf(hostECore, hostEVirt);
     assembleSlab(
         normTerms, hTerms, {b1 - b0}, {&slab, &h1e_v}, dActive,
@@ -268,14 +262,7 @@ void gradientSijrs(IntegralSource& src, int64_t batch, const Tensor& hostECore,
     // energies (assembleSlab's `deltaOf`, written out here because this class
     // does not go through it).
     const auto deltaOf = [&](const Tensor& ec, const Tensor& ev) {
-      std::vector<double> d;
-      d.reserve(static_cast<std::size_t>(hostNorm.size()));
-      for (int64_t i = b0; i < b1; ++i)
-        for (int64_t a = 0; a < nvirt; ++a)
-          for (int64_t j = 0; j < ncore; ++j)
-            for (int64_t b = 0; b < nvirt; ++b)
-              d.push_back(ev(a) + ev(b) - ec(i) - ec(j));
-      return d;
+      return sijrsDelta(b0, b1, ncore, nvirt, ec, ev);
     };
     const std::vector<double> delta = deltaOf(hostECore, hostEVirt);
     const std::vector<double> noH(delta.size(), 0.0);
@@ -310,65 +297,9 @@ void gradientSijrs(IntegralSource& src, int64_t batch, const Tensor& hostECore,
 
 // --- Sijr: a virtual and a symmetrized core pair ----------------------------
 
-// The symmetrization and triangular packing of nevpt2.energy's energy_Sijr,
-// verbatim, plus the scatter back. The perturbers are (r, j <= i); the weight
-// that multiplies the RAW normT(r, j, i) is that perturber's, and (r, j, i)
-// and (r, i, j) are the same perturber, so the scattered array is symmetric
-// in (j, i) -- which is exactly what makes
-//   sum_{r,j,i} Pfull(r,j,i) normT(r,j,i) == sum_perturbers P normSym
-// hold, the diagonal included (normSym(r,i,i) is normT(r,i,i) after its 1/2).
-// Delta_t = eps_r - eps_i - eps_j over the (r, j <= i) triangle, in the order
-// the packing below walks it: the class's `deltaOf`, so that the same formula
-// at the orbital energies' response is Deltadot and lines up with the
-// triangle's own R multipliers.
-std::vector<double> sijrDelta(int64_t nr, int64_t ncore, int64_t b0, const Tensor& ec,
-                              const Tensor& ev) {
-  std::vector<double> out;
-  out.reserve(static_cast<std::size_t>(nr * ncore * (ncore + 1) / 2));
-  for (int64_t r = 0; r < nr; ++r)
-    for (int64_t j = 0; j < ncore; ++j)
-      for (int64_t i = j; i < ncore; ++i) out.push_back(ev(b0 + r) - ec(j) - ec(i));
-  return out;
-}
-
-ScSlabMultipliers sijrMultipliers(const Tensor& normT, const Tensor& hT, int64_t b0,
-                                  const Tensor& hostECore, const Tensor& hostEVirt) {
-  const int64_t nr = normT.dim(0), ncore = normT.dim(1);
-  Tensor normSym({nr, ncore, ncore}), hSym({nr, ncore, ncore});
-  for (int64_t r = 0; r < nr; ++r)
-    for (int64_t j = 0; j < ncore; ++j)
-      for (int64_t i = 0; i < ncore; ++i) {
-        normSym(r, j, i) = normT(r, j, i) + normT(r, i, j);
-        hSym(r, j, i) = hT(r, j, i) + hT(r, i, j);
-      }
-  for (int64_t r = 0; r < nr; ++r)
-    for (int64_t kk = 0; kk < ncore; ++kk) {
-      normSym(r, kk, kk) *= 0.5;
-      hSym(r, kk, kk) *= 0.5;
-    }
-  std::vector<double> normTri, hTri;
-  for (int64_t r = 0; r < nr; ++r)
-    for (int64_t j = 0; j < ncore; ++j)
-      for (int64_t i = j; i < ncore; ++i) {
-        normTri.push_back(normSym(r, j, i));
-        hTri.push_back(hSym(r, j, i));
-      }
-  const ScMultipliers m =
-      scMultipliers(normTri, hTri, sijrDelta(nr, ncore, b0, hostECore, hostEVirt));
-  Tensor p({nr, ncore, ncore}), q({nr, ncore, ncore});
-  std::size_t k = 0;
-  for (int64_t r = 0; r < nr; ++r)
-    for (int64_t j = 0; j < ncore; ++j)
-      for (int64_t i = j; i < ncore; ++i, ++k) {
-        p(r, j, i) = m.p[k];
-        p(r, i, j) = m.p[k];
-        q(r, j, i) = m.q[k];
-        q(r, i, j) = m.q[k];
-      }
-  // `r` stays in the triangle's own order: it multiplies Deltadot, which
-  // sijrDelta builds there too.
-  return ScSlabMultipliers{std::move(p), std::move(q), m.r, m.norm, m.energy};
-}
+// Its Delta vector and its symmetrized multipliers -- energy_Sijr's
+// symmetrization and triangular packing plus the scatter back (sijrDelta,
+// sijrMultipliers) -- are nevpt2.gradient_plan's, pinned card-free there.
 
 void gradientSijr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                   const Tensor& hostECore, const Tensor& hostEVirt, const DeviceTensor& dm1,
@@ -434,56 +365,10 @@ void gradientSijr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
 
 // --- Srsi: a symmetrized virtual pair and a core index ----------------------
 
-// energy_Srsi's symmetrization and packing, verbatim, plus the scatter back --
-// as sijrMultipliers, but over the whole (r, s, i) and symmetric in (r, s).
-// Delta_t = eps_r + eps_s - eps_i over the (r <= s, i) triangle, in the
-// packing order below -- sijrDelta's counterpart, and the class's `deltaOf`.
-std::vector<double> srsiDelta(int64_t nvirt, int64_t ncore, const Tensor& ec,
-                              const Tensor& ev) {
-  std::vector<double> out;
-  out.reserve(static_cast<std::size_t>(nvirt * (nvirt + 1) / 2 * ncore));
-  for (int64_t r = 0; r < nvirt; ++r)
-    for (int64_t ss = r; ss < nvirt; ++ss)
-      for (int64_t i = 0; i < ncore; ++i) out.push_back(ev(r) + ev(ss) - ec(i));
-  return out;
-}
-
-ScSlabMultipliers srsiMultipliers(const Tensor& normT, const Tensor& hT,
-                                   const Tensor& hostECore, const Tensor& hostEVirt) {
-  const int64_t nvirt = normT.dim(0), ncore = normT.dim(2);
-  Tensor normSym({nvirt, nvirt, ncore}), hSym({nvirt, nvirt, ncore});
-  for (int64_t r = 0; r < nvirt; ++r)
-    for (int64_t ss = 0; ss < nvirt; ++ss)
-      for (int64_t i = 0; i < ncore; ++i) {
-        normSym(r, ss, i) = normT(r, ss, i) + normT(ss, r, i);
-        hSym(r, ss, i) = hT(r, ss, i) + hT(ss, r, i);
-      }
-  for (int64_t r = 0; r < nvirt; ++r)
-    for (int64_t i = 0; i < ncore; ++i) {
-      normSym(r, r, i) *= 0.5;
-      hSym(r, r, i) *= 0.5;
-    }
-  std::vector<double> normTri, hTri;
-  for (int64_t r = 0; r < nvirt; ++r)
-    for (int64_t ss = r; ss < nvirt; ++ss)
-      for (int64_t i = 0; i < ncore; ++i) {
-        normTri.push_back(normSym(r, ss, i));
-        hTri.push_back(hSym(r, ss, i));
-      }
-  const ScMultipliers m =
-      scMultipliers(normTri, hTri, srsiDelta(nvirt, ncore, hostECore, hostEVirt));
-  Tensor p({nvirt, nvirt, ncore}), q({nvirt, nvirt, ncore});
-  std::size_t k = 0;
-  for (int64_t r = 0; r < nvirt; ++r)
-    for (int64_t ss = r; ss < nvirt; ++ss)
-      for (int64_t i = 0; i < ncore; ++i, ++k) {
-        p(r, ss, i) = m.p[k];
-        p(ss, r, i) = m.p[k];
-        q(r, ss, i) = m.q[k];
-        q(ss, r, i) = m.q[k];
-      }
-  return ScSlabMultipliers{std::move(p), std::move(q), m.r, m.norm, m.energy};
-}
+// Its Delta vector and its symmetrized multipliers -- energy_Srsi's
+// symmetrization and packing plus the scatter back, symmetric in (r, s)
+// (srsiDelta, srsiMultipliers) -- are nevpt2.gradient_plan's, pinned
+// card-free there.
 
 // Its own term list, built per slab from the two slabs: the operands' roles
 // (`ga` the straight block, `gb` the one read with (r, s) swapped) are what
@@ -657,11 +542,7 @@ void gradientSrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
     };
     // Delta_t = eps_r + eps_s.
     const auto deltaOf = [&](const Tensor&, const Tensor& ev) {
-      std::vector<double> d;
-      d.reserve(static_cast<std::size_t>((b1 - b0) * nvirt));
-      for (int64_t r = b0; r < b1; ++r)
-        for (int64_t ss = 0; ss < nvirt; ++ss) d.push_back(ev(r) + ev(ss));
-      return d;
+      return srsDelta(b0, b1, nvirt, ev);
     };
     const std::vector<double> delta = deltaOf(hostECore, hostEVirt);
     assembleSlab(
@@ -763,11 +644,7 @@ void gradientSij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
     };
     // Delta_t = -(eps_i + eps_j).
     const auto deltaOf = [&](const Tensor& ec, const Tensor&) {
-      std::vector<double> d;
-      d.reserve(static_cast<std::size_t>((b1 - b0) * ncore));
-      for (int64_t i = b0; i < b1; ++i)
-        for (int64_t j = 0; j < ncore; ++j) d.push_back(-(ec(i) + ec(j)));
-      return d;
+      return sijDelta(b0, b1, ncore, ec);
     };
     const std::vector<double> delta = deltaOf(hostECore, hostEVirt);
     assembleSlab(
@@ -860,11 +737,7 @@ void gradientSir(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
     };
     // Delta_t = eps_r - eps_i, over (c, nr) -- the terms' own output order.
     const auto deltaOf = [&](const Tensor& ec, const Tensor& ev) {
-      std::vector<double> d;
-      d.reserve(static_cast<std::size_t>(ncore * (b1 - b0)));
-      for (int64_t i = 0; i < ncore; ++i)
-        for (int64_t r = b0; r < b1; ++r) d.push_back(ev(r) - ec(i));
-      return d;
+      return sirDelta(b0, b1, ncore, ec, ev);
     };
     const std::vector<double> delta = deltaOf(hostECore, hostEVirt);
     // h1e_v (v, c) carries no active index, and neither does the hoisted

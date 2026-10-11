@@ -19,6 +19,20 @@ add_cxx_module_library(
   LINK_PUBLIC nevpt2::energy_finish nevpt2::error_handling
 )
 
+# nevpt2.gradient_plan -- the device assembly's pure host arithmetic, pulled
+# out of nevpt2.gradient's internal partitions (which no test can import) the
+# way nevpt2.rdm_plan was pulled out of the RDM build: the promotion table
+# (rotBlockInfo, activeAxesOf, spanOf, generalPickPlan, promotionPlan), the
+# eight classes' Delta vectors and the two symmetrized classes' slab
+# multipliers, termHasActive, and the CI source term's host folding. No GPU,
+# so the unit tier tests it card-free (test/gradient_plan/); nevpt2.gradient
+# re-exports it.
+add_cxx_module_library(
+  NAME nevpt2.gradient_plan
+  PRIMARY_INTERFACE gradient_plan.cppm
+  LINK_PUBLIC nevpt2::tensor nevpt2::sc_amplitudes nevpt2::error_handling
+)
+
 # nevpt2.kappa_rotation -- the orbital-rotation parameterisation, host side:
 # an antisymmetric kappa, exp(kappa), and the transformation an orthogonal U
 # induces on one array's active axes. No device either, so the unit tier
@@ -40,7 +54,8 @@ add_cxx_module_library(
 # generic contraction kernel, which nevpt2.energy re-exports -- so there is no
 # device library of its own here. The SIX internal partitions, which no
 # importer sees, are nevpt2.gradient:general (gradient_general.cppm -- the
-# per-block promotion table and the general-range action a core/virtual/mixed
+# promotion table, from nevpt2.gradient_plan, read against the sidecar's
+# device arrays, and the general-range action a core/virtual/mixed
 # rotation needs, which :rotation builds on), :rotation
 # (gradient_rotation.cppm, the rotation machinery), :terms (the generic
 # term/derivative machinery), :sc_classes (the eight classes), :rdm_adjoint
@@ -58,7 +73,8 @@ add_cxx_module_library(
   PARTITIONS gradient_general.cppm gradient_rotation.cppm gradient_terms.cppm
              gradient_sc_classes.cppm gradient_rdm_adjoint.cppm gradient_ci_source.cppm
   IMPLEMENTATION gradient.cpp
-  LINK_PUBLIC nevpt2::energy nevpt2::sc_amplitudes nevpt2::sigma_vector
+  LINK_PUBLIC nevpt2::energy nevpt2::sc_amplitudes nevpt2::gradient_plan
+              nevpt2::sigma_vector
 )
 
 # nevpt2.pc_tangent -- the finite-difference check of PC-NEVPT2's CI-vector

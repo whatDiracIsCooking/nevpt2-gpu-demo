@@ -130,196 +130,64 @@ void addTensorInto(const DeviceTensor& x, const DeviceTensor& out, wwrStream_t s
   deviceTransposeAccum(x, axes, out, 1.0, stream);
 }
 
-// The three orbital spaces of the NEVPT2 partition, in the order the
-// sidecar's general index runs: core, then active, then virtual.
-enum class RotSpace { Core, Act, Virt };
-
-// Every array a class hands to assembleSlab as one of its `blocks`, plus the
-// two active-space integral blocks every Dyall block is built from. The
-// rotation's whole per-block knowledge is keyed by this.
-enum class RotBlock {
-  Sr,       // h2e_v_Sr      (v, a, a, a)
-  Si,       // h2e_v_Si      (a, a, c, a)
-  Sijrs,    // cvcv          (c, v, c, v) -- chemists' order, roles on other axes
-  Sijr,     // h2e_v_Sijr    (v, a, c, c)
-  Srsi,     // h2e_v_Srsi    (v, v, c, a)
-  SrsiT,    // the same array, batched along its second axis
-  Srs,      // h2e_v_Srs     (v, v, a, a)
-  Sij,      // h2e_v_Sij     (a, a, c, c)
-  Sir1,     // h2e_v1_Sir    (v, a, c, a)
-  Sir2,     // h2e_v2_Sir    (v, a, a, c)
-  H1eSr,    // h1e_v_Sr      (v, c) -- h^eff[v,a] - sum_b (rb|bt)
-  H1eSi,    // h1e_v_Si      (a, c)
-  H1eSir,   // h1e_v_Sir     (v, c)
-  V2tr,     // the hoisted trace sum_a h2e_v2_Sir[r,a,a,i] -- DERIVED, see below
-  H1e,      // h1e           (a, a) = h^eff[a,a]
-  H2e,      // h2e           (a, a, a, a)
-};
-
-// One slot of a two-electron block: which space its index runs over, and
-// which storage axis holds it.
-struct RotRole {
-  RotSpace space = RotSpace::Act;
-  int axis = 0;
-};
-
-// A block's rotation recipe. `rank` is 4 for a two-electron block, 2 for a
-// one-electron (h^eff) one and 0 for V2tr, which is DERIVED from Sir2's own
-// tangent (sum_a Xdot[r,a,a,i]) rather than promoted: an einsum cannot write
-// the repeated label its promotion would need, and the trace of the
-// intra-active promotions against an antisymmetric kappa cancels exactly, so
-// what is left is exactly the trace of the general part (:terms' slabDots
-// takes it there).
-struct RotBlockInfo {
-  int rank = 4;
-  std::array<RotRole, 4> roles{};  // p, q, r, s; only p, q when rank == 2
-  bool trace = false;              // h1e_v_Sr's -sum_b (rb|bt)
-};
-
-// The table. Every two-electron row is read straight off nevpt2.energy's
-// layout comment and generate_golden.py's `_integral_blocks` slice: the roles
-// are assigned so that X[p,q,r,s] == (p r | q s), which holds for every block
-// on its storage axes in order -- and for `cvcv`, stored as the chemists'
-// (i r | j s), with q and r swapped onto axes 2 and 1.
-RotBlockInfo rotBlockInfo(RotBlock b) {
-  using S = RotSpace;
-  const auto four = [](S p, S q, S r, S s) {
-    return RotBlockInfo{4, {RotRole{p, 0}, RotRole{q, 1}, RotRole{r, 2}, RotRole{s, 3}}, false};
-  };
-  const auto one = [](S p, S q, bool trace) {
-    return RotBlockInfo{2, {RotRole{p, 0}, RotRole{q, 1}, RotRole{}, RotRole{}}, trace};
-  };
-  switch (b) {
-    case RotBlock::Sr: return four(S::Virt, S::Act, S::Act, S::Act);
-    case RotBlock::Si: return four(S::Act, S::Act, S::Core, S::Act);
-    // (i r | j s): p and r are the first distribution (axes 0 and 1), q and s
-    // the second (axes 2 and 3).
-    case RotBlock::Sijrs:
-      return RotBlockInfo{4,
-                          {RotRole{S::Core, 0}, RotRole{S::Core, 2}, RotRole{S::Virt, 1},
-                           RotRole{S::Virt, 3}},
-                          false};
-    case RotBlock::Sijr: return four(S::Virt, S::Act, S::Core, S::Core);
-    case RotBlock::Srsi:
-    case RotBlock::SrsiT: return four(S::Virt, S::Virt, S::Core, S::Act);
-    case RotBlock::Srs: return four(S::Virt, S::Virt, S::Act, S::Act);
-    case RotBlock::Sij: return four(S::Act, S::Act, S::Core, S::Core);
-    case RotBlock::Sir1: return four(S::Virt, S::Act, S::Core, S::Act);
-    case RotBlock::Sir2: return four(S::Virt, S::Act, S::Act, S::Core);
-    case RotBlock::H1eSr: return one(S::Virt, S::Act, /*trace=*/true);
-    case RotBlock::H1eSi: return one(S::Act, S::Core, false);
-    case RotBlock::H1eSir: return one(S::Virt, S::Core, false);
-    case RotBlock::V2tr: return RotBlockInfo{0, {}, false};
-    case RotBlock::H1e: return one(S::Act, S::Act, false);
-    case RotBlock::H2e: return four(S::Act, S::Act, S::Act, S::Act);
-  }
-  return RotBlockInfo{};
-}
-
-// The axes of `b` that carry an ACTIVE index, ascending -- the ones #36's
-// intra-active action (:rotation's kappaActionDevice) covers, and the ones a
-// purely active rotation is the whole story for. Read off the same table, so
-// the two halves of the action cannot disagree about which axis is which.
-std::vector<int> activeAxesOf(RotBlock b) {
-  const RotBlockInfo info = rotBlockInfo(b);
-  std::vector<int> axes;
-  for (int k = 0; k < info.rank; ++k)
-    if (info.roles[static_cast<std::size_t>(k)].space == RotSpace::Act)
-      axes.push_back(info.roles[static_cast<std::size_t>(k)].axis);
-  std::sort(axes.begin(), axes.end());
-  return axes;
-}
-
-// The ten two-electron rows above are nevpt2.energy's ExtBlock values one for
-// one, by name; a class names its blocks by RotBlock directly (the kinds list
-// it hands assembleSlab), so no ExtBlock -> RotBlock conversion is needed
-// anywhere.
-
-const char* rotBlockName(RotBlock b) {
-  switch (b) {
-    case RotBlock::Sr: return "h2e_v_Sr";
-    case RotBlock::Si: return "h2e_v_Si";
-    case RotBlock::Sijrs: return "cvcv";
-    case RotBlock::Sijr: return "h2e_v_Sijr";
-    case RotBlock::Srsi: return "h2e_v_Srsi";
-    case RotBlock::SrsiT: return "h2e_v_Srsi(T)";
-    case RotBlock::Srs: return "h2e_v_Srs";
-    case RotBlock::Sij: return "h2e_v_Sij";
-    case RotBlock::Sir1: return "h2e_v1_Sir";
-    case RotBlock::Sir2: return "h2e_v2_Sir";
-    case RotBlock::H1eSr: return "h1e_v_Sr";
-    case RotBlock::H1eSi: return "h1e_v_Si";
-    case RotBlock::H1eSir: return "h1e_v_Sir";
-    case RotBlock::V2tr: return "v2tr";
-    case RotBlock::H1e: return "h1e";
-    case RotBlock::H2e: return "h2e";
-  }
-  return "?";
-}
+// The promotion table itself -- RotSpace, RotBlock, rotBlockInfo,
+// activeAxesOf, rotBlockName, generalPickPlan, promotionPlan -- is pure host
+// arithmetic and lives in nevpt2.gradient_plan (gradient_plan.cppm), where
+// the unit tier pins it card-free (test/gradient_plan/). This partition is
+// what reads it against the sidecar's device arrays.
 
 // --- the sidecar's arrays, by what a promotion asks for ----------------------
 
 // `[lo, hi)` of the sidecar's general index for one space.
 std::pair<int64_t, int64_t> spanOf(const GeneralIntegralsDevice& gen, RotSpace s) {
-  switch (s) {
-    case RotSpace::Core: return {0, gen.ncore};
-    case RotSpace::Act: return {gen.ncore, gen.ncore + gen.nact};
-    case RotSpace::Virt: return {gen.ncore + gen.nact, gen.nmo()};
-  }
-  return {0, 0};
+  return spanOf(gen.ncore, gen.nact, gen.nvirt, s);
 }
 
-// One promotion's source: `g_xP_QR` and whether its last two axes hold (R, Q)
-// rather than (Q, R) -- the integral's (q r) <-> (r q) symmetry, used to
-// normalise the second charge distribution onto one of the five stored
-// orderings.
+// The sidecar array a GeneralPickPlan names.
+const DeviceTensor& generalArray(const GeneralIntegralsDevice& gen, GeneralArray a) {
+  switch (a) {
+    case GeneralArray::XaAa: return gen.g_xa_aa;
+    case GeneralArray::XvAa: return gen.g_xv_aa;
+    case GeneralArray::XcAa: return gen.g_xc_aa;
+    case GeneralArray::XaVa: return gen.g_xa_va;
+    case GeneralArray::XvVa: return gen.g_xv_va;
+    case GeneralArray::XcVa: return gen.g_xc_va;
+    case GeneralArray::XaCa: return gen.g_xa_ca;
+    case GeneralArray::XvCa: return gen.g_xv_ca;
+    case GeneralArray::XcCa: return gen.g_xc_ca;
+    case GeneralArray::XaCv: return gen.g_xa_cv;
+    case GeneralArray::XvCv: return gen.g_xv_cv;
+    case GeneralArray::XcCv: return gen.g_xc_cv;
+    case GeneralArray::XaCc: return gen.g_xa_cc;
+    case GeneralArray::XvCc: return gen.g_xv_cc;
+  }
+  return gen.g_xa_aa;
+}
+
+// One promotion's source: the array generalPickPlan picks, and whether its
+// last two axes hold (R, Q) rather than (Q, R).
 struct GeneralPick {
   const DeviceTensor* g = nullptr;
   bool swap = false;
 };
 
-// `(x p | q r)` for the three spaces asked for. The five stored (Q, R) groups
-// are (a,a), (v,a), (c,a), (c,v) and (c,c); (v,v) is never asked for (no
-// class puts two virtuals in one charge distribution, which is also why
-// Sec. 3.4's `(xv|vv)` is absent), and (c,c) is stored for P in {a, v} only
-// (Sec. 3.3: every route to a third free core label runs through a tied pair).
-// Both of those are OUR bug if they are ever reached -- the table above, not
-// the caller's input -- so they abort.
+// `(x p | q r)` for the three spaces asked for (generalPickPlan has the
+// rule). The two combinations no class can reach -- (v,v) in one
+// distribution, and (c,c) with P = c -- are OUR bug if they are ever asked
+// for (the table, not the caller's input), so they abort.
 GeneralPick generalPick(const GeneralIntegralsDevice& gen, RotSpace p, RotSpace q, RotSpace r,
                         std::source_location loc = std::source_location::current()) {
-  using S = RotSpace;
-  // Normalise the second distribution.
-  bool swap = false;
-  if ((q == S::Act && r == S::Virt) || (q == S::Act && r == S::Core) ||
-      (q == S::Virt && r == S::Core)) {
-    std::swap(q, r);
-    swap = true;
-  }
-  const DeviceTensor* g = nullptr;
-  if (q == S::Act && r == S::Act)
-    g = p == S::Act ? &gen.g_xa_aa : (p == S::Virt ? &gen.g_xv_aa : &gen.g_xc_aa);
-  else if (q == S::Virt && r == S::Act)
-    g = p == S::Act ? &gen.g_xa_va : (p == S::Virt ? &gen.g_xv_va : &gen.g_xc_va);
-  else if (q == S::Core && r == S::Act)
-    g = p == S::Act ? &gen.g_xa_ca : (p == S::Virt ? &gen.g_xv_ca : &gen.g_xc_ca);
-  else if (q == S::Core && r == S::Virt)
-    g = p == S::Act ? &gen.g_xa_cv : (p == S::Virt ? &gen.g_xv_cv : &gen.g_xc_cv);
-  else if (q == S::Core && r == S::Core && p != S::Core)
-    g = p == S::Act ? &gen.g_xa_cc : &gen.g_xv_cc;
-  if (g == nullptr)
+  const std::optional<GeneralPickPlan> pl = generalPickPlan(p, q, r);
+  if (!pl)
     check(false,
           "generalPick: the gradient sidecar carries no such one-general-index array "
           "(docs/gradient-theory.md, Sec. 3.3) -- the promotion table asked for one of the "
           "two arrays no class can reach",
           loc);
-  return GeneralPick{g, swap};
+  return GeneralPick{&generalArray(gen, pl->array), pl->swap};
 }
 
 // --- the general action on one block ----------------------------------------
-
-// The label each storage axis of a block carries; `z` is the promoted
-// (general) index and `m` the one a dressing term contracts over.
-constexpr std::string_view kAxisLabels = "ijkl";
 
 // Accumulates the general-range part of `dkappa`'s action on a two-electron
 // block into `out` (shaped like the block): one einsum per slot, over the
@@ -334,29 +202,13 @@ constexpr std::string_view kAxisLabels = "ijkl";
 template <class KappaFn>
 void accumGeneralTwoElectron(RotBlock b, const GeneralIntegralsDevice& gen, KappaFn&& kappaFor,
                              const DeviceTensor& out, wwrStream_t stream) {
-  // Which role is the promoted slot's partner in its charge distribution, and
-  // which two roles are the other distribution: p -> (r; q, s), q -> (s; p,
-  // r), r -> (p; q, s), s -> (q; p, r).
-  static constexpr int kPartner[4] = {2, 3, 0, 1};
-  static constexpr int kSecond[4][2] = {{1, 3}, {0, 2}, {1, 3}, {0, 2}};
-  const RotBlockInfo info = rotBlockInfo(b);
+  // promotionPlan (nevpt2.gradient_plan) has the slot bookkeeping: the
+  // promoted slot's partner, the other distribution, the array, its labels.
   for (int slot = 0; slot < 4; ++slot) {
-    const RotRole prom = info.roles[static_cast<std::size_t>(slot)];
-    const RotRole partner = info.roles[static_cast<std::size_t>(kPartner[slot])];
-    const RotRole second0 = info.roles[static_cast<std::size_t>(kSecond[slot][0])];
-    const RotRole second1 = info.roles[static_cast<std::size_t>(kSecond[slot][1])];
-    const GeneralPick pick = generalPick(gen, partner.space, second0.space, second1.space);
-    std::string subs = "z";
-    subs += kAxisLabels[static_cast<std::size_t>(partner.axis)];
-    const int firstAxis = pick.swap ? second1.axis : second0.axis;
-    const int lastAxis = pick.swap ? second0.axis : second1.axis;
-    subs += kAxisLabels[static_cast<std::size_t>(firstAxis)];
-    subs += kAxisLabels[static_cast<std::size_t>(lastAxis)];
-    subs += ",z";
-    subs += kAxisLabels[static_cast<std::size_t>(prom.axis)];
-    subs += "->";
-    subs += kAxisLabels;
-    deviceEinsumAccum(subs, {pick.g, kappaFor(prom.space)}, out, 1.0, stream);
+    const PromotionPlan pl = promotionPlan(b, slot);
+    deviceEinsumAccum(promotionSubscripts(pl),
+                      {&generalArray(gen, pl.pick.array), kappaFor(pl.promoted.space)}, out, 1.0,
+                      stream);
   }
 }
 
@@ -570,25 +422,18 @@ double relativeResidual(const DeviceTensor& a, const DeviceTensor& b,
 double restrictionResidual4(RotBlock b, const GeneralIntegralsDevice& gen,
                             const DeviceTensor& stored, const DeviceResources& res,
                             std::string& where) {
-  static constexpr int kPartner[4] = {2, 3, 0, 1};
-  static constexpr int kSecond[4][2] = {{1, 3}, {0, 2}, {1, 3}, {0, 2}};
   static constexpr std::string_view kSlotName = "pqrs";
-  const RotBlockInfo info = rotBlockInfo(b);
   double worst = 0.0;
   for (int slot = 0; slot < 4; ++slot) {
-    const RotRole prom = info.roles[static_cast<std::size_t>(slot)];
-    const RotRole partner = info.roles[static_cast<std::size_t>(kPartner[slot])];
-    const RotRole second0 = info.roles[static_cast<std::size_t>(kSecond[slot][0])];
-    const RotRole second1 = info.roles[static_cast<std::size_t>(kSecond[slot][1])];
-    const GeneralPick pick = generalPick(gen, partner.space, second0.space, second1.space);
-    const auto [lo, hi] = spanOf(gen, prom.space);
-    const DeviceTensor rows = sliceAxis(*pick.g, 0, lo, hi);
+    const PromotionPlan pl = promotionPlan(b, slot);
+    const auto [lo, hi] = spanOf(gen, pl.promoted.space);
+    const DeviceTensor rows = sliceAxis(generalArray(gen, pl.pick.array), 0, lo, hi);
     // The same labels the rule's einsum gives the source, with the general
     // index now carrying the promoted slot's own label.
-    std::string subs(1, kAxisLabels[static_cast<std::size_t>(prom.axis)]);
-    subs += kAxisLabels[static_cast<std::size_t>(partner.axis)];
-    subs += kAxisLabels[static_cast<std::size_t>(pick.swap ? second1.axis : second0.axis)];
-    subs += kAxisLabels[static_cast<std::size_t>(pick.swap ? second0.axis : second1.axis)];
+    std::string subs(1, kAxisLabels[static_cast<std::size_t>(pl.promoted.axis)]);
+    subs += kAxisLabels[static_cast<std::size_t>(pl.partner.axis)];
+    subs += kAxisLabels[static_cast<std::size_t>(pl.firstAxis)];
+    subs += kAxisLabels[static_cast<std::size_t>(pl.lastAxis)];
     subs += "->";
     subs += kAxisLabels;
     DeviceTensor rebuilt = deviceEinsumNew(subs, {&rows}, 1.0, res);

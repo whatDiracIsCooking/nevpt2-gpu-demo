@@ -76,6 +76,11 @@ export import nevpt2.energy;
 // Re-exported: ScMultipliers and the amplitudes are this module's own first
 // deliverable, and its host-only half.
 export import nevpt2.sc_amplitudes;
+// Re-exported: the promotion table, the per-class Delta vectors and slab
+// multipliers, the term classification and the CI source term's host
+// folding -- the device assembly's pure host arithmetic, its own module so
+// the unit tier reaches it card-free. Every internal partition reads it.
+export import nevpt2.gradient_plan;
 // Re-exported: scCiSourceDevice's SigmaVectorOptions, and the three sigma
 // entry points the CI source term IS, once the pseudodensities are swept down
 // to the RDMs (Park Eq. 48).

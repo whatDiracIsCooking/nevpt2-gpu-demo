@@ -20,17 +20,16 @@ import nevpt2.gradient;
 // one, and the ScGDot pairing of an active block with its own tangent: the
 // rotation machinery assembleSlab pairs and differentiates along.
 import :rotation;
-// The promotion table (RotBlock, activeAxesOf), the general-range action a
-// slab's tangent adds when a direction came with a sidecar, and addTensorInto.
+// The general-range action a slab's tangent adds when a direction came with a
+// sidecar (read off nevpt2.gradient_plan's promotion table), and
+// addTensorInto.
 import :general;
 
 namespace nevpt2 {
 
-// An ScTerm operand's role: one of the class's external integral blocks (the
-// index into the class's block list) or the active-space block the term
-// contracts them against.
-inline constexpr int kScActive = -1;
-
+// An ScTerm operand: a tensor and its role, one of the class's external
+// integral blocks (the index into the class's block list) or the active-space
+// block (nevpt2.gradient_plan's kScActive) the term contracts them against.
 struct ScOperand {
   const DeviceTensor* t = nullptr;
   int block = kScActive;
@@ -46,11 +45,8 @@ struct ScTerm {
   double coef = 1.0;
 };
 
-bool termHasActive(const ScTerm& term) {
-  for (const ScOperand& o : term.ops)
-    if (o.block == kScActive) return true;
-  return false;
-}
+// termHasActive -- whether a term has an active operand -- is
+// nevpt2.gradient_plan's, where the unit tier pins it card-free.
 
 // Which terms of a list a pass covers. A class's per-tuple norm (or H) is the
 // sum of both passes; only the WithActive half has an Eqs. 42-43 counterpart,
@@ -245,36 +241,9 @@ double pairSlabDots(const ScSlabDots& dots, const std::vector<DeviceTensor>& dBl
   return ext;
 }
 
-// One slab's per-tuple multipliers: P and Q over the tuple vector's own
-// shape, and the slab's (norm, energy). For a class whose tuples ARE its
-// perturbers this is scMultipliers applied elementwise (plainMultipliers
-// below); Sijr and Srsi first symmetrize and pack a triangle, then scatter
-// the triangle's multipliers back over the full tuple shape.
-// `p` and `q` are shaped as the tuple vector -- scattered back over it for a
-// class whose perturbers are symmetrized pairs. `r` (Park Eq. 38, the
-// multiplier of the orbital-energy sum) is NOT: it stays in PERTURBER order,
-// the order the class's `delta` vector was built in, because that is the
-// vector it is contracted against (`deltaOf` in assembleSlab).
-struct ScSlabMultipliers {
-  Tensor p;
-  Tensor q;
-  std::vector<double> r;
-  double norm = 0.0;
-  double energy = 0.0;
-};
-
-// `v[b0:b1)` of a rank-1 host tensor (an orbital-energy vector).
-std::vector<double> sliceHost(const Tensor& v, int64_t b0, int64_t b1) {
-  return std::vector<double>(v.data().begin() + b0, v.data().begin() + b1);
-}
-
-// The tuple-is-perturber case: `delta` in the tuple vector's flat order.
-ScSlabMultipliers plainMultipliers(const Tensor& norm, const Tensor& h,
-                                   const std::vector<double>& delta) {
-  const ScMultipliers m = scMultipliers(norm.data(), h.data(), delta);
-  return ScSlabMultipliers{Tensor::fromFlat(norm.dims(), m.p),
-                           Tensor::fromFlat(norm.dims(), m.q), m.r, m.norm, m.energy};
-}
+// ScSlabMultipliers (one slab's per-tuple P and Q, its perturber-order R and
+// its (norm, energy)), sliceHost and plainMultipliers are
+// nevpt2.gradient_plan's, where the unit tier pins them card-free.
 
 // The per-slab core every class but Sijrs and Srsi runs:
 //

@@ -39,54 +39,10 @@ import nevpt2.gradient;
 
 namespace nevpt2 {
 
-// g3 with the dm2 and dm1 coefficients folded onto its diagonals, as the
-// header derives. `nelec` is the active space's electron count; at zero there
-// are no electrons to differentiate and dm1/dm2/dm3 are identically zero, so
-// the fold is skipped rather than divided by.
-Tensor ciSourceFolded(const Tensor& g1, const Tensor& g2, const Tensor& g3,
-                      const int64_t nelec) {
-  Tensor d3 = g3;
-  if (nelec <= 0) return d3;
-  const int64_t n = g1.dim(0);
-  // `inv1` and `inv2` are named for the RDM each scales: g1 rides on TWO of
-  // d3's diagonals (r == s and t == u), so it is divided by N_elec twice; g2
-  // on one (t == u), so once.
-  const double inv1 = 1.0 / (static_cast<double>(nelec) * static_cast<double>(nelec));
-  const double inv2 = 1.0 / static_cast<double>(nelec);
-  for (int64_t p = 0; p < n; ++p)
-    for (int64_t q = 0; q < n; ++q)
-      for (int64_t r = 0; r < n; ++r)
-        for (int64_t s = 0; s < n; ++s)
-          for (int64_t t = 0; t < n; ++t) {
-            d3(p, q, r, s, t, t) += inv2 * g2(p, q, r, s);
-            if (r == s) d3(p, q, r, r, t, t) += inv1 * g1(p, q);
-          }
-  return d3;
-}
-
-// d3 + d3 with its operator string reversed: the two halves of the 3-body
-// RDM derivative, which the one-sided sigma kernel takes as a single
-// coefficient tensor (it is linear in it). test/sigma_vector/'s
-// SigmaVector3GammaTests pins this convention against an exact central
-// difference.
-Tensor ciSourceSymmetrized(const Tensor& d3) {
-  const int64_t n = d3.dim(0);
-  Tensor out(d3.dims());
-  for (int64_t p = 0; p < n; ++p)
-    for (int64_t q = 0; q < n; ++q)
-      for (int64_t r = 0; r < n; ++r)
-        for (int64_t s = 0; s < n; ++s)
-          for (int64_t t = 0; t < n; ++t)
-            for (int64_t u = 0; u < n; ++u)
-              out(p, q, r, s, t, u) = d3(p, q, r, s, t, u) + d3(u, t, s, r, q, p);
-  return out;
-}
-
-// y += x, elementwise, over two vectors of the same shape.
-void ciSourceAddInto(const Tensor& x, Tensor& y) {
-  check(x.dims() == y.dims(), "ciSourceAddInto: shapes differ");
-  for (int64_t i = 0; i < y.size(); ++i) y.flatRef(i) += x.flat(i);
-}
+// The host half of the assembly -- ciSourceFolded (the fold derived above),
+// ciSourceSymmetrized (d3 plus its reversed operator string) and
+// ciSourceAddInto -- is pure host Tensor arithmetic and lives in
+// nevpt2.gradient_plan, where the unit tier can reach it card-free.
 
 // y_I over the whole determinant space, from the five coefficient tensors and
 // the state they are differentiated at. `h2e` is the PHYSICIST-ordered active
