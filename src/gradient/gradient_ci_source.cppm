@@ -3,9 +3,10 @@
 //
 //   y_I = dE/dc_I = <I| (O_D + O_D^dagger) |Psi>
 //
-// by nevpt2.sigma_vector's kernels. An internal partition: nothing here is
-// exported, so it is reachable from the units that `import :ci_source;` and
-// from no importer of nevpt2.gradient. (Used by gradient.cpp.)
+// by nevpt2.sigma_vector's kernels. An internal partition holding one
+// definition, ciSourceVector, whose declaration nevpt2.gradient's interface
+// exports (so test/gradient_plan/'s CiSourceVectorTests can reach it);
+// gradient.cpp's scCiSourceDevice is its caller in src/.
 //
 // THE TWO SIDES. Every RDM the energy reads is a BILINEAR form in the CI
 // vector, rho = <c|A|c>, so d rho / d c_I = ((A + A^T) c)[I] -- the operator
@@ -27,7 +28,10 @@
 // derivatives, so a dm2 coefficient is a dm3 coefficient on the (t == u)
 // diagonal over N_elec, and a dm1 coefficient is one on (r == s, t == u) over
 // N_elec^2 (`folded` below). One 3-body sigma then carries all three, and
-// nevpt2.sigma_vector needs no 1- or 2-body entry point.
+// nevpt2.sigma_vector needs no 1- or 2-body entry point. The identities and
+// the fold are pinned against an UNFOLDED host reference, card-free, by
+// test/gradient_plan/'s CiSourceFoldTests -- with negative controls showing
+// that the same comparison fails for a perturbed fold.
 //
 // COST. Five sigma calls per y: one 3-body, and a forward and a dagger for
 // each of the two f3 orders. Everything else here is host arithmetic over
