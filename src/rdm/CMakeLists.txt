@@ -1,6 +1,9 @@
 # The RDM build: host-side link tables, and the linked-in device libraries the
 # tiled dm3/f3ac/f3ca build launches -- the RDM-build kernels (kernels.cu, via
-# rdm_launch.cu), the accumulate kernel, and the f3 digest and scatter.
+# rdm_launch.cu), the accumulate kernel, and the f3 digest and scatter. Plus
+# the things built on the same link tables that the build itself does not use:
+# the host dm1/dm2 (nevpt2.rdm_host_dm) and the sigma-vector kernels
+# (nevpt2.sigma_vector, sigma_vector.cu).
 
 # nevpt2.link_tables -- Knowles-Handy link tables. Pure host integer
 # combinatorics, no GPU.
@@ -109,6 +112,42 @@ add_device_library(
   LINK_PRIVATE wwr::extension::parallel_for nevpt2::common::device
 )
 target_include_directories(nevpt2.rdm.f3_scatter.device PRIVATE ${NEVPT2_SRC_ROOT})
+
+# sigma_vector.cu -- the 3-body and 4-body-contracted sigma-vector kernels: a
+# coefficient tensor over active indices contracted with the excited
+# wavefunctions it multiplies, one amplitude per determinant, so that the n^6 /
+# n^8 RDM derivative never exists. Its own file and its own device library,
+# like every kernel added after kernels.cu. Backend-neutral (one thread per
+# output determinant, no atomic and no shuffle), so wwr::device for runtime.h
+# rather than parallel_for -- the launchers keep their own <<<>>>.
+add_device_library(
+  NAME nevpt2.rdm.sigma_vector.device
+  SOURCES sigma_vector.cu
+  LINK_PRIVATE wwr::device nevpt2::common::device
+)
+target_include_directories(nevpt2.rdm.sigma_vector.device PRIVATE ${NEVPT2_SRC_ROOT})
+
+# nevpt2.sigma_vector -- the host side of those kernels: the reverse link
+# tables, the coefficient repacking each kernel reads, the tile plan and the
+# launches. Neither demo links it yet (the analytic-gradient work is what
+# contracts a pseudodensity through it); the unit tier drives it against an
+# explicit host construction and against the device build's own dm3/f3
+# (test/sigma_vector/).
+add_cxx_module_library(
+  NAME nevpt2.sigma_vector
+  PRIMARY_INTERFACE sigma_vector.cppm
+  IMPLEMENTATION sigma_vector.cpp
+  # device_tensor (re-exports nevpt2.tensor and nevpt2.device_resources): the
+  # inputs and the result are Tensors, allocated from the caller's pool.
+  LINK_PUBLIC nevpt2::wwr nevpt2::device_tensor
+  LINK_PRIVATE nevpt2::common nevpt2::error_handling nevpt2::link_tables nevpt2::rdm_plan
+)
+# It includes sigma_vector_bridge.h after its imports, in extern "C++"
+# (runtime.h in its global module fragment), so it needs the src/ include root
+# and wwr::backend for the WWR_GPU_BACKEND_* define selected_backend.h reads
+# when there is no device-compile pass to go by -- as nevpt2.rdm_build does.
+target_include_directories(nevpt2.sigma_vector PRIVATE ${NEVPT2_SRC_ROOT})
+target_link_libraries(nevpt2.sigma_vector PRIVATE nevpt2.rdm.sigma_vector.device wwr::backend)
 
 # rdm_build.cpp includes the bridges (after its imports, in extern "C++";
 # runtime.h in its global module fragment), so it needs
