@@ -20,8 +20,9 @@ add_cxx_module_library(
 # nevpt2.device_resources);
 # wwr.extension.solver supplies the wwrsolverStatus_t error specializations
 # gpuCheck needs. energy_shared.cppm is the internal partition
-# nevpt2.energy:shared -- the intermediates both units use, which no importer
-# sees.
+# nevpt2.energy:shared -- the Sijrs class both units use, which no importer
+# sees. (The metric / Dyall-Hamiltonian intermediates ARE exported, from
+# energy.cppm: nevpt2.gradient differentiates the same class einsums.)
 add_cxx_module_library(
   NAME nevpt2.energy
   PRIMARY_INTERFACE energy.cppm

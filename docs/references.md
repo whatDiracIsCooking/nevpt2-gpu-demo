@@ -36,6 +36,9 @@
   [arXiv:1907.10180](https://arxiv.org/abs/1907.10180). The paper
   [`gradient-theory.md`](gradient-theory.md) derives from; its equation
   numbers are the ones that document cites.
+  The equation numbers `src/gradient/` cites are this paper's too: the SC
+  amplitude and multipliers are Eqs. 12 and 36-38, the pseudodensities
+  Eqs. 41-47, and the consistency identity its ctest entries assert is Eq. 40.
 
 ## Related work
 

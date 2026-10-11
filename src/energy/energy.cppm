@@ -176,6 +176,79 @@ EnergyResult energiesDevice(const NevptIntegralsDevice& ints,
                              const DeviceTensor& dm3, const DeviceTensor& f3ac,
                              const DeviceTensor& f3ca, const DeviceResources& res);
 
+// --- the class metrics and Dyall Hamiltonians -------------------------------
+//
+// The RDM-only intermediates every class energy is built from: each class
+// contracts its external integral slab against ONE of these per term -- a
+// metric (the norm side, pure RDM) or a Dyall-Hamiltonian block (the H side,
+// RDMs against the active integrals), PySCF's make_* by the same names. SC
+// (energy.cpp, energy_sc_classes.cppm) and PC (energy_pc.cpp) build them from
+// these same functions rather than a copy, and so does the SC gradient's
+// pseudodensity assembly (nevpt2.gradient), which differentiates exactly the
+// einsums the class energies evaluate -- hence exported rather than hidden in
+// the :shared partition they used to live in. All on res.stream(), each
+// result drawn from res's pool and owned by the caller.
+//
+// These three are (n, n): PySCF's make_hdm1 / make_a3 / make_k27.
+DeviceTensor make_hdm1(const DeviceTensor& dm1, const DeviceResources& res);
+DeviceTensor make_a3(const DeviceTensor& h1e, const DeviceTensor& h2e, const DeviceTensor& dm1,
+                     const DeviceTensor& dm2, const DeviceTensor& hdm1,
+                     const DeviceResources& res);
+DeviceTensor make_k27(const DeviceTensor& h1e, const DeviceTensor& h2e,
+                      const DeviceTensor& dm1, const DeviceTensor& dm2,
+                      const DeviceResources& res);
+// For Srs, Sij, Sir: (n, n, n, n) unless noted, PySCF's make_hdm2,
+// make_hdm3 (n^6), make_a7 ({rm2, a7}), make_a9, make_a12, make_a13.
+DeviceTensor make_hdm2(const DeviceTensor& dm1, const DeviceTensor& dm2,
+                       const DeviceResources& res);
+DeviceTensor make_hdm3(const DeviceTensor& dm1, const DeviceTensor& dm2,
+                       const DeviceTensor& dm3, const DeviceTensor& hdm1,
+                       const DeviceTensor& hdm2, const DeviceResources& res);
+std::pair<DeviceTensor, DeviceTensor> make_a7(const DeviceTensor& h1e, const DeviceTensor& h2e,
+                                              const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                              const DeviceTensor& dm3,
+                                              const DeviceResources& res);
+// make_a7's own (n)^6 hole-side 3-RDM, which it builds and does not hand back:
+// its own function because nevpt2.gradient differentiates a7 with respect to
+// it (Park Eqs. 46-47). `rm2` is make_a7's first return value.
+DeviceTensor make_rm3(const DeviceTensor& dm2, const DeviceTensor& dm3, const DeviceTensor& rm2,
+                      const DeviceResources& res);
+DeviceTensor make_a9(const DeviceTensor& h1e, const DeviceTensor& h2e,
+                     const DeviceTensor& hdm1, const DeviceTensor& hdm2,
+                     const DeviceTensor& hdm3, const DeviceResources& res);
+DeviceTensor make_a12(const DeviceTensor& h1e, const DeviceTensor& h2e,
+                      const DeviceTensor& dm1, const DeviceTensor& dm2,
+                      const DeviceTensor& dm3, const DeviceResources& res);
+DeviceTensor make_a13(const DeviceTensor& h1e, const DeviceTensor& h2e,
+                      const DeviceTensor& dm1, const DeviceTensor& dm2,
+                      const DeviceTensor& dm3, const DeviceResources& res);
+// For Sr, Si: PySCF's make_a16 / make_a22 ((n)^6, `pqrabc` / `ijkabc`; they
+// read the f3ac/f3ca digests) and the hole-side metrics energy_Si builds,
+// dm3_h (n^6) = 2 dm2[a,b,e,f] delta[c,d] - dm3[a,b,d,c,e,f] and dm2_h (n^4)
+// = 2 dm1[a,b] delta[c,d] - dm2[a,b,d,c].
+DeviceTensor make_a16(const DeviceTensor& h1e, const DeviceTensor& h2e, const DeviceTensor& dm3,
+                      const DeviceTensor& f3ac, const DeviceTensor& f3ca, int64_t norb,
+                      const DeviceResources& res);
+DeviceTensor make_a22(const DeviceTensor& h1e, const DeviceTensor& h2e, const DeviceTensor& dm2,
+                      const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                      const DeviceTensor& f3ca, int64_t norb, const DeviceResources& res);
+DeviceTensor make_dm3_h(const DeviceTensor& dm2, const DeviceTensor& dm3,
+                        const DeviceResources& res);
+DeviceTensor make_dm2_h(const DeviceTensor& dm1, const DeviceTensor& dm2,
+                        const DeviceResources& res);
+// SC-only, the rest of Sr's and Si's Dyall-Hamiltonian blocks (defined in
+// energy_sc_classes.cppm): make_a17 (n^4, `abcp`) / make_a19 (n^2, `ap`) are
+// Sr's, make_a23 / make_a25 Si's.
+DeviceTensor make_a17(const DeviceTensor& h1e, const DeviceTensor& h2e, const DeviceTensor& dm2,
+                      const DeviceTensor& dm3, const DeviceResources& res);
+DeviceTensor make_a19(const DeviceTensor& h1e, const DeviceTensor& h2e, const DeviceTensor& dm1,
+                      const DeviceTensor& dm2, const DeviceResources& res);
+DeviceTensor make_a23(const DeviceTensor& h1e, const DeviceTensor& h2e, const DeviceTensor& dm1,
+                      const DeviceTensor& dm2, const DeviceTensor& dm3,
+                      const DeviceResources& res);
+DeviceTensor make_a25(const DeviceTensor& h1e, const DeviceTensor& h2e, const DeviceTensor& dm1,
+                      const DeviceTensor& dm2, const DeviceResources& res);
+
 // --- PC-NEVPT2 (energy_pc.cpp) ----------------------------------------------
 
 // S's cut, relative to its largest eigenvalue (docs/pc-nevpt2.md, "The

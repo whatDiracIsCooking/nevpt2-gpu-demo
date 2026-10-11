@@ -18,11 +18,13 @@
 # One directory per component, each its own STATIC module library (or, for
 # kernels, device library), linked by its `::` alias. Every directory here is
 # something both methods run -- the RDM build, the class energies, and the
-# layers under them -- except df_integrals, the density-fitted demo's alone. The host binaries are in ../apps/, a sibling of src/ but
+# layers under them -- except df_integrals, the density-fitted demo's alone,
+# and gradient, which only apps/sc_pseudodensity/ drives. The host binaries are in ../apps/, a sibling of src/ but
 # built from here so the standalone `cmake -S src` path keeps them:
 #
 #   ../apps/integral_direct/  SC- and PC-NEVPT2 from the full MO-integral blocks (nevpt2_demo)
 #   ../apps/density_fit/      SC- and PC-NEVPT2 from three-index (L|pq) tensors (nevpt2_df_demo)
+#   ../apps/sc_pseudodensity/ the SC gradient's pseudodensity identities (nevpt2_sc_pseudodensity)
 #   ../apps/sanitizer_canary/ deliberately buggy runs for the sanitizer tier
 #
 # Dependency order:
@@ -65,8 +67,19 @@
 #                                handle, the same slabs)              (einsum)
 #   df_integrals nevpt2.df_integrals  density-fitted IntegralSource: slabs
 #                                built from B by DGEMM          (energy, wwr.blas)
+#   gradient nevpt2.sc_amplitudes  the SC amplitude T and the gradient's
+#                                multipliers P/Q/R, plus the einsum-subscript
+#                                rewriting that differentiates a class term
+#                                                     (energy_finish; no GPU)
+#            nevpt2.gradient     the SC pseudodensities, assembled over the
+#                                class energies' own slab walk and contracted
+#                                back against their integrals. A LEAF:
+#                                nothing in src/ imports it and neither demo
+#                                links it                 (energy, einsum)
 #   ../apps/integral_direct      nevpt2_demo     main.cppm
 #   ../apps/density_fit          nevpt2_df_demo  main.cppm
+#   ../apps/sc_pseudodensity     nevpt2_sc_pseudodensity  the SC pseudodensity
+#                                identity checks (nevpt2.gradient's only caller)
 #   ../apps/sanitizer_canary     nevpt2_sanitizer_canary  deliberately buggy runs
 #                                for the sanitizer tier's canaries (+ device library)
 #
@@ -165,6 +178,7 @@ add_subdirectory(profile)
 add_subdirectory(tensor)
 add_subdirectory(golden)
 add_subdirectory(einsum)
+add_subdirectory(gradient)
 add_subdirectory(cublas)
 add_subdirectory(ozaki)
 add_subdirectory(rdm)
@@ -176,4 +190,5 @@ add_subdirectory(cli)
 set(_nevpt2_apps "${CMAKE_CURRENT_SOURCE_DIR}/../apps")
 add_subdirectory(${_nevpt2_apps}/integral_direct  apps/integral_direct)
 add_subdirectory(${_nevpt2_apps}/density_fit      apps/density_fit)
+add_subdirectory(${_nevpt2_apps}/sc_pseudodensity apps/sc_pseudodensity)
 add_subdirectory(${_nevpt2_apps}/sanitizer_canary apps/sanitizer_canary)
