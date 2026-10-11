@@ -73,32 +73,12 @@ CASSCF_CONV_TOL_GRAD = 1e-8
 CASSCF_MAX_CYCLE_MACRO = 200
 
 
-def _irrep_purity(mol, mo) -> np.ndarray:
-    """``1 - max_i w_i`` per orbital, where ``w_i`` is the fraction of the
-    orbital's norm living in irrep ``i``.
-
-    The irrep subspaces are S-orthogonal and span everything, so the weights
-    sum to 1 and this is 0 for a symmetry-pure orbital. A ``--mo-from`` gate
-    has to refuse orbitals that are not pure (it re-derives ``orbsym`` from
-    them), so this says how pure a converged CASSCF leaves them."""
-    s = mol.intor("int1e_ovlp")
-    nrm = np.einsum("pi,pq,qi->i", mo, s, mo)
-    weights = []
-    for blk in mol.symm_orb:
-        if blk.shape[1] == 0:
-            continue
-        bsb = blk.T @ s @ blk
-        proj = blk.T @ s @ mo
-        weights.append(np.einsum("km,km->m", np.linalg.solve(bsb, proj), proj) / nrm)
-    return 1.0 - np.max(np.stack(weights), axis=0)
-
-
-def _orbsym_names(mol, mo) -> list[str]:
-    """PySCF irrep names of ``mo``, in order."""
-    from pyscf import symm
-
-    ids = symm.label_orb_symm(mol, mol.irrep_id, mol.symm_orb, mo)
-    return [symm.irrep_id2name(mol.groupname, i) for i in ids]
+#: Both moved to ``generate_golden.py``, which now needs them itself: its
+#: ``--mo-from`` gate re-derives ``orbsym`` from a sidecar's coefficients and
+#: refuses orbitals this measures as impure (``MO_PURITY_TOL``). Kept under
+#: the probe's own names -- this is where the purity was measured.
+_irrep_purity = gg._irrep_purity
+_orbsym_names = gg._orbsym_names
 
 
 def _perturb_within_irreps(mol, mo, eps: float, seed: int) -> np.ndarray:
