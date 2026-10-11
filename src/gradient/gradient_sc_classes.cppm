@@ -24,10 +24,19 @@
 //   Sir    reads one integral block on its DIAGONAL (h2e_v2_Sir[r, a, a, i]),
 //          whose derivative an einsum output cannot spell, so that read is
 //          hoisted into a block of its own.
+// EACH CLASS ALSO CARRIES THE ACTIVE ROTATION, in three lines: the active
+// axes of its external blocks (`:rotation`'s activeAxesOf for a two-electron
+// block, written out for the one-electron ones), a `gdot` lambda that is its
+// own make_* calls with a direction's DOTTED integrals, and `rot`/`gDots`
+// handed to assembleSlab. Everything else -- the per-slab pairing, the
+// product rule, the per-direction bookkeeping -- is generic
+// (gradient_terms.cppm, gradient_rotation.cppm). An RDM-only metric has no
+// tangent and is simply absent from the `gdot` list.
 module nevpt2.gradient:sc_classes;
 
 import std;
 import nevpt2.gradient;
+import :rotation;
 import :terms;
 
 namespace nevpt2 {
@@ -37,7 +46,8 @@ namespace nevpt2 {
 void gradientSr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                 const Tensor& hostEVirt, const DeviceTensor& dm1, const DeviceTensor& dm2,
                 const DeviceTensor& dm3, const DeviceTensor& f3ac, const DeviceTensor& f3ca,
-                int64_t norb, ScClassGradient& acc, const DeviceResources& dr) {
+                int64_t norb, const ScRotation& rot, ScClassGradient& acc,
+                const DeviceResources& dr) {
   const DeviceTensor& h1e = ai.h1e;
   const DeviceTensor& h2e = ai.h2e;
   const DeviceTensor a16 = make_a16(h1e, h2e, dm3, f3ac, f3ca, norb, dr);
@@ -47,6 +57,19 @@ void gradientSr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
   // The M / E of Eqs. 42-43 have no external index left, so one set
   // serves the whole walk; the class contracts them back at the end.
   std::vector<ScActiveAccum> dActive;
+  // a16's f3 addends carry no integral factor, so the zeros isolate the
+  // h1e/h2e part of its tangent (gradient_rotation.cppm); dm1/dm2/dm3 are
+  // this class's other blocks and do not move at all.
+  const DeviceTensor z3ac = DeviceTensor::zeros(f3ac.dims, dr);
+  const DeviceTensor z3ca = DeviceTensor::zeros(f3ca.dims, dr);
+  const auto gdot = [&](const ScRotationDir& d) {
+    std::vector<ScGDot> v;
+    v.push_back(ScGDot{&a16, make_a16(d.h1eDot, d.h2eDot, dm3, z3ac, z3ca, norb, dr)});
+    v.push_back(ScGDot{&a17, make_a17(d.h1eDot, d.h2eDot, dm2, dm3, dr)});
+    v.push_back(ScGDot{&a19, make_a19(d.h1eDot, d.h2eDot, dm1, dm2, dr)});
+    return v;
+  };
+  const std::vector<std::vector<ScGDot>> gDots = rotationTangentBlocks(rot, gdot);
 
   forBatches(src.extent(ExtBlock::Sr), batch, [&](int64_t b0, int64_t b1) {
     const DeviceTensor slab = src.slab(ExtBlock::Sr, b0, b1, dr);
@@ -65,10 +88,11 @@ void gradientSr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
     const std::vector<double> delta = sliceHost(hostEVirt, b0, b1);
     assembleSlab(
         normTerms, hTerms, {b1 - b0}, {&slab, &h1e_v}, dActive,
-        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); }, acc,
-        dr);
+        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); }, rot,
+        {activeAxesOf(ExtBlock::Sr), {1}}, gDots, acc, dr);
   });
   acc.actContraction += activeContraction(dActive, dr);
+  rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
 }
 
 // --- Si: one core index (the hole-side metrics, and -e_core as Delta) -------
@@ -76,7 +100,8 @@ void gradientSr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
 void gradientSi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                 const Tensor& hostECore, const DeviceTensor& dm1, const DeviceTensor& dm2,
                 const DeviceTensor& dm3, const DeviceTensor& f3ac, const DeviceTensor& f3ca,
-                int64_t norb, ScClassGradient& acc, const DeviceResources& dr) {
+                int64_t norb, const ScRotation& rot, ScClassGradient& acc,
+                const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const DeviceTensor& h1e = ai.h1e;
   const DeviceTensor& h2e = ai.h2e;
@@ -93,6 +118,19 @@ void gradientSi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
   // The M / E of Eqs. 42-43 have no external index left, so one set
   // serves the whole walk; the class contracts them back at the end.
   std::vector<ScActiveAccum> dActive;
+  // a22 as a16: the f3 addends are integral-free, so they are zeroed in the
+  // tangent. a25's `2 h1e^T` term, by contrast, IS an integral term and so
+  // belongs in it -- make_a25 called with the dotted integrals carries it.
+  const DeviceTensor z3ac = DeviceTensor::zeros(f3ac.dims, dr);
+  const DeviceTensor z3ca = DeviceTensor::zeros(f3ca.dims, dr);
+  const auto gdot = [&](const ScRotationDir& d) {
+    std::vector<ScGDot> v;
+    v.push_back(ScGDot{&a22, make_a22(d.h1eDot, d.h2eDot, dm2, dm3, z3ac, z3ca, norb, dr)});
+    v.push_back(ScGDot{&a23, make_a23(d.h1eDot, d.h2eDot, dm1, dm2, dm3, dr)});
+    v.push_back(ScGDot{&a25, make_a25(d.h1eDot, d.h2eDot, dm1, dm2, dr)});
+    return v;
+  };
+  const std::vector<std::vector<ScGDot>> gDots = rotationTangentBlocks(rot, gdot);
 
   forBatches(src.extent(ExtBlock::Si), batch, [&](int64_t b0, int64_t b1) {
     const DeviceTensor slab = src.slab(ExtBlock::Si, b0, b1, dr);
@@ -112,10 +150,11 @@ void gradientSi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
     for (double& x : delta) x = -x;
     assembleSlab(
         normTerms, hTerms, {b1 - b0}, {&slab, &h1e_v}, dActive,
-        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); }, acc,
-        dr);
+        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); }, rot,
+        {activeAxesOf(ExtBlock::Si), {0}}, gDots, acc, dr);
   });
   acc.actContraction += activeContraction(dActive, dr);
+  rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
 }
 
 // --- Sijrs: no active space -------------------------------------------------
@@ -134,6 +173,10 @@ void gradientSi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
 //
 // and (1/2) <g, D> = sum_t P_t N_t = E, Eq. 40 again (the exchanged piece
 // relabels into the straight one).
+//
+// It is also the one class with NO active-rotation source term at all, in
+// either direction: cvcv carries no active index, so nothing it reads moves.
+// Hence no `rot` parameter here.
 void gradientSijrs(IntegralSource& src, int64_t batch, const Tensor& hostECore,
                    const Tensor& hostEVirt, ScClassGradient& acc, const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
@@ -216,7 +259,8 @@ ScSlabMultipliers sijrMultipliers(const Tensor& normT, const Tensor& hT, int64_t
 
 void gradientSijr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                   const Tensor& hostECore, const Tensor& hostEVirt, const DeviceTensor& dm1,
-                  const DeviceTensor& dm2, ScClassGradient& acc, const DeviceResources& dr) {
+                  const DeviceTensor& dm2, const ScRotation& rot, ScClassGradient& acc,
+                  const DeviceResources& dr) {
   const int64_t ncore = hostECore.size();
   if (ncore == 0) return;
   const DeviceTensor hdm1 = make_hdm1(dm1, dr);
@@ -225,6 +269,14 @@ void gradientSijr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
   // The M / E of Eqs. 42-43 have no external index left, so one set
   // serves the whole walk; the class contracts them back at the end.
   std::vector<ScActiveAccum> dActive;
+  // hdm1 is pure RDM (its `2 delta` included: a rotation leaves delta alone),
+  // so a3 is the one block of this class that moves.
+  const auto gdot = [&](const ScRotationDir& d) {
+    std::vector<ScGDot> v;
+    v.push_back(ScGDot{&a3, make_a3(d.h1eDot, d.h2eDot, dm1, dm2, hdm1, dr)});
+    return v;
+  };
+  const std::vector<std::vector<ScGDot>> gDots = rotationTangentBlocks(rot, gdot);
 
   forBatches(src.extent(ExtBlock::Sijr), batch, [&](int64_t b0, int64_t b1) {
     const DeviceTensor slab = src.slab(ExtBlock::Sijr, b0, b1, dr);  // (nr, a, c, c)
@@ -242,9 +294,10 @@ void gradientSijr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
         [&](const Tensor& n, const Tensor& h) {
           return sijrMultipliers(n, h, b0, hostECore, hostEVirt);
         },
-        acc, dr);
+        rot, {activeAxesOf(ExtBlock::Sijr)}, gDots, acc, dr);
   });
   acc.actContraction += activeContraction(dActive, dr);
+  rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
 }
 
 // --- Srsi: a symmetrized virtual pair and a core index ----------------------
@@ -288,31 +341,70 @@ ScSlabMultipliers srsiMultipliers(const Tensor& normT, const Tensor& hT,
   return ScSlabMultipliers{std::move(p), std::move(q), m.norm, m.energy};
 }
 
+// Its own term list, built per slab from the two slabs: the operands' roles
+// (`ga` the straight block, `gb` the one read with (r, s) swapped) are what
+// the derivative and the product rule both index by, and both of this class's
+// passes evaluate the SAME list, so no subscript is written twice.
+std::vector<ScTerm> srsiTerms(const ScOperand& ga, const ScOperand& gb, const DeviceTensor& g) {
+  return {
+      {"rsip,rsia,pa->rsi", {ga, ga, {&g, kScActive}}, 2.0},
+      {"rsip,sria,pa->rsi", {ga, gb, {&g, kScActive}}, -1.0},
+  };
+}
+
 void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                   const Tensor& hostECore, const Tensor& hostEVirt, const DeviceTensor& dm1,
-                  const DeviceTensor& dm2, ScClassGradient& acc, const DeviceResources& dr) {
+                  const DeviceTensor& dm2, const ScRotation& rot, ScClassGradient& acc,
+                  const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const int64_t nvirt = hostEVirt.size(), ncore = hostECore.size();
   if (nvirt == 0 || ncore == 0) return;
   const DeviceTensor k27 = make_k27(ai.h1e, ai.h2e, dm1, dm2, dr);
   acc.hasActive = true;
+  // dm1 does not move; k27 is this class's one Dyall block.
+  const auto gdot = [&](const ScRotationDir& d) {
+    std::vector<ScGDot> v;
+    v.push_back(ScGDot{&k27, make_k27(d.h1eDot, d.h2eDot, dm1, dm2, dr)});
+    return v;
+  };
+  const std::vector<std::vector<ScGDot>> gDots = rotationTangentBlocks(rot, gdot);
+  const std::vector<std::vector<int>> blockAxes{activeAxesOf(ExtBlock::Srsi),
+                                                activeAxesOf(ExtBlock::SrsiT)};
 
   // Pass 1: the raw per-tuple (r, s, i) norm and H over the WHOLE virtual
   // pair, exactly as energy_Srsi accumulates them -- the symmetrization pairs
   // (r, s) with (s, r), which can sit in different batches, so no multiplier
   // is known until every slab has been walked. v^2 c doubles; the slabs, not
-  // this, are what scale with the active space.
+  // this, are what scale with the active space. The per-direction TANGENT of
+  // the same tables rides along, for the same reason: the multipliers it is
+  // finished with are not known until the walk is over.
   const DeviceTensor normT = DeviceTensor::zeros({nvirt, nvirt, ncore}, dr);
   const DeviceTensor hT = DeviceTensor::zeros({nvirt, nvirt, ncore}, dr);
+  std::vector<DeviceTensor> normTDot, hTDot;
+  for (std::size_t d = 0; d < rot.size(); ++d) {
+    normTDot.push_back(rot.dirs[d].tangent ? DeviceTensor::zeros({nvirt, nvirt, ncore}, dr)
+                                           : DeviceTensor());
+    hTDot.push_back(rot.dirs[d].tangent ? DeviceTensor::zeros({nvirt, nvirt, ncore}, dr)
+                                        : DeviceTensor());
+  }
   forBatches(src.extent(ExtBlock::Srsi), batch, [&](int64_t b0, int64_t b1) {
     const DeviceTensor slab = src.slab(ExtBlock::Srsi, b0, b1, dr);
     const DeviceTensor slabT = src.slab(ExtBlock::SrsiT, b0, b1, dr);
+    const ScOperand ga{&slab, 0}, gb{&slabT, 1};
     const DeviceTensor normRows = sliceAxis(normT, 0, b0, b1);
     const DeviceTensor hRows = sliceAxis(hT, 0, b0, b1);
-    deviceEinsumAccum("rsip,rsia,pa->rsi", {&slab, &slab, &dm1}, normRows, 2.0, s);
-    deviceEinsumAccum("rsip,sria,pa->rsi", {&slab, &slabT, &dm1}, normRows, -1.0, s);
-    deviceEinsumAccum("rsip,rsia,pa->rsi", {&slab, &slab, &k27}, hRows, 2.0, s);
-    deviceEinsumAccum("rsip,sria,pa->rsi", {&slab, &slabT, &k27}, hRows, -1.0, s);
+    evalTerms(srsiTerms(ga, gb, dm1), normRows, ScTermFilter::WithActive, s);
+    evalTerms(srsiTerms(ga, gb, k27), hRows, ScTermFilter::WithActive, s);
+    for (std::size_t d = 0; d < rot.size(); ++d) {
+      if (!rot.dirs[d].tangent) continue;
+      // No pseudodensity yet in this pass, so no pairing: just the dotted
+      // slabs the product rule reads (pass 2 does the pairing).
+      const ScSlabDots dots = slabDots({&slab, &slabT}, blockAxes, rot.dirs[d], dr);
+      const DeviceTensor normRowsDot = sliceAxis(normTDot[d], 0, b0, b1);
+      const DeviceTensor hRowsDot = sliceAxis(hTDot[d], 0, b0, b1);
+      evalTermsTangent(srsiTerms(ga, gb, dm1), dots.ptr, gDots[d], normRowsDot, s);
+      evalTermsTangent(srsiTerms(ga, gb, k27), dots.ptr, gDots[d], hRowsDot, s);
+    }
   });
 
   const Tensor hostNormT = downloadTensor(normT, s);
@@ -320,6 +412,15 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
   const ScSlabMultipliers m = srsiMultipliers(hostNormT, hostHT, hostECore, hostEVirt);
   acc.norm += m.norm;
   acc.energy += m.energy;
+  // The tangent, finished with the scattered multipliers over the RAW tables
+  // -- the same identity that lets actReference be taken over them (a
+  // perturber's weight multiplies both of its tuples, and the diagonal's
+  // halving is already in the packing).
+  for (std::size_t d = 0; d < rot.size(); ++d) {
+    if (!rot.dirs[d].tangent) continue;
+    acc.rotTangent[d] += dotHost(m.p.data(), downloadTensor(normTDot[d], s).data()) +
+                         dotHost(m.q.data(), downloadTensor(hTDot[d], s).data());
+  }
   // Every Srsi term carries an active block, so Eqs. 42-43's reference is the
   // whole P/Q-weighted sum.
   acc.actReference +=
@@ -336,14 +437,8 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
     const DeviceTensor slab = src.slab(ExtBlock::Srsi, b0, b1, dr);
     const DeviceTensor slabT = src.slab(ExtBlock::SrsiT, b0, b1, dr);
     const ScOperand ga{&slab, 0}, gb{&slabT, 1};
-    const std::vector<ScTerm> normTerms{
-        {"rsip,rsia,pa->rsi", {ga, ga, {&dm1, kScActive}}, 2.0},
-        {"rsip,sria,pa->rsi", {ga, gb, {&dm1, kScActive}}, -1.0},
-    };
-    const std::vector<ScTerm> hTerms{
-        {"rsip,rsia,pa->rsi", {ga, ga, {&k27, kScActive}}, 2.0},
-        {"rsip,sria,pa->rsi", {ga, gb, {&k27, kScActive}}, -1.0},
-    };
+    const std::vector<ScTerm> normTerms = srsiTerms(ga, gb, dm1);
+    const std::vector<ScTerm> hTerms = srsiTerms(ga, gb, k27);
     const DeviceTensor pRows = sliceAxis(mp, 0, b0, b1);
     const DeviceTensor qRows = sliceAxis(mq, 0, b0, b1);
     std::vector<DeviceTensor> dBlocks;
@@ -352,9 +447,14 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
     accumDerivatives(normTerms, pRows, dBlocks, dActive, dr);
     accumDerivatives(hTerms, qRows, dBlocks, dActive, dr);
     ext += dotTensors(slab, dBlocks[0], dr) + dotTensors(slabT, dBlocks[1], dr);
+    // The external half of the pairing, now that this slab's D exists.
+    for (std::size_t d = 0; d < rot.size(); ++d)
+      acc.rotExt[d] +=
+          pairSlabDots(slabDots({&slab, &slabT}, blockAxes, rot.dirs[d], dr), dBlocks, dr);
   });
   acc.extContraction += 0.5 * ext;
   acc.actContraction += activeContraction(dActive, dr);
+  rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
 }
 
 // --- Srs: a virtual pair (Park's own worked example, Eqs. 41-47) ------------
@@ -367,7 +467,8 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
 // contraction rather than outside M and E.
 void gradientSrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                  const Tensor& hostEVirt, const DeviceTensor& dm1, const DeviceTensor& dm2,
-                 const DeviceTensor& dm3, ScClassGradient& acc, const DeviceResources& dr) {
+                 const DeviceTensor& dm3, const ScRotation& rot, ScClassGradient& acc,
+                 const DeviceResources& dr) {
   const int64_t nvirt = hostEVirt.size();
   if (nvirt == 0) return;
   const auto [rm2, a7] = make_a7(ai.h1e, ai.h2e, dm1, dm2, dm3, dr);
@@ -375,6 +476,17 @@ void gradientSrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
   // The M / E of Eqs. 42-43 have no external index left, so one set
   // serves the whole walk; the class contracts them back at the end.
   std::vector<ScActiveAccum> dActive;
+  // rm2 is pure RDM; a7 is the Dyall block, and make_a7's rm2/rm3 (which it
+  // rebuilds from the RDMs either way) carry no integral, so the dotted call
+  // returns exactly a7's tangent in its second slot.
+  const auto gdot = [&](const ScRotationDir& d) {
+    std::vector<ScGDot> v;
+    std::pair<DeviceTensor, DeviceTensor> dotted =
+        make_a7(d.h1eDot, d.h2eDot, dm1, dm2, dm3, dr);
+    v.push_back(ScGDot{&a7, std::move(dotted.second)});
+    return v;
+  };
+  const std::vector<std::vector<ScGDot>> gDots = rotationTangentBlocks(rot, gdot);
 
   forBatches(src.extent(ExtBlock::Srs), batch, [&](int64_t b0, int64_t b1) {
     const DeviceTensor slab = src.slab(ExtBlock::Srs, b0, b1, dr);  // (nr, v, a, a)
@@ -391,10 +503,11 @@ void gradientSrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
       for (int64_t ss = 0; ss < nvirt; ++ss) delta.push_back(hostEVirt(r) + hostEVirt(ss));
     assembleSlab(
         normTerms, hTerms, {b1 - b0, nvirt}, {&slab}, dActive,
-        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); }, acc,
-        dr);
+        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); }, rot,
+        {activeAxesOf(ExtBlock::Srs)}, gDots, acc, dr);
   });
   acc.actContraction += activeContraction(dActive, dr);
+  rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
 
   // Eqs. 44-47: one more derivative, now of the Dyall block itself. a7 is
   // linear in the active integrals (h1e, h2e) AND in the hole RDMs make_a7
@@ -437,7 +550,8 @@ void gradientSrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
 
 void gradientSij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                  const Tensor& hostECore, const DeviceTensor& dm1, const DeviceTensor& dm2,
-                 const DeviceTensor& dm3, ScClassGradient& acc, const DeviceResources& dr) {
+                 const DeviceTensor& dm3, const ScRotation& rot, ScClassGradient& acc,
+                 const DeviceResources& dr) {
   const int64_t ncore = hostECore.size();
   if (ncore == 0) return;
   const DeviceTensor hdm1 = make_hdm1(dm1, dr);
@@ -448,6 +562,14 @@ void gradientSij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
   // The M / E of Eqs. 42-43 have no external index left, so one set
   // serves the whole walk; the class contracts them back at the end.
   std::vector<ScActiveAccum> dActive;
+  // The hole RDMs hdm1/hdm2/hdm3 read no integral, so a9 is the one block
+  // that moves -- built with the dotted integrals and the SAME hole RDMs.
+  const auto gdot = [&](const ScRotationDir& d) {
+    std::vector<ScGDot> v;
+    v.push_back(ScGDot{&a9, make_a9(d.h1eDot, d.h2eDot, hdm1, hdm2, hdm3, dr)});
+    return v;
+  };
+  const std::vector<std::vector<ScGDot>> gDots = rotationTangentBlocks(rot, gdot);
 
   forBatches(src.extent(ExtBlock::Sij), batch, [&](int64_t b0, int64_t b1) {
     const DeviceTensor slab = src.slab(ExtBlock::Sij, b0, b1, dr);  // (a, a, ni, c)
@@ -464,10 +586,11 @@ void gradientSij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
       for (int64_t j = 0; j < ncore; ++j) delta.push_back(-(hostECore(i) + hostECore(j)));
     assembleSlab(
         normTerms, hTerms, {b1 - b0, ncore}, {&slab}, dActive,
-        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); }, acc,
-        dr);
+        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); }, rot,
+        {activeAxesOf(ExtBlock::Sij)}, gDots, acc, dr);
   });
   acc.actContraction += activeContraction(dActive, dr);
+  rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
 }
 
 // --- Sir: a core and a virtual index ----------------------------------------
@@ -484,8 +607,8 @@ void gradientSij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
 // block scatters it back with delta[a, b].
 void gradientSir(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                  const Tensor& hostECore, const Tensor& hostEVirt, const DeviceTensor& dm1,
-                 const DeviceTensor& dm2, const DeviceTensor& dm3, ScClassGradient& acc,
-                 const DeviceResources& dr) {
+                 const DeviceTensor& dm2, const DeviceTensor& dm3, const ScRotation& rot,
+                 ScClassGradient& acc, const DeviceResources& dr) {
   const int64_t ncore = hostECore.size();
   if (ncore == 0) return;
   const DeviceTensor a12 = make_a12(ai.h1e, ai.h2e, dm1, dm2, dm3, dr);
@@ -494,6 +617,13 @@ void gradientSir(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
   // The M / E of Eqs. 42-43 have no external index left, so one set
   // serves the whole walk; the class contracts them back at the end.
   std::vector<ScActiveAccum> dActive;
+  const auto gdot = [&](const ScRotationDir& d) {
+    std::vector<ScGDot> v;
+    v.push_back(ScGDot{&a12, make_a12(d.h1eDot, d.h2eDot, dm1, dm2, dm3, dr)});
+    v.push_back(ScGDot{&a13, make_a13(d.h1eDot, d.h2eDot, dm1, dm2, dm3, dr)});
+    return v;
+  };
+  const std::vector<std::vector<ScGDot>> gDots = rotationTangentBlocks(rot, gdot);
 
   forBatches(src.extent(ExtBlock::Sir1), batch, [&](int64_t b0, int64_t b1) {
     const DeviceTensor slab1 = src.slab(ExtBlock::Sir1, b0, b1, dr);  // (nr, a, c, a)
@@ -526,12 +656,18 @@ void gradientSir(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
     delta.reserve(static_cast<std::size_t>(ncore * (b1 - b0)));
     for (int64_t i = 0; i < ncore; ++i)
       for (int64_t r = b0; r < b1; ++r) delta.push_back(hostEVirt(r) - hostECore(i));
+    // h1e_v (v, c) carries no active index, and neither does the hoisted
+    // trace v2tr (r, i): its active pair IS the contraction, and a trace of
+    // two rotated axes against an ANTISYMMETRIC kappa cancels exactly, so
+    // v2tr does not move. Both are `{}` here, which is what makes the
+    // hoisting free for the source term as well as for Eq. 40.
     assembleSlab(
         normTerms, hTerms, {ncore, b1 - b0}, {&slab1, &slab2, &h1e_v, &v2tr}, dActive,
-        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); }, acc,
-        dr);
+        [&](const Tensor& n, const Tensor& h) { return plainMultipliers(n, h, delta); }, rot,
+        {activeAxesOf(ExtBlock::Sir1), activeAxesOf(ExtBlock::Sir2), {}, {}}, gDots, acc, dr);
   });
   acc.actContraction += activeContraction(dActive, dr);
+  rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
 }
 
 }  // namespace nevpt2

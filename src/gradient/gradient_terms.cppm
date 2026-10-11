@@ -16,6 +16,10 @@ module nevpt2.gradient:terms;
 
 import std;
 import nevpt2.gradient;
+// The kappa directions, the device action that forms a tensor's tangent along
+// one, and the ScGDot pairing of an active block with its own tangent: the
+// rotation machinery assembleSlab pairs and differentiates along.
+import :rotation;
 
 namespace nevpt2 {
 
@@ -140,6 +144,78 @@ void accumDerivatives(const std::vector<ScTerm>& terms, const DeviceTensor& mult
   }
 }
 
+// The FORWARD TANGENT of a term list: the product rule, each operand
+// replaced in turn by its own tangent, with the term's OWN subscripts (no
+// rewriting -- that is the adjoint's business, accumDerivatives above). An
+// operand with no tangent does not move along the direction and is skipped:
+// a purely RDM-built metric (absent from `gDots`), and a block with no active
+// index at all (a nullptr in `blockDots` -- Sir's h1e_v and its hoisted
+// diagonal trace, whose active pair is contracted away and so cannot move;
+// see gradient.cppm, "The active-rotation source term").
+//
+// `blockDots` is indexed as the class's block list, `gDots` keyed by the base
+// active block each tangent belongs to.
+void evalTermsTangent(const std::vector<ScTerm>& terms,
+                      const std::vector<const DeviceTensor*>& blockDots,
+                      const std::vector<ScGDot>& gDots, const DeviceTensor& out,
+                      wwrStream_t stream) {
+  for (const ScTerm& term : terms) {
+    for (std::size_t k = 0; k < term.ops.size(); ++k) {
+      const ScOperand& op = term.ops[k];
+      const DeviceTensor* dot = op.block == kScActive
+                                    ? gDotOf(gDots, op.t)
+                                    : blockDots[static_cast<std::size_t>(op.block)];
+      if (dot == nullptr) continue;
+      std::vector<const DeviceTensor*> ops;
+      ops.reserve(term.ops.size());
+      for (std::size_t j = 0; j < term.ops.size(); ++j)
+        ops.push_back(j == k ? dot : term.ops[j].t);
+      deviceEinsumAccum(term.subs, ops, out, term.coef, stream);
+    }
+  }
+}
+
+// One slab's blocks dotted along ONE direction: the tangent of each block
+// that carries an active index (`blockAxes[i]`, in `blocks`' order), and a
+// nullptr for each block that carries none -- which is what the product rule
+// skips. The tensors own their memory and are freed with the returned value,
+// so a direction's slab tangents do not outlive its iteration.
+struct ScSlabDots {
+  std::vector<DeviceTensor> owned;
+  std::vector<const DeviceTensor*> ptr;  // &owned[i], or nullptr
+};
+
+ScSlabDots slabDots(const std::vector<const DeviceTensor*>& blocks,
+                    const std::vector<std::vector<int>>& blockAxes, const ScRotationDir& dir,
+                    const DeviceResources& res,
+                    std::source_location loc = std::source_location::current()) {
+  if (blockAxes.size() != blocks.size())
+    check(false, "slabDots: one axis list per block", loc);
+  ScSlabDots out;
+  out.owned.resize(blocks.size());
+  out.ptr.assign(blocks.size(), nullptr);
+  for (std::size_t i = 0; i < blocks.size(); ++i) {
+    if (blockAxes[i].empty()) continue;
+    out.owned[i] = kappaActionDevice(*blocks[i], blockAxes[i], dir.kappa, res);
+    out.ptr[i] = &out.owned[i];
+  }
+  return out;
+}
+
+// The EXTERNAL half of the adjoint pairing for one slab and one direction:
+// sum_blocks <D, Xdot>, Eq. 41's pseudodensity against the direction's action
+// on the very block it is conjugate to.
+double pairSlabDots(const ScSlabDots& dots, const std::vector<DeviceTensor>& dBlocks,
+                    const DeviceResources& res,
+                    std::source_location loc = std::source_location::current()) {
+  if (dots.ptr.size() != dBlocks.size())
+    check(false, "pairSlabDots: one pseudodensity per block", loc);
+  double ext = 0.0;
+  for (std::size_t i = 0; i < dBlocks.size(); ++i)
+    if (dots.ptr[i] != nullptr) ext += dotTensors(dBlocks[i], *dots.ptr[i], res);
+  return ext;
+}
+
 // One slab's per-tuple multipliers: P and Q over the tuple vector's own
 // shape, and the slab's (norm, energy). For a class whose tuples ARE its
 // perturbers this is scMultipliers applied elementwise (plainMultipliers
@@ -184,12 +260,25 @@ ScSlabMultipliers plainMultipliers(const Tensor& norm, const Tensor& h,
 // left, so they accumulate over the whole class's walk, and the caller
 // contracts them back (and frees them) once the walk is done --
 // activeContraction() below.
+//
+// `rot` adds the ACTIVE-ROTATION work, and nothing happens for a caller with
+// no directions. Per direction: this slab's own blocks dotted along it
+// (`blockAxes` lists each block's active axes, in `blocks`' order -- empty for
+// a block that carries none), the EXTERNAL half of the adjoint pairing
+// <D, Xdot> accumulated into acc.rotExt, and -- for a direction that asked
+// for it -- the forward tangent of the same terms under the product rule,
+// finished with THIS slab's own multipliers as Park Eqs. 36-37 prescribe,
+// P.Ndot + Q.Hdot. `gDots[d]` is the class's active-block tangents along
+// direction d (rotationTangentBlocks), and is empty for a direction that
+// wants the adjoint alone.
 template <class MultiplierFn>
 void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm>& hTerms,
                   const std::vector<int64_t>& tupleDims,
                   const std::vector<const DeviceTensor*>& blocks,
                   std::vector<ScActiveAccum>& dActive, MultiplierFn&& multiplierFn,
-                  ScClassGradient& acc, const DeviceResources& res) {
+                  const ScRotation& rot, const std::vector<std::vector<int>>& blockAxes,
+                  const std::vector<std::vector<ScGDot>>& gDots, ScClassGradient& acc,
+                  const DeviceResources& res) {
   const wwrStream_t stream = res.stream();
 
   // The with-active halves kept apart, so actReference can exclude the terms
@@ -231,6 +320,22 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
   double ext = 0.0;
   for (std::size_t i = 0; i < blocks.size(); ++i) ext += dotTensors(*blocks[i], dBlocks[i], res);
   acc.extContraction += 0.5 * ext;
+
+  // --- the active rotation, one direction at a time -------------------------
+  for (std::size_t d = 0; d < rot.size(); ++d) {
+    const ScSlabDots dots = slabDots(blocks, blockAxes, rot.dirs[d], res);
+    acc.rotExt[d] += pairSlabDots(dots, dBlocks, res);
+    if (!rot.dirs[d].tangent) continue;
+    const DeviceTensor normDot = DeviceTensor::zeros(tupleDims, res);
+    const DeviceTensor hDot = DeviceTensor::zeros(tupleDims, res);
+    evalTermsTangent(normTerms, dots.ptr, gDots[d], normDot, stream);
+    evalTermsTangent(hTerms, dots.ptr, gDots[d], hDot, stream);
+    // No sync before the downloads, for the reason the base pair's give.
+    const Tensor hostNormDot = downloadTensor(normDot, stream);
+    const Tensor hostHDot = downloadTensor(hDot, stream);
+    acc.rotTangent[d] +=
+        dotHost(m.p.data(), hostNormDot.data()) + dotHost(m.q.data(), hostHDot.data());
+  }
 }
 
 // Eqs. 42-43 contracted back, once a class's walk is over: sum_G <G, M_G>
@@ -248,6 +353,43 @@ const DeviceTensor* activeAccumOf(const std::vector<ScActiveAccum>& dActive,
   for (const ScActiveAccum& a : dActive)
     if (a.g == g) return &a.d;
   return nullptr;
+}
+
+// The Dyall-block tangents built up front, for the directions that asked for
+// the forward tangent -- those are needed INSIDE the slab walk (the product
+// rule runs per slab), while a direction that only wants the adjoint pairing
+// has its set built one at a time afterwards, in rotationPairActive. That is
+// what keeps the peak at one extra set of a class's blocks per TANGENT
+// direction rather than per direction.
+//
+// `gdotFn(dir)` is the class's own one-liner: its make_* calls with that
+// direction's dotted integrals (gradient_sc_classes.cppm).
+template <class GDotFn>
+std::vector<std::vector<ScGDot>> rotationTangentBlocks(const ScRotation& rot, GDotFn&& gdotFn) {
+  std::vector<std::vector<ScGDot>> out(rot.size());
+  for (std::size_t d = 0; d < rot.size(); ++d)
+    if (rot.dirs[d].tangent) out[d] = gdotFn(rot.dirs[d]);
+  return out;
+}
+
+// The ACTIVE half of the adjoint pairing, once a class's walk is over and its
+// M_G accumulators are complete: sum_G <M_G, Gdot>, into `out[d]`. A
+// direction whose tangent blocks were built up front reuses them; the rest
+// build, pair and free one direction at a time, so a long direction list
+// costs no extra peak.
+template <class GDotFn>
+void rotationPairActive(const ScRotation& rot, const std::vector<std::vector<ScGDot>>& pre,
+                        const std::vector<ScActiveAccum>& dActive, GDotFn&& gdotFn,
+                        std::vector<double>& out, const DeviceResources& res) {
+  for (std::size_t d = 0; d < rot.size(); ++d) {
+    std::vector<ScGDot> own;
+    if (pre[d].empty()) own = gdotFn(rot.dirs[d]);
+    const std::vector<ScGDot>& gDots = pre[d].empty() ? own : pre[d];
+    for (const ScGDot& g : gDots) {
+      const DeviceTensor* m = activeAccumOf(dActive, g.g);
+      if (m != nullptr) out[d] += dotTensors(g.dot, *m, res);
+    }
+  }
 }
 
 }  // namespace nevpt2
