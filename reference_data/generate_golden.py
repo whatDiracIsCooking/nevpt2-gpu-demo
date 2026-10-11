@@ -80,6 +80,19 @@ and the committed density-fitted files::
     uv run python reference_data/generate_golden.py --df --basis cc-pvtz \\
         --name n2_ccpvtz_cas1010_df
 
+``--gradgold`` additionally writes the **gradient sidecar**
+``<out>.gradgold`` beside the golden -- a separate file, leaving the golden's
+bytes untouched, carrying the MO-integral inventory an analytic NEVPT2
+gradient reads plus the full-MO-range Fock matrices and ``mo_coeff``
+(:func:`write_gradgold`, :func:`_gradient_arrays`;
+docs/gradient-theory.md, section 3). The committed sidecars are the two small
+cases::
+
+    uv run python reference_data/generate_golden.py --ncas 4 --nelecas 4 \\
+        --name n2_ccpvdz_cas44 --gradgold
+    uv run python reference_data/generate_golden.py --ncas 8 --nelecas 8 \\
+        --name n2_ccpvdz_cas88 --gradgold
+
 and the salicylaldimine CAS(8,8)/6-31G** pair (gitignored, 145/166 MB; the
 pi space picked by irrep, the DF one fitted with 6-31G**-RIFIT)::
 
@@ -202,6 +215,54 @@ PC_SOLVE_ORDER = (
 #: docstring for the full binary layout (``src/golden/golden.cppm`` reads it).
 GOLDEN_MAGIC = b"NEVPT2G1"
 
+#: Magic bytes identifying a gradient **sidecar** (``*.gradgold``) -- a
+#: SEPARATE file from the golden it sits beside, carrying only what an analytic
+#: NEVPT2 gradient needs on top of it (:func:`write_gradgold`'s docstring has
+#: the layout; ``src/golden/golden.cppm`` reads it). It is a sidecar and not
+#: extra arrays in the golden on purpose: the golden format is extensible
+#: (magic + array count), but adding arrays would change every committed
+#: golden's bytes, and a regenerated golden differing from the committed one is
+#: this project's signal that something changed (docs/reference-data.md,
+#: "Regenerating the golden file").
+GRADGOLD_MAGIC = b"NEVPT2D1"
+
+#: How far from zero the RHF Fock's core-active, core-virtual and
+#: active-virtual blocks may be in the canonicalised MO basis before
+#: :func:`_check_gradient_invariants` refuses to write a sidecar. This is
+#: invariant (O1) of docs/gradient-theory.md, §3.6 -- the single statement
+#: that the active space is a set of RHF canonical orbitals -- and it holds
+#: only up to RHF convergence -- ``mf.get_fock()`` is built from the converged
+#: density, while ``mf.mo_coeff`` diagonalises the previous iteration's Fock --
+#: so the bound is the SCF's, not machine epsilon, and it is NOT tightened by
+#: raising ``mf.conv_tol``, which would change the golden state. Two decades
+#: above the measured residual, and still four decades below what a wrongly
+#: selected active space would show. The measured residuals are in
+#: docs/reference-data.md, "The gradient sidecar".
+O1_FOCK_TOL = 1e-5
+
+#: Likewise for invariant (O2): the generalized Fock's core-core and
+#: virtual-virtual off-diagonals, which ``canonicalize`` zeroes by
+#: diagonalising f inside each space, and its diagonals, which must reproduce
+#: the golden's ``e_core`` / ``e_virt``. A diagonalisation is exact to
+#: ~machine precision on these sizes, so this one is tight.
+O2_FOCK_TOL = 1e-10
+
+
+def _write_arrays(f, arrays: dict[str, np.ndarray]) -> None:
+    """The named-array section both file formats end with: an int32 count,
+    then per array a name, a rank, int64 extents and C-order f64 data. Shared
+    so the two writers cannot drift, and so the golden's bytes are untouched
+    by the sidecar's arrival."""
+    f.write(struct.pack("<i", len(arrays)))
+    for name, arr in arrays.items():
+        arr = np.ascontiguousarray(arr, dtype=np.float64)
+        name_b = name.encode("ascii")
+        f.write(struct.pack("<i", len(name_b)))
+        f.write(name_b)
+        f.write(struct.pack("<i", arr.ndim))
+        f.write(struct.pack(f"<{arr.ndim}q", *arr.shape))
+        f.write(arr.tobytes(order="C"))
+
 
 def write_golden(
     path: Path,
@@ -241,15 +302,56 @@ def write_golden(
         f.write(GOLDEN_MAGIC)
         f.write(struct.pack("<iiiiq", ncas, nelec_a, nelec_b, ncore, ndet))
         f.write(struct.pack("<dd", e_casci, e_nevpt2_total))
-        f.write(struct.pack("<i", len(arrays)))
-        for name, arr in arrays.items():
-            arr = np.ascontiguousarray(arr, dtype=np.float64)
-            name_b = name.encode("ascii")
-            f.write(struct.pack("<i", len(name_b)))
-            f.write(name_b)
-            f.write(struct.pack("<i", arr.ndim))
-            f.write(struct.pack(f"<{arr.ndim}q", *arr.shape))
-            f.write(arr.tobytes(order="C"))
+        _write_arrays(f, arrays)
+
+
+def write_gradgold(
+    path: Path,
+    *,
+    nao: int,
+    nmo: int,
+    ncore: int,
+    nact: int,
+    nvirt: int,
+    nelec_rhf: int,
+    arrays: dict[str, np.ndarray],
+) -> None:
+    """Write the gradient sidecar (``*.gradgold``) for the golden beside it.
+
+    Same named-array section as :func:`write_golden` (:func:`_write_arrays`),
+    a different magic and a different scalar header -- the sidecar's header is
+    the orbital-space partition the array shapes are written in terms of, not
+    a CI state, because the state is the golden's job.
+
+    Layout (all little-endian, doubles are f64, no padding)::
+
+        8s      magic "NEVPT2D1"
+        i i i i i i  nao, nmo, ncore, nact, nvirt, nelec_rhf
+        i       n_arrays
+        repeated n_arrays times:
+            i           name_len
+            <name_len>s name (not NUL-terminated)
+            i           ndim
+            q * ndim    shape
+            d * prod(shape)  data, C (row-major) order
+
+    What it carries, and why only this much: the seventeen one-general-index
+    MO-integral blocks Park's Eq. 28 reads
+    (:func:`_gradient_arrays`; docs/gradient-theory.md, §3.3), the
+    full-MO-range one-electron and Fock matrices (§3.5), and ``mo_coeff``.
+    NOT an ``n_mo^4`` dump: the eighteenth block ``(xv|vv)`` is the largest of
+    the eighteen and is never needed, because no integral the energy reads
+    carries three virtual labels and promotion cannot create one (§3.4). That
+    omission is a constant factor ``O(n_occ/n_virt)``, not a change of order,
+    so the inventory makes the small cases cheap and a large case is still
+    large -- which is why the gradient validation set is small molecules.
+
+    ``src/golden/golden.cppm``'s ``loadGradGold`` reads exactly this layout.
+    """
+    with open(path, "wb") as f:
+        f.write(GRADGOLD_MAGIC)
+        f.write(struct.pack("<6i", nao, nmo, ncore, nact, nvirt, nelec_rhf))
+        _write_arrays(f, arrays)
 
 
 def _build_state(
@@ -647,6 +749,188 @@ def _df_blocks(pt, with_df, eris) -> dict:
     )
 
 
+def _gradient_arrays(mc, pt, eris, dm1: np.ndarray) -> dict:
+    r"""The gradient sidecar's arrays: the one-general-index MO-integral
+    inventory of docs/gradient-theory.md, §3.3, plus §3.5's full-MO-range
+    matrices and ``mo_coeff``.
+
+    Naming: ``g_xP_QR`` is the array in which the general index ``x`` shares a
+    charge distribution with a label from space ``P``, the other distribution
+    holding ``Q`` and ``R`` (``c``/``a``/``v`` for core/active/virtual), stored
+    in chemists' order as ``arr[x, p, q, r] = (x p | q r)``. The three
+    pairings of the same four space labels are *different* arrays
+    (``g_xv_ca``, ``g_xa_cv``, ``g_xc_va``), as §3.3 says.
+
+    Fourteen rows are stored in full. Three are stored only on the restricted
+    slices the gradient actually reaches, which is where §3.1's two structural
+    facts pay off:
+
+    * ``(xc|cc)`` -- the core density is diagonal, so every route to it runs
+      through ``(pq|jj)`` or ``(pj|jq)`` with two core labels already tied.
+      Two slices, not an ``n_mo n_core^3`` array: ``g_xc_cc_j[x,i,j]`` is
+      ``(x i | j j)`` (the Coulomb route) and ``g_xc_cc_k[x,j,i]`` is
+      ``(x j | j i)`` (the exchange route). They are the only two independent
+      ones -- ``(x i | j k)`` with ``i = k`` is ``(x k | k j)`` by the
+      permutational symmetry of a real MO integral.
+    * ``(xa|vv)`` and ``(xc|vv)`` -- these come only from
+      ``d eps_r / d kappa`` in the form ``(rr|x.)``, so the two virtual
+      labels coincide: ``g_xa_vv[x,t,r] = (x t | r r)``,
+      ``g_xc_vv[x,i,r] = (x i | r r)``, both ``n_mo n_virt``-sized rather
+      than ``n_mo n_virt^2``.
+
+    Each restricted row is built as a Coulomb (or exchange) matrix of the
+    rank-1 density of one orbital, back-transformed to MOs, so neither
+    unrestricted parent is ever formed:
+    ``(x q | j j) = [C^T J(C_j C_j^T) C]_xq`` and
+    ``(x j | j q) = [C^T K(C_j C_j^T) C]_xq``.
+
+    The full rows come from five ``ao2mo.general`` calls, one per second
+    charge distribution ``(Q,R)``, each sliced into its three ``P`` rows --
+    the union of a group is ``(x q | Q R)`` over all ``q``, so the five
+    transients are together exactly the size of the fourteen stored rows. The
+    ``(Q,R) = (a,a)`` group is PySCF's own ``ppaa``, so the sidecar's
+    ``g_x*_aa`` and the golden's ``h2e`` come from one transform.
+
+    The eighteenth block, ``(xv|vv)``, is deliberately absent: §3.4.
+    """
+    from pyscf import ao2mo
+
+    mf = mc._scf
+    mol = pt.mol
+    mo = pt.mo_coeff
+    nmo = mo.shape[1]
+    ncore, nact = pt.ncore, pt.ncas
+    nocc = ncore + nact
+    c, a, v = slice(0, ncore), slice(ncore, nocc), slice(nocc, None)
+    mo_c, mo_a, mo_v = mo[:, c], mo[:, a], mo[:, v]
+
+    def general(q3, q4):
+        """``(x q | Q R)`` for every general ``x`` and ``q``: the whole
+        ``(Q,R)`` group of §3.3's table in one transform."""
+        eri = ao2mo.general(mol, (mo, mo, q3, q4), compact=False)
+        return eri.reshape(nmo, nmo, q3.shape[1], q4.shape[1])
+
+    g_aa = np.asarray(eris["ppaa"]).reshape(nmo, nmo, nact, nact)
+    g_va = general(mo_v, mo_a)
+    g_ca = general(mo_c, mo_a)
+    g_cv = general(mo_c, mo_v)
+    g_cc = general(mo_c, mo_c)
+
+    # The rank-1 densities of the core and virtual orbitals, in one get_jk
+    # pass: J gives (x q | p p), K gives (x p | p q).
+    dms_c = np.einsum("mj,nj->jmn", mo_c, mo_c)
+    dms_v = np.einsum("mr,nr->rmn", mo_v, mo_v)
+    vj, vk = mf.get_jk(mol, list(dms_c) + list(dms_v))
+    vj, vk = np.asarray(vj), np.asarray(vk)
+    gj = np.einsum("mp,Pmn,nq->Ppq", mo, vj, mo)  # [P, x, q] = (x q | P P)
+    gk = np.einsum("mp,Pmn,nq->Ppq", mo, vk, mo)  # [P, x, q] = (x P | P q)
+
+    heff = np.asarray(eris["h1eff"])  # h^eff: h + the core dressing
+    h = heff - np.asarray(eris["vhf_c"])
+    papa = np.asarray(eris["papa"]).reshape(nmo, nact, nmo, nact)
+
+    def fock(gamma: np.ndarray) -> np.ndarray:
+        """``h^eff + sum_tu gamma_tu [ (pq|tu) - (1/2)(pt|uq) ]`` over the
+        full MO range: the generalized Fock of the active density ``gamma``."""
+        return (
+            heff
+            + np.einsum("tu,pqtu->pq", gamma, g_aa)
+            - 0.5 * np.einsum("tu,ptqu->pq", gamma, papa)
+        )
+
+    return dict(
+        mo_coeff=mo,
+        h=h,
+        heff=heff,
+        f=fock(dm1),
+        # f^h: the same Fock with the active space fully occupied (gamma = 2I).
+        f_h=fock(2.0 * np.eye(nact)),
+        fock_rhf=mo.T @ mf.get_fock() @ mo,
+        g_xa_aa=g_aa[:, a],
+        g_xv_aa=g_aa[:, v],
+        g_xc_aa=g_aa[:, c],
+        g_xa_va=g_va[:, a],
+        g_xv_va=g_va[:, v],
+        g_xc_va=g_va[:, c],
+        g_xa_ca=g_ca[:, a],
+        g_xv_ca=g_ca[:, v],
+        g_xc_ca=g_ca[:, c],
+        g_xa_cv=g_cv[:, a],
+        g_xv_cv=g_cv[:, v],
+        g_xc_cv=g_cv[:, c],
+        g_xa_cc=g_cc[:, a],
+        g_xv_cc=g_cc[:, v],
+        # (x i | j j) and (x j | j i): gj/gk's first axis is the tied core j.
+        g_xc_cc_j=gj[:ncore, :, c].transpose(1, 2, 0),
+        g_xc_cc_k=gk[:ncore, :, c].transpose(1, 0, 2),
+        # (x t | r r) and (x i | r r): the first axis is the tied virtual r.
+        g_xa_vv=gj[ncore:, :, a].transpose(1, 2, 0),
+        g_xc_vv=gj[ncore:, :, c].transpose(1, 2, 0),
+    )
+
+
+def _check_gradient_invariants(pt, grad: dict, nelec_rhf: int, mo_energy_rhf) -> dict:
+    """The three invariants of docs/gradient-theory.md, §3.6, asserted before
+    a sidecar is written. They are exact by construction, so a violation means
+    the state is not the one the derivation describes and every multiplier
+    downstream would be meaningless -- the same stance
+    :func:`_check_degeneracy` takes on a noise-dependent SC energy.
+
+    Returns the measured residuals, for the generator's printout."""
+    ncore, nact = pt.ncore, pt.ncas
+    nocc = ncore + nact
+    c, a, v = slice(0, ncore), slice(ncore, nocc), slice(nocc, None)
+    fock_rhf, f = grad["fock_rhf"], grad["f"]
+
+    # (O1) F is block-diagonal over core/active/virtual: the single statement
+    # that the active space is a set of RHF canonical orbitals.
+    blocks = {"core-act": fock_rhf[c, a], "core-virt": fock_rhf[c, v],
+              "act-virt": fock_rhf[a, v]}
+    o1_each = {k: (float(np.max(np.abs(b))) if b.size else 0.0) for k, b in blocks.items()}
+    o1 = max(o1_each.values())
+    if o1 > O1_FOCK_TOL:
+        raise SystemExit(
+            f"(O1) violated: the RHF Fock's core/active/virtual off-blocks reach "
+            f"{o1:.1e} (> {O1_FOCK_TOL:g}). The active space is not a set of RHF "
+            "canonical orbitals, so docs/gradient-theory.md's derivation does not "
+            "describe this state."
+        )
+
+    # (O2) f is diagonal inside core and inside virtual, and those diagonals
+    # are the golden's e_core / e_virt.
+    o2 = 0.0
+    for span in (c, v):
+        block = f[span, span]
+        if block.size:
+            o2 = max(o2, float(np.max(np.abs(block - np.diag(np.diag(block))))))
+    e_cv = np.concatenate([np.diag(f[c, c]), np.diag(f[v, v])])
+    e_ref = np.concatenate([pt.mo_energy[:ncore], pt.mo_energy[nocc:]])
+    o2 = max(o2, float(np.max(np.abs(e_cv - e_ref))) if e_cv.size else 0.0)
+    if o2 > O2_FOCK_TOL:
+        raise SystemExit(
+            f"(O2) violated: the generalized Fock is off pseudocanonical form, or "
+            f"off the golden's e_core/e_virt, by {o2:.1e} (> {O2_FOCK_TOL:g})."
+        )
+
+    # (O3) Diagonalising F's active block splits the active space into exactly
+    # nelec_rhf/2 - ncore eigenvalues below the RHF gap and the rest above it,
+    # with none inside: the recovery of act_O / act_V (§2.6) working.
+    w = np.linalg.eigvalsh(fock_rhf[a, a])
+    nocc_rhf = nelec_rhf // 2
+    homo, lumo = mo_energy_rhf[nocc_rhf - 1], mo_energy_rhf[nocc_rhf]
+    n_below = int(np.count_nonzero(w <= homo + O1_FOCK_TOL))
+    inside = w[(w > homo + O1_FOCK_TOL) & (w < lumo - O1_FOCK_TOL)]
+    if n_below != nocc_rhf - ncore or inside.size:
+        raise SystemExit(
+            f"(O3) violated: F's active block has {n_below} eigenvalue(s) at or "
+            f"below the RHF HOMO ({homo:.6f}) and {inside.size} inside the gap "
+            f"({homo:.6f} .. {lumo:.6f}), but act_O must hold "
+            f"{nocc_rhf - ncore} and the gap none."
+        )
+    return {"o1": o1, "o1_each": o1_each, "o2": o2, "act_occ": n_below,
+            "homo": homo, "lumo": lumo}
+
+
 def generate(
     atom: str,
     basis: str,
@@ -658,7 +942,8 @@ def generate(
     rdm4_threads: int = 1,
     cas_irreps: dict[str, int] | None = None,
     core_irreps: dict[str, int] | None = None,
-) -> dict:
+    gradgold: bool = False,
+) -> tuple[dict, dict, tuple[dict, dict] | None]:
     t0 = time.perf_counter()
     mc, pt = _build_state(atom, basis, ncas, nelecas, auxbasis, cas_irreps, core_irreps)
     with_df = mc.with_df if auxbasis is not None else None
@@ -713,7 +998,35 @@ def generate(
         pc_class_energies = np.array([pc_ref[c] for c in CLASSES])
         arrays["pc_class_energies"] = pc_class_energies
         arrays["e_pc_total"] = np.array([pc_class_energies.sum()])
-    return meta, arrays
+
+    grad = None
+    if gradgold:
+        nmo = pt.mo_coeff.shape[1]
+        grad_arrays = _gradient_arrays(mc, pt, eris, dm1)
+        res = _check_gradient_invariants(
+            pt, grad_arrays, mc.mol.nelectron, mc._scf.mo_energy
+        )
+        grad = (
+            dict(
+                nao=pt.mo_coeff.shape[0],
+                nmo=nmo,
+                ncore=pt.ncore,
+                nact=ncas,
+                nvirt=nmo - pt.ncore - ncas,
+                nelec_rhf=mc.mol.nelectron,
+            ),
+            grad_arrays,
+        )
+        print(
+            f"[{name}] gradient sidecar: {len(grad_arrays)} arrays, "
+            f"{sum(a.size for a in grad_arrays.values()) * 8 / 1e6:.2f} MB; "
+            "(O1) "
+            + " ".join(f"{k} {x:.2e}" for k, x in res["o1_each"].items())
+            + f" (O2) {res['o2']:.2e} "
+            f"(O3) {res['act_occ']} of {ncas} active orbitals below the RHF HOMO "
+            f"({res['homo']:.6f}; LUMO {res['lumo']:.6f})"
+        )
+    return meta, arrays, grad
 
 
 def _irrep_counts(text: str) -> dict[str, int]:
@@ -772,6 +1085,13 @@ def main() -> None:
         "orbitals around the Fermi level)",
     )
     ap.add_argument(
+        "--gradgold",
+        action="store_true",
+        help="also write the gradient sidecar <out>.gradgold beside the golden "
+        "(the MO-integral inventory an analytic NEVPT2 gradient reads, plus the "
+        "full-range Fock matrices and mo_coeff; docs/gradient-theory.md, section 3)",
+    )
+    ap.add_argument(
         "--core-irreps",
         type=_irrep_counts,
         default=None,
@@ -783,6 +1103,12 @@ def main() -> None:
         ap.error("--auxbasis needs --df")
     if args.core_irreps is not None and args.cas_irreps is None:
         ap.error("--core-irreps needs --cas-irreps")
+    # The gradient derivation (docs/gradient-theory.md) is written for
+    # conventional four-index integrals: a DF sidecar would carry fitted
+    # blocks whose (O1)/(O2) invariants hold against the DF Fock, not the one
+    # the derivation names. Refused rather than quietly written.
+    if args.gradgold and args.df:
+        ap.error("--gradgold is conventional-integral only, not --df")
     auxbasis = (args.auxbasis or f"{args.basis}-jkfit") if args.df else None
     if args.name is None:
         args.name = "n2_ccpvdz_cas1010" + ("_df" if args.df else "")
@@ -792,13 +1118,18 @@ def main() -> None:
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    meta, arrays = generate(
+    meta, arrays, grad = generate(
         args.atom, args.basis, args.ncas, args.nelecas, args.name, auxbasis,
         pc=not args.no_pc, rdm4_threads=args.rdm4_threads,
         cas_irreps=args.cas_irreps, core_irreps=args.core_irreps,
+        gradgold=args.gradgold,
     )
     write_golden(out_path, **meta, arrays=arrays)
     print(f"wrote {out_path}")
+    if grad is not None:
+        grad_path = out_path.with_suffix(".gradgold")
+        write_gradgold(grad_path, **grad[0], arrays=grad[1])
+        print(f"wrote {grad_path}")
 
 
 if __name__ == "__main__":

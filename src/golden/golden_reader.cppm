@@ -1,7 +1,14 @@
-// nevpt2.golden:reader -- the byte-level reader behind loadGolden: a bounded
-// FILE* cursor and the one-array parser. An internal partition: nothing here is
-// exported, so it is reachable from golden.cpp (`import :reader;`) and from no
-// importer of nevpt2.golden.
+// nevpt2.golden:reader -- the byte-level reader behind loadGolden and
+// loadGradGold: a bounded FILE* cursor and the one-array parser. Both file
+// formats end with the same named-array section (generate_golden.py's
+// _write_arrays writes it for both), so both parse it with the one readArray
+// here; what differs is the magic and the scalar header each loader reads
+// first. An internal partition: nothing here is exported, so it is reachable
+// from golden.cpp / gradgold.cpp (`import :reader;`) and from no importer of
+// nevpt2.golden.
+//
+// Every message names the file kind through Reader's `label` -- "golden file"
+// or "gradient sidecar" -- so a refusal says which of the two was being read.
 module;
 
 #include <cstdio>  // SEEK_END / SEEK_SET: macros, which `import std` does not carry
@@ -27,26 +34,30 @@ static_assert(std::endian::native == std::endian::little,
 
 class Reader {
  public:
-  static Result<Reader> open(const std::string& path) {
+  // `label` names the file kind in every message this Reader produces, and in
+  // readArray's: "golden file" or "gradient sidecar".
+  static Result<Reader> open(const std::string& path, std::string label) {
     std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return err_io("could not open golden file: " + path);
-    Reader r(f, path);
+    if (!f) return err_io(std::format("could not open {}: {}", label, path));
+    Reader r(f, path, std::move(label));
     // The file's size bounds every later read, so a corrupt extent is refused
     // as running past the end instead of sizing a huge allocation.
-    if (std::fseek(f, 0, SEEK_END) != 0) return err_io("could not seek golden file: " + path);
+    if (std::fseek(f, 0, SEEK_END) != 0)
+      return err_io(std::format("could not seek {}: {}", r.label_, path));
     const long size = std::ftell(f);
     if (size < 0 || std::fseek(f, 0, SEEK_SET) != 0)
-      return err_io("could not size golden file: " + path);
+      return err_io(std::format("could not size {}: {}", r.label_, path));
     r.remaining_ = size;
     return r;
   }
 
   const std::string& path() const { return path_; }
+  const std::string& label() const { return label_; }
   int64_t remaining() const { return remaining_; }
 
   Status bytes(void* dst, std::size_t n) {
     if (std::cmp_greater(n, remaining_) || std::fread(dst, 1, n, f_.get()) != n)
-      return err_io("golden file: unexpected EOF -- " + path_);
+      return err_io(std::format("{}: unexpected EOF -- {}", label_, path_));
     remaining_ -= static_cast<int64_t>(n);
     return {};
   }
@@ -67,7 +78,7 @@ class Reader {
   }
   Result<std::string> str(int64_t n) {
     if (n < 0 || n > remaining_)
-      return err_io(std::format("golden file: bad string length {} -- {}", n, path_));
+      return err_io(std::format("{}: bad string length {} -- {}", label_, n, path_));
     std::string s(static_cast<std::size_t>(n), '\0');
     NEVPT2_TRY(bytes(s.data(), s.size()));
     return s;
@@ -77,20 +88,24 @@ class Reader {
   struct Closer {
     void operator()(std::FILE* f) const { std::fclose(f); }
   };
-  Reader(std::FILE* f, std::string path) : f_(f), path_(std::move(path)) {}
+  Reader(std::FILE* f, std::string path, std::string label)
+      : f_(f), path_(std::move(path)), label_(std::move(label)) {}
 
   std::unique_ptr<std::FILE, Closer> f_;
   std::string path_;
+  std::string label_;
   int64_t remaining_ = 0;
 };
 
-// One named array, its header validated before it sizes anything.
-Status readArray(Reader& r, GoldenFile& g) {
+// One named array, its header validated before it sizes anything. Takes the
+// destination map rather than a file struct, so the one parser serves both
+// formats' array sections.
+Status readArray(Reader& r, std::unordered_map<std::string, Tensor>& arrays) {
   const int64_t nameLen = NEVPT2_TRY(r.i32());
   std::string name = NEVPT2_TRY(r.str(nameLen));
   const int64_t ndim = NEVPT2_TRY(r.i32());
   if (ndim < 0 || ndim > kMaxRank)
-    return err_io(std::format("golden file: array '{}' has rank {} (expected 0..{}) -- {}", name,
+    return err_io(std::format("{}: array '{}' has rank {} (expected 0..{}) -- {}", r.label(), name,
                               ndim, kMaxRank, r.path()));
   // The file stores each extent as an int64 -- the int64_t held here.
   std::vector<int64_t> shape(static_cast<std::size_t>(ndim));
@@ -98,18 +113,34 @@ Status readArray(Reader& r, GoldenFile& g) {
   for (int64_t& s : shape) {
     s = NEVPT2_TRY(r.i64());
     if (s < 0)
-      return err_io(std::format("golden file: array '{}' has a negative extent {} -- {}", name,
+      return err_io(std::format("{}: array '{}' has a negative extent {} -- {}", r.label(), name,
                                 s, r.path()));
     // Bounded by the bytes left in the file, so neither the element count
     // nor its byte count can overflow.
     if (s > 0 && total > r.remaining() / static_cast<int64_t>(sizeof(double)) / s)
-      return err_io(std::format("golden file: array '{}' runs past the end of the file -- {}",
+      return err_io(std::format("{}: array '{}' runs past the end of the file -- {}", r.label(),
                                 name, r.path()));
     total *= s;
   }
   std::vector<double> data(static_cast<std::size_t>(total));
   NEVPT2_TRY(r.bytes(data.data(), data.size() * sizeof(double)));
-  g.arrays.emplace(std::move(name), Tensor::fromFlat(shape, std::move(data)));
+  arrays.emplace(std::move(name), Tensor::fromFlat(shape, std::move(data)));
+  return {};
+}
+
+// The array section both formats end with: an int32 count, then that many
+// arrays, and nothing after the last one.
+Status readArraySection(Reader& r, std::unordered_map<std::string, Tensor>& arrays) {
+  const int64_t nArrays = NEVPT2_TRY(r.i32());
+  if (nArrays < 0)
+    return err_io(
+        std::format("{}: negative array count {} -- {}", r.label(), nArrays, r.path()));
+  for (int64_t a = 0; a < nArrays; ++a) NEVPT2_TRY(readArray(r, arrays));
+  // The writer stops after the last array, so anything left is a truncated
+  // or miscounted header, not padding.
+  if (r.remaining() != 0)
+    return err_io(std::format("{}: {} bytes after the last of its {} arrays -- {}", r.label(),
+                              r.remaining(), nArrays, r.path()));
   return {};
 }
 

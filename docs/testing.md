@@ -223,6 +223,11 @@ uv run python reference_data/generate_golden.py --ncas 8 --nelecas 8 --name n2_c
 uv run python reference_data/generate_golden.py --ncas 8 --nelecas 8 --df --name n2_ccpvdz_cas88_df
 ```
 
+The two conventional cases also carry a gradient sidecar, which the committed
+commands add with `--gradgold`
+([`reference-data.md`](reference-data.md), "The gradient sidecar"); the flag
+writes a separate `*.gradgold` file and leaves these goldens' bytes alone.
+
 | case | ncore | n_det | E_corr (conventional / DF) |
 |---|---:|---:|---|
 | CAS(4,4) | 5 | 36 | −0.2349210164 / −0.2349326445 |
