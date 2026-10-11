@@ -15,6 +15,15 @@
 // (Eq. 15), is checked against nevpt2.energy's own answer for the same state
 // to 1e-10 and against the golden PySCF per-class energy to 1e-7.
 //
+// WITH --kappa-act IT CHECKS THE ORBITAL SOURCE TERM INSTEAD, the
+// active-active block of Park's Eq. 26: the adjoint pairing <kappa, Y_act>
+// out of those same pseudodensities against the forward tangent of the same
+// classes along kappa, for several seeded antisymmetric directions, and both
+// against the one finite difference in sight -- energiesDevice rerun at
+// rotated integrals, which is what pins the rotation convention. The
+// partition :kappa_check is where that lives, and it prints its own PASS
+// line.
+//
 // It is the only caller of nevpt2.gradient; the demos do not link it.
 
 // A module unit, so each binary is apps/<app>/{main.cppm,CMakeLists.txt}.
@@ -29,6 +38,12 @@ module;
 
 export module nevpt2.app.sc_pseudodensity;
 
+// --kappa-act: the active-active block of the orbital source term, checked
+// against the forward tangent and against a finite difference of the energy
+// itself. This binary's own flag (nothing else assembles pseudodensities),
+// and its own PASS line.
+export import :kappa_check;
+
 import std;
 // nevpt2.cli: --golden, --tiles and the rest of the flags the demos take.
 import nevpt2.cli;
@@ -39,17 +54,24 @@ import nevpt2.rdm_build;
 
 int main(int argc, char** argv) {
   constexpr std::string_view kGoldenHint = "path.nevpt2gold";
+  constexpr std::string_view kExtraFlags = "[--kappa-act]";
   const std::vector<std::string_view> args(argv + 1, argv + argc);
   nevpt2::cli::CommonOptions opt;
+  bool kappaActArg = false;
 
+  // The common flags first (nevpt2.cli), then this binary's own; anything
+  // else is a usage error.
   for (std::size_t i = 0; i < args.size(); ++i) {
     const nevpt2::Result<bool> used = nevpt2::cli::parseCommonFlag(args, i, opt);
     if (!used) {
       nevpt2::report(used.error());
       return 1;
     }
-    if (!*used) {
-      std::fputs(nevpt2::cli::usage(argv[0], kGoldenHint, "").c_str(), stderr);
+    if (*used) continue;
+    if (args[i] == "--kappa-act") {
+      kappaActArg = true;
+    } else {
+      std::fputs(nevpt2::cli::usage(argv[0], kGoldenHint, kExtraFlags).c_str(), stderr);
       return 1;
     }
   }
@@ -133,6 +155,23 @@ int main(int argc, char** argv) {
   std::printf("computing the eight SC-NEVPT2 class energies on the GPU...\n");
   const nevpt2::EnergyResult energies =
       nevpt2::energiesDevice(dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, *res);
+
+  // --kappa-act: the active-active orbital source term instead of the
+  // identity report -- the adjoint pairing <kappa, Y_act> against the
+  // forward tangent along the same direction, and both against a central
+  // finite difference of energiesDevice at rotated integrals
+  // (:kappa_check). Its own PASS line is the gate, and the identity report
+  // below does not run.
+  if (kappaActArg) {
+    const nevpt2::Result<bool> ok = checkKappaAct(g, energies, dInts, dDm1, dDm2, rdm.dm3,
+                                                  rdm.f3ac, rdm.f3ca, *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
 
   std::printf("assembling the SC pseudodensities on the GPU...\n");
   const auto t0 = std::chrono::steady_clock::now();

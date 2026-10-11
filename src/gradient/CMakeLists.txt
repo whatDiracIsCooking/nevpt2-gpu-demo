@@ -16,6 +16,20 @@ add_cxx_module_library(
   LINK_PRIVATE nevpt2::error_handling
 )
 
+# nevpt2.kappa_rotation -- the orbital-rotation parameterisation, host side:
+# an antisymmetric kappa, exp(kappa), and the transformation an orthogonal U
+# induces on one array's active axes. No device either, so the unit tier
+# checks it card-free (test/gradient/): that U is orthogonal, and that a
+# rotation by kappa = 0 leaves a block bit-identical. nevpt2.gradient does NOT
+# link it -- the device twin of the kappa action is its own (:rotation) --
+# apps/sc_pseudodensity/ does, for the finite-difference side of the check.
+add_cxx_module_library(
+  NAME nevpt2.kappa_rotation
+  PRIMARY_INTERFACE kappa_rotation.cppm
+  LINK_PUBLIC nevpt2::tensor
+  LINK_PRIVATE nevpt2::error_handling
+)
+
 # nevpt2.gradient -- the device assembly. It imports nevpt2.energy (and
 # re-exports it: the entry points take its ActiveIntegralsDevice and
 # IntegralSource, and build the metric / Dyall-Hamiltonian blocks with its own
@@ -24,11 +38,13 @@ add_cxx_module_library(
 # device library of its own here. gradient_terms.cppm and
 # gradient_sc_classes.cppm are the internal partitions nevpt2.gradient:terms
 # (the generic term/derivative machinery) and nevpt2.gradient:sc_classes (the
-# eight classes), which no importer sees.
+# eight classes), which no importer sees; gradient_rotation.cppm is
+# nevpt2.gradient:rotation, the active-rotation machinery both of them use
+# (:terms imports it, so it is listed first).
 add_cxx_module_library(
   NAME nevpt2.gradient
   PRIMARY_INTERFACE gradient.cppm
-  PARTITIONS gradient_terms.cppm gradient_sc_classes.cppm
+  PARTITIONS gradient_rotation.cppm gradient_terms.cppm gradient_sc_classes.cppm
   IMPLEMENTATION gradient.cpp
   LINK_PUBLIC nevpt2::energy nevpt2::sc_amplitudes
 )

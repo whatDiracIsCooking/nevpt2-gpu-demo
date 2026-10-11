@@ -225,6 +225,50 @@ if(NEVPT2_BUILD_TESTING)
     unset(_sc_pd_gold)
   endforeach()
 
+  # --- the active-active orbital source term, --kappa-act -------------------------
+  #
+  # nevpt2_sc_pseudodensity --kappa-act (apps/sc_pseudodensity/kappa_check.cppm):
+  # the active-active block of Park Eq. 26's Y_xy, taken BOTH WAYS and held
+  # against itself -- the adjoint pairing <kappa, Y_act> out of the same
+  # pseudodensities the entries above check, and the forward tangent Edot
+  # along the same direction, for four seeded antisymmetric directions, to
+  # 1e-7 (exact arithmetic, not a step size: it comes out near machine
+  # precision). Y_act is also assembled as a MATRIX by probing the basis
+  # directions and its pairing checked back, and the whole convention is
+  # pinned to nevpt2.kappa_rotation's exp(t kappa) by one central finite
+  # difference of energiesDevice at rotated integrals -- the same
+  # plateau-and-Richardson analysis as --sc-tangent's, and for the same
+  # reason (docs/testing.md, "The active-rotation source term").
+  #
+  # The sweep reruns the energy stage at 28 displaced integral sets, but NOT
+  # the RDM build (the rotation moves integrals only), so these are seconds at
+  # every size here. Its PASS line is its own, so no entry can pass on
+  # another's output.
+  #
+  # ONLY CAS(4,4) is `small`. The device work the sanitizer tier is here to
+  # watch -- the kappa action, the per-direction pairings, the product rule --
+  # is the same code at every size, and the CAS(8,8) entry costs 103 s under
+  # memcheck against CAS(4,4)'s 1.4 s (the 28-point sweep and the 28 basis
+  # probes, each a full pass), which would be half that preset's whole runtime
+  # for no path this does not already cover (docs/testing.md, "The
+  # active-rotation source term", and "Wall times" for what the tier is kept
+  # under).
+  set(_nevpt2_kappa_pass "PASS: the active-rotation source term's adjoint and tangent agree")
+  foreach(_case cas44 cas88 cas1010)
+    set(_kappa_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.nevpt2gold")
+    _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_kappa_${_case}
+                          "${_kappa_gold}" --tiles 3 --kappa-act)
+    if(TEST nevpt2_sc_pseudodensity_kappa_${_case})
+      set_tests_properties(nevpt2_sc_pseudodensity_kappa_${_case} PROPERTIES
+        PASS_REGULAR_EXPRESSION "${_nevpt2_kappa_pass}")
+      if(_case STREQUAL "cas44")
+        set_tests_properties(nevpt2_sc_pseudodensity_kappa_${_case}
+                             PROPERTIES LABELS "gpu;small")
+      endif()
+    endif()
+    unset(_kappa_gold)
+  endforeach()
+
   # --- *_pc: PC-NEVPT2 ----------------------------------------------
   #
   # The same RDM build as the SC entry at the same --tiles; the PC stage runs

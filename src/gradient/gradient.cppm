@@ -57,6 +57,8 @@
 // identities in exact arithmetic -- a mis-transcribed index does not satisfy
 // them -- and the ctest entries hold them to 1e-10 (docs/testing.md, "The SC
 // pseudodensity identities").
+// AND THE ORBITAL-ROTATION SOURCE TERM'S ACTIVE-ACTIVE BLOCK comes out of the
+// same walk -- "The active-rotation source term" below, scActiveRotationDevice.
 export module nevpt2.gradient;
 
 import std;
@@ -107,6 +109,12 @@ struct ScClassGradient {
   double intReference = 0.0;    // <K, E>
   double intContraction = 0.0;  // <h1e, d^eff> + <h2e, its two-electron partner>
   double rdmContraction = 0.0;  // <rm2, D_rm2> + <rm3, D_rm3>
+
+  // --- the active-rotation source term, one entry per requested direction ---
+  // (empty when none was). See "The active-rotation source term" below.
+  std::vector<double> rotExt{};      // sum_blocks <D, Xdot>: Eq. 41's half
+  std::vector<double> rotAct{};      // sum_G <M_G, Gdot>:    Eqs. 42-43's half
+  std::vector<double> rotTangent{};  // the forward tangent, P.Ndot + Q.Hdot
 };
 
 struct ScGradientResult {
@@ -138,6 +146,125 @@ ScGradientResult scPseudodensityDevice(const NevptIntegralsDevice& ints, const D
                                        const DeviceTensor& f3ac, const DeviceTensor& f3ca,
                                        const DeviceResources& res);
 
+// --- The active-rotation source term ----------------------------------------
+//
+// Park Eq. 26's orbital source term Y_xy = dE/dkappa_xy, RESTRICTED TO THE
+// ACTIVE-ACTIVE BLOCK -- and in both directions, which is the point:
+//
+//   the ADJOINT   <kappa, Y_act> = sum_blocks <D, Xdot> + sum_G <M_G, Gdot>,
+//                 the pseudodensities above paired with the direction;
+//   the TANGENT   Edot(kappa), the same class terms rerun under the product
+//                 rule and finished with Eqs. 36-37's multipliers.
+//
+// They are one derivative taken two ways, so holding them equal (to 1e-7; it
+// comes out near machine precision) is what checks the assembly. The third
+// number, a central finite difference of energiesDevice itself along
+// exp(t kappa), is apps/sc_pseudodensity/'s -- it is what pins the device
+// kappa action to nevpt2.kappa_rotation's exponential map, which the two
+// directions here SHARE and so cannot check against each other.
+//
+// WHAT MOVES, EXACTLY -- the scope of this entry point, and the reason it is
+// the active-active block alone. An active rotation at fixed CI coefficients
+// moves every stored array that carries an active index: the active-space
+// integrals h1e and h2e, and every external integral block's active slots.
+// Those are all here. Held FIXED are
+//
+//   * the RDMs dm1/dm2/dm3 -- correct: they are functions of the CI vector,
+//     which this derivative holds fixed;
+//   * the f3ac/f3ca digests -- NOT a property of the exact derivative, but
+//     of this functional: the digests are h2e contracted with the 4-RDM, so
+//     the exact dE/dkappa carries a term through them, and recovering it in
+//     reverse mode needs that contraction's TRANSPOSE (the 4-RDM against a
+//     6-index conjugate density), a kernel this tree does not have. Both
+//     directions here therefore differentiate the energy stage's own
+//     functional, with the digests among its fixed inputs;
+//   * the orbital energies e_core/e_virt -- likewise this functional's, and
+//     in the exact derivative they move too, through the active density
+//     inside the generalized Fock matrix: that needs the (xa|cc) and (xa|vv)
+//     integrals the golden does not carry (docs/gradient-theory.md, Sec. 1.3,
+//     which is explicit that "the active block needs only what the golden
+//     already carries" is the easy mistake here).
+//
+// So this is the INTEGRAL HALF of the chain rule, dE/dkappa at fixed RDMs,
+// fixed digests and fixed orbital energies -- exact for that functional, in
+// both modes, and the half that the core/virtual and mixed blocks' work
+// builds on. docs/testing.md, "The active-rotation source term", records what
+// is measured and names the two gaps again.
+//
+// THE CHAIN RULE THROUGH THE DYALL BLOCKS IS WHAT THIS ADDS to the
+// pseudodensities above, and it needs no new term list: every make_* of
+// nevpt2.energy is linear in the integrals it reads, so a block's tangent is
+// that same builder called with the dotted integrals (the :rotation
+// partition says it again, with the f3 = 0 argument that isolates the h1e/h2e
+// part). Eqs. 44-47's one-electron and two-electron active-space
+// pseudodensities -- the Srs-only, make_a7-shaped objects above -- are NOT on
+// this path and are not completed into Park's Eq. 35 Gamma-conjugate form
+// here: that form is a re-expression of the same numbers, with no consumer
+// until the full Y (core and virtual included) needs the RDM side too.
+struct ScRotationRequest {
+  Tensor kappa;          // (n_act, n_act), antisymmetric (nevpt2.kappa_rotation)
+  bool tangent = false;  // also take the forward tangent along it
+};
+
+// One direction's answer, summed over the eight classes.
+struct ScRotationPairing {
+  double ext = 0.0;         // sum_blocks <D, Xdot>
+  double act = 0.0;         // sum_G <M_G, Gdot>
+  double adjoint = 0.0;     // <kappa, Y_act> = ext + act
+  double tangent = 0.0;     // Edot(kappa), 0 when it was not asked for
+  bool hasTangent = false;
+};
+
+struct ScRotationResult {
+  ScGradientResult grad;                   // the pseudodensity identities, as above
+  std::vector<ScRotationPairing> dirs{};   // one per ScRotationRequest, in order
+};
+
+// The pseudodensity assembly of scPseudodensityDevice (which is this with no
+// directions), plus the source term paired against each `dirs` entry. Same
+// inputs, same slab walk, same stream and pool; a malformed kappa is the
+// CALLER's input and comes back as an Error, reported once at main.
+//
+// Everything is accumulated per class in CLASSES order, so a caller can read
+// the per-class breakdown off `grad.classes[c].rotExt/rotAct/rotTangent`
+// (parallel to `dirs`). Sijrs contributes nothing to any of it: the MP2-like
+// class reads no array with an active index at all.
+Result<ScRotationResult> scActiveRotationDevice(const ActiveIntegralsDevice& active,
+                                                IntegralSource& source, int64_t batch,
+                                                const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                                const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                                const DeviceTensor& f3ca,
+                                                const std::vector<ScRotationRequest>& dirs,
+                                                const DeviceResources& res);
+
+// The integral-direct entry point: full blocks, one slab each.
+Result<ScRotationResult> scActiveRotationDevice(const NevptIntegralsDevice& ints,
+                                                const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                                const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                                const DeviceTensor& f3ca,
+                                                const std::vector<ScRotationRequest>& dirs,
+                                                const DeviceResources& res);
+
+// Y_act as a MATRIX: the antisymmetric (n_act, n_act) whose pairing with any
+// antisymmetric kappa is scActiveRotationDevice's `adjoint`. Assembled by
+// probing the same linear functional with the n_act (n_act - 1) / 2 basis
+// directions E_pq - E_qp, `chunk` of them per slab walk (the pseudodensities
+// are rebuilt once per chunk, so a bigger chunk is faster and holds more).
+// Y_pq for p < q is half the pairing with E_pq - E_qp, so that
+// sum_pq kappa_pq Y_pq is the pairing with kappa; Y_qp = -Y_pq, diagonal zero.
+//
+// There is no cheaper assembly available: the gauge invariance of the class
+// energies under a covariant rotation of integrals AND RDMs together makes
+// the directly-contractible part (<D, X> and <M_G, G> with one active index
+// left open) exactly SYMMETRIC, hence invisible to an antisymmetric kappa --
+// all of Y_act's content sits in the chain rule through the Dyall blocks,
+// which is a map into the integrals, not out of them. Probing it is what a
+// caller wanting the matrix pays; a caller wanting a pairing pays nothing.
+Result<Tensor> scActiveRotationMatrix(const NevptIntegralsDevice& ints, const DeviceTensor& dm1,
+                                      const DeviceTensor& dm2, const DeviceTensor& dm3,
+                                      const DeviceTensor& f3ac, const DeviceTensor& f3ca,
+                                      int64_t chunk, const DeviceResources& res);
+
 // Prints the per-class table -- the amplitude energy against `energies`'
 // (nevpt2.energy's own answer for the same state) and against the golden
 // `ref`, and both identity residuals -- then the gate line the
@@ -147,5 +274,13 @@ ScGradientResult scPseudodensityDevice(const NevptIntegralsDevice& ints, const D
 // `energies`' and of `ref`'s, and both identity residuals are within `idtol`.
 bool printScGradientReport(const ScGradientResult& g, const EnergyResult& energies,
                            const Tensor& ref, double atol, double idtol);
+
+// Prints the per-direction table of the active-rotation source term -- the
+// adjoint pairing, its two halves, the forward tangent and the difference --
+// and returns whether every direction that carries a tangent agrees to
+// `atol`. The PASS/FAIL line is the caller's (apps/sc_pseudodensity/'s
+// --kappa-act gate also weighs its finite difference), so this prints the
+// table and the verdict, not a gate line.
+bool printScRotationTable(const ScRotationResult& r, double atol);
 
 }  // namespace nevpt2

@@ -154,6 +154,105 @@ The host half — the scalar finish's derivative, which is the only thing the
 tangent differentiates by hand — is `test/energy_finish/`, card-free
 (`NormToEnergyDerivativeTests`, `NormToEnergyTangentTests`).
 
+## The active-rotation source term
+
+`nevpt2_sc_pseudodensity_kappa_cas44`, `_cas88` and `_cas1010` (`gpu`;
+CAS(4,4) also `small`) run `nevpt2_sc_pseudodensity --golden <case> --tiles 3
+--kappa-act` and match `PASS: the active-rotation source term's adjoint and
+tangent agree`. What they check is the **active-active block of Park Eq. 26's
+orbital source term** `Y_xy = dE/dkappa_xy`, taken two ways out of the same
+slab walk and held against itself:
+
+| | |
+|---|---|
+| **A**, the adjoint | `<kappa, Y_act> = sum_blocks <D, Xdot> + sum_G <M_G, Gdot>` — the pseudodensities the entries above check, paired with the direction's action on the very arrays they are conjugate to |
+| **B**, the tangent | `Edot(kappa)`: the same class terms rerun under the product rule, finished with Eqs. 36-37's multipliers |
+| **C**, one finite difference | a central difference of `energiesDevice` along `exp(h kappa)` — every stored integral block rotated on the host, the RDMs and digests untouched |
+
+`A == B` is the gate, at this tree's usual 1e-7, and it is **exact
+arithmetic, not a step size**. `C` is there because A and B *share* two
+conventions — the device kappa action, and "a Dyall block's tangent is its
+own `make_*` called with the dotted integrals" — and a wrong tangent of an
+operand cancels between the two modes; the finite difference is what pins both
+to `nevpt2.kappa_rotation`'s exponential map. Same role, and the same
+plateau-and-Richardson analysis, as `--sc-tangent`'s above.
+
+**What is differentiated, and the two pieces that are missing.** The
+functional is the SC total as a function of the MO **integrals** — every array
+carrying an active index rotated — with `dm1`/`dm2`/`dm3`, the `f3ac`/`f3ca`
+digests and the orbital energies all held fixed. The RDMs being fixed is the
+derivative's own definition (they are functions of the CI vector). The other
+two are this functional's limits, and are the core/virtual work's to lift:
+the digests carry an `h2e` dependence whose reverse mode needs the 4-RDM
+contraction's transpose, and the orbital energies respond through the active
+density inside the generalized Fock matrix, which needs the `(xa|cc)` and
+`(xa|vv)` blocks the golden does not carry
+([`gradient-theory.md`](gradient-theory.md), §1.3). `gradient.cppm`, "The
+active-rotation source term", says it where the code is.
+
+Measured on an RTX 3080 (CUDA, Release, `--tiles 3`), four seeded
+antisymmetric directions of unit Frobenius norm per case:
+
+| case | `<kappa, Y_act>`, direction 0 | `max \|Y_act\|` | A vs B, worst of four | matrix vs pairing | FD plateau `\|err\|` (relative) | fourfold halvings |
+|---|---|---|---|---|---|---|
+| CAS(4,4) | 2.0e-16 — zero by symmetry, below | 4.0e-16 | 1.5e-31 | 2.6e-28 | 1.8e-12 (7.7e-12) | 7 |
+| CAS(8,8) | 8.69193610221149e-03 | 1.5e-1 | 2.9e-15 | 4.4e-15 | 6.3e-11 (2.9e-10) | 8 |
+| CAS(10,10) | 2.96982227227210e-02 | 1.3e-1 | 2.8e-15 | 3.0e-15 | 3.2e-11 (1.7e-10) | 7 |
+
+The adjoint and the tangent agree at **machine precision** — 1e-15 against a
+1e-7 gate — and the finite difference lands 1e-10 to 1e-11 away from both,
+with the ratio 4.00 to two decimals through the truncation regime. The whole
+entry takes <1 s / 2 s / 30 s at the three sizes (of which the matrix is
+0.01 s / 1.6 s / 15 s and the 28-point sweep most of the rest), and the pool
+high-water is 0.7 MB / 60.8 MB / 1679 MB — the last being the CAS(10,10) RDM
+build's, which the entry runs first and which dominates it.
+
+**CAS(4,4) asserts a nontrivial zero.** N2's four active orbitals there are
+its π system, and in D2h they lie in four *distinct* irreps, so every
+active-active rotation mixes two of them: the energy is invariant under the
+group, a scalar has no component along a non-symmetric generator, and the
+whole source term vanishes identically — which is what both halves of A, B
+and the matrix report (`max |Y_act| = 4.0e-16`), and what C confirms from the
+unmodified energy stage (its differences fall as `h^2` towards zero and reach
+1.8e-12). CAS(8,8) and CAS(10,10) have same-irrep pairs in the active space
+and a source term of order 1e-1, so they are where the identity has content.
+
+Because of that zero, the finite difference's error is judged against
+`max(|Edot|, |E_corr|)` and not against `|Edot|` — which is also the right
+scale on its own terms: differencing `E(+h) - E(-h)` carries round-off of
+order `eps |E| / h`, so the floor is set by the energy's magnitude, not the
+derivative's.
+
+**Y_act as a matrix.** `scActiveRotationMatrix` probes the same linear
+functional with the `n_act (n_act - 1) / 2` basis directions `E_pq - E_qp`
+(in chunks of 16, one slab walk per chunk) and the entry checks its pairing
+with each seeded kappa back against A. That is the entry point the
+core/virtual extension compares against, and probing is what it costs:
+the gauge invariance of the class energies under a *covariant* rotation of
+integrals and RDMs together makes the directly-contractible part (`<D, X>`
+and `<M_G, G>` with one active index left open) exactly symmetric, hence
+invisible to an antisymmetric kappa, so all of `Y_act`'s content sits in the
+chain rule through the Dyall blocks — a map *into* the integrals, which
+reverse mode does not run backwards for free. Above 64 basis directions the
+matrix is skipped (CAS(10,10)'s 45 are in, CAS(12,12)'s 66 are not); the
+per-direction pairing is unaffected and costs nothing extra.
+
+**Only CAS(4,4) is `small`,** unlike the pseudodensity-identity entries above.
+The device work the sanitizer tier is there to watch — the kappa action, the
+per-direction pairings, the product rule — is the same code at every size,
+and the CAS(8,8) entry costs **103 s under memcheck and 34 s under
+initcheck** against CAS(4,4)'s 1.4 s and 1.2 s (the 28-point sweep and the 28
+basis probes are each a full pass over everything) — about half the memcheck
+preset's whole runtime for no path CAS(4,4) does not already cover. It was
+run clean under both before being dropped from `small`; "Wall times" below is
+the standard the tier is kept to.
+
+The host half — `exp(kappa)` orthogonal to 1e-14, and a rotation by
+`kappa = 0` leaving every block **bit**-identical (compared as bit patterns,
+with a `-0.0` and a denormal in the data) — is `test/gradient/`, card-free:
+`AntisymmetricKappaTests`, `ExpKappaTests`, `RotateAxesTests`,
+`RotateByZeroTests` and `KappaRotationDeathTest`.
+
 ## Sanitizers
 
 Some bugs show up only some of the time — a call left on the legacy stream
@@ -441,6 +540,7 @@ memcheck with the leak check. "plain" is the same entry unsanitized
 | `nevpt2_cas88_pc` | 0.67 | 0.50 | 4.22 | 2.17 | — | — | 2.91 | 1.60 | — | — |
 | `nevpt2_df_cas44_pc` | 0.51 | 0.35 | 0.72 | 0.67 | — | — | 1.42 | 0.41 | — | — |
 | `nevpt2_df_cas88_pc` | 0.67 | 0.51 | 4.17 | 2.17 | — | — | 2.94 | 1.64 | — | — |
+| `nevpt2_sc_pseudodensity_kappa_cas44` | 0.88 | 0.67 | 1.42 | 1.17 | — | — | — | — | 0.38 | — |
 | each canary | 0.36 | 0.35 | 0.75–0.86 | 0.49 | 0.53 | 0.77 | 0.37 | 0.36 | — | — |
 
 The `nevpt2_cas88_profile` row was measured with the RDM-build-only profiler
@@ -448,7 +548,9 @@ that `--profile` has since absorbed. `nevpt2_df_cas88_profile` and the two
 `--ozaki` small entries have not been timed under the tier; the `--ozaki`
 pair has been run clean under memcheck (with the leak check), racecheck,
 initcheck, synccheck, `asan` and `ubsan`, but not yet `hip-asan` /
-`hip-ubsan`. racecheck and synccheck have not been run on the `--pc` entries.
+`hip-ubsan`. racecheck and synccheck have not been run on the `--pc` entries,
+nor on `nevpt2_sc_pseudodensity_kappa_cas44`, which has been run clean under
+`asan`, `ubsan`, memcheck (with the leak check) and initcheck.
 
 Everything except racecheck finishes in well under a minute, so CAS(8,8) is
 affordable under every tool. racecheck costs ~100s per CAS(8,8) entry on the

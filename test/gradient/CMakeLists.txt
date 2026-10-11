@@ -31,3 +31,29 @@ add_gtest_suite_tests(
   TARGET gradient_tests
   SUITES ScAmplitudesDeathTest
   DEATH)
+
+# Host-only suites for nevpt2.kappa_rotation (src/gradient/kappa_rotation.cppm)
+# -- the orbital-rotation parameterisation: a seeded antisymmetric kappa,
+# U = exp(kappa) and the transformation U induces on one array's active axes.
+# No device either, so NOT REQUIRES_GPU: the two properties the whole
+# active-rotation construction rests on -- U orthogonal to 1e-14, and a
+# rotation by kappa = 0 leaving every block BIT-identical -- are checkable
+# with no card. The source term assembled from them is a numerical claim and
+# stays with the golden tier (the `nevpt2_sc_pseudodensity_kappa_*` entries in
+# the root CMakeLists.txt).
+add_gtest_executable(
+  NAME kappa_rotation_tests
+  SOURCES kappa_rotation_tests.cpp
+  LINK nevpt2::kappa_rotation)
+
+add_gtest_suite_tests(
+  TARGET kappa_rotation_tests
+  SUITES AntisymmetricKappaTests ExpKappaTests RotateAxesTests RotateByZeroTests)
+
+# The abort tier: a non-square or non-antisymmetric kappa, and an axis list
+# that does not fit the tensor or u. EXPECT_DEATH forks per assertion, hence
+# its own `death` label.
+add_gtest_suite_tests(
+  TARGET kappa_rotation_tests
+  SUITES KappaRotationDeathTest
+  DEATH)
