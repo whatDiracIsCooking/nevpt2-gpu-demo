@@ -43,6 +43,11 @@ module;
 export module nevpt2.app.integral_direct;
 
 import std;
+// This demo's own helper, in an interface partition that exports nothing (see
+// its header): `export import` only because [module.unit] requires a primary
+// interface to re-export its interface partitions.
+export import :tangent_check;
+
 // nevpt2.cli: the flags both demos take, and the checks that span them
 // (--cublas is refused there on a build without it).
 import nevpt2.cli;
@@ -54,24 +59,52 @@ import nevpt2.rdm_build;
 
 int main(int argc, char** argv) {
   constexpr std::string_view kGoldenHint = "path.nevpt2gold";
+  constexpr std::string_view kExtraFlags = "[--sc-tangent]";
+  // --sc-tangent's one direction, fixed so the check is reproducible run to
+  // run (the several directions of the dot-product test are later work).
+  constexpr std::uint64_t kTangentSeed = 0x5eed'0032u;
   const std::vector<std::string_view> args(argv + 1, argv + argc);
   nevpt2::cli::CommonOptions opt;
+  // --sc-tangent: instead of the golden comparison, differentiate the SC
+  // total with respect to the CI vector and check it against Euler's identity
+  // and a central finite difference of the energy itself (:tangent_check).
+  // This demo's own flag, not nevpt2.cli's: the density-fitted demo has no
+  // tangent path.
+  bool scTangentArg = false;
 
-  // Every flag this demo takes is a common one; anything else is a usage
-  // error. A bad value, or a bad combination, is a config Error reported once.
+  // The common flags first (nevpt2.cli), then this demo's own; anything else
+  // is a usage error. A bad value, or a bad combination, is a config Error
+  // reported once.
   for (std::size_t i = 0; i < args.size(); ++i) {
     const nevpt2::Result<bool> used = nevpt2::cli::parseCommonFlag(args, i, opt);
     if (!used) {
       nevpt2::report(used.error());
       return 1;
     }
-    if (!*used) {
-      std::fputs(nevpt2::cli::usage(argv[0], kGoldenHint, "").c_str(), stderr);
+    if (*used) continue;
+    if (args[i] == "--sc-tangent") {
+      scTangentArg = true;
+    } else {
+      std::fputs(nevpt2::cli::usage(argv[0], kGoldenHint, kExtraFlags).c_str(), stderr);
       return 1;
     }
   }
   if (const nevpt2::Status st = nevpt2::cli::finalize(opt, kGoldenHint); !st) {
     nevpt2::report(st.error());
+    return 1;
+  }
+  // The tangent RDM build is the emitted or the native-fp64 BLAS digest only
+  // -- the same rule finalize() applies to --rdm-tangent, which it cannot
+  // apply here because --sc-tangent is this demo's flag.
+  if (scTangentArg && (opt.rdm.cublas || opt.rdm.ozaki || opt.rdm.fusedDigest)) {
+    nevpt2::report(nevpt2::Error::config(
+        "--sc-tangent runs the tangent RDM build, which is the emitted digest or "
+        "--blas-digest; not --cublas, --ozaki or --fused-digest"));
+    return 1;
+  }
+  if (scTangentArg && opt.pc) {
+    nevpt2::report(nevpt2::Error::config(
+        "--sc-tangent differentiates the strongly-contracted energy; it has no --pc path"));
     return 1;
   }
 
@@ -178,6 +211,26 @@ int main(int argc, char** argv) {
 
   nevpt2::DeviceTensor dDm1 = nevpt2::uploadTensor(g.get("dm1"), *res);
   nevpt2::DeviceTensor dDm2 = nevpt2::uploadTensor(g.get("dm2"), *res);
+
+  // --sc-tangent: the forward tangent of the SC total with respect to the CI
+  // vector (nevpt2.energy's energiesTangentDevice) against Euler's identity
+  // and a central finite difference of energiesDevice itself -- the one-time
+  // cross-check that licenses the exact dot-product tests downstream
+  // (:tangent_check, and docs/testing.md, "The SC tangent's finite-difference
+  // cross-check"). It rebuilds dm1/dm2 on the host at every displaced CI
+  // vector, so it reads `ci` and the integrals, not the golden's per-class
+  // energies: its own PASS line is the gate, and the golden comparison below
+  // does not run.
+  if (scTangentArg) {
+    const nevpt2::Result<bool> ok =
+        checkScTangent(g, opt.rdm, dInts, rdm, kTangentSeed, *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
 
   // --pc: the PC-NEVPT2 classes instead of the SC ones (all
   // eight), checked against block2's pc_class_energies and e_pc_total.

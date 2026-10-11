@@ -87,6 +87,73 @@ exist (below). The host half — the amplitude and multiplier formulas, and the
 subscript rewriting that differentiates a class term — is `test/gradient/`,
 card-free.
 
+## The SC tangent's finite-difference cross-check
+
+`nevpt2_cas44_sc_tangent` and `nevpt2_cas88_sc_tangent` (`gpu`; the CAS(4,4)
+one `small`) run `nevpt2_demo --golden <case> --tiles 3 --sc-tangent` and
+match `PASS: the SC tangent matches Euler`. They are **the only finite
+difference in the golden tier, and a one-time one**: it validates
+`energiesTangentDevice` (`nevpt2.energy`'s `:sc_tangent` partition) so that
+every later check of the reverse-mode assembly can be an exact dot-product
+identity against the tangent at this tree's usual 1e-7, with no step size
+anywhere. `apps/integral_direct/tangent_check.cppm` has the derivation; the
+entry checks three things.
+
+**The two exact checks.** A class norm is affine in the RDMs, so displacing
+them by any `X` must change it by exactly the tangent at `X`
+(`norm_k(dm + X) - norm_k(dm) == normDot_k(X)`), which is two runs of the
+unmodified `energiesDevice` against one of `energiesTangentDevice`. And for
+the three classes whose metric *and* Dyall-Hamiltonian blocks are purely
+linear in the RDMs — Sr, Srsi, Srs — the class energy is homogeneous of
+degree 2 in the CI vector, so the tangent along the state itself is `2 E_k`
+(Euler). The other five classes are affine, not homogeneous (`hdm1`'s
+`2 delta`, `hdm2`'s delta-delta terms, `a25`'s `2 h1e^T`, Sir's
+one-electron norm term), and Sijrs reads no RDM at all, so its tangent is
+exactly zero; no Euler identity holds for those, and they are checked by the
+norm increment and by the difference below. On an RTX 3080 (CUDA, Release):
+
+| exact check | CAS(4,4) | CAS(8,8) |
+|---|---|---|
+| `energiesTangentDevice`'s base total vs `energiesDevice`' | 5.8e-16 | 2.3e-15 |
+| the norm increment, worst of the eight classes | 7.5e-16 | 1.5e-14 |
+| Euler, worst of Sr / Srsi / Srs (energy and norm) | 4.2e-16 | 1.5e-15 |
+
+**The finite difference.** The total is a *ratio* of quadratics in the CI
+vector (the finish divides), so a central difference of `energiesDevice`
+along the straight line `c ± h u` — rebuilding dm1/dm2 on the host and
+dm3/f3ac/f3ca on the device at every displaced vector — has a genuine
+`O(h^2)` error. Measured on an RTX 3080, with `h = 2^-k` for k = 6…19 and one
+seeded direction (`|u| = 1`, `<c|u> = 0`):
+
+| case | `Edot(u)` | fourfold halvings | plateau `|err|` | plateau relative | crossover `h` |
+|---|---|---|---|---|---|
+| CAS(4,4) | 2.8187e-3 | 6 (k = 10…16) | 0.9–1.6e-11 | 3.0–5.6e-9 | 2^-17…2^-18 ≈ 1e-5 |
+| CAS(8,8) | -3.9074e-4 | 7 (k = 6…13) | 8.6e-12 | 2.2e-8 | 2^-15 ≈ 3.1e-5 |
+
+The ratio is 4.00 to two decimals through the truncation regime; below the
+crossover `h` the error rises again as round-off in `E / 2h`, and the exact
+step that reaches the plateau moves between runs (the RDM build's
+`atomicAdd`s reassociate, so `E` itself carries ~1e-14). The gate is
+therefore the *shape*: at least four consecutive halvings with a ratio in
+[3.2, 4.8], and a best relative error under 1e-6 — ~50x above what is
+measured.
+
+**One row of the sweep can go wild, and that is a property of differencing
+the energy.** A perturber that is empty at the base point (`N_k = H_k = 0` —
+N2's symmetry gives plenty) has both growing as `h^2` when the state is
+displaced, so its energy `-N^2/(Delta N + H)` is `O(h^2)`, even in `h`, and
+invisible to a central difference. But `N` and `H` are then tiny differences
+of O(1) contractions, i.e. round-off, and at a step where `Delta N + H`
+happens to cancel to nothing the term is numerically enormous: at CAS(4,4),
+k = 9 gives `-0.0961` where the derivative is `0.0028`. The tangent is
+unaffected (it skips those perturbers exactly as `normToEnergy` does), which
+is why the Richardson criterion asks for a run of good halvings rather than
+every one of them.
+
+The host half — the scalar finish's derivative, which is the only thing the
+tangent differentiates by hand — is `test/energy_finish/`, card-free
+(`NormToEnergyDerivativeTests`, `NormToEnergyTangentTests`).
+
 ## Sanitizers
 
 Some bugs show up only some of the time — a call left on the legacy stream
@@ -257,6 +324,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_df_cas44`, `nevpt2_df_cas88` | density fitting with `--check-blocks`; the default `--batch 8` leaves a ragged last slab on both (19 virtuals = 8 + 8 + 3, 17 = 8 + 8 + 1) |
 | `nevpt2_cas44_pc`, `nevpt2_cas88_pc`, `nevpt2_df_cas44_pc`, `nevpt2_df_cas88_pc` | `--pc`: the solver handle's eigensolves, the `d x d` BLAS GEMMs and the PC slab einsums, on both demos |
 | `nevpt2_cas88_rdm_tangent` | `--rdm-tangent`: the tangent RDM build beside the plain one, checked against twice it (the derivative itself is checked against a finite difference in the unit tier, `test/rdm/rdm_tangent_tests.cpp`) |
+| `nevpt2_cas44_sc_tangent` | `--sc-tangent`: the SC class energies' tangent with respect to the RDMs, against the norms' exact affine increment, Euler's identity and a finite difference ("The SC tangent's finite-difference cross-check", below). `nevpt2_cas88_sc_tangent` runs the same at CAS(8,8) and is **not** `small` |
 | `nevpt2_sc_pseudodensity_cas44`, `nevpt2_sc_pseudodensity_cas88` | the SC gradient's pseudodensity assembly and its identities ("The SC pseudodensity identities", above) |
 
 They are ordinary golden checks too, so `ctest --preset fast` and

@@ -53,6 +53,13 @@
 // _check_pc_conditioning rule applied to S. A non-positive denominator
 // lambda_k + Delta_t refuses the class too, rather than dividing through a
 // sign change.
+//
+// AND THE SC CLASSES CARRY A FORWARD TANGENT (energy_sc_tangent.cppm, the
+// :sc_tangent partition): energiesTangentDevice, the derivative of the eight
+// SC class energies with respect to the RDMs along a given direction. See
+// "the forward tangent" below for why that needs no new contraction -- the
+// class einsums are linear in the RDMs, so the tangent reruns them with the
+// tangent RDMs substituted and differentiates only the scalar finish.
 export module nevpt2.energy;
 
 import std;
@@ -175,6 +182,69 @@ EnergyResult energiesDevice(const NevptIntegralsDevice& ints,
                              const DeviceTensor& dm1, const DeviceTensor& dm2,
                              const DeviceTensor& dm3, const DeviceTensor& f3ac,
                              const DeviceTensor& f3ca, const DeviceResources& res);
+
+// --- the forward tangent (energy_sc_tangent.cppm) ---------------------------
+//
+// The directional derivative of the SC class energies with respect to the
+// RDMs: energiesTangentDevice takes the RDMs AND a second set of tensors of
+// the same shapes -- the tangents dm1_dot / dm2_dot / dm3_dot / f3ac_dot /
+// f3ca_dot -- and returns each class's norm and energy together with the
+// derivative of each along that direction. With the RDM tangents from a CI
+// direction u (nevpt2.rdm_host_dm's dm12Dot and nevpt2.rdm_build's
+// buildRdmTangentsDevice), `totalDot` is Edot(u), the forward-mode derivative
+// of the second-order energy along u -- which is what the reverse-mode
+// (adjoint) assembly is checked against.
+//
+// NOTHING IS DIFFERENTIATED BY HAND HERE EXCEPT THE SCALAR FINISH. At fixed
+// integrals every class's per-perturber N and H is LINEAR in the RDMs (each
+// is the external integral slab contracted twice against ONE metric or
+// Dyall-Hamiltonian block, and every make_* below is linear in the RDMs up to
+// a handful of RDM-free terms), so N_dot and H_dot are the SAME einsum chains
+// with the tangent blocks substituted -- and the tangent block is the same
+// make_* called with the tangent RDMs. The three builders that carry an
+// RDM-free term (make_hdm1's 2 delta, make_hdm2's two delta-delta terms and
+// make_a25's 2 h1e^T), and the one class term that carries one (Sir's purely
+// one-electron norm term), drop it in the tangent; Sijrs contracts no RDM at
+// all, so its tangent is exactly zero. The only derivative taken is
+// nevpt2.energy_finish's normToEnergyTangent, the scalar finish's.
+struct EnergyTangentResult {
+  std::array<double, 8> norms{};        // as EnergyResult: sum_k N_k per class
+  std::array<double, 8> energies{};     // as EnergyResult
+  std::array<double, 8> normDots{};     // d/dt of each class norm
+  std::array<double, 8> energyDots{};   // d/dt of each class energy
+  double total = 0.0;                   // sum of `energies`
+  double totalDot = 0.0;                // sum of `energyDots`: Edot
+};
+
+// Everything energiesDevice does, plus the tangent, from the same slab walk:
+// one stream (res.stream()), every intermediate from res's pool and freed
+// when its class returns, every read-back a downloadTensor (which
+// synchronizes that stream), so all work is complete when this returns. The
+// `*Dot` tensors have their plain counterparts' shapes and are read, never
+// written. `batch` bounds every slab as in energiesDevice.
+//
+// `norms`/`energies`/`total` are energiesDevice's own numbers for the same
+// state, recomputed here from the same chains -- so a caller can check the
+// two against each other for free.
+EnergyTangentResult energiesTangentDevice(const ActiveIntegralsDevice& active,
+                                          IntegralSource& source, int64_t batch,
+                                          const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                          const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                          const DeviceTensor& f3ca, const DeviceTensor& dm1Dot,
+                                          const DeviceTensor& dm2Dot, const DeviceTensor& dm3Dot,
+                                          const DeviceTensor& f3acDot,
+                                          const DeviceTensor& f3caDot,
+                                          const DeviceResources& res);
+
+// The integral-direct entry point: full blocks, one slab each.
+EnergyTangentResult energiesTangentDevice(const NevptIntegralsDevice& ints,
+                                          const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                          const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                          const DeviceTensor& f3ca, const DeviceTensor& dm1Dot,
+                                          const DeviceTensor& dm2Dot, const DeviceTensor& dm3Dot,
+                                          const DeviceTensor& f3acDot,
+                                          const DeviceTensor& f3caDot,
+                                          const DeviceResources& res);
 
 // --- the class metrics and Dyall Hamiltonians -------------------------------
 //

@@ -228,6 +228,7 @@ required:
 | `--consume-emitted` | use the emitted kernel for the consume step instead of the GEMM |
 | `--rdm-tangent` | also run the tangent RDM build — the derivative of dm3/f3ac/f3ca with respect to the CI vector — and check it against twice the plain build. It holds about twice the per-tile intermediates, so it needs more tiles than the plain build; not usable with `--cublas`, `--ozaki` or `--fused-digest` |
 | `--pool-threshold BYTES\|max` | the memory pool's release threshold (default `max`) |
+| `--sc-tangent` | **integral-direct demo only**: instead of the golden comparison, differentiate the SC total with respect to the CI vector and check that tangent against the class norms' exact affine increment, Euler's identity and a central finite difference of the energy itself. Same digest restriction as `--rdm-tangent`, and no `--pc` path |
 | `--batch N` | **DF demo only**: slab length along each integral block's batch index (default 8; `0` = one slab per block). A memory lever |
 | `--check-blocks` | **DF demo only**: also compare every DF-built integral block against the file's four-index arrays |
 
