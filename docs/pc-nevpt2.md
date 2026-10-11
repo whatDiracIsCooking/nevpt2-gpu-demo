@@ -506,11 +506,20 @@ fields (the two CAS(12,12) files) is refused before the RDM build.
 | `nevpt2_df_ccpvtz_cas1010_pc` | `n2_ccpvtz_cas1010_df` | `--tiles 3 --batch 5` | |
 | `nevpt2_cas44_pc`, `nevpt2_cas88_pc` | `n2_ccpvdz_cas44`, `_cas88` | `--tiles 3` | `small` |
 | `nevpt2_df_cas44_pc`, `nevpt2_df_cas88_pc` | their `_df` twins | `--tiles 3` | `small` |
+| `nevpt2_cas1010_casscf_pc` | `n2_ccpvdz_cas1010_casscf` | `--tiles 3` | |
+| `nevpt2_cas44_casscf_pc`, `nevpt2_df_cas44_casscf_pc` | `n2_ccpvdz_cas44_casscf` and its `_df` twin | `--tiles 3` | `small` |
 
 `nevpt2_cas1012_pc` is `slow` because it takes ~29s on CUDA and ~36s on HIP,
-against ≤3s for every other PC entry. The four `small` entries put the PC
+against ≤3s for every other PC entry. The six `small` entries put the PC
 stage (the eigensolves, the BLAS GEMMs, the slab einsums) under the
 sanitizer tier.
+
+The last three entries read the **CASSCF-orbital** goldens
+([`reference-data.md`](reference-data.md), "The MO sidecar: committed CASSCF
+orbitals"): nothing in the PC stage sees the reference kind, so they are the
+same check on a different state, with block2's PC answer on those orbitals as
+the reference and metric gaps decades inside `PC_MIN_GAP`
+([`reference-data.md`](reference-data.md), "PC fields").
 
 ## Cost
 

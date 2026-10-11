@@ -175,8 +175,9 @@ int main(int argc, char** argv) {
   }
 
   // The reference the golden's orbitals came from is part of what the file
-  // is, so it goes in the header line beside the active space -- every
-  // committed golden says CASCI (docs/reference-data.md, "The file format").
+  // is, so it goes in the header line beside the active space: CASCI for most
+  // committed goldens, CASSCF for the `*_casscf*` ones
+  // (docs/reference-data.md, "The file format").
   std::print("=== SC-NEVPT2 demo ({}/C++): CAS({},{})  ncore={}  n_det={}  reference={} ===\n",
              nevpt2::kGpuBackendName, norb, g.nelecA + g.nelecB, g.ncore, ndet,
              nevpt2::referenceKindName(g.reference));

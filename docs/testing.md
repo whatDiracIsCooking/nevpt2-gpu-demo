@@ -59,6 +59,42 @@ right: a numerical claim needs that backend's card. The `compile-cuda` /
 `compile-hip` presets are compile-and-link-only configurations (testing
 off).
 
+## The CASSCF-orbital entries
+
+Six golden entries read a reference whose orbitals came from a converged
+`mcscf.CASSCF` rather than from RHF ([`reference-data.md`](reference-data.md),
+"The MO sidecar: committed CASSCF orbitals"). They are ordinary golden checks
+— the unmodified binaries, the unmodified flags, every class and the total to
+1e-7 — on a file whose header says `reference_kind = CASSCF`, which both demos
+print in their first line:
+
+| entry | binary | flags | labels |
+|---|---|---|---|
+| `nevpt2_cas44_casscf` | `nevpt2_demo` | `--tiles 3` | `gpu;small` |
+| `nevpt2_cas44_casscf_pc` | `nevpt2_demo` | `--pc --tiles 3` | `gpu;small` |
+| `nevpt2_df_cas44_casscf` | `nevpt2_df_demo` | `--tiles 3 --check-blocks` | `gpu;small` |
+| `nevpt2_df_cas44_casscf_pc` | `nevpt2_df_demo` | `--pc --tiles 3` | `gpu;small` |
+| `nevpt2_cas1010_casscf` | `nevpt2_demo` | `--tiles 3` | `gpu` |
+| `nevpt2_cas1010_casscf_pc` | `nevpt2_demo` | `--pc --tiles 3` | `gpu` |
+
+The CAS(4,4) four are `small`, so the sanitizer tier runs a `NEVPT2G2` file
+too; CAS(10,10) is the production size at the shipped `--tiles 3`. All three
+goldens carry PC fields.
+
+**What there is deliberately no entry for: the gradient paths.** Every
+derivative in this tree is derived for the CASCI-on-RHF Lagrangian, so
+`nevpt2_demo --sc-tangent` and `--gradient-source` **refuse** a CASSCF golden
+as an `err_unsupported` before any card is touched, and so does
+`reference_data/nevpt2_numgrad.py`. That refusal is checked in the unit tier
+instead, by `test/golden`'s `GoldenCommittedCasscfTests` — which reads
+`golden/n2_ccpvdz_cas44_casscf.nevpt2gold` itself, so the gate is held against
+a committed reference and not only against a file a test spliced together.
+Host-only, no card.
+
+Nothing in `src/` branches on the reference kind anywhere else: the RDM build,
+the digests, the energy stage and the PC solve see a CI vector and integrals,
+which is exactly the claim these entries make.
+
 ## The SC pseudodensity identities
 
 The golden tier's third kind of entry, beside the SC and PC energy checks:
@@ -743,6 +779,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_cas44_sc_tangent` | `--sc-tangent`: the SC class energies' tangent with respect to the RDMs, against the norms' exact affine increment, Euler's identity and a finite difference ("The SC tangent's finite-difference cross-check", below). `nevpt2_cas88_sc_tangent` runs the same at CAS(8,8) and is **not** `small` |
 | `nevpt2_sc_pseudodensity_cas44`, `nevpt2_sc_pseudodensity_cas88` | the SC gradient's pseudodensity assembly and its identities ("The SC pseudodensity identities", above) |
 | `nevpt2_pc_tangent_cas44`, `nevpt2_pc_tangent_cas88` | the PC tangent: a second solve per class, the tangent slab einsums and the `(m, m)` blocks' GEMMs, plus ten RDM builds and PC stages per entry ("The PC tangent against a finite difference", above) |
+| `nevpt2_cas44_casscf`, `nevpt2_cas44_casscf_pc`, `nevpt2_df_cas44_casscf`, `nevpt2_df_cas44_casscf_pc` | the same four paths on **CASSCF orbitals** — a `NEVPT2G2` golden whose `reference_kind` is CASSCF ("The CASSCF-orbital entries", above). Same CAS(4,4) shape, so the same cost |
 
 They are ordinary golden checks too, so `ctest --preset fast` and
 `ctest --preset hip` run them on every backend.
@@ -858,12 +895,24 @@ memcheck with the leak check. "plain" is the same entry unsanitized
 | `nevpt2_cas88_pc` | 0.67 | 0.50 | 4.22 | 2.17 | — | — | 2.91 | 1.60 | — | — |
 | `nevpt2_df_cas44_pc` | 0.51 | 0.35 | 0.72 | 0.67 | — | — | 1.42 | 0.41 | — | — |
 | `nevpt2_df_cas88_pc` | 0.67 | 0.51 | 4.17 | 2.17 | — | — | 2.94 | 1.64 | — | — |
+| `nevpt2_cas44_casscf` | 0.46 | — | 0.56 | — | — | — | — | — | 0.33 | 0.33 |
+| `nevpt2_cas44_casscf_pc` | 0.51 | — | 0.73 | — | — | — | — | — | 0.34 | 0.37 |
+| `nevpt2_df_cas44_casscf` | 0.48 | — | 0.57 | — | — | — | — | — | 0.33 | 0.34 |
+| `nevpt2_df_cas44_casscf_pc` | 0.53 | — | 0.72 | — | — | — | — | — | 0.35 | 0.37 |
 | `nevpt2_sc_pseudodensity_kappa_cas44` | 0.88 | 0.67 | 1.42 | 1.17 | — | — | — | — | 0.38 | — |
 | `nevpt2_pc_tangent_cas44` | 0.72 | 0.51 | 1.72 | 1.32 | — | — | — | — | 0.44 | — |
 | `nevpt2_pc_tangent_cas88` | 3.07 | 3.05 | 45.22 | 19.25 | — | — | — | — | 2.27 | — |
 | `nevpt2_gradient_source_cas44` | 0.95 | 0.69 | 3.47 | 2.72 | — | — | — | — | 0.46 | — |
 | `nevpt2_gradient_source_cas88` | 2.52 | 2.51 | 59.25 | 37.07 | — | — | — | — | 1.91 | — |
 | each canary | 0.36 | 0.35 | 0.75–0.86 | 0.49 | 0.53 | 0.77 | 0.37 | 0.36 | — | — |
+
+The four `*_casscf*` rows ("The CASSCF-orbital entries", above) have been run
+clean under `asan` and under memcheck (with the leak check) on CUDA and plain
+on both backends, and **not** under ubsan, initcheck, racecheck, synccheck,
+`hip-asan` or `hip-ubsan`; their four columns of `—` mean "not measured", not
+"clean". They were also measured with another job sharing the host and the
+card, so they are upper bounds — they are the CAS(4,4) paths beside them at
+the same cost, which is the point of the row rather than the figure.
 
 The `nevpt2_cas88_profile` row was measured with the RDM-build-only profiler
 that `--profile` has since absorbed. `nevpt2_df_cas88_profile` and the two

@@ -596,6 +596,50 @@ if(NEVPT2_BUILD_TESTING)
     endif()
   endforeach()
 
+  # --- CASSCF-orbital references -------------------------------------------------
+  #
+  # The same molecule, basis and active spaces as the CASCI entries above, on
+  # converged CASSCF orbitals instead of RHF's: `generate_golden.py --casscf
+  # --mo-out` commits the optimised orbitals to a `*.mogold` sidecar once, and
+  # `--mo-from` runs the same deterministic CASCI on them, so no golden's state
+  # depends on an optimiser (docs/reference-data.md, "The MO sidecar: committed
+  # CASSCF orbitals"). These files carry `reference_kind = CASSCF` and a
+  # DIFFERENT E_corr from their CASCI twins -- a different reference, not a
+  # noisier one; how far apart is in docs/reference-data.md, "What 'CASSCF
+  # input' means here".
+  #
+  # Nothing in src/ branches on the kind except the gradient paths, which
+  # REFUSE a CASSCF golden as Unsupported, so there is deliberately no
+  # --sc-tangent / --gradient-source / --kappa-* / nevpt2_sc_pseudodensity
+  # entry here. test/golden's GoldenCommittedCasscfTests is that refusal
+  # checked against one of these committed files rather than a spliced one.
+  # Every other path is the unmodified binary on the unmodified flags: a
+  # CASSCF-orbital golden is checked the same way, to the same 1e-7.
+  #
+  # CAS(4,4), conventional and DF, is `small` like its CASCI twins, so the
+  # sanitizer tier reads a NEVPT2G2 file too; CAS(10,10) is the production size
+  # at the shipped --tiles 3. All three goldens carry PC fields -- their metric
+  # gaps, like their CASCI twins', are decades inside the refusal
+  # (docs/reference-data.md, "PC fields").
+  set(_gold_44_casscf "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_casscf.nevpt2gold")
+  set(_gold_44_casscf_df
+      "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_casscf_df.nevpt2gold")
+  set(_gold_1010_casscf "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas1010_casscf.nevpt2gold")
+
+  add_golden_test(nevpt2_cas44_casscf "${_gold_44_casscf}" --tiles 3)
+  add_pc_golden_test(nevpt2_cas44_casscf_pc "${_gold_44_casscf}" --tiles 3)
+  add_df_golden_test(nevpt2_df_cas44_casscf "${_gold_44_casscf_df}" --tiles 3 --check-blocks)
+  add_df_pc_golden_test(nevpt2_df_cas44_casscf_pc "${_gold_44_casscf_df}" --tiles 3)
+  foreach(_t nevpt2_cas44_casscf nevpt2_cas44_casscf_pc
+             nevpt2_df_cas44_casscf nevpt2_df_cas44_casscf_pc)
+    if(TEST ${_t})
+      set_tests_properties(${_t} PROPERTIES LABELS "gpu;small")
+    endif()
+  endforeach()
+
+  add_golden_test(nevpt2_cas1010_casscf "${_gold_1010_casscf}" --tiles 3)
+  add_pc_golden_test(nevpt2_cas1010_casscf_pc "${_gold_1010_casscf}" --tiles 3)
+
   # --- the PC tangent with respect to the CI vector -------------------------------
   #
   # nevpt2_pc_tangent (apps/pc_tangent/, the only binary that links

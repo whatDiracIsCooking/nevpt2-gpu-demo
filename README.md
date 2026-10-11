@@ -43,8 +43,9 @@ you try to run it on your own system.
   is too large to commit and has to be regenerated. Two more non-N₂ cases are
   committed for the gradient work: LiF CAS(4,6) and acrolein CAS(6,5), both
   def2-SVP (LiF with no PC reference — see
-  [`docs/reference-data.md`](docs/reference-data.md)). Anything else is
-  untested.
+  [`docs/reference-data.md`](docs/reference-data.md)). Three of the N₂ cases —
+  CAS(4,4), CAS(10,10) and a DF CAS(4,4) — are committed a second time on
+  converged CASSCF orbitals (next bullet). Anything else is untested.
 - **The CI vector is read in, and so are `dm1`/`dm2`.** The GPU builds the
   3-RDM and the 4-RDM intermediates. A real CASSCF code produces the 1- and
   2-RDMs cheaply, and building them here as dense string-algebra operators
@@ -52,8 +53,19 @@ you try to run it on your own system.
 - **One active space and one CI vector per run.** There is no persistent
   device session for a geometry scan or a trajectory, so each run pays its
   whole setup again.
-- **The reference is CASCI, not a fresh CASSCF,** to keep it reproducible to
-  the last bit (docs/reference-data.md, "What "CASSCF input" means here, and why the golden state is CASCI").
+- **Every golden's state is a CASCI diagonalisation, never a fresh CASSCF in
+  the regeneration chain** — that is what keeps it reproducible to the last
+  bit. Which *orbitals* it runs on is recorded in the file: most committed
+  goldens are a CASCI on RHF orbitals, and three are a CASCI on **converged
+  CASSCF orbitals** committed beside them in an MO sidecar (N₂/cc-pVDZ
+  CAS(4,4), CAS(10,10), and a DF CAS(4,4)), so the energy path has
+  CASSCF-orbital references as well. The optimiser runs once, offline, into
+  that sidecar; regenerating the golden from it is deterministic
+  (docs/reference-data.md, "What "CASSCF input" means here, and why the golden state is CASCI").
+- **The gradient work stays CASCI-only.** Its derivation is the CASCI-on-RHF
+  Lagrangian, so every derivative path refuses a CASSCF-orbital golden rather
+  than differentiate a reference it does not cover, and no gradient sidecar is
+  written for one.
 - **The gradient work is source terms, not a nuclear gradient.** The tree
   differentiates the NEVPT2 energy with respect to the CI vector and (for the
   active–active block) with respect to an orbital rotation, at one fixed

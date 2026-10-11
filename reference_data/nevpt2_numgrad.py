@@ -172,8 +172,10 @@ def read_golden_header(path: Path) -> dict:
     ``generate_golden.write_golden``).
 
     Both magics are accepted: a pre-kind ``NEVPT2G1`` file carries no
-    ``reference_kind`` field and is a CASCI by definition, which is what every
-    committed golden is."""
+    ``reference_kind`` field and is a CASCI on RHF orbitals by definition,
+    which is what every committed golden with a gradient sidecar is. A
+    ``NEVPT2G2`` file states its kind, and a ``casscf`` one is refused by
+    :func:`_check_reference_kind`."""
     with open(path, "rb") as f:
         magic = f.read(8)
         assert magic in gg.GOLDEN_MAGICS, f"{path} is not a golden file"

@@ -3,7 +3,8 @@
 # back as an IO Result, never an abort; GoldenFile::require names a missing
 # array; the header's reference_kind field round-trips in the NEVPT2G2 layout,
 # reads as CASCI from the pre-kind NEVPT2G1 one and gates the derivative paths
-# (requireCasciReference); and the committed CAS(4,4) golden parses with the
+# (requireCasciReference) -- on a spliced file and on the committed
+# CASSCF-orbital golden; and the committed CAS(4,4) golden parses with the
 # expected header and array shapes. Pure host file parsing, no device: NOT
 # REQUIRES_GPU, so these run with no card visible. Nothing here checks an
 # energy.
@@ -21,10 +22,22 @@ endif()
 target_compile_definitions(golden_tests PRIVATE NEVPT2_TEST_GOLDEN_CAS44="${_golden_cas44}")
 unset(_golden_cas44)
 
+# Its CASSCF-orbital twin: the committed NEVPT2G2 file, the one reference_kind
+# = CASSCF reference in the tree that is not spliced together by a test
+# (docs/reference-data.md, "The MO sidecar: committed CASSCF orbitals"). Read
+# only, like the one above.
+set(_golden_cas44_casscf "${PROJECT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_casscf.nevpt2gold")
+if(NOT EXISTS "${_golden_cas44_casscf}")
+  message(FATAL_ERROR "test/golden: committed golden missing: ${_golden_cas44_casscf}")
+endif()
+target_compile_definitions(
+  golden_tests PRIVATE NEVPT2_TEST_GOLDEN_CAS44_CASSCF="${_golden_cas44_casscf}")
+unset(_golden_cas44_casscf)
+
 add_gtest_suite_tests(
   TARGET golden_tests
   SUITES GoldenLoadErrorTests GoldenRequireTests GoldenReferenceKindTests
-         GoldenReferenceKindGateTests GoldenCas44Tests)
+         GoldenReferenceKindGateTests GoldenCommittedCasscfTests GoldenCas44Tests)
 
 # Host-only suites for the OTHER reader in nevpt2.golden: loadGradGold, the
 # `*.gradgold` gradient sidecar (docs/gradient-theory.md, section 3). Same
