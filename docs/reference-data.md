@@ -66,6 +66,11 @@ uv run python reference_data/generate_golden.py \
 # the numerical gradient in those two sidecars (see "The numerical gradient")
 uv run python reference_data/nevpt2_numgrad.py --case lif_def2svp_cas46
 uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65
+
+# the ANALYTIC gradient of the same two states, which writes no committed
+# file at all (see "The analytic gradient")
+uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46
+uv run python reference_data/nevpt2_grad.py --case acrolein_def2svp_cas65
 ```
 
 **Regeneration is a check.** Every committed golden regenerates
@@ -450,6 +455,121 @@ sidecar is sha256 `ae8de2cb…` after both, and acrolein's gitignored one
 ("LiF and acrolein, the gradient-validation pair" below), and both file sizes
 are unchanged to the 0.92 MB / 56.94 MB above.
 
+### The analytic gradient
+
+`reference_data/nevpt2_grad.py` is the other half: the **Z-vector solve and
+the AO contraction**, over a `pyscf.grad.lagrange.Gradients` subclass. Like
+`nevpt2_numgrad.py` it is offline tooling — no build, no test and no binary in
+`src/` or `apps/` runs it, and it writes no committed file — and that is the
+design, not an accident: this repo's shape is "offline Python generates the
+reference, the C++ GPU demo reproduces it", so a PySCF solve inside the
+runtime would invert it. The derivation it implements is
+[`gradient-theory.md`](gradient-theory.md), §1–§2; what the C++ side does and
+does not carry is [`gradients.md`](gradients.md), §1.
+
+There is no `pyscf/grad/nevpt2.py` — that absence is the gap, and the four
+hooks the base class leaves to a child are exactly the four pieces:
+
+| hook | here |
+|---|---|
+| `get_wfn_response` | `y_I = dE_corr/dc_I` and `A_pq = Y_pq − Y_qp`, plus the CI relaxation and the (O2)–CI coupling |
+| `get_Aop_Adiag` | `P (H − E_CASCI) P` from the CASCI reference, block-diagonal against the constraint Jacobian — the decoupling of §2.2 |
+| `get_ham_response` | `d(E_CASCI + E_corr)/dx` at frozen wavefunction parameters |
+| `get_LdotJnuc` | the multipliers against `dF/dx`, `df/dx` and `d<z\|H\|c>/dx` |
+
+**It is a Lagrangian gradient with differenced skeleton derivatives**, and the
+distinction from `grad_num` is the point. With the multipliers in hand the
+whole gradient is the nuclear derivative of one scalar along a **frozen
+orthonormal path** `C(x) = S(x)^{−1/2} S(x₀)^{1/2} C(x₀)` at fixed CI vector
+— four evaluations per Cartesian component, against `nevpt2_numgrad.py`'s six
+**re-converged** RHF+CASCI+NEVPT2 runs. Nothing re-solves, so every component
+is differenced, including the ones that are zero by symmetry (which
+`nevpt2_numgrad.py` must skip, §4.3): they come out as the zeros they are and
+are reported as the free check. Replacing the quotients with PySCF's
+derivative integrals needs the NEVPT2 **relaxed densities** — `Y_xy` fixes
+only the antisymmetric part of the generalized Fock, and the AO contraction
+needs the densities themselves — which `src/gradient/` builds and frees
+unread ([`gradients.md`](gradients.md), §5.2).
+
+**What the two cases come out at**, source terms from PySCF, 0.0025 bohr:
+
+| | LiF CAS(4,6) | acrolein CAS(6,5) |
+|---|---|---|
+| `kappa` directions = constraints | 246 | 2846 |
+| CI Z-vector residual `\|P(H−E)Pz + Py\|` | 1.404e-12 | 2.006e-12 |
+| orbital residual `\|M λ + B\|`, direct / GMRES | 1.0e-15 / 1.5e-12 | 5.9e-15 / 8.7e-12 |
+| the orbital system's condition number | 8.2e4 | 1.2e4 |
+| CI/(O2) fixed point | 6 iterations, last step 1.9e-15 | 6 iterations, last step 3.7e-15 |
+| `z·c` after projection | 4.0e-19 | −5.7e-19 |
+| gauge identity (§1.3, no multiplier) | 2.0e-6 | 2.7e-4 |
+| Richardson bar, skeleton / multipliers | 2.2e-7 / 1.8e-9 | 5.6e-7 / 1.2e-8 |
+| `\|g\|` on the zero-by-symmetry axes | 1.7e-15 | 3.0e-11 |
+| sum over atoms per column | ≤5.6e-11 | ≤1.0e-8 |
+| **max `\|g − grad_num\|`** | **5.3e-9** (6 components) | **7.6e-8** (16 in-plane) |
+| wall, single-threaded | 56 s | 1029 s |
+
+The cost is the `kappa` sweep: one central difference of the SC-NEVPT2 energy
+per non-gauge rotation, `O(n_mo²)` of them — 937 s of acrolein's 1029 s.
+That is what makes the source terms self-contained and is the one thing a GPU
+dump would replace.
+
+The last row is **not** a gate here, and its tolerance is issue #41's to
+state: `grad_num` is itself a finite difference (its own error bar is 1.1e-10
+on LiF and 4.5e-9 on acrolein, "The numerical gradient" above), and the
+analytic side's own bar is the Richardson row. Acrolein's `grad_num` is read
+from `nevpt2_numgrad.py --no-write`, since its sidecar is gitignored.
+
+**How it is validated**, since the analytic-versus-numerical comparison and
+its tolerance are issue #41's and not a gate here: `--casci-only` drops
+`E_corr` from the source terms and from the scalar, leaving a plain CASCI
+whose analytic gradient PySCF already has. That one comparison exercises the
+frozen path, the full constraint Jacobian, the selection-boundary multipliers,
+the CPHF block and the differentiation at once. Against the **numerical
+CASCI** gradient (`nevpt2_numgrad.py`'s own `grad_casci`, which it prints but
+does not store) it lands at **2.0e-8** on LiF and **5.3e-8** on acrolein.
+
+**`pyscf.grad.casci` is not an oracle for either committed case**, and the run
+says so rather than reporting a disagreement as a failure. It divides its
+redundant core–act_O and act_V–virtual blocks by orbital-energy denominators
+assuming act_O is the *first* `n_elec/2 − n_core` active columns;
+`--cas-irreps` orders the active block by irrep, so on LiF PySCF's own answer
+lands **4.7e-4** from the numerical CASCI gradient while this pipeline lands
+2.0e-8. `--energy-ordered` drops the irrep selection and restores the
+configuration PySCF assumes; the two analytic gradients then agree to
+**1.7e-5** on acrolein. (Calling it at all needs
+`mo_coeff=mc.mo_coeff, ci=mc.ci`: its default is `mc._scf.mo_coeff`, the
+*unsorted* RHF orbitals, which do not describe one state together with
+`mc.ci`.)
+
+**Four things an implementation has to get right, none of which shows up in a
+residual.** All four were found by the checks above, and all four leave the
+Z-vector residuals at round-off while moving the gradient by 1e-2 to 1e-5:
+
+1. **The act_O–act_V rotation is not a gauge.** It leaves the energy alone —
+   it is an active–active rotation, so §1.3 applies — but it **moves the RHF
+   occupied space**, so `F_{act_O,act_V} = 0` is a genuine Brillouin
+   condition with a multiplier of its own. act_O and act_V must therefore be
+   index ranges, which is why the state is rotated into the basis that
+   diagonalises `F`'s active block (§2.6) rather than carrying act_O as a
+   subspace of the natural-orbital basis.
+2. **The CI multiplier must be projected against the state**, not merely
+   solved in a projected operator. `|c>` is an exact null vector of
+   `P (H − E) P`, so a multiple of it moves no residual, and a Jacobi
+   preconditioner does not commute with the projector — the solve comes back
+   with `z` almost *parallel* to the state, and the `− (dE_CASCI/dx)(z·c)`
+   term the Lagrangian drops is then not zero.
+3. **`y_I` must be the projected gradient, taken along directions orthogonal
+   to the state.** The SC energy off the unit sphere is not the energy of any
+   state (the hole-side metrics' constants are the hole RDMs only at unit
+   norm, [`gradients.md`](gradients.md), §7) and it has poles there, so a
+   quotient along a bare determinant axis walks off the sphere and returns a
+   number whose own linearity fails — by 4e-2 at the dominant determinant on
+   acrolein, against 1e-7 for every pair of determinants not containing it.
+   It converges over three decades while doing so.
+4. **`y_I` must carry the orbital energies' own CI derivative.**
+   `e_core`/`e_virt` are the generalized Fock's diagonal and so are functions
+   of the active density; the device's `y_I` holds them fixed.
+
 ## Density fitting
 
 `nevpt2_df_demo` computes SC-NEVPT2 from three-index `(L|pq)` tensors
@@ -764,6 +884,7 @@ not used.
 | `reference_data/generate_golden.py` | the **only** file that defines the golden state (`block2_pc_probe.py` imports its `_build_state`). Runs a deterministic `mcscf.CASCI` (see "What "CASSCF input" means here" above), canonicalises it exactly as `pyscf.mrpt.NEVPT.kernel` does, and writes the CI vector, `dm1`/`dm2`, every MO-integral block, and PySCF's own per-class NEVPT2 answer into one flat binary file. `--df` does the same density-fitted and adds the `B_*` blocks. Unless `--no-pc`, it also runs block2's PC-NEVPT2 on the same state and writes `pc_class_energies` / `e_pc_total` (see "PC fields" above) |
 | `reference_data/block2_pc_probe.py` | rebuilds a golden's state with `generate_golden._build_state` (imported, not copied), checks it is bit-identical to the committed CI vector, and runs block2's `WickSCNEVPT2` and `WickICNEVPT2` (PC) on it: per-class energies, timings, peak RSS, and the PC linear-solve / metric conditioning (`--metric`). Writes no golden. See [`pc-nevpt2.md`](pc-nevpt2.md) |
 | `reference_data/nevpt2_numgrad.py` | the **numerical** nuclear gradient: displaced RHF → CASCI → SC-NEVPT2 runs (states built by `generate_golden._build_state`, imported) differenced and Richardson-extrapolated into a sidecar's `grad_num` / `grad_num_residual` / `grad_num_probed` / `grad_num_step`. Refuses a displacement whose detected point group — or whose core/active irrep selection — differs from the reference geometry's, rather than produce a number from a different active space. Writes no golden and no new sidecar; only the two gradient-validation cases carry its arrays (see "The numerical gradient" above) |
+| `reference_data/nevpt2_grad.py` | the **analytic** nuclear gradient: a `pyscf.grad.lagrange.Gradients` subclass that solves the CI and orbital Z-vector equations of [`gradient-theory.md`](gradient-theory.md), §2 and contracts them into a gradient, differentiating one scalar along a frozen orthonormal path. Source terms from PySCF by default, or from a `.gradsrc` dump (`--source dump`) when the GPU side grows one. Writes **nothing** unless `--out` is given, and never a committed file; `--casci-only` is its own validation (see "The analytic gradient" above) |
 | `reference_data/pyscf_contract_time.py` | the CPU side of the head-to-head: reads a golden file and times PySCF's `NEVPTcontract` (`make_dm123` + `_contract4pdm` ×2) on the *same frozen CI vector* the demo reads, with no CASCI re-solve (see [`performance.md`](performance.md), "Head-to-head vs PySCF") |
 | `golden/n2_ccpvdz_cas1010.nevpt2gold` | the **default case**: CAS(10,10) on N2/cc-pVDZ |
 | `golden/n2_ccpvdz_cas1212.nevpt2gold` | CAS(12,12) on the same molecule, the scaling case (see [`performance.md`](performance.md), "Scaling with active-space size"). `slow`-labelled; run with `--tiles 40`. Carries **no** PC fields: its PC metric is ungapped (see "PC fields" above) |
