@@ -1019,7 +1019,10 @@ the size of PySCF's redundant-block denominators, not of an error here.
 
 **Four things an implementation has to get right, none of which shows up in a
 residual.** All four were found by the checks above, and all four leave the
-Z-vector residuals at round-off while moving the gradient by 1e-2 to 1e-5:
+Z-vector residuals at round-off while moving the gradient by 1e-2 to 1e-5.
+Each now has a gated check of its own that does fail on it — reintroduced one
+at a time, with the numbers, in [`testing.md`](testing.md),
+"Residual-independent checks of the gradient path":
 
 1. **The act_O–act_V rotation is not a gauge.** It leaves the energy alone —
    it is an active–active rotation, so §1.3 applies — but it **moves the RHF

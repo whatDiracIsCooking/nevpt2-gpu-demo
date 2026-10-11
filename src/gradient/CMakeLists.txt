@@ -83,11 +83,12 @@ add_cxx_module_library(
 # that links the RDM build AND the energy stage, because that is what a
 # displaced state costs: nevpt2::rdm_host_dm rebuilds its dm1/dm2 on the host
 # (the golden file's arrays are only the state's own) and nevpt2::rdm_build
-# its dm3/f3ac/f3ca on the device. apps/pc_tangent/ is the only binary that
-# links it.
+# its dm3/f3ac/f3ca on the device. nevpt2::gradient_plan (host-only) is for
+# longestFourfoldRun, the step-ladder rule its report gates on.
+# apps/pc_tangent/ is the only binary that links it.
 add_cxx_module_library(
   NAME nevpt2.pc_tangent
   PRIMARY_INTERFACE pc_tangent.cppm
   IMPLEMENTATION pc_tangent.cpp
-  LINK_PUBLIC nevpt2::energy nevpt2::rdm_build nevpt2::rdm_host_dm
+  LINK_PUBLIC nevpt2::energy nevpt2::rdm_build nevpt2::rdm_host_dm nevpt2::gradient_plan
 )

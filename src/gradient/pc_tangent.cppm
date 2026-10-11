@@ -71,6 +71,8 @@ export import nevpt2.rdm_build;
 // Re-exported: the host dm1/dm2 rebuild and their tangent, one per displaced
 // state.
 export import nevpt2.rdm_host_dm;
+// Re-exported: longestFourfoldRun, the step-ladder rule the report gates on.
+export import nevpt2.gradient_plan;
 
 export namespace nevpt2 {
 
@@ -90,6 +92,14 @@ export namespace nevpt2 {
 inline constexpr std::array<bool, 8> kPcHomogeneousInCi{true,  true, false, false,
                                                         true,  true, false, true};
 
+// The fewest consecutive fourfold halvings the finite difference must show
+// (nevpt2.gradient_plan, longestFourfoldRun), on top of every ratio being 4:
+// a RUN, never one step (docs/testing.md, "Residual-independent checks of the
+// gradient path"). Two, so three steps at least -- what the slowest entry,
+// nevpt2_pc_tangent_cas1012, runs; a check with fewer has measured no order
+// of convergence at all and fails.
+inline constexpr int kPcMinFourfoldRun = 2;
+
 // One step of the central difference.
 struct PcFdStep {
   double h = 0.0;
@@ -99,6 +109,12 @@ struct PcFdStep {
   // err of the previous (larger) step divided by this one's: 4 for a
   // second-order difference, 0 for the first step, which has no predecessor.
   double ratio = 0.0;
+  // The PC conditioning guard's record at the two displaced states c + h u
+  // and c - h u: the smallest S gap over the classes that have a spectrum, as
+  // the solve that produced fdClass measured it. 0 means the guard was never
+  // run there -- and a displaced state is exactly where the metric's rank can
+  // move (#41), so the report FAILS on it rather than trusting the energy.
+  std::array<double, 2> displacedGap{};
 };
 
 struct PcTangentCheck {
@@ -153,7 +169,9 @@ Result<PcTangentCheck> pcTangentFdCheck(const RdmBuildOptions& rdmOpt,
 // and prints PASS -- only when all eight classes were computed, each energy
 // is within `idtol` of pcEnergiesDevice's, Euler's identity holds to `idtol`
 // relative on every class kPcHomogeneousInCi marks, every Richardson ratio is
-// within `ratioTol` of 4, and the extrapolated difference is within `atol` of
+// within `ratioTol` of 4 AND they make a run of at least kPcMinFourfoldRun,
+// every displaced state carries the conditioning guard's record of a gap of
+// at least PC_MIN_GAP, and the extrapolated difference is within `atol` of
 // the analytic tangent.
 bool printPcTangentReport(const PcTangentCheck& c, double atol, double idtol, double ratioTol);
 

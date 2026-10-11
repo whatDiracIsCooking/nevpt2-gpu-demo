@@ -17,6 +17,11 @@
 //                srsiMultipliers);
 //   :ci_source   ciSourceFolded / ciSourceSymmetrized / ciSourceAddInto.
 //
+// And one rule shared beyond nevpt2.gradient: longestFourfoldRun, the step
+// ladder every finite-difference check of the gradient path is gated on --
+// the SC tangent, the two orbital source-term checks and the PC tangent
+// (nevpt2.pc_tangent links this module for it).
+//
 // Everything here is moved, not rewritten: the same loops in the same order,
 // so the device path's numbers are bit-for-bit what they were.
 export module nevpt2.gradient_plan;
@@ -592,6 +597,55 @@ Tensor ciSourceSymmetrized(const Tensor& d3) {
 void ciSourceAddInto(const Tensor& x, Tensor& y) {
   check(x.dims() == y.dims(), "ciSourceAddInto: shapes differ");
   for (int64_t i = 0; i < y.size(); ++i) y.flatRef(i) += x.flat(i);
+}
+
+// --- the step ladder ---------------------------------------------------------
+//
+// Every finite difference in the gradient path is gated on a RUN of halvings
+// that each cut its error fourfold -- never on one step (docs/testing.md,
+// "Residual-independent checks of the gradient path"). One step cannot tell a
+// converged quotient from one converged to the wrong thing: #41's PC source
+// term was wrong only at a step size, by a first-order term no single step
+// shows, and #32's lone step went wild where a symmetry-empty perturber's
+// Delta N + H cancelled to round-off. A run of fourfold halvings is the
+// signature of an O(h^2) truncation error being walked down, and nothing else
+// produces one by accident.
+//
+// The rule lives here so that every check applies the SAME one: the SC
+// tangent (apps/integral_direct/), the active-rotation and full orbital source
+// terms (apps/sc_pseudodensity/), the PC tangent (nevpt2.pc_tangent) and --
+// in Python, by the same definition (`fourfold_runs`) --
+// reference_data/nevpt2_grad.py's ladders. test/gradient_plan/'s
+// FourfoldRunTests pin it.
+
+// The Richardson window: while truncation dominates, halving h cuts a central
+// difference's error fourfold. A little slack each way -- the coarsest steps
+// still carry an h^4 term, and the finest approach the round-off floor.
+inline constexpr double kFourfoldLow = 3.2;
+inline constexpr double kFourfoldHigh = 4.8;
+
+// The longest run of consecutive halvings over a ladder.
+struct FourfoldRun {
+  int length = 0;        // how many consecutive ratios fell inside the window
+  std::size_t end = 0;   // the index of the finer rung of the run's last halving
+};
+
+// `err[i]` is the ladder's error (or its change between rungs) at the i-th
+// step, each step half the previous one; the ratio across halving i is
+// err[i-1] / err[i], and a run counts the consecutive ratios strictly inside
+// (lo, hi). A rung whose error is exactly zero has no ratio and breaks the
+// run, as does a wild one. Ties go to the coarser run: the first run of the
+// greatest length is the one reported.
+FourfoldRun longestFourfoldRun(std::span<const double> err, double lo = kFourfoldLow,
+                               double hi = kFourfoldHigh) {
+  FourfoldRun best;
+  int run = 0;
+  for (std::size_t i = 1; i < err.size(); ++i) {
+    const double ratio = err[i] > 0.0 ? err[i - 1] / err[i] : 0.0;
+    run = (ratio > lo && ratio < hi) ? run + 1 : 0;
+    if (run > best.length) best = FourfoldRun{run, i};
+  }
+  return best;
 }
 
 }  // namespace nevpt2

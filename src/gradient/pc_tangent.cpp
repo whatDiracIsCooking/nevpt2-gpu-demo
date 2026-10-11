@@ -131,7 +131,16 @@ DeviceTensor pcTangentScaled(const DeviceTensor& x, double a, const DeviceResour
 // Numerical Error naming the step: the difference quotient cannot be formed
 // from an energy that was not computed, and quietly dropping the class would
 // make the comparison meaningless.
-Result<std::array<double, 8>> pcTangentEnergies(const RdmBuildOptions& opt,
+//
+// `minGap` is the conditioning guard's record of that state: the smallest S
+// gap over the classes with a spectrum, as pcEnergiesDevice's own gap check
+// measured it. The report gates on it being there (PcFdStep::displacedGap).
+struct PcDisplacedEnergies {
+  std::array<double, 8> energy{};
+  double minGap = 0.0;
+};
+
+Result<PcDisplacedEnergies> pcTangentEnergies(const RdmBuildOptions& opt,
                                                 const NevptIntegralsDevice& ints,
                                                 const HostDm12Builder& builder, const Tensor& c,
                                                 const Tensor& h2e, std::string_view what,
@@ -143,15 +152,24 @@ Result<std::array<double, 8>> pcTangentEnergies(const RdmBuildOptions& opt,
       buildRdmsDevice(opt, c, builder.norb(), builder.nelecA(), builder.nelecB(), h2e, res);
   const PcEnergyResult e =
       NEVPT2_TRY(pcEnergiesDevice(ints, dm1, dm2, rdm.dm3, rdm.f3ac, rdm.f3ca, res));
-  std::array<double, 8> out{};
+  PcDisplacedEnergies out;
+  out.minGap = std::numeric_limits<double>::infinity();
+  bool anySpectrum = false;
   for (int i = 0; i < 8; ++i) {
     if (e.classes[i].status != PcStatus::Done)
       return err_numerical(std::format(
           "the PC class {} is refused at the displaced state {}: {}; no finite difference can "
           "be formed there",
           CLASSES[i], what, e.classes[i].why.empty() ? "not computed" : e.classes[i].why));
-    out[i] = e.classes[i].energy;
+    out.energy[i] = e.classes[i].energy;
+    if (e.classes[i].hasSpectrum) {
+      anySpectrum = true;
+      out.minGap = std::min(out.minGap, e.classes[i].spectrum.gap);
+    }
   }
+  // No class with a spectrum means no gap was measured: that is "not
+  // recorded", which the report fails on, not an infinitely safe state.
+  if (!anySpectrum) out.minGap = 0.0;
   return out;
 }
 
@@ -257,16 +275,17 @@ Result<PcTangentCheck> pcTangentFdCheck(const RdmBuildOptions& rdmOpt,
     PcFdStep st;
     st.h = h;
     std::printf("\nfinite difference at h=%.6g: two more states, each a full RDM build\n", h);
-    const std::array<double, 8> plus = NEVPT2_TRY(
+    const PcDisplacedEnergies plus = NEVPT2_TRY(
         pcTangentEnergies(rdmOpt, ints, builder, pcTangentStep(ci, h, u), h2e,
                           std::format("c + {:g} u", h), res));
-    const std::array<double, 8> minus = NEVPT2_TRY(
+    const PcDisplacedEnergies minus = NEVPT2_TRY(
         pcTangentEnergies(rdmOpt, ints, builder, pcTangentStep(ci, -h, u), h2e,
                           std::format("c - {:g} u", h), res));
     for (int i = 0; i < 8; ++i) {
-      st.fdClass[i] = (plus[i] - minus[i]) / (2.0 * h);
+      st.fdClass[i] = (plus.energy[i] - minus.energy[i]) / (2.0 * h);
       st.fdTotal += st.fdClass[i];
     }
+    st.displacedGap = {plus.minGap, minus.minGap};
     st.err = std::fabs(st.fdTotal - out.edotTotal);
     st.ratio = (prevErr > 0.0 && st.err > 0.0) ? prevErr / st.err : 0.0;
     prevErr = st.err;
@@ -338,19 +357,42 @@ bool printPcTangentReport(const PcTangentCheck& c, double atol, double idtol, do
   std::printf("Euler: worst |Edot(c, c) - 2 E| over the five homogeneous classes = %.2e\n",
               maxEulerDelta);
 
-  if (haveFd) {
-    std::printf(
-        "\ncentral differences of the PC total along c + h u (second order: the error falls "
-        "4x per halving)\n");
-    std::printf("%12s %18s %12s %8s\n", "h", "fd (Ha)", "|fd - Edot|", "ratio");
-    for (const PcFdStep& st : c.steps) {
-      if (st.ratio > 0.0) {
-        std::printf("%12.6g %18.10f %12.2e %8.3f\n", st.h, st.fdTotal, st.err, st.ratio);
-        ok = ok && std::fabs(st.ratio - 4.0) < ratioTol;
-      } else {
-        std::printf("%12.6g %18.10f %12.2e %8s\n", st.h, st.fdTotal, st.err, "-");
-      }
+  // The finite difference is gated on a RUN of fourfold halvings, never on a
+  // step: with fewer than kPcMinFourfoldRun of them -- no steps, or one --
+  // the check has measured no order of convergence and fails.
+  std::printf(
+      "\ncentral differences of the PC total along c + h u (second order: the error falls "
+      "4x per halving)\n");
+  std::printf("%12s %18s %12s %8s %22s\n", "h", "fd (Ha)", "|fd - Edot|", "ratio",
+              "guard gap at c +- h u");
+  std::vector<double> errs;
+  bool guarded = true;
+  for (const PcFdStep& st : c.steps) {
+    errs.push_back(st.err);
+    // The conditioning guard must have run at both displaced states and
+    // passed: a displaced state is exactly where the metric's rank can move.
+    const bool stepGuarded = st.displacedGap[0] >= PC_MIN_GAP && st.displacedGap[1] >= PC_MIN_GAP;
+    guarded = guarded && stepGuarded;
+    const std::string gaps =
+        std::format("{:.1e} {:.1e}{}", st.displacedGap[0], st.displacedGap[1],
+                    stepGuarded ? "" : " NO");
+    if (st.ratio > 0.0) {
+      std::printf("%12.6g %18.10f %12.2e %8.3f %22s\n", st.h, st.fdTotal, st.err, st.ratio,
+                  gaps.c_str());
+      ok = ok && std::fabs(st.ratio - 4.0) < ratioTol;
+    } else {
+      std::printf("%12.6g %18.10f %12.2e %8s %22s\n", st.h, st.fdTotal, st.err, "-",
+                  gaps.c_str());
     }
+  }
+  const FourfoldRun run = longestFourfoldRun(errs, 4.0 - ratioTol, 4.0 + ratioTol);
+  const bool runOk = run.length >= kPcMinFourfoldRun;
+  ok = ok && runOk && guarded;
+  std::printf("fourfold run: %d consecutive halvings (%d needed) -- %s; the conditioning guard "
+              "ran and passed (gap >= %.0e) at every displaced state -- %s\n",
+              run.length, kPcMinFourfoldRun, runOk ? "ok" : "NOT ENOUGH", PC_MIN_GAP,
+              guarded ? "ok" : "NO");
+  if (haveFd) {
     std::printf("Richardson (4 fd(h_min) - fd(2 h_min)) / 3 = %.10f Ha   |delta vs Edot|=%.2e\n",
                 c.richardson, c.richardsonErr);
     ok = ok && c.richardsonErr < atol;
@@ -362,8 +404,8 @@ bool printPcTangentReport(const PcTangentCheck& c, double atol, double idtol, do
   // A wording of its own, so no other entry's PASS line can satisfy this
   // entry's regex (or the other way round).
   std::printf("\n%s: the PC-NEVPT2 tangent matches the central finite difference (Richardson "
-              "to %.0e, every ratio 4 +- %.1f)\n",
-              ok ? "PASS" : "FAIL", atol, ratioTol);
+              "to %.0e, every ratio 4 +- %.1f, a run of %d)\n",
+              ok ? "PASS" : "FAIL", atol, ratioTol, kPcMinFourfoldRun);
   return ok;
 }
 

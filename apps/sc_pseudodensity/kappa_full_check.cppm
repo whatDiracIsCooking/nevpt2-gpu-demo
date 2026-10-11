@@ -122,8 +122,8 @@ constexpr std::size_t kFdSteps = kFdLastExp - kFdFirstExp + 1;
 // The best error over the sweep, relative to max(|Edot|, |E_corr|) -- the
 // scale :kappa_check's header argues for, and for the same reasons.
 constexpr double kFullFdTol = 1e-6;
-constexpr double kFdRichardsonLow = 3.2;
-constexpr double kFdRichardsonHigh = 4.8;
+// The run length; the window is nevpt2.gradient_plan's kFourfoldLow /
+// kFourfoldHigh, shared by every finite-difference check of the gradient path.
 constexpr int kFdRichardsonRun = 3;
 
 // How many basis directions share one slab walk when Y's inactive blocks are
@@ -323,23 +323,14 @@ bool finiteDifferenceSweep(const char* name, const nevpt2::GoldenFile& g,
   for (std::size_t i = 1; i < kFdSteps; ++i)
     if (err[i] < err[bestAt]) bestAt = i;
   const double bestRel = err[bestAt] / std::max(1e-30, scale);
-  int run = 0, bestRun = 0, bestRunEnd = 0;
-  for (std::size_t i = 1; i < kFdSteps; ++i) {
-    const double ratio = err[i] > 0.0 ? err[i - 1] / err[i] : 0.0;
-    run = (ratio > kFdRichardsonLow && ratio < kFdRichardsonHigh) ? run + 1 : 0;
-    if (run > bestRun) {
-      bestRun = run;
-      bestRunEnd = static_cast<int>(i);
-    }
-  }
-  const bool ok = bestRel < kFullFdTol && bestRun >= kFdRichardsonRun;
+  const nevpt2::FourfoldRun run = nevpt2::longestFourfoldRun(err);
+  const bool ok = bestRel < kFullFdTol && run.length >= kFdRichardsonRun;
   std::printf("  Edot(kappa) = %.14e; plateau |err| = %.3e (relative %.3e) at h = %.3e\n", edot,
               err[bestAt], bestRel, step[bestAt]);
   std::printf("  Richardson: %d consecutive fourfold halvings (ratio in [%.1f, %.1f]) ending "
               "at h = %.3e -- %s, %d needed\n",
-              bestRun, kFdRichardsonLow, kFdRichardsonHigh,
-              step[static_cast<std::size_t>(bestRunEnd)], ok ? "ok" : "NOT ENOUGH",
-              kFdRichardsonRun);
+              run.length, nevpt2::kFourfoldLow, nevpt2::kFourfoldHigh, step[run.end],
+              ok ? "ok" : "NOT ENOUGH", kFdRichardsonRun);
   return ok;
 }
 

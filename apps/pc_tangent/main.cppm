@@ -73,8 +73,9 @@ int main(int argc, char** argv) {
   //
   // Four steps is the default; each one costs two more states -- two more RDM
   // builds and PC stages -- which at 12 orbitals is minutes, so a caller that
-  // wants fewer can say so (never one: the Richardson extrapolation needs
-  // two).
+  // wants fewer can say so (never fewer than three: the report gates on a RUN
+  // of nevpt2::kPcMinFourfoldRun = 2 fourfold halvings, not on one step --
+  // docs/testing.md, "Residual-independent checks of the gradient path").
   constexpr int kStartPow = 12;
   constexpr int kDefaultFdSteps = 4;
   // The direction's seed: fixed, so the whole check is reproducible run to
@@ -128,10 +129,12 @@ int main(int argc, char** argv) {
     nevpt2::report(st.error());
     return 1;
   }
-  // Two steps make a Richardson table; the upper bound is only there so a
-  // typo cannot queue hours of RDM builds.
-  if (fdSteps < 2 || fdSteps > 8) {
-    const nevpt2::Status st = nevpt2::err_config("--fd-steps must be in 2..8");
+  // Three steps make a run of two fourfold halvings, the fewest the report
+  // accepts (kPcMinFourfoldRun); the upper bound is only there so a typo
+  // cannot queue hours of RDM builds.
+  if (fdSteps < nevpt2::kPcMinFourfoldRun + 1 || fdSteps > 8) {
+    const nevpt2::Status st = nevpt2::err_config(
+        std::format("--fd-steps must be in {}..8", nevpt2::kPcMinFourfoldRun + 1));
     nevpt2::report(st.error());
     return 1;
   }

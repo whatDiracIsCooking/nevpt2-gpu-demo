@@ -98,14 +98,13 @@ constexpr std::size_t kStepCount = kLastStepExp - kFirstStepExp + 1;
 // nothing. docs/testing.md, "The active-rotation source term", has the
 // measured plateaus.
 constexpr double kFdTol = 1e-6;
-// The Richardson window and the run length -- a RUN, not the whole table,
-// because differencing the energy at a small displacement has an intrinsic
-// hazard: a perturber that is symmetry-empty at the base point has N and H
-// growing together as h^2, and at a step where Delta N + H cancels to
-// round-off the term is numerically enormous (docs/testing.md, "The SC
-// tangent's finite-difference cross-check", where it was first seen).
-constexpr double kRichardsonLow = 3.2;
-constexpr double kRichardsonHigh = 4.8;
+// The run length -- a RUN, not the whole table, because differencing the
+// energy at a small displacement has an intrinsic hazard: a perturber that is
+// symmetry-empty at the base point has N and H growing together as h^2, and
+// at a step where Delta N + H cancels to round-off the term is numerically
+// enormous (docs/testing.md, "The SC tangent's finite-difference
+// cross-check", where it was first seen). The window is nevpt2.gradient_plan's
+// kFourfoldLow / kFourfoldHigh, shared by every such check.
 constexpr int kRichardsonRun = 3;
 
 // The golden's integral blocks with every ACTIVE axis transformed by `u`,
@@ -288,22 +287,13 @@ nevpt2::Result<bool> checkKappaAct(const nevpt2::GoldenFile& g,
               "over below it\n",
               err[bestAt], bestRel, step[bestAt], kFirstStepExp + static_cast<int>(bestAt));
 
-  int run = 0, bestRun = 0, bestRunEnd = 0;
-  for (std::size_t i = 1; i < kStepCount; ++i) {
-    const double ratio = err[i] > 0.0 ? err[i - 1] / err[i] : 0.0;
-    run = (ratio > kRichardsonLow && ratio < kRichardsonHigh) ? run + 1 : 0;
-    if (run > bestRun) {
-      bestRun = run;
-      bestRunEnd = static_cast<int>(i);
-    }
-  }
-  const bool richardson = bestRun >= kRichardsonRun;
+  const nevpt2::FourfoldRun run = nevpt2::longestFourfoldRun(err);
+  const bool richardson = run.length >= kRichardsonRun;
   ok = ok && richardson;
   std::printf("  Richardson: %d consecutive halvings cut the error fourfold (ratio in [%.1f, "
               "%.1f]), ending at h = %.3e -- %s, %d needed\n",
-              bestRun, kRichardsonLow, kRichardsonHigh,
-              step[static_cast<std::size_t>(bestRunEnd)], richardson ? "ok" : "NOT ENOUGH",
-              kRichardsonRun);
+              run.length, nevpt2::kFourfoldLow, nevpt2::kFourfoldHigh, step[run.end],
+              richardson ? "ok" : "NOT ENOUGH", kRichardsonRun);
 
   std::printf("\n%s: the active-rotation source term's adjoint and tangent agree to %.0e for "
               "every direction, and the finite difference to %.0e of the energy scale\n",
