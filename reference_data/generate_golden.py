@@ -4,9 +4,11 @@ r"""Build a golden SC-NEVPT2 CASSCF-input reference file, via PySCF.
 This is the **only** file in this demo that defines the golden state
 (``block2_pc_probe.py`` imports :func:`_build_state`). It runs a plain
 ``mcscf.CASCI`` diagonalisation on converged RHF orbitals -- bit-identical
-run to run given the thread and Davidson settings below, unlike
-a fresh CASSCF orbital optimisation (see :func:`_build_state` for why CASCI
-is used as the reproducible golden state) -- canonicalises it exactly as
+run to run given the thread and Davidson settings below, and deterministic
+by construction, with no orbital optimiser in the chain (see
+:func:`_build_state`, and docs/reference-data.md, "What 'CASSCF input' means
+here, and why the golden state is CASCI", for what a fresh CASSCF measurably
+does instead) -- canonicalises it exactly as
 ``pyscf.mrpt.NEVPT.kernel``
 does, and writes everything a CASSCF/CASCI package would hand a downstream
 NEVPT2 driver into one flat binary file (see :func:`write_golden`'s
@@ -364,9 +366,13 @@ def _build_state(
     core_irreps: dict[str, int] | None = None,
 ):
     """Deterministic CASCI + NEVPT canonicalisation: a plain CASCI
-    diagonalisation on converged RHF orbitals, where a fresh CASSCF orbital
-    optimisation would converge to differently-rotated degenerate solutions
-    run to run.
+    diagonalisation on converged RHF orbitals, with no orbital optimiser in
+    the chain. A fresh CASSCF **is** reproducible under these settings
+    (measured: docs/reference-data.md, "What 'CASSCF input' means here, and
+    why the golden state is CASCI", and
+    ``reference_data/casscf_repro_probe.py``); what it is not is the same
+    reference -- optimising the orbitals moves E_corr by tens of
+    millihartree.
 
     With ``auxbasis`` the RHF is density-fitted and the CASCI is a
     ``DFCASCI`` sharing the RHF's ``with_df`` object, so one fitted integral

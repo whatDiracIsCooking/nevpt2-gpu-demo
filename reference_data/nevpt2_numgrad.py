@@ -24,9 +24,11 @@ deterministic at every displaced geometry, so two displaced energies are two
 values of one function and their difference quotient means something. A CASSCF
 reference would converge to a differently-rotated solution of the same energy
 at each displacement, and the numerical gradient would be garbage
-(docs/reference-data.md, "What 'CASSCF input' means here, and why the golden
-state is CASCI"; docs/gradient-theory.md, §1.1, and §4.4 for why that is a
-*precondition* for this script rather than the hazard below).
+(docs/gradient-theory.md, §1.1, and §4.4 for why that is a *precondition* for
+this script rather than the hazard below). That is a statement about
+*displaced* geometries: at one fixed geometry a fresh CASSCF reproduces bit
+for bit, measured in docs/reference-data.md, "What 'CASSCF input' means here,
+and why the golden state is CASCI".
 
 **In-plane displacements only, and the refusal.** The active space is selected
 by irrep, and the irrep labels exist only as long as the point group does, so
