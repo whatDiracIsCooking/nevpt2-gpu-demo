@@ -229,6 +229,7 @@ required:
 | `--rdm-tangent` | also run the tangent RDM build — the derivative of dm3/f3ac/f3ca with respect to the CI vector — and check it against twice the plain build. It holds about twice the per-tile intermediates, so it needs more tiles than the plain build; not usable with `--cublas`, `--ozaki` or `--fused-digest` |
 | `--pool-threshold BYTES\|max` | the memory pool's release threshold (default `max`) |
 | `--sc-tangent` | **integral-direct demo only**: instead of the golden comparison, differentiate the SC total with respect to the CI vector and check that tangent against the class norms' exact affine increment, Euler's identity and a central finite difference of the energy itself. Same digest restriction as `--rdm-tangent`, and no `--pc` path |
+| `--gradient-source` | **integral-direct demo only**: instead of the golden comparison, assemble the SC-NEVPT2 CI source term `y_I = dE/dc_I` (Park Eq. 48) in reverse mode and check it against the forward tangent by duality — `<u, y> = Edot(u)`, exactly, for several seeded directions and for the state itself, plus the full Jacobian column by column where the determinant space is small enough. Same digest restriction as `--rdm-tangent`, and no `--pc` path |
 | `--batch N` | **DF demo only**: slab length along each integral block's batch index (default 8; `0` = one slab per block). A memory lever |
 | `--check-blocks` | **DF demo only**: also compare every DF-built integral block against the file's four-index arrays |
 

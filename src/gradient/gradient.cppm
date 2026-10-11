@@ -4,9 +4,12 @@
 // Theory Comput. 2019 (arXiv:1907.10180): the amplitudes and multipliers
 // (nevpt2.sc_amplitudes, re-exported) and, from them, the density-like
 // quantities that multiply every molecular integral the second-order energy
-// reads -- Eqs. 41-47. Nothing else in the tree imports this, and neither
-// demo links it; apps/sc_pseudodensity/ drives it, and the Z-vector source
-// terms that will consume it are later work.
+// reads -- Eqs. 41-47 -- and, one chain rule further in, the CI SOURCE TERM
+// y_I = dE/dc_I of Eq. 48 (scCiSourceDevice, at the bottom). Nothing else in
+// the tree imports this; apps/sc_pseudodensity/ drives the pseudodensity
+// identities and the active-rotation source term (--kappa-act) and
+// nevpt2_demo's --gradient-source the CI source term. The orbital source
+// term's core and virtual blocks are later work.
 //
 // WHAT A PSEUDODENSITY IS HERE. A strongly-contracted class energy is a sum
 // over external-orbital tuples t of
@@ -57,8 +60,11 @@
 // identities in exact arithmetic -- a mis-transcribed index does not satisfy
 // them -- and the ctest entries hold them to 1e-10 (docs/testing.md, "The SC
 // pseudodensity identities").
-// AND THE ORBITAL-ROTATION SOURCE TERM'S ACTIVE-ACTIVE BLOCK comes out of the
-// same walk -- "The active-rotation source term" below, scActiveRotationDevice.
+//
+// AND TWO SOURCE TERMS COME OUT OF THE SAME WALK. The ORBITAL one's
+// active-active block is "The active-rotation source term" below
+// (scActiveRotationDevice); the CI one, one chain rule further in, is "The CI
+// source term, Park Eq. 48" (scCiSourceDevice) at the bottom.
 export module nevpt2.gradient;
 
 import std;
@@ -70,6 +76,10 @@ export import nevpt2.energy;
 // Re-exported: ScMultipliers and the amplitudes are this module's own first
 // deliverable, and its host-only half.
 export import nevpt2.sc_amplitudes;
+// Re-exported: scCiSourceDevice's SigmaVectorOptions, and the three sigma
+// entry points the CI source term IS, once the pseudodensities are swept down
+// to the RDMs (Park Eq. 48).
+export import nevpt2.sigma_vector;
 
 export namespace nevpt2 {
 
@@ -282,5 +292,72 @@ bool printScGradientReport(const ScGradientResult& g, const EnergyResult& energi
 // --kappa-act gate also weighs its finite difference), so this prints the
 // table and the verdict, not a gate line.
 bool printScRotationTable(const ScRotationResult& r, double atol);
+
+// --- the CI source term, Park Eq. 48 ------------------------------------------
+//
+// y_I = dE/dc_I = <I| (O_D + O_D^dagger) |Psi>, the whole second-order
+// energy's derivative with respect to the CI vector at fixed orbitals and
+// fixed amplitudes -- the right-hand side of docs/gradient-theory.md's
+// (decoupled) CI Z-vector equation, and the one derivative of E the
+// Lagrangian needs in determinant space.
+//
+// HOW IT IS BUILT, in three steps, each already its own checked piece:
+//
+//   1. the same slab walk scPseudodensityDevice runs, which leaves one
+//      accumulator M_G = dE/dG per metric / Dyall-Hamiltonian block G
+//      (Eqs. 42-43);
+//   2. ONE CHAIN RULE FURTHER IN (nevpt2.gradient:rdm_adjoint): every block
+//      is linear in the RDMs, so sweeping each block's own einsum chain
+//      backwards -- reverse-topologically, since a9 reads hdm3 reads hdm2 and
+//      a7 reads rm3 reads rm2 -- turns the M_G into the five coefficient
+//      tensors dE/d(dm1), dE/d(dm2), dE/d(dm3), dE/d(f3ac), dE/d(f3ca);
+//   3. those contracted with the RDMs' own CI derivatives
+//      (nevpt2.gradient:ci_source), which is what the sigma-vector kernels
+//      compute without the n^6 * ndet or n^8 * ndet derivative ever
+//      existing: nevpt2.sigma_vector's 3-body sigma for dm3 (dm1 and dm2 fold
+//      onto its diagonals, so they need no sigma of their own) and the 4-body
+//      contracted sigma, forward and dagger, for each f3 order.
+//
+// AND IT IS CHECKED AGAINST FORWARD MODE, exactly. nevpt2.energy's
+// energiesTangentDevice computes the same derivative the other way round, so
+// for ANY direction u in determinant space
+//
+//   <u, y> == Edot(u)                         to round-off, not to a step
+//
+// -- two different computations of one number, which is what
+// nevpt2_demo's --gradient-source gates on (and, at CAS(4,4), column by
+// column over the whole Jacobian; docs/testing.md, "The CI source term's
+// forward-reverse duality").
+struct ScCiSourceResult {
+  // y_I over the determinant space, in the CI vector's own
+  // (nstringsA, nstringsB) shape.
+  Tensor y;
+  // The same walk's Eq. 40-47 numbers: free, since the sweep runs on top of
+  // exactly that walk, and printScGradientReport reports them unchanged.
+  ScGradientResult pseudodensities;
+};
+
+// Assembles y_I from the same inputs as scPseudodensityDevice plus the state
+// itself: `ci` is the (nstringsA, nstringsB) CI vector the RDMs were built
+// from, and `nelecA`/`nelecB` its active space's electron counts. `sigma`
+// tiles the sigma kernels' determinant axis -- a launch-granularity knob, not
+// a memory one (nevpt2.sigma_vector's SigmaVectorOptions says why).
+//
+// Everything runs on res.stream() and every device allocation is a
+// DeviceBuffer from res's pool; the five coefficient tensors live from the
+// first class to the last sigma call and are freed when this returns.
+ScCiSourceResult scCiSourceDevice(const ActiveIntegralsDevice& active, IntegralSource& source,
+                                  int64_t batch, const Tensor& ci, int64_t nelecA,
+                                  int64_t nelecB, const DeviceTensor& dm1,
+                                  const DeviceTensor& dm2, const DeviceTensor& dm3,
+                                  const DeviceTensor& f3ac, const DeviceTensor& f3ca,
+                                  const SigmaVectorOptions& sigma, const DeviceResources& res);
+
+// The integral-direct entry point: full blocks, one slab each.
+ScCiSourceResult scCiSourceDevice(const NevptIntegralsDevice& ints, const Tensor& ci,
+                                  int64_t nelecA, int64_t nelecB, const DeviceTensor& dm1,
+                                  const DeviceTensor& dm2, const DeviceTensor& dm3,
+                                  const DeviceTensor& f3ac, const DeviceTensor& f3ca,
+                                  const SigmaVectorOptions& sigma, const DeviceResources& res);
 
 }  // namespace nevpt2

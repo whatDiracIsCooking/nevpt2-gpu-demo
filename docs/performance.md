@@ -549,6 +549,43 @@ The derivative itself is checked against a central finite difference of the
 plain build in the unit tier (docs/testing.md has the tier; the suites are
 `test/rdm/rdm_tangent_tests.cpp`).
 
+### `--tiles` on the CI source term (`--gradient-source`)
+
+`nevpt2_demo --gradient-source` (`nevpt2.gradient`'s `scCiSourceDevice`: the
+pseudodensity walk, the sweep down to the five RDM coefficient tensors, and
+the sigma-vector contractions that make `y_I = dE/dc_I`) adds **no tile-sized
+buffer of its own**. The sweep's accumulators are `n^2 + n^4 + 3 n^6` doubles
+— 24 MB at CAS(10,10), independent of `--tiles` — and the 4-body sigma's one
+intermediate spans the *whole* determinant axis by construction (its second
+pass gathers from anywhere in it), so it is `n^2 * ndet` doubles, 50.8 MB at
+CAS(10,10), independent of `--tiles` as well.
+
+So on this path `--tiles` is the **tangent RDM build's** memory lever and
+nothing else, and the floors above apply unchanged: the check runs
+`buildRdmTangentsDevice` once per direction, so CAS(10,10) needs at least 2
+(`--tiles 1` fails with a clean out-of-memory at
+`rdm_build_tangent.cppm`'s `L2` allocation, *after* `y` itself has been built
+without trouble). RTX 3080, CUDA, Release, CAS(10,10), the card shared with
+another process (how much it held was not recorded, so read the `--tiles 1`
+row as "below the floor on a shared card", not as a floor of its own — the
+measured floors are the table above):
+
+| `--tiles` | `y` built in | pool used, whole run | outcome |
+|---:|---:|---:|---|
+| 1 | 5.34s | — | out of memory in the tangent build |
+| 3 | 5.68s | 3334.2 MB | the shipped count |
+| 10 | 7.36s | 1039.4 MB | passes |
+
+The peak difference is entirely the tangent build's per-tile blocks (the rows
+in "Tile floors" above); what `--tiles` does to the new stage is only the
+sigma kernels' launch granularity, and more tiles there are slightly *slower*
+(5.7s to 7.4s from 3 to 10) because each pass is split into more launches with
+no buffer shrinking in return. **The recommendation is `--tiles 3` at
+CAS(10,10)**, the same count every other entry at that size uses, and the one
+the duality residuals in docs/testing.md, "The CI source term's
+forward-reverse duality", were measured with. Larger active spaces have not
+been measured on this path.
+
 ### The memory pool
 
 Every device allocation is a `DeviceBuffer` drawn from one stream-ordered

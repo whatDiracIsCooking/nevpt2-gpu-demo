@@ -106,4 +106,43 @@ Tensor sigmaVector4Device(const SigmaVectorOptions& opt, int order, const Tensor
                           int64_t nelecA, int64_t nelecB, const Tensor& d6, const Tensor& eriF3,
                           const DeviceResources& res);
 
+// The SAME coefficient tensor against the DAGGER of that operator string:
+//
+//   sigma[K] = sum_{wvuts,a} d6[...] sum_{xqp} eri[a,x,q,p]
+//                  (E_pq E_xs E_tu E_vw |ci>)[K]        (order 0, ca)
+//
+// and E_sx in place of E_xs for order 1 (ac) -- every one-body operator
+// transposed and the string read backwards, which is what
+// (E_wv E_ut E_sx E_qp)^dagger is. Arguments, shapes and layouts are
+// sigmaVector4Device's exactly.
+//
+// WHY THIS IS A SECOND FUNCTION AND NOT A PERMUTED d6. The CI derivative of
+// the f3 contraction is two-sided (Park Eq. 48's O_D + O_D^dagger),
+//
+//   d/dc_I sum d6 . f3 = sigmaVector4Device[I] + sigmaVector4DaggerDevice[I],
+//
+// and for the 3-BODY sigma the second half is literally the first with d3's
+// index order reversed -- a plain transpose the caller does itself. Here it
+// is not: the dagger's coefficient puts the ERI on the OUTERMOST two
+// operators instead of the innermost two, and `d6 (x) eri` with the ERI
+// outside is not `d6' (x) eri'` with it inside for any d6', eri'. What
+// changes is only which kernel pass carries which block: stage 1 takes d6
+// (the inner pair is E_tu E_vw, whose indices are d6's, leaving (a, s) as the
+// batch), stage 2 the ERI (the outer pair is E_pq E_xs, whose indices are the
+// ERI's, with `s` pinned to the batch's own). Same two kernels, same (n^2,
+// n^4) coefficient shapes, same single (n^2, ndet) intermediate -- no new
+// kernel, and no n^8 object either.
+//
+// The one-sided identity at the top of this interface holds for it unchanged,
+// since <c|O|c> = <c|O^dagger|c> for a real state:
+//
+//   sum_K ci[K] sigmaVector4DaggerDevice(d6, order)[K] = sum d6 . f3{ca,ac}
+//
+// which is one of the two things the unit tier checks it with (the other
+// being a central difference of that contraction, exact because it is
+// quadratic in ci).
+Tensor sigmaVector4DaggerDevice(const SigmaVectorOptions& opt, int order, const Tensor& ci,
+                                int64_t norb, int64_t nelecA, int64_t nelecB, const Tensor& d6,
+                                const Tensor& eriF3, const DeviceResources& res);
+
 }  // namespace nevpt2

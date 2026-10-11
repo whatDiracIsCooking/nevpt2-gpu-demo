@@ -44,6 +44,19 @@
 //                                the 4-body convention is pinned to the
 //                                tensors the energy actually reads
 //     IsTilingInvariant          as above, across the two kernel passes
+//   SigmaVector4GammaTests
+//     MatchesHostF3Derivative    the CI derivative of the host f3 contraction
+//                                by the same exact central difference, against
+//                                sigmaVector4Device + sigmaVector4DaggerDevice
+//                                -- the two-sided object Park Eq. 48 needs
+//     DaggerContractsToDeviceF3  sum_K ci[K] sigma4Dagger[K] = sum d6 . f3,
+//                                which holds for the dagger too since
+//                                <c|O|c> = <c|O^dagger|c>
+//     DaggerIsNotTheForwardHalf  the negative controls: forward + FORWARD
+//                                (instead of + dagger), and the dagger fed a
+//                                d6 with its last two axes swapped, both miss
+//                                the derivative -- so the match above is not
+//                                something any pair of calls would give
 //
 // The one-sided sigma and the two-sided Gamma. sigmaVector3Device computes
 // the ONE-SIDED contraction sum d3 (E E E|ci>), while the RDM derivative is
@@ -155,6 +168,20 @@ Tensor reversed(const Tensor& d3, int64_t n) {
         for (int64_t s = 0; s < n; ++s)
           for (int64_t t = 0; t < n; ++t)
             for (int64_t u = 0; u < n; ++u) out(p, q, r, s, t, u) = d3(u, t, s, r, q, p);
+  return out;
+}
+
+// d6 with its last two axes swapped -- the (s, a) pair the two f3 orders
+// disagree on, hence the one permutation a layout bug would most plausibly
+// land on. Used only as a negative control.
+Tensor lastPairSwapped(const Tensor& d6, int64_t n) {
+  Tensor out(d6.dims());
+  for (int64_t w = 0; w < n; ++w)
+    for (int64_t v = 0; v < n; ++v)
+      for (int64_t u = 0; u < n; ++u)
+        for (int64_t t = 0; t < n; ++t)
+          for (int64_t a = 0; a < n; ++a)
+            for (int64_t b = 0; b < n; ++b) out(w, v, u, t, a, b) = d6(w, v, u, t, b, a);
   return out;
 }
 
@@ -512,6 +539,107 @@ TEST(SigmaVector4Tests, IsTilingInvariant) {
         "sigma4 across tile counts");
   }
   EXPECT_TRUE(sawShortLastTile) << "no tile count here leaves a short last tile";
+}
+
+// --- SigmaVector4GammaTests -------------------------------------------------
+//
+// The f3 contraction's CI derivative, which is what an SC-NEVPT2 gradient
+// actually needs: the forward sigma gives <I|O|Psi> and the dagger one
+// <I|O^dagger|Psi>, and only their SUM is d/dc_I of sum d6 . f3.
+
+// sum_{wvuts,a,xqp} coef <x|...|x> = <x | sigma4(order, d6, eri, x)>, the host
+// contraction whose CI gradient the two sigmas together are. Its derivative
+// is taken as a central difference, which is EXACT: the contraction is
+// quadratic in x, so the h^2 terms cancel identically.
+std::vector<double> hostF3DerivativeByDifference(const Forward& f, const Tensor& ci, int order,
+                                                 const Tensor& d6, const Tensor& eri) {
+  const int64_t ndet = f.ndet();
+  constexpr double kH = 1.0 / 64.0;  // a power of two, so x +- h is exact
+  std::vector<double> want(static_cast<std::size_t>(ndet), 0.0);
+  for (int64_t I = 0; I < ndet; ++I) {
+    std::vector<double> plusI = flat(ci), minusI = flat(ci);
+    plusI[static_cast<std::size_t>(I)] += kH;
+    minusI[static_cast<std::size_t>(I)] -= kH;
+    const double up = dot(plusI, hostSigma4(f, plusI, order, d6, eri));
+    const double down = dot(minusI, hostSigma4(f, minusI, order, d6, eri));
+    want[static_cast<std::size_t>(I)] = (up - down) / (2.0 * kH);
+  }
+  return want;
+}
+
+TEST(SigmaVector4GammaTests, MatchesHostF3Derivative) {
+  const DeviceResources* res = resourcesOrFail();
+  ASSERT_NE(res, nullptr);
+  const CasCase& c = cas44();
+  const int64_t n = c.norb;
+  const Tensor ci = randomCi(c);
+  const Tensor eri = randomTensor({n, n, n, n}, c.seed ^ 0xe1u);
+  const Tensor d6 = randomTensor({n, n, n, n, n, n}, c.seed ^ 0xd6u);
+  const Forward f(c);
+  for (const int order : {0, 1}) {
+    SCOPED_TRACE(order == 0 ? "ca" : "ac");
+    const Tensor fwd =
+        sigmaVector4Device(tiles(1), order, ci, n, c.nelecA, c.nelecB, d6, eri, *res);
+    const Tensor adj =
+        sigmaVector4DaggerDevice(tiles(1), order, ci, n, c.nelecA, c.nelecB, d6, eri, *res);
+    expectVectorsAgree(flat(plus(fwd, adj)),
+                       hostF3DerivativeByDifference(f, ci, order, d6, eri),
+                       "sigma4 + sigma4Dagger");
+  }
+}
+
+TEST(SigmaVector4GammaTests, DaggerContractsToDeviceF3) {
+  const DeviceResources* res = resourcesOrFail();
+  ASSERT_NE(res, nullptr);
+  for (const CasCase& c : {cas44(), cas66()}) {
+    SCOPED_TRACE(caseName(c));
+    const int64_t n = c.norb;
+    const Tensor ci = randomCi(c);
+    const Tensor d6 = randomTensor({n, n, n, n, n, n}, c.seed ^ 0xd6u);
+    const Tensor eri = randomTensor({n, n, n, n}, c.seed ^ 0xe1u);
+    const Tensor h2e = transpose(eri, {0, 2, 1, 3});
+    const DeviceRdms rdms = buildRdms(c, ci, h2e, *res);
+    for (const int order : {0, 1}) {
+      SCOPED_TRACE(order == 0 ? "ca" : "ac");
+      const Tensor sigma =
+          sigmaVector4DaggerDevice(tiles(1), order, ci, n, c.nelecA, c.nelecB, d6, eri, *res);
+      const double want = dot(flat(d6), order == 0 ? rdms.f3ca : rdms.f3ac);
+      const double got = dot(flat(ci), flat(sigma));
+      EXPECT_NEAR(got, want, kTol * std::max(1.0, std::abs(want)));
+      EXPECT_GT(std::abs(want), 1e-6) << "the f3 contraction is ~0";
+    }
+  }
+}
+
+TEST(SigmaVector4GammaTests, DaggerIsNotTheForwardHalf) {
+  const DeviceResources* res = resourcesOrFail();
+  ASSERT_NE(res, nullptr);
+  const CasCase& c = cas44();
+  const int64_t n = c.norb;
+  const Tensor ci = randomCi(c);
+  const Tensor eri = randomTensor({n, n, n, n}, c.seed ^ 0xe1u);
+  const Tensor d6 = randomTensor({n, n, n, n, n, n}, c.seed ^ 0xd6u);
+  const Forward f(c);
+  const int order = 0;
+  const std::vector<double> want = hostF3DerivativeByDifference(f, ci, order, d6, eri);
+  const double scale = kTol * std::max(1.0, maxAbs(want));
+  const Tensor fwd =
+      sigmaVector4Device(tiles(1), order, ci, n, c.nelecA, c.nelecB, d6, eri, *res);
+  const auto worst = [&](const Tensor& got) {
+    double m = 0.0;
+    for (int64_t K = 0; K < got.size(); ++K)
+      m = std::max(m, std::abs(got.flat(K) - want[static_cast<std::size_t>(K)]));
+    return m;
+  };
+  // Twice the forward half instead of forward + dagger: the two halves are
+  // different operators, so this must miss by far more than the tolerance.
+  EXPECT_GT(worst(plus(fwd, fwd)), 1e3 * scale) << "forward + forward matched the derivative";
+  // The dagger fed a d6 whose last two axes are swapped: a layout-sensitive
+  // comparison, as the 3-body suite's reversed-d3 control is.
+  const Tensor swapped = sigmaVector4DaggerDevice(tiles(1), order, ci, n, c.nelecA, c.nelecB,
+                                                  lastPairSwapped(d6, n), eri, *res);
+  EXPECT_GT(worst(plus(fwd, swapped)), 1e3 * scale)
+      << "a d6 with its last two axes swapped matched the derivative";
 }
 
 }  // namespace nevpt2::test::sigma_vector
