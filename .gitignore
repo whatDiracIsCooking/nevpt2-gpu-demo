@@ -34,6 +34,12 @@ golden/*cas1414*
 # CAS(8,8)".
 golden/salicylaldimine_*
 
+# Acrolein's GRADIENT SIDECAR only: 57 MB, past GitHub's 50 MB warning and past
+# pre-commit's check-added-large-files limit. The golden beside it (7.1 MB) and
+# both LiF files (0.20 / 0.92 MB) ARE committed. Regenerates byte-identically in
+# ~31 s. See docs/reference-data.md, "The gradient sidecar".
+golden/acrolein_def2svp_cas65.gradgold
+
 # Editor / OS
 .vscode/
 .idea/
