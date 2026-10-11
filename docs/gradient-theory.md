@@ -9,7 +9,9 @@ and their solve order are not the paper's. They are derived here.
 
 This document is **derivation only**. It describes no code and names no file
 that does not yet exist; what gets built, and how it is checked, belongs in the
-implementation and testing documents. It quotes **no measured numbers**: the
+implementation and testing documents — [`gradients.md`](gradients.md) is the
+code side of this one, and says which parts of §1–§4 are implemented and
+which are not. It quotes **no measured numbers**: the
 array and file sizes the inventory in §3 implies are measurements of a
 particular case and belong in [`reference-data.md`](reference-data.md), the
 finite-difference tolerances in [`testing.md`](testing.md), the costs in

@@ -578,7 +578,8 @@ the RDM build's. `n2_ccpvdz_cas1012`, pool used / reserved, MB:
 
 ## The tangent with respect to the CI vector
 
-`pcTangentsDevice` (`src/energy/energy_pc_tangent.cppm`) differentiates every
+`pcTangentsDevice` (`src/energy/energy_pc.cpp`, over the `:pc_tangent`
+partition in `energy_pc_tangent.cppm`) differentiates every
 PC class energy with respect to the CI vector, with the integrals held fixed
 — the CI half of the analytic gradient, which is where PC is the branch worth
 carrying (Park's Table 3: PC within 5.0e-6 of numerical, SC unstable).
@@ -687,6 +688,26 @@ energies themselves carry ~1e-15 relative and the difference quotient divides
 that by `2h` (the same effect the SC tangent's sweep records in
 [`testing.md`](testing.md), "The SC tangent's finite-difference
 cross-check"). The ratios do not move at this `h`.
+
+**Where round-off takes over: `h ≈ 2^-20`,** five halvings below `2^-15`, the
+finest step any ctest entry takes. Measured 2026-10-11 on the RTX 3080 (CUDA,
+Release, the default emitted digest, `--tiles 3`) by sweeping past the
+entries' own steps with `--fd-start-pow`, which is what that flag is for.
+These are **deliberate diagnostic runs**, and the two that reach past the
+crossover FAIL the gate — that is the point of them:
+
+| run | `h` range | what happens |
+|---|---|---|
+| CAS(4,4), `--fd-start-pow 12 --fd-steps 8` | 2^-12 … 2^-19 | still truncation throughout: ratios 4.000, 4.000, 4.000, 3.999, 3.978, 4.097, 3.649, and \|fd − Edot\| falls 2.7e-6 → 1.8e-10. PASSes |
+| CAS(4,4), `--fd-start-pow 17 --fd-steps 8` | 2^-17 … 2^-24 | the last fourfold halving is 2^-19. From **2^-20** the ratios collapse — 1.03, 0.79, 1.09, 2.70, 0.11 — and \|fd − Edot\| floors at 6e-11 to 5.7e-10. Richardson lands at 7.8e-10, still inside its own 1e-8 gate; what fails is the ratio band |
+| CAS(8,8), `--fd-start-pow 14 --fd-steps 8` | 2^-14 … 2^-21 | ratios 4.000 to 3.905 down to 2^-19 (\|fd − Edot\| 6.4e-9), then **2^-20** overshoots to 5.8e-11 on a cancellation (ratio 112) and 2^-21 rises again to 2.6e-9. Fails on the ratios too; Richardson 3.4e-9 |
+
+So the default start, `h = 2^-12`, sits eight halvings above the crossover,
+and the entries' four steps stay entirely inside the truncation regime — which
+is why their ratios read 4.000 and the shape criterion is the right gate. Past
+`h ≈ 2^-20` the error is the energies' own reassociation divided by `2h` and
+the difference quotient measures nothing; CAS(10,12) was not swept (each step
+is two RDM builds at 12 orbitals, see the cost below).
 
 The gate is 1e-8 on the Richardson difference, 4 ± 0.5 on every ratio and
 1e-9 on the two exact checks, so each has two decades or more of margin. The

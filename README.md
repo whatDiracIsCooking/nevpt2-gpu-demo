@@ -54,6 +54,15 @@ you try to run it on your own system.
   whole setup again.
 - **The reference is CASCI, not a fresh CASSCF,** to keep it reproducible to
   the last bit (docs/reference-data.md, "What "CASSCF input" means here, and why the golden state is CASCI").
+- **The gradient work is source terms, not a nuclear gradient.** The tree
+  differentiates the NEVPT2 energy with respect to the CI vector and (for the
+  active–active block) with respect to an orbital rotation, at one fixed
+  geometry. The Z-vector solve, the derivative integrals and any derivative
+  with respect to a nuclear coordinate are not implemented; the only nuclear
+  gradient anywhere is a *numerical* one, written by an offline Python tool
+  (`reference_data/nevpt2_numgrad.py`) into a `*.gradgold` sidecar whose
+  `grad_num` arrays nothing in `src/` or `apps/` reads yet
+  ([`docs/gradients.md`](docs/gradients.md)).
 - **It needs a GPU.** There is no CPU path.
 
 ## Quickstart
@@ -210,8 +219,9 @@ The gitignored reference files (CAS(14,14) and the salicylaldimine CAS(8,8)
 pair) have to be regenerated with `reference_data/generate_golden.py` before
 either demo can read them.
 
-**Flags.** Both binaries take all of these, plus `--golden <file>`, which is
-required:
+**Flags.** Both binaries take the shared flags below (`src/cli/`), plus
+`--golden <file>`, which is required; the rows marked *demo only* are one
+binary's:
 
 | flag | does |
 |---|---|
@@ -234,6 +244,31 @@ required:
 | `--check-blocks` | **DF demo only**: also compare every DF-built integral block against the file's four-index arrays |
 
 An unrecognized argument prints the binary's usage line.
+
+### The gradient checks
+
+Two further binaries, plus three of the flags above, check the
+**gradient** work: derivatives of the NEVPT2 energy with respect to the CI
+vector and to an orbital rotation, each computed two independent ways and held
+against the other. They read the same reference files, and each prints its own
+`PASS:` line. What they compute, and what the gradient path deliberately does
+*not* do, is [`docs/gradients.md`](docs/gradients.md).
+
+| invocation | extra flags | what it checks |
+|---|---|---|
+| `nevpt2_demo --rdm-tangent` (also `nevpt2_df_demo`) | — | the tangent RDM build beside the plain one, against twice it |
+| `nevpt2_demo --sc-tangent` | — | the SC total's derivative with respect to the CI vector |
+| `nevpt2_demo --gradient-source` | — | the CI source term `y_I = dE/dc_I`, against that tangent by duality |
+| `nevpt2_sc_pseudodensity` | `--kappa-act` | the SC pseudodensity identities; with `--kappa-act`, the active–active orbital source term instead |
+| `nevpt2_pc_tangent` | `--fd-steps N` (2..8, default 4), `--fd-start-pow N` (1..30, default 12: the first step is `2^-N`) | PC's derivative with respect to the CI vector, against a Richardson-verified finite difference |
+
+Everything that builds a *tangent* — the first three rows and
+`nevpt2_pc_tangent` — runs the emitted or the native-fp64 BLAS digest;
+`--cublas`, `--ozaki` and `--fused-digest` are refused there, since a tangent
+of an approximate digest is not the derivative of what the energy stage
+computed. `nevpt2_sc_pseudodensity` builds no tangent RDMs and takes any
+digest. `--sc-tangent` and `--gradient-source` are the integral-direct demo's
+alone, refuse each other, and have no `--pc` path.
 
 ## One tree, two backends
 
@@ -263,7 +298,7 @@ How the layering works is [`docs/architecture.md`](docs/architecture.md),
 | path | what |
 |---|---|
 | `src/` | the library, one directory per component, both backends (per-file inventory: [`docs/architecture.md`](docs/architecture.md), §4) |
-| `apps/` | the binaries: `integral_direct/` → `nevpt2_demo`, `density_fit/` → `nevpt2_df_demo`, `sanitizer_canary/` |
+| `apps/` | the binaries: `integral_direct/` → `nevpt2_demo`, `density_fit/` → `nevpt2_df_demo`, the two gradient checks `sc_pseudodensity/` and `pc_tangent/`, and `sanitizer_canary/` |
 | `test/` | the GoogleTest unit tier: host logic, never an energy |
 | `golden/` | the committed reference files, which are the oracle ([`docs/reference-data.md`](docs/reference-data.md)) |
 | `reference_data/` | the offline Python that generates them (PySCF, block2), and the CPU side of the head-to-head |
@@ -293,6 +328,8 @@ and what it cannot see are in docs/testing.md, "Coverage".
 |---|---|
 | how a number gets computed, stage by stage | [`docs/implementation.md`](docs/implementation.md) |
 | how the tree is layered, built, and split across two vendors | [`docs/architecture.md`](docs/architecture.md) |
+| what the gradient path computes, and what it deliberately does not | [`docs/gradients.md`](docs/gradients.md) |
+| the gradient derivation for this reference: the Lagrangian, the Z-vector equations, the integral inventory | [`docs/gradient-theory.md`](docs/gradient-theory.md) |
 | what it costs, which knobs matter, and what didn't help | [`docs/performance.md`](docs/performance.md) |
 | PC-NEVPT2: the design, accuracy against block2, cost | [`docs/pc-nevpt2.md`](docs/pc-nevpt2.md) |
 | where the reference files come from and why they can be trusted | [`docs/reference-data.md`](docs/reference-data.md) |
