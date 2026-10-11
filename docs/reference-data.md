@@ -15,23 +15,54 @@ and 2-RDMs, and a set of MO-integral blocks. The generator canonicalises the
 state exactly as `pyscf.mrpt.NEVPT.kernel` does, and stores PySCF's own
 per-class SC-NEVPT2 answer alongside.
 
-The orbitals the committed goldens use are **converged RHF** orbitals, and the
-state is a plain `mcscf.CASCI` diagonalisation on them: a linear-algebra step
-with no orbital optimiser anywhere in the chain, which reproduces bit for bit
-given the two settings in "Reproducibility" below. What rules a fresh CASSCF
-out of the committed files is **not** reproducibility — it reproduces too, and
-the next subsection is the measurement — but that its orbitals are a
-*different reference*, worth tens of millihartree in `E_corr`, and that
-optimising them costs a run.
+**Every committed golden's state is a plain `mcscf.CASCI` diagonalisation** —
+a linear-algebra step with no orbital optimiser anywhere in the chain, which
+reproduces bit for bit given the two settings in "Reproducibility" below. What
+differs between the committed files is *which orbitals* that CASCI runs on,
+and the header's `reference_kind` says which ("The file format" below):
 
-A golden on that other reference is something the generator can build, in two
-steps that keep the optimiser **out** of the golden's chain rather than
-putting it in: `--casscf --mo-out FILE` optimises once and commits the
-converged orbitals, and `--mo-from FILE` runs the same deterministic
-`mcscf.CASCI` on them and records `reference_kind = casscf` ("The MO sidecar"
-below). No CASSCF-orbital golden is committed yet.
+| `reference_kind` | orbitals | committed files |
+|---|---|---|
+| `casci` | converged RHF | every golden without `_casscf` in its name |
+| `casscf` | a converged `mcscf.CASSCF`, committed in an MO sidecar | the three `*_casscf*` files ("The MO sidecar: committed CASSCF orbitals" below) |
 
-It never writes `dm3`, `f3ac` or `f3ca`. Producing those from the CI vector is
+**The CASSCF-orbital references are built in two steps, and the sidecar is the
+design.** `--casscf --mo-out FILE` runs the optimiser **once** and commits its
+converged `mo_coeff` to a `*.mogold` file; `--mo-from FILE` then runs the same
+deterministic CASCI every other golden is built with, on those committed
+orbitals. So a golden's state depends on a *file*, never on an optimiser in
+the regeneration chain. Three things that buys:
+
+- **Provenance.** The sidecar carries the fingerprint of the calculation it
+  belongs to — geometry in the symmetry frame, basis, AO/MO counts, point
+  group, `ncore`/`ncas`/`nelecas`, the irrep selection, `E_CASSCF` — and
+  `--mo-from` rebuilds all of it from its own flags and refuses on any
+  difference, reporting every mismatch at once.
+- **Independence from the optimiser.** The committed orbitals pin the
+  reference across PySCF versions, convergence settings and starting points.
+  Regenerating the golden re-runs only the deterministic part, so the property
+  this directory rests on survives: a regenerated file that differs from the
+  committed one means something changed.
+- **Cost.** The optimisation happens once, not on every regeneration.
+
+**None of that is a reproducibility argument.** A fresh `mcscf.CASSCF` *does*
+reproduce under these settings — the next subsection is that measurement, and
+it refutes an earlier claim in this file that it does not. What optimising the
+orbitals changes is the **reference**: E_corr moves by tens of millihartree
+(the last table in "The `--casscf` / `--mo-from` gate thresholds"), a
+different number rather than a noisier one, which is why both kinds are worth
+committing.
+
+**What a CASSCF-orbital golden is not an input for: the gradient work.** Every
+derivative in this tree is derived for the CASCI-on-RHF Lagrangian, so
+`nevpt2_demo --sc-tangent`, `--gradient-source` and
+`reference_data/nevpt2_numgrad.py` all refuse a `casscf` golden, and
+`--gradgold` is refused with `--casscf` and with `--mo-from`
+([`gradient-theory.md`](gradient-theory.md), §1.1 and §5). The gradient tier
+stays CASCI-only on purpose; the energy path is what these files exercise.
+
+Whichever orbitals it is handed, the generator never writes `dm3`, `f3ac` or
+`f3ca`. Producing those from the CI vector is
 the expensive step the GPU build exists for, and storing them would let the
 demo skip the part it is supposed to demonstrate.
 
@@ -128,15 +159,15 @@ loosening `conv_tol_grad` alone (ΔE_corr against the converged
 so dE_corr/d‖g_orb‖ ≈ 0.11–0.13 Eh per unit norm at CAS(10,10), and 0.057 at
 CAS(4,4) (the same test there: ‖g_orb‖ 1.126e-5 costs 6.4e-7). And the scale
 of an input a gate must *refuse* — the RHF orbitals, which is what the
-committed goldens are built on:
+committed **CASCI** goldens are built on:
 
 | orbitals | ‖g_orb‖ | E_CASCI | E_CASCI − E_CASSCF |
 |---|---|---|---|
 | CAS(4,4), RHF | 6.98e-2 | −109.017971290758 | +2.82e-2 |
 | CAS(10,10), RHF | 7.54e-2 | −109.048231643881 | +8.15e-2 |
 
-(both E_CASCI values are the committed goldens' own `e_casci`, which is what
-those files hold: CASCI on RHF orbitals.)
+(both E_CASCI values are the committed CASCI goldens' own `e_casci`, which is
+what those files hold: CASCI on RHF orbitals.)
 
 **The two thresholds**, for the stationarity gate a committed-orbital sidecar
 needs:
@@ -181,18 +212,21 @@ probe:
 |---|---|---|---|
 | CAS(4,4) | 5.860e-9 | 9.153e-8 | 1.705e-13 |
 | CAS(10,10) | 2.521e-8 | 7.513e-8 | 8.527e-14 |
+| CAS(4,4), DF | 5.786e-9 | 9.037e-8 | 1.847e-13 |
 
-Still 11–13× inside the refusal, with the goldens these runs wrote carrying
-E_corr −0.207071732083 and −0.126182539677 — the probe's numbers to every
-digit it prints — and it is the second
+Still 11–13× inside the refusal, and the goldens those runs wrote are the
+**committed** CASSCF-orbital files ("The MO sidecar: committed CASSCF
+orbitals" below), carrying E_corr −0.207071732083 and −0.126182539677 — the
+probe's numbers to every digit it prints. That is the second
 argument against tightening the refusal to 1e-7: that would leave the real
 gate well under 2× of headroom, not 4×.
 
 **Where "tens of millihartree" actually comes from.** The CASCI-vs-CASSCF
 *reference* difference, which is real, is the whole reason to want
-CASSCF-orbital goldens:
+CASSCF-orbital goldens — and both columns are now committed files, the twin
+pairs the demos are checked against:
 
-| case | golden E_corr (CASCI on RHF) | E_corr on CASSCF orbitals | difference |
+| case | E_corr, the CASCI golden (RHF orbitals) | E_corr, the CASSCF golden | difference |
 |---|---|---|---|
 | CAS(4,4) | −0.234921016374 | −0.207071732083 | 2.78e-2 |
 | CAS(10,10) | −0.194651972215 | −0.126182539677 | 6.85e-2 |
@@ -253,15 +287,32 @@ uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65
 uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46
 uv run python reference_data/nevpt2_grad.py --case acrolein_def2svp_cas65
 
-# a golden on CONVERGED CASSCF orbitals, in two steps -- nothing committed
-# yet (see "The MO sidecar"). The same case flags go to both commands: they
-# are the sidecar's fingerprint, and a mismatch is refused
+# the three goldens on CONVERGED CASSCF orbitals, each in two steps (see "The
+# MO sidecar"). The FIRST command of each pair rewrites the committed sidecar
+# and is only needed if the sidecar itself is being rebuilt; with the sidecar
+# in hand, the second command alone regenerates the golden byte for byte. The
+# same case flags go to both: they are the sidecar's fingerprint, and a
+# mismatch is refused
 uv run python reference_data/generate_golden.py --ncas 4 --nelecas 4 \
     --name n2_ccpvdz_cas44_casscf --casscf \
     --mo-out golden/n2_ccpvdz_cas44_casscf.mogold
 uv run python reference_data/generate_golden.py --ncas 4 --nelecas 4 \
     --name n2_ccpvdz_cas44_casscf \
     --mo-from golden/n2_ccpvdz_cas44_casscf.mogold
+
+uv run python reference_data/generate_golden.py --ncas 10 --nelecas 10 \
+    --name n2_ccpvdz_cas1010_casscf --casscf \
+    --mo-out golden/n2_ccpvdz_cas1010_casscf.mogold
+uv run python reference_data/generate_golden.py --ncas 10 --nelecas 10 \
+    --name n2_ccpvdz_cas1010_casscf \
+    --mo-from golden/n2_ccpvdz_cas1010_casscf.mogold
+
+uv run python reference_data/generate_golden.py --df --ncas 4 --nelecas 4 \
+    --name n2_ccpvdz_cas44_casscf_df --casscf \
+    --mo-out golden/n2_ccpvdz_cas44_casscf_df.mogold
+uv run python reference_data/generate_golden.py --df --ncas 4 --nelecas 4 \
+    --name n2_ccpvdz_cas44_casscf_df \
+    --mo-from golden/n2_ccpvdz_cas44_casscf_df.mogold
 ```
 
 **Regeneration is a check.** Every committed golden regenerates
@@ -269,12 +320,25 @@ byte-identical, CAS(12,12) included (generated twice in separate processes,
 ~8 min each, single-threaded). A regenerated file that differs from the
 committed one means something changed.
 
-**One exception, and it is in the header only.** The committed files are
-written in the pre-kind `NEVPT2G1` layout; the generator now writes
-`NEVPT2G2`, which differs by the magic's last byte and the four-byte
+**The three CASSCF-orbital files regenerate byte-identically from their
+committed sidecars**, with no exception to make for the header: they were
+written after the `reference_kind` field existed, so they are `NEVPT2G2`
+already and `cmp` compares them whole. Measured, each regenerated from
+`golden/<case>.mogold` into a scratch `--out` and compared with the committed
+file (CUDA devcontainer, PySCF 2.14.0, single-threaded):
+
+| golden | size | regenerated | sha256 (both) |
+|---|---:|---|---|
+| `n2_ccpvdz_cas44_casscf.nevpt2gold` | 238 653 B | identical | `79f564e8…` |
+| `n2_ccpvdz_cas44_casscf_df.nevpt2gold` | 470 637 B | identical | `8d36d59c…` |
+| `n2_ccpvdz_cas1010_casscf.nevpt2gold` | 1 130 061 B | identical | `f8f00352…` |
+
+**One exception, and it applies to the pre-kind files only.** The committed
+**CASCI** goldens are written in the `NEVPT2G1` layout; the generator now
+writes `NEVPT2G2`, which differs by the magic's last byte and the four-byte
 `reference_kind` field at the end of the scalar header ("The file format"
-below). So a regenerated golden is 4 bytes longer than its committed twin,
-and the comparison skips the two headers:
+below). So a regenerated CASCI golden is 4 bytes longer than its committed
+twin, and the comparison skips the two headers:
 
 ```bash
 cmp -i 48:52 golden/n2_ccpvdz_cas44.nevpt2gold /tmp/n2_ccpvdz_cas44.nevpt2gold
@@ -419,6 +483,8 @@ PC-NEVPT2. What the generator does check before writing them:
   | `n2_ccpvdz_cas1010` / `_df` | `iabcpqg*` (Si) | 1.6e-16 / 1.1e-16 | 1.8e-10 / 1.7e-10 | 1.1e6 / 1.7e6 |
   | `n2_ccpvtz_cas1010_df` | `iabcpqg*` (Si) | 9.5e-16 | 2.5e-11 | 2.6e4 |
   | `n2_ccpvdz_cas1012` | `rabcpqg*` (Sr) | 2.8e-15 | 8.1e-10 | 3.9e5 |
+  | `n2_ccpvdz_cas44_casscf` / `_df` | `ijabpq-` (Sij) | 0 / 0 | 1.2e-4 | 9.0e10 / 9.1e10 |
+  | `n2_ccpvdz_cas1010_casscf` | `rabcpqg*` (Sr) | 8.8e-16 | 7.1e-10 | 1.1e6 |
   | `n2_ccpvdz_cas1212` (**refused**) | `rabcpqg*` (Sr) | 3.8e-13 | 4.5e-13 | **1.3** |
 
   These are relative singular values of `H_D`, maxed or minned over the
@@ -469,12 +535,14 @@ Lagrangian, so `nevpt2_demo`'s `--sc-tangent` and `--gradient-source`
 `casscf` golden — see [`gradient-theory.md`](gradient-theory.md), §1.1 and
 §5. Both demos print the kind in their header line.
 
-**Two magics, because the field is newer than the files.** `NEVPT2G2` is the
-layout with the field; `NEVPT2G1` is the layout from before it, which every
-**committed** golden is written in and which means CASCI — the only thing it
-could mean, since a golden has always been a CASCI on RHF orbitals. The
-reader accepts both and loads a `G1` file as CASCI, so adding the field
-rewrote no committed file. An unknown kind code is an IO Error, like a bad
+**Two magics, because the field is newer than most of the files.** `NEVPT2G2`
+is the layout with the field, which the three `*_casscf*` goldens are written
+in; `NEVPT2G1` is the layout from before it, which every committed **CASCI**
+golden is written in and which means CASCI — the only thing it could mean,
+since until the CASSCF-orbital path a golden had always been a CASCI on RHF
+orbitals. The reader accepts both and loads a `G1` file as CASCI, so adding
+the field rewrote no committed file, and committing the first `G2` ones did
+not either. An unknown kind code is an IO Error, like a bad
 magic: a file this reader cannot interpret, as distinct from a reference it
 can read and will not differentiate.
 
@@ -489,6 +557,33 @@ format" above) and nothing else about the generator changes: the
 canonicalisation, `_check_degeneracy`, the RDMs, PySCF's per-class answer and
 block2's PC all run exactly as they do on the RHF path.
 
+**The three committed pairs**, each a 6.6 KB sidecar beside its golden
+(regeneration commands in "Regenerating the golden file" above; their ctest
+entries in [`testing.md`](testing.md), "The CASSCF-orbital entries"):
+
+| sidecar | golden | E_CASSCF | ‖g_orb‖ at `--casscf` | purity defect | macro |
+|---|---|---|---|---|---:|
+| `n2_ccpvdz_cas44_casscf.mogold` | `n2_ccpvdz_cas44_casscf.nevpt2gold` | −109.0461390747 | 5.860e-9 | 1.3e-14 | 5 |
+| `n2_ccpvdz_cas1010_casscf.mogold` | `n2_ccpvdz_cas1010_casscf.nevpt2gold` | −109.1296891843 | 2.521e-8 | 1.8e-14 | 16 |
+| `n2_ccpvdz_cas44_casscf_df.mogold` | `n2_ccpvdz_cas44_casscf_df.nevpt2gold` | −109.0458757487 | 5.786e-9 | 5.8e-15 | 5 |
+
+and what the goldens they wrote carry (the `--mo-from` gate's own two numbers,
+then the state):
+
+| golden | ‖g_orb‖ (the gate) | \|E_CASCI − E_CASSCF\| | E_corr (SC) | E_corr (PC, block2) |
+|---|---|---|---|---|
+| `n2_ccpvdz_cas44_casscf` | 9.153e-8 | 1.705e-13 | −0.2070717321 | −0.2072316444 |
+| `n2_ccpvdz_cas1010_casscf` | 7.513e-8 | 8.527e-14 | −0.1261825397 | −0.1298993211 |
+| `n2_ccpvdz_cas44_casscf_df` | 9.037e-8 | 1.847e-13 | −0.2070810097 | −0.2072408933 |
+
+The DF pair is fitted throughout — the CASSCF optimisation included
+(`--df` is passed to both commands, and the sidecar records the auxiliary
+basis as part of its fingerprint), so it is PySCF's DF answer on DF-optimised
+orbitals, which is the only self-consistent thing for `nevpt2_df_demo` to be
+checked against. The two conventional SC E_corr values are the ones
+`reference_data/casscf_repro_probe.py` printed for the same orbitals, to every
+digit it prints ("A fresh CASSCF reproduces, measured" above).
+
 **Why commit the orbitals instead of optimising them in line.** Not because a
 CASSCF run would wander — it does not, and "A fresh CASSCF reproduces,
 measured" above is that measurement. Because the golden's state should depend
@@ -497,7 +592,9 @@ across PySCF versions and settings, the expensive optimisation happens once,
 and the second step keeps the property the whole directory rests on — a
 regenerated golden that differs from the committed one means something
 changed. Running `--mo-from` twice on one sidecar gives byte-identical
-`.nevpt2gold` files.
+`.nevpt2gold` files, and each of the three committed goldens regenerates
+byte-identically from its committed sidecar — the hashes are in "Regenerating
+the golden file" above.
 
 **The sidecar is a fingerprint plus coefficients.** Same flat idiom as
 `.gradgold` — own magic (`NEVPT2M1`), a scalar header, the same named-array
@@ -530,8 +627,9 @@ ones: above `label_orb_symm`'s 1e-7 it **replaces** the orbitals with
 sidecar's), and between 1e-9 and 1e-7 it labels them anyway behind a
 `logger.warn` that `verbose=0` never prints (and the symmetry-adapted FCI
 solver then imposes a symmetry the orbitals do not have). The orbitals
-`--casscf` itself wrote measure 1.3e-14 (CAS(4,4)) and 1.8e-14 (CAS(10,10))
-through this check — five decades inside the refusal. With
+`--casscf` itself wrote measure 1.3e-14 (CAS(4,4)), 1.8e-14 (CAS(10,10)) and
+5.8e-15 (the DF CAS(4,4)) through this check — five decades inside the
+refusal; those are the committed sidecars' own figures (the table above). With
 `--cas-irreps`/`--core-irreps`, the irrep composition of the loaded core and
 active windows must also be the one the flags ask for — `--mo-from` does not
 re-sort the orbitals, so that is what checks they are ordered as the flags
@@ -970,6 +1068,13 @@ classes non-zero. They are also the two cases that carry a gradient sidecar
 (see "The gradient sidecar" above), for the same reason: small enough that the
 general-range integral inventory is cheap.
 
+CAS(4,4) is the small case that also exists on **CASSCF orbitals**,
+conventional and DF (`n2_ccpvdz_cas44_casscf[_df]`, see "The MO sidecar:
+committed CASSCF orbitals" above), so the sanitizer tier reads a
+`reference_kind = casscf` file as well. CAS(8,8) has no CASSCF twin: at the
+same molecule and basis it would exercise nothing the CAS(4,4) pair and the
+CAS(10,10) one do not.
+
 ## Salicylaldimine CAS(8,8)
 
 The one golden pair that is not N2: salicylaldimine (2-methanimidoylphenol,
@@ -1208,6 +1313,9 @@ not used.
 | `golden/n2_ccpvdz_cas1012.nevpt2gold` | the 12-orbital **PC** case: CAS(10,12) on the same molecule (both N 1s in the core, n_det = 627k), with SC and PC fields. Exists because CAS(12,12) cannot be a PC golden. Its SC fields pass `nevpt2_demo --tiles 40` (CUDA, \|ΔE_corr\| 4e-15); its ctest entry is the PC one, `nevpt2_cas1012_pc` (`--pc --tiles 40`, `slow`) |
 | `golden/n2_ccpvdz_cas1010_df.nevpt2gold`, `golden/n2_ccpvdz_cas1212_df.nevpt2gold`, `golden/n2_ccpvtz_cas1010_df.nevpt2gold` | the **density-fitted** goldens (`--df`, aux basis `<basis>-jkfit`), the oracle for `nevpt2_df_demo`: PySCF's DF-NEVPT2 as the answer, plus the four three-index `B_*` blocks. A different reference from the conventional files (see "Density fitting" above). The cc-pVTZ one (nvirt = 48) exists for slab boundaries, not memory pressure |
 | `golden/n2_ccpvdz_cas44.nevpt2gold`, `golden/n2_ccpvdz_cas88.nevpt2gold` and their `_df` twins | the **small** cases (see "The small cases" above) |
+| `golden/n2_ccpvdz_cas44_casscf.mogold`, `golden/n2_ccpvdz_cas44_casscf.nevpt2gold` | the **CASSCF-orbital** CAS(4,4) pair: the committed converged `mo_coeff` (6.6 KB) and the golden a deterministic CASCI on it writes (`reference_kind = casscf`, `NEVPT2G2`, 0.24 MB, SC **and** PC). The `small` CASSCF entries run on it, and `test/golden`'s `GoldenCommittedCasscfTests` is the gradient paths' refusal checked against a committed file (see "The MO sidecar: committed CASSCF orbitals" above) |
+| `golden/n2_ccpvdz_cas1010_casscf.mogold`, `golden/n2_ccpvdz_cas1010_casscf.nevpt2gold` | the same at the **production size**, CAS(10,10) (1.13 MB, SC and PC; `--tiles 3`). Its sidecar's optimisation takes 16 macro iterations and its golden ~2 min to rebuild, nearly all of it block2's dense 4-RDM |
+| `golden/n2_ccpvdz_cas44_casscf_df.mogold`, `golden/n2_ccpvdz_cas44_casscf_df.nevpt2gold` | the **density-fitted** CASSCF-orbital case, `nevpt2_df_demo`'s CASSCF reference (0.47 MB, SC and PC): fitted throughout, the orbital optimisation included, so the aux basis is part of the sidecar's fingerprint |
 | `golden/n2_ccpvdz_cas44.gradgold`, `golden/n2_ccpvdz_cas88.gradgold` | the **gradient sidecars** for those two cases: the general-range MO-integral blocks an analytic gradient reads, plus the full-range Fock matrices and `mo_coeff` (see "The gradient sidecar" above). Separate files, so the goldens beside them are untouched. `test/golden/gradgold_tests.cpp` round-trips the reader and checks the CAS(4,4) one against the golden beside it |
 | `reference_data/geometries/salicylaldimine.xyz`, `reference_data/basis/6-31gss-rifit.nw`, `golden/salicylaldimine_631gss_cas88[_df].nevpt2gold` | the non-N2 case (see "Salicylaldimine CAS(8,8)" above). The two goldens are **gitignored** and regenerate byte-identically in ~2.5 min each; their four ctest entries register only once they exist |
 | `reference_data/geometries/lif.xyz`, `golden/lif_def2svp_cas46.nevpt2gold`, `golden/lif_def2svp_cas46.gradgold` | the **LiF smoke test** of the gradient-validation pair (see "LiF and acrolein, the gradient-validation pair" above): linear, Coov → C2v, CAS(4,6) as the pure π space by irrep, def2-SVP. **SC fields only** — its PC metric is refused as ungapped, so no `--pc` entry exists for it. Both files are committed (0.20 / 0.92 MB), and the sidecar carries the **numerical gradient** on top of the 24 arrays `--gradgold` writes, so it takes two commands to regenerate (see "The numerical gradient" above) |

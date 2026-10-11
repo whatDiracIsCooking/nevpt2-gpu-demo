@@ -33,10 +33,12 @@ export namespace nevpt2 {
 
 // Which reference produced the orbitals a golden's state sits in -- the
 // provenance the scalar header records (docs/reference-data.md, "The file
-// format"). Every committed golden is a CASCI diagonalisation on converged
-// RHF orbitals (docs/reference-data.md, "What 'CASSCF input' means here, and
-// why the golden state is CASCI"), and a pre-kind "NEVPT2G1" file carries no
-// field because that is the only thing it could be.
+// format"). Every committed golden's state is a CASCI diagonalisation; what
+// this says is which orbitals it ran on -- RHF's, or a converged CASSCF's
+// committed in an MO sidecar (docs/reference-data.md, "What 'CASSCF input'
+// means here, and why the golden state is CASCI"). A pre-kind "NEVPT2G1" file
+// carries no field because, before that sidecar path existed, RHF was the only
+// thing it could be.
 //
 // The two are different references, not a clean and a noisy version of one:
 // optimising the orbitals moves E_corr by tens of millihartree. The whole

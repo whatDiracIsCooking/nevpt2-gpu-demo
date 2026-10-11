@@ -18,12 +18,18 @@
 //                         is an IO Error, and requireCasciReference -- the
 //                         gate --sc-tangent / --gradient-source sit behind --
 //                         refuses a CASSCF golden as Unsupported
+//   GoldenCommittedCasscfTests
+//                         the committed golden/n2_ccpvdz_cas44_casscf.nevpt2gold:
+//                         a real NEVPT2G2 file whose reference_kind is CASSCF,
+//                         so the gate above is checked against a committed
+//                         file and not only a spliced one
 //   GoldenCas44Tests      the committed golden/n2_ccpvdz_cas44.nevpt2gold:
 //                         header fields and array shapes
 //
 // The malformed files are written to a per-test temp directory, removed in
-// TearDown. The committed golden is only ever read; its path comes from CMake
-// (NEVPT2_TEST_GOLDEN_CAS44), not from this source.
+// TearDown. The committed goldens are only ever read; their paths come from
+// CMake (NEVPT2_TEST_GOLDEN_CAS44, NEVPT2_TEST_GOLDEN_CAS44_CASSCF), not from
+// this source.
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
 // textual std #include before any import.
@@ -35,6 +41,9 @@ import nevpt2.golden;
 #ifndef NEVPT2_TEST_GOLDEN_CAS44
 #error "NEVPT2_TEST_GOLDEN_CAS44 must be defined by test/golden/CMakeLists.txt"
 #endif
+#ifndef NEVPT2_TEST_GOLDEN_CAS44_CASSCF
+#error "NEVPT2_TEST_GOLDEN_CAS44_CASSCF must be defined by test/golden/CMakeLists.txt"
+#endif
 
 // Not a module unit (gtest is a textual header), so no partition: the
 // helpers and suites live in a named namespace instead of an anonymous one.
@@ -42,6 +51,7 @@ import nevpt2.golden;
 namespace nevpt2::test::golden {
 
 constexpr std::string_view kGoldenCas44 = NEVPT2_TEST_GOLDEN_CAS44;
+constexpr std::string_view kGoldenCas44Casscf = NEVPT2_TEST_GOLDEN_CAS44_CASSCF;
 
 std::string readAll(const std::filesystem::path& p) {
   std::ifstream in(p, std::ios::binary);
@@ -222,8 +232,10 @@ std::string asG2(const std::string_view g1, const std::int32_t kind) {
 using GoldenReferenceKindTests = GoldenTempDir;
 
 TEST_F(GoldenReferenceKindTests, TheCommittedGoldenIsAPreKindFileAndReadsAsCasci) {
-  // Every committed golden is still the pre-kind layout, which is why
-  // bumping the magic did not have to rewrite one.
+  // Every committed CASCI golden is still the pre-kind layout, which is why
+  // bumping the magic did not have to rewrite one; only the CASSCF-orbital
+  // files, written after the field existed, are G2
+  // (GoldenCommittedCasscfTests below).
   const std::string bytes = readAll(std::string(kGoldenCas44));
   ASSERT_GE(bytes.size(), 8u);
   EXPECT_EQ(bytes.substr(0, 8), "NEVPT2G1");
@@ -328,6 +340,72 @@ TEST_F(GoldenReferenceKindTests, TheGateRefusesALoadedCasscfGolden) {
   const Status s = r->requireCasciReference("--gradient-source");
   ASSERT_FALSE(s.has_value());
   EXPECT_EQ(s.error().kind, ErrorKind::Unsupported);
+}
+
+// --- GoldenCommittedCasscfTests -----------------------------------------------
+//
+// The suite above spliced its G2 files together byte by byte, because when the
+// field was added no committed golden carried it. One does now:
+// golden/n2_ccpvdz_cas44_casscf.nevpt2gold, written by `generate_golden.py
+// --mo-from` on committed CASSCF orbitals (docs/reference-data.md, "The MO
+// sidecar: committed CASSCF orbitals"). These three tests are the same
+// contract read off that real file -- the layout, the kind, and the gradient
+// gate's refusal -- so the refusal is checked against a reference that
+// actually exists. Host-only like the rest of this binary: nothing here
+// computes or compares an energy, only whether two files are the same
+// reference.
+TEST(GoldenCommittedCasscfTests, TheCommittedCasscfGoldenIsAG2CasscfFile) {
+  const std::string bytes = readAll(std::string(kGoldenCas44Casscf));
+  ASSERT_GE(bytes.size(), 8u);
+  EXPECT_EQ(bytes.substr(0, 8), "NEVPT2G2");
+
+  const Result<GoldenFile> r = loadGolden(std::string(kGoldenCas44Casscf));
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(r->reference, ReferenceKind::Casscf);
+  EXPECT_EQ(referenceKindName(r->reference), "CASSCF");
+  // The same case as the CASCI twin beside it: the orbitals differ, the
+  // active space does not.
+  EXPECT_EQ(r->ncas, 4);
+  EXPECT_EQ(r->nelecA, 2);
+  EXPECT_EQ(r->nelecB, 2);
+  EXPECT_EQ(r->ncore, 5);
+  EXPECT_EQ(r->ndet, 36);
+  // It carries the PC fields its --pc ctest entry needs.
+  EXPECT_TRUE(r->require({"pc_class_energies", "e_pc_total"}).has_value());
+}
+
+TEST(GoldenCommittedCasscfTests, ItIsADifferentReferenceFromItsCasciTwin) {
+  const Result<GoldenFile> casscf = loadGolden(std::string(kGoldenCas44Casscf));
+  ASSERT_TRUE(casscf.has_value()) << casscf.error().message;
+  const Result<GoldenFile> casci = loadGolden(std::string(kGoldenCas44));
+  ASSERT_TRUE(casci.has_value()) << casci.error().message;
+
+  // Same header shape, different state: optimised orbitals are a different
+  // reference, which is the whole reason the kind is recorded. How far apart
+  // the two energies are is a measurement, and it lives in
+  // docs/reference-data.md, "What 'CASSCF input' means here" -- not here.
+  EXPECT_EQ(casscf->ncas, casci->ncas);
+  EXPECT_EQ(casscf->ndet, casci->ndet);
+  EXPECT_NE(casscf->reference, casci->reference);
+  EXPECT_NE(casscf->eCasci, casci->eCasci);
+  EXPECT_NE(casscf->eNevpt2Total, casci->eNevpt2Total);
+}
+
+TEST(GoldenCommittedCasscfTests, TheGradientGateRefusesTheCommittedCasscfGolden) {
+  const Result<GoldenFile> r = loadGolden(std::string(kGoldenCas44Casscf));
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  for (const std::string_view flag : {"--sc-tangent", "--gradient-source"}) {
+    const Status s = r->requireCasciReference(flag);
+    ASSERT_FALSE(s.has_value()) << flag;
+    EXPECT_EQ(s.error().kind, ErrorKind::Unsupported) << flag;
+    EXPECT_NE(s.error().message.find(flag), std::string::npos) << s.error().message;
+    EXPECT_NE(s.error().message.find("CASSCF"), std::string::npos) << s.error().message;
+  }
+  // And the CASCI twin beside it still passes the same gate, so the refusal
+  // is the kind's doing and not the gate's.
+  const Result<GoldenFile> casci = loadGolden(std::string(kGoldenCas44));
+  ASSERT_TRUE(casci.has_value()) << casci.error().message;
+  EXPECT_TRUE(casci->requireCasciReference("--sc-tangent").has_value());
 }
 
 // --- GoldenCas44Tests ---------------------------------------------------------

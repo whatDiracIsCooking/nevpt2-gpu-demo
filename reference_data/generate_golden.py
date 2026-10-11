@@ -121,8 +121,14 @@ mismatch is refused::
     uv run python reference_data/generate_golden.py --ncas 4 --nelecas 4 \\
         --name n2_ccpvdz_cas44_casscf \\
         --mo-from golden/n2_ccpvdz_cas44_casscf.mogold
+        # and likewise for the other two committed pairs, --ncas 10
+        # --nelecas 10 --name n2_ccpvdz_cas1010_casscf, and --df --ncas 4
+        # --nelecas 4 --name n2_ccpvdz_cas44_casscf_df (docs/reference-data.md,
+        # "Regenerating the golden file" has both commands of each in full)
 
-The second step is bit-reproducible like every other golden, and
+Three such pairs are committed -- N2/cc-pVDZ CAS(4,4), CAS(10,10) and a DF
+CAS(4,4) -- and each golden regenerates byte-identically from its committed
+sidecar. The second step is bit-reproducible like every other golden, and
 :func:`_check_casscf_stationary` refuses orbitals that are not a converged
 stationary point of that state (RHF orbitals handed in as a sidecar, a loosely
 converged optimisation) just as :func:`_check_degeneracy` refuses a state whose
@@ -441,10 +447,11 @@ def write_golden(
     RHF orbitals and refuse a ``"casscf"`` golden (docs/gradient-theory.md,
     §1.1). It is the one field the previous layout, :data:`GOLDEN_MAGIC_V1`,
     does not have -- a ``G1`` file is a CASCI by definition and every reader
-    here, ``loadGolden`` included, still accepts one, so the committed goldens
-    did not have to be rewritten for it. Regenerating one now does rewrite it
-    as ``G2``, which is why the check in docs/reference-data.md,
-    "Regenerating the golden file" skips the header.
+    here, ``loadGolden`` included, still accepts one, so the committed CASCI
+    goldens did not have to be rewritten for it. Regenerating one now does
+    rewrite it as ``G2``, which is why the check in docs/reference-data.md,
+    "Regenerating the golden file" skips the header for those files; the
+    committed ``*_casscf*`` goldens were written as ``G2`` and compare whole.
 
     ``src/golden/golden.cppm`` is the reader for exactly this layout.
     """

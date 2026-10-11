@@ -46,8 +46,9 @@ def read_golden(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
     off = 8
     # The magics are spelled out rather than imported from generate_golden,
     # which would force its single-threading on this timing script. b"NEVPT2G2"
-    # ends its scalar header with the reference_kind field; the pre-kind
-    # b"NEVPT2G1" (every committed golden) has none and means "casci".
+    # ends its scalar header with the reference_kind field (the committed
+    # CASSCF-orbital goldens); the pre-kind b"NEVPT2G1" (the committed CASCI
+    # ones) has none and means "casci".
     if magic not in (b"NEVPT2G2", b"NEVPT2G1"):
         raise ValueError(f"bad magic {magic!r}")
     ncas, nelec_a, nelec_b, ncore, ndet = take("<iiiiq")
