@@ -52,6 +52,16 @@ uv run python reference_data/generate_golden.py --ncas 8 --nelecas 8 --name n2_c
 # the 12-orbital files: CAS(10,12) is the PC case, CAS(12,12) is refused one
 uv run python reference_data/generate_golden.py --ncas 12 --nelecas 10 --name n2_ccpvdz_cas1012
 uv run python reference_data/generate_golden.py --ncas 12 --nelecas 12 --no-pc --name n2_ccpvdz_cas1212
+
+# the gradient-validation pair (see "LiF and acrolein" below), both with sidecars
+uv run python reference_data/generate_golden.py \
+    --atom reference_data/geometries/lif.xyz --basis def2-svp \
+    --ncas 6 --nelecas 4 --cas-irreps "B1=3,B2=3" --no-pc \
+    --name lif_def2svp_cas46 --gradgold
+uv run python reference_data/generate_golden.py \
+    --atom reference_data/geometries/acrolein.xyz --basis def2-svp \
+    --ncas 5 --nelecas 6 --cas-irreps "A'=1,A\"=4" \
+    --name acrolein_def2svp_cas65 --gradgold
 ```
 
 **Regeneration is a check.** Every committed golden regenerates
@@ -303,10 +313,31 @@ uv run python reference_data/generate_golden.py --ncas 8 --nelecas 8 \
     --name n2_ccpvdz_cas88 --gradgold
 ```
 
-The gradient validation molecules (LiF and acrolein) take the same flag once
-their geometries exist. `--gradgold` is conventional-integral only and is
-refused with `--df`: the derivation names the conventional Fock, and a fitted
-sidecar's (O1)/(O2) would hold against a different one.
+**The two gradient-validation molecules carry sidecars too** (see "LiF and
+acrolein, the gradient-validation pair" below for their generator commands and
+their states). They are the measured illustration of the paragraph above — the
+inventory makes a small case cheap and does not make a bigger one cheap:
+
+| | LiF CAS(4,6) | acrolein CAS(6,5) |
+|---|---|---|
+| ncore / nact / nvirt (nmo) | 4 / 6 / 13 (23) | 12 / 5 / 59 (76) |
+| `*.nevpt2gold` | 0.20 MB | 7.1 MB |
+| `*.gradgold` | 0.92 MB | 56.94 MB |
+| (O1) core–act / core–virt / act–virt | 0.0 / 2.54e-7 / 3.73e-8 | 2.36e-7 / 1.73e-7 / 2.73e-7 |
+| (O2) | 4.77e-14 | 9.00e-13 |
+| (O3) active orbitals below the RHF HOMO | 2 of 6 | 3 of 5 |
+
+LiF's sidecar is committed; **acrolein's is gitignored**
+(`golden/acrolein_def2svp_cas65.gradgold`), the same precedent the big goldens
+set: 57 MB is past GitHub's 50 MB warning and past the 10 MB
+`check-added-large-files` limit the pre-commit hook enforces. The 7.1 MB golden
+beside it **is** committed, so only the gradient half needs regenerating (~31 s,
+byte-identical). Both goldens stayed byte-identical with and without
+`--gradgold`, as at CAS(4,4)/CAS(8,8).
+
+`--gradgold` is conventional-integral only and is refused with `--df`: the
+derivation names the conventional Fock, and a fitted sidecar's (O1)/(O2) would
+hold against a different one.
 
 ## Density fitting
 
@@ -491,6 +522,109 @@ atomic contention on gfx1200 costs far more than on the RTX 3080. N2 never
 shows it, because its nvirt (16–48) keeps those outputs and contractions
 small. The two SC entries are labelled `slow` because of the HIP time.
 
+## LiF and acrolein, the gradient-validation pair
+
+The two molecules the analytic-gradient work is validated on, chosen so the
+comparison has an **external** reference: Park reports both, with the same
+active-space sizes, in the paper the derivation follows
+([`references.md`](references.md), "Analytical gradients"; his Table 2 lists
+acrolein (6e,5o) among the optimised systems, his Table 3 LiF (4e,6o) among the
+analytic-vs-numerical gradient tests). So a later disagreement is this tree's
+bug, not open physics. Same generator and settings as everything above
+(single-threaded, 1e-12 Davidson, point-group symmetry auto-detected),
+`_check_degeneracy` passing on both, and both carry a gradient sidecar (see
+"The gradient sidecar" above).
+
+**Inputs, committed under `reference_data/geometries/`:**
+
+- `lif.xyz`: Li and F on the z axis at the experimental equilibrium bond
+  length, r_e = 1.5639 Å (Huber & Herzberg). Linear, so the detected group is
+  **Coov**, mapped to **C2v** by `LINEAR_SUBGROUP` — the same path N2's Dooh →
+  D2h takes, and the reason the π partners land in different irreps (B1, B2)
+  where symmetry, not noise, pins the rotation between them.
+- `acrolein.xyz`: prop-2-enal, s-trans, PubChem CID 7847's 3D conformer
+  (MMFF94) with z set to exactly 0 (max |z| was 4.0e-4 Å) so that PySCF detects
+  **Cs**, exactly as `salicylaldimine.xyz` does. Not optimised at any level of
+  theory. Planar Cs is what the gradient work needs: an in-plane displacement
+  cannot break the σ_h, so the `A'`/`A"` labels the active space is written in
+  survive it ([`gradient-theory.md`](gradient-theory.md), §4.3).
+
+**Both active spaces are picked by irrep** (`--cas-irreps`), not by orbital
+energy, for the same §4.2 reason: an energy-ordered selection can reorder under
+a displacement. PySCF's own core guess is correct for both (the `ncore` lowest
+orbitals are exactly the ones wanted), so neither needs `--core-irreps`.
+
+- **LiF CAS(4,6)** is the **pure π space**, `B1=3,B2=3`: the occupied F 2p π
+  pair plus two π* pairs, with the σ bond left in the core. The
+  energy-ordered CAS(4,6) (`σ*`, `σ*` in place of the second π* pair) is
+  **not usable**: two of its active natural occupations come out at 1.7e-7 and
+  6.7e-9, below PySCF's `FRAC_OCC_THRESHOLD` (1e-6), so `canonicalize` rotates
+  those active orbitals together with the virtuals — PySCF warns "Active
+  orbitals [2 3] ... are canonicalized with external orbitals", and its own
+  comment there says the zeroth-order Hamiltonian is then strongly affected.
+  The consequence is measurable: on that state block2's SC `Si` came out
+  **1.4e-7** from PySCF's, past `BLOCK2_SC_TOL`, and the generator refused the
+  file. The π space's smallest active occupation is 6.8e-6, above the
+  threshold, and block2's SC then agrees with PySCF's to **1.9e-15**.
+- **Acrolein CAS(6,5)** is `A'=1,A"=4`: the oxygen in-plane lone pair (A′)
+  plus the two occupied π and the two lowest π* (A″). The selected orbitals are
+  RHF 12, 13, 14, 15 and 18 — note the 18: the second π* is **not** the orbital
+  an energy-ordered CAS(6,5) would take (RHF 16 is an A′ σ*), which is the
+  whole reason this case is specified by irrep.
+
+| | LiF | acrolein |
+|---|---|---|
+| geometry / basis | `lif.xyz`, def2-SVP | `acrolein.xyz`, def2-SVP |
+| detected group → used | Coov → C2v | Cs → Cs |
+| active space | CAS(4e,6o), `B1=3,B2=3` | CAS(6e,5o), `A'=1,A"=4` |
+| nao = nmo / ncore / nvirt | 23 / 4 / 13 | 76 / 12 / 59 |
+| n_det | 225 | 100 |
+| E_CASCI | -106.8522555004 | -190.6559118485 |
+| E_corr SC (PySCF) | -0.1968408342 | -0.5466581859 |
+| E_corr PC (block2) | **refused** (below) | -0.5473408112 |
+| block2 SC − PySCF SC, max class | 1.9e-15 | 4.4e-15 |
+| smallest PC gap (block, ≥ 1e3 needed) | **1.7** (`iabcpqg*`) | 7.4e5 (`ijabpq+`) |
+| file size, golden / sidecar | 0.20 MB / 0.92 MB | 7.1 MB / 56.94 MB |
+| generation, single-threaded | 1.6 s | 31.0 s |
+
+**LiF's PC answer is refused, and that is a finding, not a workaround.**
+`_check_pc_conditioning` rejects three of its thirteen PC blocks —
+`iabcpqg*` (Si) at a gap of 1.7, `rsabpq-` at 5.3, `rsabpq+` at 49, against the
+1e3 the guard needs — for the same reason N2 CAS(12,12) is refused: the lstsq
+cut falls in a continuum of singular values (`iabcpqg*`: largest dropped
+3.5e-14, smallest kept 4.9e-14, relative), so the PC energy would record one
+implementation's choice of cut. Four of LiF's six active orbitals are
+essentially empty (occupations 3.0e-3, 3.0e-3, 6.8e-6, 6.8e-6), which is what
+flattens the PC metric; it is a property of a 4-electron space on an ionic
+closed-shell diatomic rather than of this basis or bond length — the
+energy-ordered CAS(4,6)'s smallest active occupation stayed between 9e-10 and
+4e-8 in all four bases probed (def2-SVP, cc-pVDZ, 6-31G*, cc-pVTZ) at each of
+r = 1.5639, 1.7 and 2.0 Å. **The π space's margin is basis-dependent, and
+def2-SVP is on the right side of it**: its smallest occupation is 6.8e-6,
+against 6.9e-7 in cc-pVDZ, which would land back under
+`FRAC_OCC_THRESHOLD` and bring the mixed canonicalisation back. So the LiF golden is
+generated with `--no-pc` and carries SC fields only, and there is deliberately
+no `nevpt2_lif_cas46_pc` ctest entry. Acrolein carries both, and its PC gaps
+are four or more decades clear of the guard.
+
+**What they check**, `--tiles 3` (not a measured floor: one tile fits at these
+active-space sizes, as for the N2 CAS(8,8) entries), RTX 3080, default emitted
+digest, all PASS:
+
+| entry | E_corr \|delta\| | max class \|delta\| | wall |
+|---|---|---|---|
+| `nevpt2_lif_cas46` | 1.6e-14 vs PySCF | 1.5e-14 | 0.04 s |
+| `nevpt2_acrolein_cas65` | 1.8e-15 vs PySCF | 9.8e-16 | 0.04 s |
+| `nevpt2_acrolein_cas65_pc` | 4.6e-14 vs block2 (8/8 classes, 0 refused) | 4.8e-14 | 0.08 s |
+
+Device pool high-water for the whole run is 2.2 MB (LiF), 7.8 MB (acrolein SC)
+and 10.3 MB (acrolein PC). The HIP side of these three entries has not been
+measured, so none of them is labelled `slow`.
+
+All four files regenerate **byte-identical** from the commands above (goldens
+sha256 `ef97ad2c…` / `cb8e3228…`, sidecars `093a7fbe…` / `8001e0c5…`), and the
+goldens are byte-identical with `--gradgold` dropped.
+
 ## CAS(14,14)
 
 `n2_ccpvdz_cas1414` (n_det = 11.8M) is the next head-to-head point (see
@@ -521,4 +655,7 @@ not used.
 | `golden/n2_ccpvdz_cas44.nevpt2gold`, `golden/n2_ccpvdz_cas88.nevpt2gold` and their `_df` twins | the **small** cases (see "The small cases" above) |
 | `golden/n2_ccpvdz_cas44.gradgold`, `golden/n2_ccpvdz_cas88.gradgold` | the **gradient sidecars** for those two cases: the general-range MO-integral blocks an analytic gradient reads, plus the full-range Fock matrices and `mo_coeff` (see "The gradient sidecar" above). Separate files, so the goldens beside them are untouched. `test/golden/gradgold_tests.cpp` round-trips the reader and checks the CAS(4,4) one against the golden beside it |
 | `reference_data/geometries/salicylaldimine.xyz`, `reference_data/basis/6-31gss-rifit.nw`, `golden/salicylaldimine_631gss_cas88[_df].nevpt2gold` | the non-N2 case (see "Salicylaldimine CAS(8,8)" above). The two goldens are **gitignored** and regenerate byte-identically in ~2.5 min each; their four ctest entries register only once they exist |
+| `reference_data/geometries/lif.xyz`, `golden/lif_def2svp_cas46.nevpt2gold`, `golden/lif_def2svp_cas46.gradgold` | the **LiF smoke test** of the gradient-validation pair (see "LiF and acrolein, the gradient-validation pair" above): linear, Coov → C2v, CAS(4,6) as the pure π space by irrep, def2-SVP. **SC fields only** — its PC metric is refused as ungapped, so no `--pc` entry exists for it. Both files are committed (0.20 / 0.92 MB) |
+| `reference_data/geometries/acrolein.xyz`, `golden/acrolein_def2svp_cas65.nevpt2gold` | the **acrolein** half of the pair: planar Cs, CAS(6,5) = the oxygen lone pair + 2 π + 2 π*, def2-SVP, with SC **and** PC fields. 7.1 MB, committed |
+| `golden/acrolein_def2svp_cas65.gradgold` | **not committed** (gitignored, 57 MB — the one file of the pair that is): acrolein's gradient sidecar. Regenerate it with the `--gradgold` command in "Regenerating the golden file"; the golden beside it is unaffected |
 | `golden/n2_ccpvdz_cas1414.nevpt2gold` | **not committed**; see "CAS(14,14)" above |

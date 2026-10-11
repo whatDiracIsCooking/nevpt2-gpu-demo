@@ -1,0 +1,4 @@
+2
+lithium fluoride, experimental equilibrium bond length r_e = 1.5639 A (Huber & Herzberg), on the z axis so PySCF detects Coov (mapped to C2v by LINEAR_SUBGROUP)
+Li     0.0000     0.0000     0.0000
+F      0.0000     0.0000     1.5639

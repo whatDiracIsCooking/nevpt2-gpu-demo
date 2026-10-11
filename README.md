@@ -40,7 +40,10 @@ you try to run it on your own system.
 - **What has been checked.** The committed cases are N₂: cc-pVDZ CAS(4,4),
   (8,8), (10,10), (10,12) and (12,12), plus DF variants that include a
   cc-pVTZ CAS(10,10). The first non-N₂ case, salicylaldimine CAS(8,8)/6-31G**,
-  is too large to commit and has to be regenerated. Anything else is
+  is too large to commit and has to be regenerated. Two more non-N₂ cases are
+  committed for the gradient work: LiF CAS(4,6) and acrolein CAS(6,5), both
+  def2-SVP (LiF with no PC reference — see
+  [`docs/reference-data.md`](docs/reference-data.md)). Anything else is
   untested.
 - **The CI vector is read in, and so are `dm1`/`dm2`.** The GPU builds the
   3-RDM and the 4-RDM intermediates. A real CASSCF code produces the 1- and
@@ -199,7 +202,7 @@ docs/performance.md, "Tile floors"):
 
 | reference file | `--tiles` |
 |---|---|
-| CAS(4,4), CAS(8,8), CAS(10,10), conventional or `_df`, cc-pVDZ or cc-pVTZ | `3` |
+| CAS(4,4), CAS(8,8), CAS(10,10), conventional or `_df`, cc-pVDZ or cc-pVTZ; LiF CAS(4,6) and acrolein CAS(6,5) | `3` |
 | CAS(12,12), CAS(10,12) | `40` |
 | CAS(12,12) with `--cublas` | `80` or `150` (at fewer tiles emulation can decline; see below) |
 

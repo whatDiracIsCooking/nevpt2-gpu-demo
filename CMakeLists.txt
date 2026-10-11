@@ -176,6 +176,27 @@ if(NEVPT2_BUILD_TESTING)
     add_golden_test(nevpt2_cas1010_cublas "${_gold_1010}" --tiles 3 --cublas)
   endif()
 
+  # --- the gradient-validation molecules: LiF and acrolein -----------------------
+  #
+  # The two molecules the analytic-gradient work is validated against, each with
+  # the active-space SIZE Park used (docs/reference-data.md, "LiF and acrolein,
+  # the gradient-validation pair"). LiF is the two-atom smoke test: linear, so
+  # Coov mapped to C2v, CAS(4,6) taken as the pure pi space by irrep. Its golden
+  # carries NO PC fields -- the generator refuses its PC metric, three blocks'
+  # lstsq cut sitting in a continuum -- so there is deliberately no
+  # nevpt2_lif_cas46_pc entry. Acrolein is planar Cs, CAS(6,5) = the oxygen lone
+  # pair plus 2 pi + 2 pi*, and carries both SC and PC.
+  #
+  # --tiles 3 is not a measured floor at these active-space sizes (one tile fits,
+  # as for the N2 CAS(8,8) entries); it is the count every other entry here uses.
+  # Not `small`: the sanitizer tier stays on N2. Both goldens are committed
+  # (0.20 MB and 7.1 MB); only acrolein's 57 MB gradient sidecar is gitignored.
+  set(_gold_lif46 "${CMAKE_CURRENT_SOURCE_DIR}/golden/lif_def2svp_cas46.nevpt2gold")
+  set(_gold_acr65 "${CMAKE_CURRENT_SOURCE_DIR}/golden/acrolein_def2svp_cas65.nevpt2gold")
+  add_golden_test(nevpt2_lif_cas46 "${_gold_lif46}" --tiles 3)
+  add_golden_test(nevpt2_acrolein_cas65 "${_gold_acr65}" --tiles 3)
+  add_pc_golden_test(nevpt2_acrolein_cas65_pc "${_gold_acr65}" --tiles 3)
+
   # --- the SC gradient's pseudodensity identities --------------------------------
   #
   # nevpt2_sc_pseudodensity (apps/sc_pseudodensity/, the only binary that links

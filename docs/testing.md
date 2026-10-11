@@ -402,8 +402,9 @@ CUDA costs almost nothing.
 - **A `no_sanitizer` label and a CI sanitizer preset.** No entry needs
   exempting, and there is no CI.
 - **The large cases.** CAS(10,10) and up are too slow under
-  compute-sanitizer. The salicylaldimine goldens stay out too, so the tier
-  stays on N2.
+  compute-sanitizer. The salicylaldimine goldens and the two
+  gradient-validation cases (LiF, acrolein) stay out too, so the tier stays on
+  N2.
 
 ## Coverage
 
