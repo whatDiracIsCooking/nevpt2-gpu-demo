@@ -1,9 +1,12 @@
 # Host-only suites for nevpt2.golden: loadGolden's refusals on a
 # missing, truncated or wrongly-tagged file (temp files the test writes) come
 # back as an IO Result, never an abort; GoldenFile::require names a missing
-# array; and the committed CAS(4,4) golden parses with the expected header and
-# array shapes. Pure host file parsing, no device: NOT REQUIRES_GPU, so these
-# run with no card visible. Nothing here checks an energy.
+# array; the header's reference_kind field round-trips in the NEVPT2G2 layout,
+# reads as CASCI from the pre-kind NEVPT2G1 one and gates the derivative paths
+# (requireCasciReference); and the committed CAS(4,4) golden parses with the
+# expected header and array shapes. Pure host file parsing, no device: NOT
+# REQUIRES_GPU, so these run with no card visible. Nothing here checks an
+# energy.
 add_gtest_executable(
   NAME golden_tests
   SOURCES golden_tests.cpp
@@ -20,7 +23,8 @@ unset(_golden_cas44)
 
 add_gtest_suite_tests(
   TARGET golden_tests
-  SUITES GoldenLoadErrorTests GoldenRequireTests GoldenCas44Tests)
+  SUITES GoldenLoadErrorTests GoldenRequireTests GoldenReferenceKindTests
+         GoldenReferenceKindGateTests GoldenCas44Tests)
 
 # Host-only suites for the OTHER reader in nevpt2.golden: loadGradGold, the
 # `*.gradgold` gradient sidecar (docs/gradient-theory.md, section 3). Same

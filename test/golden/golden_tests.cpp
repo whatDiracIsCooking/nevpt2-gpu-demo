@@ -11,6 +11,13 @@
 //                         come back as an IO Error -- never an abort
 //   GoldenRequireTests    require() names the first array the file lacks;
 //                         checkNdet() refuses a header ndet it does not match
+//   GoldenReferenceKindTests
+//                         the header's reference_kind field: a "NEVPT2G2"
+//                         file round-trips both kinds, the pre-kind
+//                         "NEVPT2G1" layout reads as CASCI, an unknown code
+//                         is an IO Error, and requireCasciReference -- the
+//                         gate --sc-tangent / --gradient-source sit behind --
+//                         refuses a CASSCF golden as Unsupported
 //   GoldenCas44Tests      the committed golden/n2_ccpvdz_cas44.nevpt2gold:
 //                         header fields and array shapes
 //
@@ -191,6 +198,136 @@ TEST(GoldenRequireTests, CheckNdetRefusesAMismatch) {
   ASSERT_FALSE(s.has_value());
   EXPECT_EQ(s.error().kind, ErrorKind::IO);
   EXPECT_NE(s.error().message.find("header ndet = 36"), std::string::npos) << s.error().message;
+}
+
+// --- GoldenReferenceKindTests -------------------------------------------------
+
+// The committed golden rewritten in the "NEVPT2G2" layout: the magic bumped
+// and a four-byte reference_kind spliced in at the end of the scalar header,
+// every array byte left exactly where it was. That is the whole difference
+// between the two layouts, and the transformation regenerating a committed
+// golden performs today (docs/reference-data.md, "Regenerating the golden
+// file").
+std::string asG2(const std::string_view g1, const std::int32_t kind) {
+  // 8 magic + (4 + 4 + 4 + 4 + 8) scalars + (8 + 8) energies.
+  constexpr std::size_t kKindOffset = 8 + 24 + 16;
+  std::string out(g1);
+  out.replace(0, 8, "NEVPT2G2");
+  std::string field(4, '\0');
+  std::memcpy(field.data(), &kind, 4);
+  out.insert(kKindOffset, field);
+  return out;
+}
+
+using GoldenReferenceKindTests = GoldenTempDir;
+
+TEST_F(GoldenReferenceKindTests, TheCommittedGoldenIsAPreKindFileAndReadsAsCasci) {
+  // Every committed golden is still the pre-kind layout, which is why
+  // bumping the magic did not have to rewrite one.
+  const std::string bytes = readAll(std::string(kGoldenCas44));
+  ASSERT_GE(bytes.size(), 8u);
+  EXPECT_EQ(bytes.substr(0, 8), "NEVPT2G1");
+
+  Result<GoldenFile> r = loadGolden(std::string(kGoldenCas44));
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(r->reference, ReferenceKind::Casci);
+  EXPECT_EQ(referenceKindName(r->reference), "CASCI");
+}
+
+TEST_F(GoldenReferenceKindTests, G2RoundTripsBothKinds) {
+  const std::string g1 = readAll(std::string(kGoldenCas44));
+  ASSERT_GT(g1.size(), 48u);
+  const Result<GoldenFile> reference = loadGolden(std::string(kGoldenCas44));
+  ASSERT_TRUE(reference.has_value()) << reference.error().message;
+
+  const std::vector<std::pair<std::int32_t, ReferenceKind>> kinds = {
+      {0, ReferenceKind::Casci}, {1, ReferenceKind::Casscf}};
+  for (const auto& [code, kind] : kinds) {
+    const std::string name = std::format("g2_kind{}.nevpt2gold", code);
+    Result<GoldenFile> r = loadGolden(write(name, asG2(g1, code)));
+    ASSERT_TRUE(r.has_value()) << r.error().message;
+    EXPECT_EQ(r->reference, kind) << code;
+    // The four inserted bytes are the ONLY difference: the rest of the
+    // header, and every array, parse exactly as the G1 file's did.
+    EXPECT_EQ(r->ncas, reference->ncas);
+    EXPECT_EQ(r->nelecA, reference->nelecA);
+    EXPECT_EQ(r->nelecB, reference->nelecB);
+    EXPECT_EQ(r->ncore, reference->ncore);
+    EXPECT_EQ(r->ndet, reference->ndet);
+    EXPECT_EQ(r->eCasci, reference->eCasci);
+    EXPECT_EQ(r->eNevpt2Total, reference->eNevpt2Total);
+    ASSERT_EQ(std::ssize(r->arrays), std::ssize(reference->arrays));
+    for (const auto& [arrayName, t] : reference->arrays) {
+      ASSERT_TRUE(r->require({arrayName}).has_value()) << arrayName;
+      const Tensor& got = r->get(arrayName);
+      EXPECT_EQ(got.dims(), t.dims()) << arrayName;
+      ASSERT_EQ(got.size(), t.size()) << arrayName;
+      for (int64_t k = 0; k < t.size(); ++k) ASSERT_EQ(got.flat(k), t.flat(k)) << arrayName << k;
+    }
+  }
+  EXPECT_EQ(referenceKindName(ReferenceKind::Casscf), "CASSCF");
+}
+
+TEST_F(GoldenReferenceKindTests, AnUnknownReferenceKindIsAnIoError) {
+  const std::string g1 = readAll(std::string(kGoldenCas44));
+  ASSERT_GT(g1.size(), 48u);
+  // A well-formed G2 file in every other respect, so what is refused is the
+  // kind code and nothing else.
+  for (const std::int32_t code : {-1, 2, 7}) {
+    const Result<GoldenFile> r =
+        loadGolden(write(std::format("bad_kind{}.nevpt2gold", code), asG2(g1, code)));
+    expectIoError(r, std::format("reference_kind = {} is not a kind this reader knows", code));
+  }
+}
+
+TEST_F(GoldenReferenceKindTests, BadMagicNamesBothAcceptedMagics) {
+  std::string bytes = readAll(std::string(kGoldenCas44));
+  ASSERT_GT(bytes.size(), 8u);
+  bytes.replace(0, 8, "NEVPT2G9");
+  const Result<GoldenFile> r = loadGolden(write("bad_magic_g9.nevpt2gold", bytes));
+  expectIoError(r, "bad magic");
+  if (!r.has_value()) {
+    EXPECT_NE(r.error().message.find("NEVPT2G2"), std::string::npos) << r.error().message;
+    EXPECT_NE(r.error().message.find("NEVPT2G1"), std::string::npos) << r.error().message;
+  }
+}
+
+TEST(GoldenReferenceKindGateTests, ACasciReferencePassesTheGate) {
+  GoldenFile g;  // the default, which is what a pre-kind file loads as
+  EXPECT_EQ(g.reference, ReferenceKind::Casci);
+  EXPECT_TRUE(g.requireCasciReference("--sc-tangent").has_value());
+}
+
+TEST(GoldenReferenceKindGateTests, GradientPathRefusesACasscfReference) {
+  GoldenFile g;
+  g.reference = ReferenceKind::Casscf;
+  for (const std::string_view flag : {"--sc-tangent", "--gradient-source"}) {
+    const Status s = g.requireCasciReference(flag);
+    ASSERT_FALSE(s.has_value()) << flag;
+    // Unsupported, not IO: a CASSCF-orbital golden is a well-formed file
+    // carrying a reference this code does not differentiate.
+    EXPECT_EQ(s.error().kind, ErrorKind::Unsupported) << flag;
+    EXPECT_NE(s.error().message.find(flag), std::string::npos) << s.error().message;
+    EXPECT_NE(s.error().message.find("CASSCF"), std::string::npos) << s.error().message;
+    // The message must point at the derivation that does not cover it.
+    EXPECT_NE(s.error().message.find("docs/gradient-theory.md"), std::string::npos)
+        << s.error().message;
+    EXPECT_NE(s.error().message.find("CP-CASSCF"), std::string::npos) << s.error().message;
+  }
+}
+
+TEST_F(GoldenReferenceKindTests, TheGateRefusesALoadedCasscfGolden) {
+  // End to end: a G2 file whose kind is CASSCF loads fine and is refused by
+  // the gate, which is the order the demo does it in -- all host-side, with
+  // no card.
+  const std::string g1 = readAll(std::string(kGoldenCas44));
+  ASSERT_GT(g1.size(), 48u);
+  Result<GoldenFile> r = loadGolden(write("casscf.nevpt2gold", asG2(g1, 1)));
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(referenceKindName(r->reference), "CASSCF");
+  const Status s = r->requireCasciReference("--gradient-source");
+  ASSERT_FALSE(s.has_value());
+  EXPECT_EQ(s.error().kind, ErrorKind::Unsupported);
 }
 
 // --- GoldenCas44Tests ---------------------------------------------------------

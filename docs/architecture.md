@@ -433,11 +433,16 @@ failure, not the `main` that printed it. `Result<T>` is
 returns one:
 
 - `loadGolden` → `Result<GoldenFile>` (cannot open, short read, bad magic, a
-  header whose rank, extents or size the file cannot hold: `IO`), and
-  `GoldenFile::require({...})` → `Status`, which each demo calls on the
-  arrays it reads before any GPU work (the DF demo a second time for
-  `--check-blocks`'s; its `B_*` tensors and both demos' `--pc` fields are
-  tested with `arrays.contains` instead).
+  `reference_kind` it does not know, a header whose rank, extents or size the
+  file cannot hold: `IO`), and `GoldenFile::require({...})` → `Status`, which
+  each demo calls on the arrays it reads before any GPU work (the DF demo a
+  second time for `--check-blocks`'s; its `B_*` tensors and both demos'
+  `--pc` fields are tested with `arrays.contains` instead).
+  `GoldenFile::requireCasciReference(what)` → `Status` is the other side of
+  that split: a golden built on CASSCF orbitals parses fine and is a
+  reference no derivative here is derived for, so the differentiation flags
+  gate on it and get `Unsupported`, not `IO`
+  (docs/reference-data.md, "The file format").
 - `loadGradGold` → `Result<GradGoldFile>`, the same contract on the gradient
   sidecar, plus the header checks its array shapes are written in terms of: a
   space partition that does not add up to `nmo`, an RHF electron count that

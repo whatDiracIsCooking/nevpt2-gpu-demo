@@ -161,9 +161,25 @@ int main(int argc, char** argv) {
     nevpt2::report(st.error());
     return 1;
   }
+  // Both differentiation checks are derivatives of the CASCI-on-RHF
+  // Lagrangian (docs/gradient-theory.md), so a CASSCF-orbital golden is a
+  // valid request this code does not handle: an Unsupported Error, reported
+  // once here. Before DeviceResources::create below, so no card is touched
+  // and the gate is pure host logic (test/golden's
+  // GoldenReferenceKindGateTests.GradientPathRefusesACasscfReference).
+  if (differentiates) {
+    if (const nevpt2::Status st = g.requireCasciReference(whichFlag); !st) {
+      nevpt2::report(st.error());
+      return 1;
+    }
+  }
 
-  std::print("=== SC-NEVPT2 demo ({}/C++): CAS({},{})  ncore={}  n_det={} ===\n",
-             nevpt2::kGpuBackendName, norb, g.nelecA + g.nelecB, g.ncore, ndet);
+  // The reference the golden's orbitals came from is part of what the file
+  // is, so it goes in the header line beside the active space -- every
+  // committed golden says CASCI (docs/reference-data.md, "The file format").
+  std::print("=== SC-NEVPT2 demo ({}/C++): CAS({},{})  ncore={}  n_det={}  reference={} ===\n",
+             nevpt2::kGpuBackendName, norb, g.nelecA + g.nelecB, g.ncore, ndet,
+             nevpt2::referenceKindName(g.reference));
 
   std::printf("golden reference: %s\n", opt.goldenPath.c_str());
   std::printf("golden E_CASCI=%.10f  golden E_corr=%.10f\n", g.eCasci,

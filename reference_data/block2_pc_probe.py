@@ -67,9 +67,19 @@ def read_golden(path: Path) -> dict:
     want = {"ci", "class_energies", "class_norms"}
     out = {}
     with open(path, "rb") as f:
-        assert f.read(8) == gg.GOLDEN_MAGIC, f"{path} is not a golden file"
+        # Either magic: a pre-kind NEVPT2G1 file (every committed golden)
+        # has no reference_kind field, a NEVPT2G2 one carries it right before
+        # the array count. This probe reads a state, not a provenance, so it
+        # only needs to step over the field.
+        magic = f.read(8)
+        assert magic in gg.GOLDEN_MAGICS, f"{path} is not a golden file"
         out["ncas"], _, _, out["ncore"], _ = struct.unpack("<iiiiq", f.read(24))
         out["e_casci"], out["e_corr"] = struct.unpack("<dd", f.read(16))
+        if magic == gg.GOLDEN_MAGIC:
+            (code,) = struct.unpack("<i", f.read(4))
+            out["reference_kind"] = gg.REFERENCE_KINDS[code]
+        else:
+            out["reference_kind"] = "casci"
         (n,) = struct.unpack("<i", f.read(4))
         for _ in range(n):
             (ln,) = struct.unpack("<i", f.read(4))

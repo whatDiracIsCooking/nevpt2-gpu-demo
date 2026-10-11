@@ -215,7 +215,33 @@ PC_SOLVE_ORDER = (
 
 #: Magic bytes identifying a golden-reference file -- see :func:`write_golden`'s
 #: docstring for the full binary layout (``src/golden/golden.cppm`` reads it).
-GOLDEN_MAGIC = b"NEVPT2G1"
+#: ``G2`` is the current layout: it ends its scalar header with the
+#: ``reference_kind`` field (:data:`REFERENCE_KINDS`).
+GOLDEN_MAGIC = b"NEVPT2G2"
+
+#: The layout before ``reference_kind``, which every **committed** golden is
+#: written in. It stays readable -- by ``loadGolden`` and by every reader here
+#: -- and means ``"casci"``, which is the only thing it could mean: a golden
+#: has always been a CASCI diagonalisation on converged RHF orbitals
+#: (docs/reference-data.md, "What 'CASSCF input' means here, and why the golden
+#: state is CASCI"). Accepting it is what keeps the committed files from having
+#: to be rewritten for a one-field header change.
+GOLDEN_MAGIC_V1 = b"NEVPT2G1"
+
+#: Every magic a golden file may carry, newest first.
+GOLDEN_MAGICS = (GOLDEN_MAGIC, GOLDEN_MAGIC_V1)
+
+#: The ``reference_kind`` codes a ``G2`` scalar header may hold: which
+#: reference produced the orbitals the state sits in. Provenance lives in the
+#: file so a consumer can refuse what it does not support -- every derivative
+#: in this tree is derived for the CASCI-on-RHF Lagrangian
+#: (docs/gradient-theory.md, §1.1 and §1.2), so the gradient paths refuse a
+#: ``"casscf"`` golden. ``src/golden/golden.cppm``'s ``ReferenceKind`` is the
+#: same two codes.
+REFERENCE_KINDS = {0: "casci", 1: "casscf"}
+
+#: ``REFERENCE_KINDS`` inverted: the name :func:`write_golden` takes.
+REFERENCE_KIND_CODES = {name: code for code, name in REFERENCE_KINDS.items()}
 
 #: Magic bytes identifying a gradient **sidecar** (``*.gradgold``) -- a
 #: SEPARATE file from the golden it sits beside, carrying only what an analytic
@@ -276,6 +302,7 @@ def write_golden(
     ndet: int,
     e_casci: float,
     e_nevpt2_total: float,
+    reference_kind: str,
     arrays: dict[str, np.ndarray],
 ) -> None:
     """Write the custom little-endian binary golden-reference format.
@@ -287,9 +314,10 @@ def write_golden(
 
     Layout (all little-endian, doubles are f64, no padding)::
 
-        8s      magic "NEVPT2G1"
+        8s      magic "NEVPT2G2"
         i i i i q  ncas, nelec_a, nelec_b, ncore, ndet
         d d     e_casci, e_nevpt2_total
+        i       reference_kind (0 = casci, 1 = casscf)
         i       n_arrays
         repeated n_arrays times:
             i           name_len
@@ -298,12 +326,29 @@ def write_golden(
             q * ndim    shape
             d * prod(shape)  data, C (row-major) order
 
+    ``reference_kind`` is which reference produced the orbitals the state sits
+    in (:data:`REFERENCE_KINDS`), recorded so a consumer can refuse what it
+    does not support: the gradient paths are derived for a CASCI on converged
+    RHF orbitals and refuse a ``"casscf"`` golden (docs/gradient-theory.md,
+    §1.1). It is the one field the previous layout, :data:`GOLDEN_MAGIC_V1`,
+    does not have -- a ``G1`` file is a CASCI by definition and every reader
+    here, ``loadGolden`` included, still accepts one, so the committed goldens
+    did not have to be rewritten for it. Regenerating one now does rewrite it
+    as ``G2``, which is why the check in docs/reference-data.md,
+    "Regenerating the golden file" skips the header.
+
     ``src/golden/golden.cppm`` is the reader for exactly this layout.
     """
+    if reference_kind not in REFERENCE_KIND_CODES:
+        raise SystemExit(
+            f"write_golden: reference_kind {reference_kind!r} is not one of "
+            f"{sorted(REFERENCE_KIND_CODES)}"
+        )
     with open(path, "wb") as f:
         f.write(GOLDEN_MAGIC)
         f.write(struct.pack("<iiiiq", ncas, nelec_a, nelec_b, ncore, ndet))
         f.write(struct.pack("<dd", e_casci, e_nevpt2_total))
+        f.write(struct.pack("<i", REFERENCE_KIND_CODES[reference_kind]))
         _write_arrays(f, arrays)
 
 
@@ -991,6 +1036,11 @@ def generate(
         ndet=int(pt.ci.size),
         e_casci=float(mc.e_tot),
         e_nevpt2_total=e_corr,
+        # :func:`_build_state` runs a CASCI diagonalisation on converged RHF
+        # orbitals and nothing else, so this is the only kind this generator
+        # can produce today; it is written out rather than defaulted so a
+        # future orbital source has one place to set it.
+        reference_kind="casci",
     )
     arrays = dict(
         ci=np.ascontiguousarray(np.asarray(pt.load_ci(), dtype=np.float64)),

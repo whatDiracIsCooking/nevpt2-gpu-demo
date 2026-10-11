@@ -31,6 +31,25 @@ export import nevpt2.error_handling;
 
 export namespace nevpt2 {
 
+// Which reference produced the orbitals a golden's state sits in -- the
+// provenance the scalar header records (docs/reference-data.md, "The file
+// format"). Every committed golden is a CASCI diagonalisation on converged
+// RHF orbitals (docs/reference-data.md, "What 'CASSCF input' means here, and
+// why the golden state is CASCI"), and a pre-kind "NEVPT2G1" file carries no
+// field because that is the only thing it could be.
+//
+// The two are different references, not a clean and a noisy version of one:
+// optimising the orbitals moves E_corr by tens of millihartree. The whole
+// gradient derivation is written for the first of them
+// (docs/gradient-theory.md), which is why `requireCasciReference` exists.
+enum class ReferenceKind {
+  Casci = 0,   // a CASCI diagonalisation on converged RHF orbitals
+  Casscf = 1,  // orbitals from a converged CASSCF
+};
+
+// "CASCI" / "CASSCF" -- the kind as a demo's header line prints it.
+[[nodiscard]] std::string_view referenceKindName(ReferenceKind kind);
+
 struct GoldenFile {
   // Stored as int32 (ndet as int64) in the file; held as int64_t like every
   // host size.
@@ -41,6 +60,10 @@ struct GoldenFile {
   int64_t ndet = 0;
   double eCasci = 0.0;
   double eNevpt2Total = 0.0;
+  // The header's reference_kind field, which only a "NEVPT2G2" file carries:
+  // the older layout predates it and is a CASCI by definition, so this
+  // default is also what a G1 file loads as.
+  ReferenceKind reference = ReferenceKind::Casci;
   std::unordered_map<std::string, Tensor> arrays;
 
   // An IO Error naming the first of `names` the file does not carry. Each
@@ -58,16 +81,25 @@ struct GoldenFile {
   // vector's length to the active space the kernels index it with.
   [[nodiscard]] Status checkNdet(int64_t expected) const;
 
+  // An Unsupported Error unless `reference` is a CASCI -- the gate every
+  // derivative path sits behind, with `what` naming the one asking
+  // (`--sc-tangent`, say). NOT an IO Error: a CASSCF-orbital golden is a
+  // perfectly well-formed file, and a valid request this code does not
+  // handle is the Unsupported tier (docs/architecture.md, "Error handling").
+  // Host-only and cheap, so a caller runs it before any GPU work.
+  [[nodiscard]] Status requireCasciReference(std::string_view what) const;
+
   // The array `name`. Aborts (check) if it is absent: the demo should have
   // require()d it, so reaching here without it is our bug, not the file's.
   const Tensor& get(const std::string& name) const;
 };
 
 // The parsed file, or an IO Error if it cannot be opened, ends early, has the
-// wrong magic, or carries a malformed array header (a negative or oversized
-// rank, a negative extent, or an element count that overflows or runs past
-// the end of the file), has bytes after its last array, or carries a ci
-// whose length is not the header's ndet.
+// wrong magic ("NEVPT2G2", or the pre-kind "NEVPT2G1"), carries a
+// reference_kind this reader does not know, or carries a malformed array
+// header (a negative or oversized rank, a negative extent, or an element
+// count that overflows or runs past the end of the file), has bytes after its
+// last array, or carries a ci whose length is not the header's ndet.
 [[nodiscard]] Result<GoldenFile> loadGolden(const std::string& path);
 
 // ---------------------------------------------------------------------------

@@ -159,6 +159,15 @@ the numerical gradient would have a stable reference to be a gradient *of*.
 RHF followed by a CASCI diagonalisation is deterministic at every displaced
 geometry.
 
+**This is a precondition, and it is enforced rather than assumed.** A golden
+file records which reference built its orbitals in its header
+([`reference-data.md`](reference-data.md), "The file format"), and every
+derivative path refuses a CASSCF one: `nevpt2_demo`'s `--sc-tangent` and
+`--gradient-source` as an unsupported-request error, and
+`reference_data/nevpt2_numgrad.py` before it computes an energy. The refusal
+cites this section; a CASSCF reference needs CP-CASSCF (§5) and, numerically,
+a different strategy altogether (§4.4).
+
 ### 1.2 What is true here
 
 The golden's orbitals come out of a fixed four-step chain: converged RHF, then

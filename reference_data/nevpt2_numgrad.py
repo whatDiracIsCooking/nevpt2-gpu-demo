@@ -28,7 +28,10 @@ at each displacement, and the numerical gradient would be garbage
 this script rather than the hazard below). That is a statement about
 *displaced* geometries: at one fixed geometry a fresh CASSCF reproduces bit
 for bit, measured in docs/reference-data.md, "What 'CASSCF input' means here,
-and why the golden state is CASCI".
+and why the golden state is CASCI". The golden's header says which reference
+built its orbitals, so this is enforced and not merely assumed: a golden whose
+``reference_kind`` is not ``"casci"`` is **refused**
+(:func:`_check_reference_kind`), before any energy is computed.
 
 **In-plane displacements only, and the refusal.** The active space is selected
 by irrep, and the irrep labels exist only as long as the point group does, so
@@ -164,16 +167,53 @@ def read_xyz(path: Path) -> list[tuple[str, tuple[float, float, float]]]:
 
 def read_golden_header(path: Path) -> dict:
     """The scalar header of a ``.nevpt2gold`` file -- the two energies this
-    script checks its rebuilt reference state against (layout:
-    ``generate_golden.write_golden``)."""
+    script checks its rebuilt reference state against, and the reference kind
+    :func:`_check_reference_kind` gates on (layout:
+    ``generate_golden.write_golden``).
+
+    Both magics are accepted: a pre-kind ``NEVPT2G1`` file carries no
+    ``reference_kind`` field and is a CASCI by definition, which is what every
+    committed golden is."""
     with open(path, "rb") as f:
-        assert f.read(8) == gg.GOLDEN_MAGIC, f"{path} is not a golden file"
+        magic = f.read(8)
+        assert magic in gg.GOLDEN_MAGICS, f"{path} is not a golden file"
         ncas, nelec_a, nelec_b, ncore, ndet = struct.unpack("<iiiiq", f.read(24))
         e_casci, e_corr = struct.unpack("<dd", f.read(16))
+        kind = "casci"
+        if magic == gg.GOLDEN_MAGIC:
+            (code,) = struct.unpack("<i", f.read(4))
+            assert code in gg.REFERENCE_KINDS, f"{path}: unknown reference_kind {code}"
+            kind = gg.REFERENCE_KINDS[code]
     return dict(
         ncas=ncas, nelec_a=nelec_a, nelec_b=nelec_b, ncore=ncore, ndet=ndet,
-        e_casci=e_casci, e_corr=e_corr,
+        e_casci=e_casci, e_corr=e_corr, reference_kind=kind,
     )
+
+
+def _check_reference_kind(kind: str, path: Path) -> None:
+    """Refuse a golden whose orbitals did not come from a CASCI on converged
+    RHF orbitals. Everything here differentiates *that* reference: RHF
+    followed by a CASCI diagonalisation is one deterministic function of the
+    geometry, so two displaced energies are two values of it. A CASSCF
+    reference is a different Lagrangian -- CP-CASSCF rather than RHF
+    Brillouin/CPHF plus an active-space selection (docs/gradient-theory.md,
+    §1.1, §1.2 and §5) -- and differencing one needs a different strategy
+    anyway, since each displaced geometry lands on a differently-rotated
+    solution of the same energy (§4.4). Refused, not warned: the number it
+    would produce looks like a gradient. (``apps/integral_direct``'s
+    ``--sc-tangent`` and ``--gradient-source`` refuse the same input, as an
+    ``err_unsupported``.)"""
+    if kind != "casci":
+        raise SystemExit(
+            f"{path}: this golden's reference_kind is {kind!r}, and this "
+            "script differentiates a CASCI on converged RHF orbitals. A "
+            "CASSCF reference needs CP-CASSCF and a different "
+            "numerical-gradient strategy -- each displaced geometry would "
+            "land on a differently-rotated solution of the same energy, so a "
+            "difference quotient of it is not a gradient "
+            "(docs/gradient-theory.md, §1.1 and §4.4). Refused rather than "
+            "differenced."
+        )
 
 
 def read_gradgold(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
@@ -445,12 +485,18 @@ def run(args) -> dict:
                ncas=case["ncas"], nelecas=case["nelecas"],
                cas_irreps=case["cas_irreps"], step=args.step, natm=len(geom))
 
+    # The golden's header first: reading it costs nothing, and its reference
+    # kind decides whether differencing this state means anything at all, so
+    # the refusal lands before the reference energy is computed.
+    gold = read_golden_header(args.golden)
+    rec["reference_kind"] = gold["reference_kind"]
+    _check_reference_kind(gold["reference_kind"], args.golden)
+
     t0 = time.perf_counter()
     ref_group = point_group(geom, case["basis"])
     e_casci, e_corr, ref_labels = energy(geom, case)
     rec.update(group=ref_group, e_casci=e_casci, e_corr=e_corr, labels=ref_labels)
 
-    gold = read_golden_header(args.golden)
     rec["d_e_casci"] = e_casci - gold["e_casci"]
     rec["d_e_corr"] = e_corr - gold["e_corr"]
     # The state differentiated must be the state the golden holds, or the
