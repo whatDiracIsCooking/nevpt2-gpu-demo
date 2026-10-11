@@ -8,7 +8,9 @@ run to run given the thread and Davidson settings below, and deterministic
 by construction, with no orbital optimiser in the chain (see
 :func:`_build_state`, and docs/reference-data.md, "What 'CASSCF input' means
 here, and why the golden state is CASCI", for what a fresh CASSCF measurably
-does instead) -- canonicalises it exactly as
+does instead; ``--casscf`` / ``--mo-from``, below, is how to get a
+CASSCF-orbital golden without putting an optimiser in this chain either) --
+canonicalises it exactly as
 ``pyscf.mrpt.NEVPT.kernel``
 does, and writes everything a CASSCF/CASCI package would hand a downstream
 NEVPT2 driver into one flat binary file (see :func:`write_golden`'s
@@ -103,6 +105,29 @@ pi space picked by irrep, the DF one fitted with 6-31G**-RIFIT)::
         --ncas 8 --nelecas 8 --cas-irreps 'A"=8' --core-irreps "A'=27,A\"=1" \\
         --name salicylaldimine_631gss_cas88       # add --df --auxbasis
         # reference_data/basis/6-31gss-rifit.nw and a _df name for the twin
+
+``--casscf --mo-out FILE`` / ``--mo-from FILE`` build a golden on **converged
+CASSCF orbitals** in two steps, so that no golden's state depends on an
+orbital optimiser. The first step optimises once and commits the orbitals
+(:func:`optimise_mo`, :func:`write_mo_sidecar`); the second runs the same
+deterministic CASCI as every other golden, on those orbitals
+(:func:`_build_state`), and records ``reference_kind="casscf"``. Pass the
+*same* case flags to both -- they are the sidecar's fingerprint, and a
+mismatch is refused::
+
+    uv run python reference_data/generate_golden.py --ncas 4 --nelecas 4 \\
+        --name n2_ccpvdz_cas44_casscf --casscf \\
+        --mo-out golden/n2_ccpvdz_cas44_casscf.mogold
+    uv run python reference_data/generate_golden.py --ncas 4 --nelecas 4 \\
+        --name n2_ccpvdz_cas44_casscf \\
+        --mo-from golden/n2_ccpvdz_cas44_casscf.mogold
+
+The second step is bit-reproducible like every other golden, and
+:func:`_check_casscf_stationary` refuses orbitals that are not a converged
+stationary point of that state (RHF orbitals handed in as a sidecar, a loosely
+converged optimisation) just as :func:`_check_degeneracy` refuses a state whose
+answer would depend on noise. ``--gradgold`` is refused with either flag: the
+gradient derivation is written for the CASCI-on-RHF Lagrangian.
 """
 
 from __future__ import annotations
@@ -275,6 +300,90 @@ O1_FOCK_TOL = 1e-5
 #: ~machine precision on these sizes, so this one is tight.
 O2_FOCK_TOL = 1e-10
 
+#: Magic bytes identifying an **MO sidecar** (``*.mogold``) -- the converged
+#: CASSCF orbitals ``--casscf --mo-out`` writes and ``--mo-from`` reads back.
+#: A third file in the ``.gradgold`` idiom (own magic, own scalar header, the
+#: same named-array section), and a sidecar for the same reason: it leaves
+#: every golden's bytes alone (:func:`write_mo_sidecar` has the layout).
+#: Committing the orbitals, rather than re-optimising them, is about
+#: **provenance and independence from the optimiser** -- the golden then
+#: depends on a file plus the same deterministic ``mcscf.CASCI`` the RHF path
+#: runs, and no CASSCF run at all. It is NOT a workaround for an irreproducible
+#: optimiser: a fresh CASSCF under :data:`CASSCF_CONV_TOL` /
+#: :data:`CASSCF_CONV_TOL_GRAD` reproduces bit for bit, measured
+#: (docs/reference-data.md, "A fresh CASSCF reproduces, measured").
+MO_SIDECAR_MAGIC = b"NEVPT2M1"
+
+#: ``--casscf``'s optimiser settings, all three far past PySCF's defaults
+#: (1e-7 energy, ``sqrt(conv_tol)`` ~ 3.2e-4 gradient, 50 macro iterations).
+#: Measured (docs/reference-data.md, "The ``--casscf`` / ``--mo-from`` gate
+#: thresholds"): PySCF's own defaults stop at ||g_orb|| 2.8e-5, whose E_corr
+#: is 3.6e-6 from the converged one -- far outside the 1e-7 the demos check
+#: to, and refused by :data:`CASSCF_GRAD_TOL`. ``conv_tol_grad`` 1e-7
+#: converges at CAS(10,10) in 16 macro iterations and reaches ||g_orb||
+#: 2.5e-8, 40x inside the gate, with a bit-identical E_corr. 1e-8 does **not**
+#: converge there -- it runs to a 200-macro ceiling while producing that same
+#: answer -- so it is not what ``mc.converged`` is asserted against.
+CASSCF_CONV_TOL = 1e-12
+CASSCF_CONV_TOL_GRAD = 1e-7
+CASSCF_MAX_CYCLE_MACRO = 200
+
+#: How far from stationary a ``--mo-from`` sidecar's orbitals may be: the
+#: 2-norm of ``mc.get_grad(mo, (casdm1, casdm2), eris)`` -- i.e.
+#: ``mc1step.gen_g_hop(mo, 1, casdm1, casdm2, eris)[0]``, the quantity
+#: ``conv_tol_grad`` gates -- evaluated at the sidecar's orbitals with the
+#: RDMs of the fresh CASCI that just ran on them
+#: (:func:`_check_casscf_stationary`). Measured, all in
+#: docs/reference-data.md, "The ``--casscf`` / ``--mo-from`` gate thresholds":
+#: a converged CASSCF lands at 2.5e-8 (CAS(10,10)) / 5.9e-9 (CAS(4,4)), RHF
+#: orbitals at ~7e-2 (five decades over), a PySCF-default-converged CASSCF at
+#: 2.8e-5. It is a **stationarity** bound and not an E_corr guarantee:
+#: dE_corr/d||g_orb|| is 0.11-0.13 Eh per unit norm at CAS(10,10), so
+#: orbitals accepted right AT 1e-6 could sit ~1.2e-7 from the converged
+#: E_corr. That is why ``--casscf`` optimises to
+#: :data:`CASSCF_CONV_TOL_GRAD` (1e-7, reaching 2.5e-8) instead of merely to
+#: the gate; tightening the gate itself to 1e-7 would leave only 4x of
+#: headroom over what ``mc1step`` reaches and could refuse a bigger case's
+#: legitimate sidecar.
+CASSCF_GRAD_TOL = 1e-6
+
+#: How far the deterministic CASCI on a sidecar's orbitals may land from the
+#: ``e_casscf`` the sidecar recorded (:func:`_check_casscf_stationary`). This
+#: is the fingerprint in energy form -- a wrong basis, geometry or active
+#: space shows up here by decades (RHF orbitals: 2.8e-2 / 8.1e-2), as does a
+#: basis-data or PySCF change that actually moves this state, which is why
+#: :func:`_mo_fingerprint` does not compare version strings. Measured
+#: agreement at the real thing: 2.0e-13 (CAS(4,4)), 8.5e-14 (CAS(10,10)) --
+#: four decades of headroom.
+CASSCF_E_TOL = 1e-9
+
+#: How impure a sidecar's orbitals may be, as the fraction of an orbital's
+#: norm living outside its own irrep (:func:`_irrep_purity`). ``--mo-from``
+#: re-derives ``orbsym`` from the committed coefficients, so the coefficients
+#: have to be pure enough for that label to mean something:
+#: :func:`_check_mo_symmetry` has what PySCF does with an impure set instead,
+#: and why neither branch of it is acceptable here. 1e-9 is PySCF's own
+#: "not strictly symmetrized" warning threshold -- five decades above what a
+#: converged CASSCF measures (1.7e-14, docs/reference-data.md, "A fresh CASSCF
+#: reproduces, measured") and two decades below the 1e-7 at which
+#: ``label_orb_symm`` raises instead of warning.
+MO_PURITY_TOL = 1e-9
+
+#: How far a ``--mo-from`` run's geometry may be from the sidecar's, per
+#: coordinate in Bohr, in the symmetry frame :func:`_build_mol` puts the
+#: molecule in. Both sides come from the same parse of the same input, so the
+#: agreement is normally exact; this leaves room only for a different spelling
+#: of the same geometry, and is decades below any real displacement.
+MO_GEOM_TOL = 1e-10
+
+#: Sidecar fingerprint fields recorded for provenance and NOT compared by
+#: :func:`_check_mo_fingerprint`. ``atom_spec`` is the ``--atom`` string as
+#: typed, which may be a path to an .xyz file whose contents can change under
+#: it (the geometry is compared as coordinates instead); the two version
+#: strings would turn every harmless dependency bump into a refusal, while a
+#: change that actually moves this state is caught by :data:`CASSCF_E_TOL`.
+MO_PROVENANCE_FIELDS = frozenset({"atom_spec", "pyscf", "numpy"})
+
 
 def _write_arrays(f, arrays: dict[str, np.ndarray]) -> None:
     """The named-array section both file formats end with: an int32 count,
@@ -401,6 +510,476 @@ def write_gradgold(
         _write_arrays(f, arrays)
 
 
+def _write_fields(f, fields: dict[str, str]) -> None:
+    """The MO sidecar's text section: an int32 count, then per field a UTF-8
+    key and a UTF-8 value, each length-prefixed. The golden and the gradient
+    sidecar hold only numbers; a fingerprint has to name a basis and a point
+    group, so this one format carries text."""
+    f.write(struct.pack("<i", len(fields)))
+    for key, val in fields.items():
+        for text in (key, val):
+            b = text.encode("utf-8")
+            f.write(struct.pack("<i", len(b)))
+            f.write(b)
+
+
+def write_mo_sidecar(
+    path: Path,
+    *,
+    nao: int,
+    nmo: int,
+    ncore: int,
+    ncas: int,
+    nelec_a: int,
+    nelec_b: int,
+    e_casscf: float,
+    fields: dict[str, str],
+    arrays: dict[str, np.ndarray],
+) -> None:
+    """Write the MO sidecar (``*.mogold``): the converged CASSCF orbitals plus
+    the fingerprint of the calculation that produced them.
+
+    Written by ``--casscf --mo-out FILE`` (:func:`optimise_mo`) and read back
+    by ``--mo-from FILE`` (:func:`read_mo_sidecar`, :func:`_build_state`).
+    Nothing in ``src/`` reads it: it is an *input* to the generator, not a
+    reference for the demos, which is why it has no C++ reader.
+
+    Layout (all little-endian, doubles are f64, no padding)::
+
+        8s      magic "NEVPT2M1"
+        i i i i i i  nao, nmo, ncore, ncas, nelec_a, nelec_b
+        d       e_casscf
+        i       n_fields
+        repeated n_fields times:
+            i           key_len
+            <key_len>s  key   (UTF-8)
+            i           val_len
+            <val_len>s  value (UTF-8)
+        i       n_arrays
+        repeated n_arrays times:    (identical to the golden's section)
+            i           name_len
+            <name_len>s name (not NUL-terminated)
+            i           ndim
+            q * ndim    shape
+            d * prod(shape)  data, C (row-major) order
+
+    The two arrays are ``mo_coeff`` ``(nao, nmo)`` -- already in
+    core/active/virtual column order, so ``--mo-from`` hands them to
+    ``mcscf.CASCI`` unsorted -- and ``geom``, the molecule's coordinates in
+    Bohr in the symmetry frame :func:`_build_mol` puts it in. The scalar
+    header's ``e_casscf`` is the optimiser's own energy, which
+    :func:`_check_casscf_stationary` holds the loaded state to; the rest of
+    the fingerprint is :func:`_mo_fingerprint`.
+    """
+    with open(path, "wb") as f:
+        f.write(MO_SIDECAR_MAGIC)
+        f.write(struct.pack("<6i", nao, nmo, ncore, ncas, nelec_a, nelec_b))
+        f.write(struct.pack("<d", e_casscf))
+        _write_fields(f, fields)
+        _write_arrays(f, arrays)
+
+
+def read_mo_sidecar(path: Path) -> dict:
+    """An MO sidecar back as a dict: the scalar header's fields, ``fields``
+    (the text section) and every array by name (layout:
+    :func:`write_mo_sidecar`).
+
+    A sidecar is *input*, so what this can diagnose is a refusal and not an
+    assertion: the wrong magic (the usual mistake -- a golden handed to
+    ``--mo-from``), a missing or mis-shaped array, trailing bytes."""
+    out: dict = {}
+    with open(path, "rb") as f:
+        magic = f.read(8)
+        if magic != MO_SIDECAR_MAGIC:
+            raise SystemExit(
+                f"{path} is not an MO sidecar: magic {magic!r}, expected "
+                f"{MO_SIDECAR_MAGIC!r} (--mo-from reads what --casscf --mo-out "
+                "writes)"
+            )
+        names = ("nao", "nmo", "ncore", "ncas", "nelec_a", "nelec_b")
+        out.update(zip(names, struct.unpack("<6i", f.read(24)), strict=True))
+        (out["e_casscf"],) = struct.unpack("<d", f.read(8))
+        fields: dict[str, str] = {}
+        (n,) = struct.unpack("<i", f.read(4))
+        for _ in range(n):
+            pair = []
+            for _ in range(2):
+                (ln,) = struct.unpack("<i", f.read(4))
+                pair.append(f.read(ln).decode("utf-8"))
+            fields[pair[0]] = pair[1]
+        out["fields"] = fields
+        (n,) = struct.unpack("<i", f.read(4))
+        for _ in range(n):
+            (ln,) = struct.unpack("<i", f.read(4))
+            name = f.read(ln).decode("ascii")
+            (nd,) = struct.unpack("<i", f.read(4))
+            shape = struct.unpack(f"<{nd}q", f.read(8 * nd))
+            nbytes = 8 * int(np.prod(shape))
+            out[name] = np.frombuffer(f.read(nbytes), "<f8").reshape(shape).copy()
+        if f.read(1):
+            raise SystemExit(f"{path}: trailing bytes after the last array")
+    for name in ("mo_coeff", "geom"):
+        if name not in out:
+            raise SystemExit(f"{path}: no {name} array")
+    want = (out["nao"], out["nmo"])
+    if out["mo_coeff"].shape != want:
+        raise SystemExit(
+            f"{path}: mo_coeff is {out['mo_coeff'].shape}, but its header says "
+            f"{want}"
+        )
+    return out
+
+
+def _irrep_purity(mol, mo) -> np.ndarray:
+    """``1 - max_i w_i`` per orbital, where ``w_i`` is the fraction of the
+    orbital's norm living in irrep ``i``.
+
+    The irrep subspaces are S-orthogonal and span everything, so the weights
+    sum to 1 and this is 0 for a symmetry-pure orbital.
+    :func:`_check_mo_symmetry` is what refuses on it; ``casscf_repro_probe.py``
+    is where it was measured on converged CASSCF orbitals."""
+    s = mol.intor("int1e_ovlp")
+    nrm = np.einsum("pi,pq,qi->i", mo, s, mo)
+    weights = []
+    for blk in mol.symm_orb:
+        if blk.shape[1] == 0:
+            continue
+        bsb = blk.T @ s @ blk
+        proj = blk.T @ s @ mo
+        weights.append(np.einsum("km,km->m", np.linalg.solve(bsb, proj), proj) / nrm)
+    return 1.0 - np.max(np.stack(weights), axis=0)
+
+
+def _orbsym_names(mol, mo) -> list[str]:
+    """PySCF irrep names of ``mo``, in order."""
+    from pyscf import symm
+
+    ids = symm.label_orb_symm(mol, mol.irrep_id, mol.symm_orb, mo)
+    return [symm.irrep_id2name(mol.groupname, i) for i in ids]
+
+
+def _check_mo_symmetry(mol, mo) -> tuple[np.ndarray, list[str], float]:
+    """``orbsym`` re-derived from a set of MO coefficients, refusing orbitals
+    that are not symmetry-pure. Returns ``(mo tagged with orbsym, irrep names,
+    worst purity defect)``.
+
+    The tag is not decoration: ``mc1step_symm`` masks its unique orbital
+    variables with ``mo_coeff.orbsym``, so ``get_grad``
+    (:func:`_check_casscf_stationary`) needs it, and PySCF's
+    ``hf_symm.get_orbsym`` takes a present tag as the answer.
+
+    Why the purity is a refusal and not a warning: handed an impure
+    ``mo_coeff``, ``casci_symm.label_symmetry_`` either **replaces** the
+    orbitals with ``symm.symmetrize_space``'s projection of them (above
+    ``label_orb_symm``'s own 1e-7, a ValueError it catches) or labels them
+    anyway with a ``logger.warn`` that ``verbose=0`` never prints (between
+    1e-9 and 1e-7). The first silently builds a golden for different orbitals
+    than the sidecar's; the second has the symmetry-adapted FCI solver impose
+    a symmetry the orbitals do not have. Both are wrong answers rather than
+    noisy ones, so :data:`MO_PURITY_TOL` sits at the lower edge of that
+    window."""
+    from pyscf import lib, symm
+
+    defect = _irrep_purity(mol, mo)
+    worst = int(np.argmax(defect))
+    if defect[worst] > MO_PURITY_TOL:
+        raise SystemExit(
+            f"orbital {worst} is not symmetry-pure in {mol.groupname}: "
+            f"{defect[worst]:.1e} of its norm lies outside its own irrep "
+            f"(> {MO_PURITY_TOL:g}). PySCF would answer that by projecting "
+            "these orbitals onto the irreps (a different state than the "
+            "sidecar's) or by labelling them anyway and imposing a symmetry "
+            "they do not have. Re-run --casscf in this point group, or "
+            "symmetrize the orbitals (pyscf.symm.symmetrize_space)."
+        )
+    ids = symm.label_orb_symm(mol, mol.irrep_id, mol.symm_orb, mo)
+    names = [symm.irrep_id2name(mol.groupname, i) for i in ids]
+    return lib.tag_array(mo, orbsym=ids), names, float(defect[worst])
+
+
+def _check_mo_irreps(names: list[str], ncore: int, ncas: int,
+                     cas_irreps: dict[str, int] | None,
+                     core_irreps: dict[str, int] | None) -> None:
+    """With ``--cas-irreps``/``--core-irreps``, the irrep composition of a
+    sidecar's core and active windows must be the one that was asked for.
+    ``--mo-from`` does NOT re-sort the loaded orbitals -- ``--casscf`` already
+    sorted them, and re-sorting converged orbitals by irrep could only shuffle
+    them -- so this is what checks that the active window really holds the
+    requested orbitals."""
+    from collections import Counter
+
+    spans = (("active", names[ncore : ncore + ncas], cas_irreps),
+             ("core", names[:ncore], core_irreps))
+    for label, got, want in spans:
+        if want is None:
+            continue
+        if Counter(got) != Counter(want):
+            raise SystemExit(
+                f"the {label} window of these orbitals holds "
+                f"{dict(sorted(Counter(got).items()))}, but the requested "
+                f"{label} irreps are {dict(sorted(want.items()))}: the "
+                "sidecar's orbitals are not ordered the way this run's flags "
+                "describe."
+            )
+
+
+def _irrep_text(counts: dict[str, int] | None) -> str:
+    """``{'A"': 8, "A'": 1}`` -> ``"A'=1,A\\"=8"``: the canonical, order-free
+    spelling of an irrep selection, so a fingerprint compare does not depend
+    on the order the flag was typed in. ``None`` is the empty string."""
+    if counts is None:
+        return ""
+    return ",".join(f"{k}={v}" for k, v in sorted(counts.items()))
+
+
+def _mo_fingerprint(
+    mol,
+    mc,
+    nmo: int,
+    atom: str,
+    basis: str,
+    auxbasis: str | None,
+    cas_irreps: dict[str, int] | None,
+    core_irreps: dict[str, int] | None,
+) -> tuple[dict, dict[str, str], np.ndarray]:
+    """The sidecar's own description of the calculation its orbitals came from:
+    ``(scalars, fields, geom)``, exactly what :func:`write_mo_sidecar` takes.
+
+    One function so that the writer and :func:`_check_mo_fingerprint` cannot
+    drift: ``--casscf`` writes this, and ``--mo-from`` rebuilds it from the
+    molecule and flags in front of it and refuses on any difference.
+
+    Compared on load: the AO and MO counts, the orbital-space partition
+    (``ncore``/``ncas``/``nelecas``), the detected point group, the basis and
+    auxiliary-basis names, the irrep selection, and the **geometry** -- as
+    coordinates in the symmetry frame, not as the ``--atom`` string, because
+    that string can be a path to an .xyz file whose contents can change under
+    it. Recorded and not compared: :data:`MO_PROVENANCE_FIELDS`."""
+    import pyscf
+
+    na, nb = mc.nelecas
+    scalars = dict(
+        nao=int(mol.nao),
+        nmo=int(nmo),
+        ncore=int(mc.ncore),
+        ncas=int(mc.ncas),
+        nelec_a=int(na),
+        nelec_b=int(nb),
+    )
+    fields = {
+        "symbols": " ".join(mol.atom_symbol(i) for i in range(mol.natm)),
+        "basis": basis,
+        "auxbasis": auxbasis or "",
+        "groupname": mol.groupname,
+        "cas_irreps": _irrep_text(cas_irreps),
+        "core_irreps": _irrep_text(core_irreps),
+        "atom_spec": atom,
+        "pyscf": pyscf.__version__,
+        "numpy": np.__version__,
+    }
+    return scalars, fields, np.ascontiguousarray(mol.atom_coords())
+
+
+def _check_mo_fingerprint(side: dict, path: Path, *args) -> None:
+    """Refuse a ``--mo-from`` sidecar that does not describe the calculation
+    this run is doing. ``*args`` is :func:`_mo_fingerprint`'s argument list
+    for *this* run.
+
+    Every difference is collected and reported at once, because the usual
+    cause is one wrong flag and the full list says which."""
+    scalars, fields, geom = _mo_fingerprint(*args)
+    bad = [
+        f"{k}: sidecar {side[k]}, this run {v}"
+        for k, v in scalars.items()
+        if side[k] != v
+    ]
+    bad += [
+        f"{k}: sidecar {side['fields'].get(k)!r}, this run {v!r}"
+        for k, v in fields.items()
+        if k not in MO_PROVENANCE_FIELDS and side["fields"].get(k) != v
+    ]
+    if side["geom"].shape != geom.shape:
+        bad.append(
+            f"geometry: sidecar has {side['geom'].shape[0]} atom(s), this run "
+            f"{geom.shape[0]}"
+        )
+    else:
+        d = float(np.max(np.abs(side["geom"] - geom))) if geom.size else 0.0
+        if d > MO_GEOM_TOL:
+            bad.append(
+                f"geometry: {d:.2e} Bohr from the sidecar's, per coordinate "
+                f"(> {MO_GEOM_TOL:g})"
+            )
+    if bad:
+        raise SystemExit(
+            f"{path} was written for a different calculation:\n  "
+            + "\n  ".join(bad)
+            + "\nThe orbitals in an MO sidecar only mean anything for the state "
+            "they were optimised for, so --mo-from refuses rather than "
+            "silently building a golden for something else. Re-run "
+            "--casscf --mo-out with this run's flags, or fix the flags."
+        )
+
+
+def _casscf(mf, ncas: int, nelecas, auxbasis: str | None):
+    """``mcscf.CASSCF``, or ``DFCASSCF`` sharing the RHF's own ``with_df`` so
+    one fitted integral set feeds the optimiser too. Nothing is optimised
+    here; :func:`_check_casscf_stationary` builds one of these purely to
+    evaluate a gradient."""
+    from pyscf import mcscf
+
+    if auxbasis is not None:
+        mc = mcscf.DFCASSCF(mf, ncas, nelecas)
+        assert mc.with_df is mf.with_df, "DFCASSCF built its own DF object"
+    else:
+        mc = mcscf.CASSCF(mf, ncas, nelecas)
+    mc.fcisolver.conv_tol = FCI_CONV_TOL
+    return mc
+
+
+def _check_casscf_stationary(
+    mf, mc, mo: np.ndarray, e_casscf: float, auxbasis: str | None
+) -> tuple[float, float]:
+    """Refuse a ``--mo-from`` sidecar whose orbitals are not a converged CASSCF
+    stationary point of the state ``mc`` just solved -- the way
+    :func:`_check_degeneracy` refuses a state whose answer would depend on
+    noise. Returns ``(||g_orb||, |E_CASCI - E_CASSCF|)``.
+
+    Two independent refusals, both measured in docs/reference-data.md, "The
+    ``--casscf`` / ``--mo-from`` gate thresholds":
+
+    * :data:`CASSCF_GRAD_TOL` on the CASSCF orbital-gradient norm at these
+      orbitals, with the RDMs of the fresh CASCI that just ran on them. This
+      is the gate that catches RHF orbitals handed in as a sidecar (five
+      decades over) and a loosely converged optimisation (PySCF's own
+      defaults: one decade over, and 3.6e-6 off in E_corr). It bounds
+      **stationarity**, not E_corr -- see :data:`CASSCF_GRAD_TOL` for the
+      measured slope.
+    * :data:`CASSCF_E_TOL` on ``|E_CASCI - e_casscf|``, the fingerprint in
+      energy form: a wrong basis, geometry or active space moves it by
+      decades.
+
+    ``get_grad`` lives on ``mc1step``, not on ``CASCI``, so an unoptimised
+    ``mcscf.CASSCF``/``DFCASSCF`` on the same ``_scf`` is built here to
+    evaluate it. It runs one ``ao2mo`` and one ``gen_g_hop``; no optimiser is
+    entered."""
+    mcs = _casscf(mf, mc.ncas, mc.nelecas, auxbasis)
+    mcs.mo_coeff = mo
+    eris = mcs.ao2mo(mo)
+    casdm1, casdm2 = mcs.fcisolver.make_rdm12(mc.ci, mcs.ncas, mcs.nelecas)
+    g_norm = float(np.linalg.norm(mcs.get_grad(mo, (casdm1, casdm2), eris)))
+    d_e = abs(float(mc.e_tot) - e_casscf)
+    if g_norm > CASSCF_GRAD_TOL:
+        raise SystemExit(
+            f"these orbitals are not a CASSCF stationary point: the orbital "
+            f"gradient norm is {g_norm:.3e} (> {CASSCF_GRAD_TOL:g}). RHF "
+            "orbitals measure ~7e-2 and a PySCF-default-converged CASSCF "
+            "2.8e-5, whose E_corr is already 3.6e-6 from the converged one -- "
+            "far outside the 1e-7 the demos check to. Re-run --casscf, which "
+            f"optimises to conv_tol_grad {CASSCF_CONV_TOL_GRAD:g} and reaches "
+            "~2.5e-8 (docs/reference-data.md, \"The --casscf / --mo-from gate "
+            "thresholds\")."
+        )
+    if d_e > CASSCF_E_TOL:
+        raise SystemExit(
+            f"the CASCI on these orbitals gives {mc.e_tot:.12f}, "
+            f"{d_e:.3e} from the sidecar's E_CASSCF {e_casscf:.12f} "
+            f"(> {CASSCF_E_TOL:g}). The same orbitals in the same state "
+            "reproduce it to ~1e-13, so this is the fingerprint failing in "
+            "energy form: a different basis, geometry, active space or "
+            "basis-set/PySCF definition of them."
+        )
+    return g_norm, d_e
+
+
+def optimise_mo(
+    atom: str,
+    basis: str,
+    ncas: int,
+    nelecas: int,
+    name: str,
+    auxbasis: str | None = None,
+    cas_irreps: dict[str, int] | None = None,
+    core_irreps: dict[str, int] | None = None,
+) -> tuple[dict, dict[str, np.ndarray]]:
+    """``--casscf``: one symmetry-adapted ``mcscf.CASSCF`` from the usual RHF +
+    ``--cas-irreps``/``--core-irreps`` start, returning what
+    :func:`write_mo_sidecar` needs to commit its converged orbitals.
+
+    This is the only function in this file that runs an orbital optimiser, and
+    it writes no golden: the orbitals are committed, and a *second*
+    invocation, ``--mo-from``, builds the golden by running the same
+    deterministic ``mcscf.CASCI`` on them that the RHF path runs on RHF
+    orbitals. So a golden's state depends on a file, not on an optimiser --
+    which is the point, rather than any irreproducibility of the optimiser
+    itself (it reproduces; :data:`MO_SIDECAR_MAGIC`).
+
+    Settings: :data:`CASSCF_CONV_TOL` / :data:`CASSCF_CONV_TOL_GRAD` /
+    :data:`CASSCF_MAX_CYCLE_MACRO`, and :data:`FCI_CONV_TOL` on the Davidson,
+    in the point group :func:`_build_mol` detects. Three refusals before a
+    sidecar is written -- an unconverged optimisation, orbitals that are not
+    symmetry-pure (:func:`_check_mo_symmetry`), and an orbital gradient above
+    :data:`CASSCF_GRAD_TOL` -- so ``--mo-out`` never writes a file
+    ``--mo-from`` would turn around and refuse."""
+    from pyscf import scf
+
+    t0 = time.perf_counter()
+    mol = _build_mol(atom, basis)
+    mf = scf.RHF(mol)
+    if auxbasis is not None:
+        mf = mf.density_fit(auxbasis=auxbasis)
+    mf.kernel()
+    assert mf.converged, "RHF did not converge"
+
+    mc = _casscf(mf, ncas, nelecas, auxbasis)
+    mc.conv_tol = CASSCF_CONV_TOL
+    mc.conv_tol_grad = CASSCF_CONV_TOL_GRAD
+    mc.max_cycle_macro = CASSCF_MAX_CYCLE_MACRO
+    macro: list = []
+    mc.callback = lambda envs: macro.append(envs.get("imacro"))
+    mo_start = mf.mo_coeff
+    if cas_irreps is not None:
+        assert sum(cas_irreps.values()) == ncas, f"{cas_irreps} is not {ncas} orbitals"
+        mo_start = mc.sort_mo_by_irrep(cas_irreps, core_irreps, mo_coeff=mo_start)
+    mc.kernel(mo_start)
+    if not mc.converged:
+        raise SystemExit(
+            f"CASSCF did not converge to conv_tol {CASSCF_CONV_TOL:g} / "
+            f"conv_tol_grad {CASSCF_CONV_TOL_GRAD:g} in "
+            f"{CASSCF_MAX_CYCLE_MACRO} macro iterations. Non-stationary "
+            "orbitals are what --mo-from's gate exists to refuse, so none are "
+            "written."
+        )
+
+    mo = mc.mo_coeff
+    _, names, purity = _check_mo_symmetry(mol, mo)
+    _check_mo_irreps(names, mc.ncore, ncas, cas_irreps, core_irreps)
+    eris = mc.ao2mo(mo)
+    casdm1, casdm2 = mc.fcisolver.make_rdm12(mc.ci, ncas, mc.nelecas)
+    g_norm = float(np.linalg.norm(mc.get_grad(mo, (casdm1, casdm2), eris)))
+    if g_norm > CASSCF_GRAD_TOL:
+        raise SystemExit(
+            f"CASSCF reported convergence but its orbital gradient norm is "
+            f"{g_norm:.3e} (> {CASSCF_GRAD_TOL:g}), which --mo-from would "
+            "refuse: not writing a sidecar."
+        )
+
+    na, nb = mc.nelecas
+    nmo = mo.shape[1]
+    print(
+        f"[{name}] CASSCF CAS({ncas},{na + nb}) ncore={mc.ncore} "
+        f"E_CASSCF={mc.e_tot:.10f} |g_orb|={g_norm:.3e} "
+        f"purity defect {purity:.1e} macro={(max(macro) + 1) if macro else 0} "
+        f"({time.perf_counter() - t0:.1f}s)"
+    )
+    print(f"[{name}] active irreps: {names[mc.ncore : mc.ncore + ncas]}")
+    scalars, fields, geom = _mo_fingerprint(
+        mol, mc, nmo, atom, basis, auxbasis, cas_irreps, core_irreps
+    )
+    meta = dict(**scalars, e_casscf=float(mc.e_tot), fields=fields)
+    return meta, dict(mo_coeff=mo, geom=geom)
+
+
 def _build_state(
     atom: str,
     basis: str,
@@ -409,6 +988,7 @@ def _build_state(
     auxbasis: str | None = None,
     cas_irreps: dict[str, int] | None = None,
     core_irreps: dict[str, int] | None = None,
+    mo_from: str | Path | None = None,
 ):
     """Deterministic CASCI + NEVPT canonicalisation: a plain CASCI
     diagonalisation on converged RHF orbitals, with no orbital optimiser in
@@ -418,6 +998,20 @@ def _build_state(
     ``reference_data/casscf_repro_probe.py``); what it is not is the same
     reference -- optimising the orbitals moves E_corr by tens of
     millihartree.
+
+    ``mo_from`` is that other reference, without an optimiser in this chain
+    either: the same deterministic CASCI, on the converged CASSCF orbitals
+    committed in an MO sidecar (``--casscf --mo-out``, :func:`optimise_mo`)
+    instead of on RHF's. The loaded orbitals are already in
+    core/active/virtual order, so they are handed to ``mcscf.CASCI``
+    unsorted, and three refusals run around the solve:
+    :func:`_check_mo_fingerprint` (the sidecar describes this calculation),
+    :func:`_check_mo_symmetry` + :func:`_check_mo_irreps` (``orbsym``
+    re-derived from the committed coefficients, refusing impure orbitals) and
+    :func:`_check_casscf_stationary` (they are a converged stationary point).
+    Everything downstream -- the canonicalisation, :func:`_check_degeneracy`,
+    the RDMs, PySCF's per-class energies, block2's PC -- is unchanged, and the
+    golden records ``reference_kind="casscf"``.
 
     With ``auxbasis`` the RHF is density-fitted and the CASCI is a
     ``DFCASCI`` sharing the RHF's ``with_df`` object, so one fitted integral
@@ -452,12 +1046,36 @@ def _build_state(
     else:
         mc = mcscf.CASCI(mf, ncas, nelecas)
     mc.fcisolver.conv_tol = FCI_CONV_TOL
-    if cas_irreps is not None:
+    side = None
+    if mo_from is not None:
+        side = read_mo_sidecar(Path(mo_from))
+        _check_mo_fingerprint(
+            side, Path(mo_from), mol, mc, mf.mo_coeff.shape[1], atom, basis,
+            auxbasis, cas_irreps, core_irreps,
+        )
+        mo, names, purity = _check_mo_symmetry(mol, side["mo_coeff"])
+        _check_mo_irreps(names, mc.ncore, ncas, cas_irreps, core_irreps)
+        print(
+            f"  --mo-from {mo_from}: E_CASSCF={side['e_casscf']:.10f} "
+            f"purity defect {purity:.1e} active irreps "
+            f"{names[mc.ncore : mc.ncore + ncas]}"
+        )
+        # Already in core/active/virtual order: --casscf sorted them.
+        mc.kernel(mo)
+    elif cas_irreps is not None:
         assert sum(cas_irreps.values()) == ncas, f"{cas_irreps} is not {ncas} orbitals"
         mc.kernel(mc.sort_mo_by_irrep(cas_irreps, core_irreps))
     else:
         mc.kernel()
     assert mc.converged, f"CASCI did not converge to {FCI_CONV_TOL:g}"
+    if side is not None:
+        g_norm, d_e = _check_casscf_stationary(
+            mf, mc, mo, side["e_casscf"], auxbasis
+        )
+        print(
+            f"  --mo-from gate: |g_orb|={g_norm:.3e} (<= {CASSCF_GRAD_TOL:g}) "
+            f"|E_CASCI-E_CASSCF|={d_e:.3e} (<= {CASSCF_E_TOL:g})"
+        )
     pt = mrpt.NEVPT(mc)
     pt.mo_coeff, single_ci, pt.mo_energy = pt.canonicalize(
         pt.mo_coeff, ci=pt.load_ci(), cas_natorb=True
@@ -994,9 +1612,12 @@ def generate(
     cas_irreps: dict[str, int] | None = None,
     core_irreps: dict[str, int] | None = None,
     gradgold: bool = False,
+    mo_from: str | Path | None = None,
 ) -> tuple[dict, dict, tuple[dict, dict] | None]:
     t0 = time.perf_counter()
-    mc, pt = _build_state(atom, basis, ncas, nelecas, auxbasis, cas_irreps, core_irreps)
+    mc, pt = _build_state(
+        atom, basis, ncas, nelecas, auxbasis, cas_irreps, core_irreps, mo_from
+    )
     with_df = mc.with_df if auxbasis is not None else None
     dm1, dm2, dms, eris = _pyscf_dms(pt, with_df)
     ref = _pyscf_per_class(pt, dms, eris)
@@ -1036,11 +1657,12 @@ def generate(
         ndet=int(pt.ci.size),
         e_casci=float(mc.e_tot),
         e_nevpt2_total=e_corr,
-        # :func:`_build_state` runs a CASCI diagonalisation on converged RHF
-        # orbitals and nothing else, so this is the only kind this generator
-        # can produce today; it is written out rather than defaulted so a
-        # future orbital source has one place to set it.
-        reference_kind="casci",
+        # Which reference produced the orbitals this CASCI diagonalised:
+        # RHF's, or the converged CASSCF orbitals of a --mo-from sidecar. The
+        # state is a CASCI either way; the field records the orbital source,
+        # which is what a consumer has to be able to refuse (the gradient
+        # paths do -- docs/gradient-theory.md, section 1.1).
+        reference_kind="casscf" if mo_from is not None else "casci",
     )
     arrays = dict(
         ci=np.ascontiguousarray(np.asarray(pt.load_ci(), dtype=np.float64)),
@@ -1154,11 +1776,45 @@ def main() -> None:
         help="core orbitals per irrep, same syntax (default: PySCF's guess, the "
         "ncore lowest orbitals; needs --cas-irreps)",
     )
+    ap.add_argument(
+        "--casscf",
+        action="store_true",
+        help="optimise the orbitals ONCE: run a symmetry-adapted mcscf.CASSCF "
+        "from the usual RHF + --cas-irreps start and write its converged "
+        "mo_coeff to --mo-out. Writes no golden; feed the sidecar back with "
+        "--mo-from",
+    )
+    ap.add_argument(
+        "--mo-out",
+        default=None,
+        help="where --casscf writes its MO sidecar (the .mogold idiom)",
+    )
+    ap.add_argument(
+        "--mo-from",
+        default=None,
+        help="build the golden by running the usual deterministic CASCI on this "
+        "MO sidecar's committed CASSCF orbitals instead of on RHF's; the "
+        "golden's reference_kind is then casscf",
+    )
     args = ap.parse_args()
     if args.auxbasis is not None and not args.df:
         ap.error("--auxbasis needs --df")
     if args.core_irreps is not None and args.cas_irreps is None:
         ap.error("--core-irreps needs --cas-irreps")
+    if args.casscf and args.mo_from:
+        ap.error("--casscf writes a sidecar, --mo-from reads one: not both")
+    if args.casscf and args.mo_out is None:
+        ap.error("--casscf needs --mo-out FILE (it writes no golden)")
+    if args.mo_out is not None and not args.casscf:
+        ap.error("--mo-out needs --casscf")
+    # The gradient derivation is written for a CASCI on converged RHF
+    # orbitals: its Lagrangian has no orbital-rotation multipliers, because
+    # the RHF orbitals are stationary for RHF and not for the CAS energy
+    # (docs/gradient-theory.md, sections 1.1 and 1.2). A sidecar for a
+    # CASSCF-orbital state would be a sidecar for a different derivation --
+    # which is also why loadGradGold's consumers refuse a casscf-kind golden.
+    if args.gradgold and (args.casscf or args.mo_from):
+        ap.error("--gradgold is CASCI-on-RHF-orbitals only, not --casscf/--mo-from")
     # The gradient derivation (docs/gradient-theory.md) is written for
     # conventional four-index integrals: a DF sidecar would carry fitted
     # blocks whose (O1)/(O2) invariants hold against the DF Fock, not the one
@@ -1169,6 +1825,17 @@ def main() -> None:
     if args.name is None:
         args.name = "n2_ccpvdz_cas1010" + ("_df" if args.df else "")
 
+    if args.casscf:
+        mo_path = Path(args.mo_out)
+        mo_path.parent.mkdir(parents=True, exist_ok=True)
+        meta, arrays = optimise_mo(
+            args.atom, args.basis, args.ncas, args.nelecas, args.name, auxbasis,
+            cas_irreps=args.cas_irreps, core_irreps=args.core_irreps,
+        )
+        write_mo_sidecar(mo_path, **meta, arrays=arrays)
+        print(f"wrote {mo_path}")
+        return
+
     out_path = Path(args.out) if args.out else (
         Path(__file__).resolve().parent.parent / "golden" / f"{args.name}.nevpt2gold"
     )
@@ -1178,7 +1845,7 @@ def main() -> None:
         args.atom, args.basis, args.ncas, args.nelecas, args.name, auxbasis,
         pc=not args.no_pc, rdm4_threads=args.rdm4_threads,
         cas_irreps=args.cas_irreps, core_irreps=args.core_irreps,
-        gradgold=args.gradgold,
+        gradgold=args.gradgold, mo_from=args.mo_from,
     )
     write_golden(out_path, **meta, arrays=arrays)
     print(f"wrote {out_path}")

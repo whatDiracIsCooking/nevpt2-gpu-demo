@@ -24,6 +24,13 @@ the next subsection is the measurement — but that its orbitals are a
 *different reference*, worth tens of millihartree in `E_corr`, and that
 optimising them costs a run.
 
+A golden on that other reference is something the generator can build, in two
+steps that keep the optimiser **out** of the golden's chain rather than
+putting it in: `--casscf --mo-out FILE` optimises once and commits the
+converged orbitals, and `--mo-from FILE` runs the same deterministic
+`mcscf.CASCI` on them and records `reference_kind = casscf` ("The MO sidecar"
+below). No CASSCF-orbital golden is committed yet.
+
 It never writes `dm3`, `f3ac` or `f3ca`. Producing those from the CI vector is
 the expensive step the GPU build exists for, and storing them would let the
 demo skip the part it is supposed to demonstrate.
@@ -158,6 +165,29 @@ needs:
   geometry or active space shows up here by decades (RHF orbitals: 2.8e-2 and
   8.1e-2) — and not a stationarity check, which is the other threshold's job.
 
+**Both are implemented as written**, in `generate_golden.py`:
+`CASSCF_GRAD_TOL` (1e-6) and `CASSCF_E_TOL` (1e-9), checked by
+`_check_casscf_stationary`, with `CASSCF_CONV_TOL` 1e-12 /
+`CASSCF_CONV_TOL_GRAD` 1e-7 / `CASSCF_MAX_CYCLE_MACRO` 200 on `--casscf`'s own
+optimisation. One number moves in the move from probe to gate, and it is worth
+knowing which: the gate evaluates the gradient with the RDMs of the
+**generator's own** CASCI — the 1e-12-Davidson state the golden records —
+rather than the optimiser's warm-started CI vector, and that CI vector's
+residual floors at ~1e-6 ("Reproducibility" below). So the same converged
+orbitals measure about a decade higher through the gate than through the
+probe:
+
+| case | ‖g_orb‖, optimiser's CI (the probe) | ‖g_orb‖, the generator's CASCI (the gate) | \|E_CASCI − E_CASSCF\| |
+|---|---|---|---|
+| CAS(4,4) | 5.860e-9 | 9.153e-8 | 1.705e-13 |
+| CAS(10,10) | 2.521e-8 | 7.513e-8 | 8.527e-14 |
+
+Still 11–13× inside the refusal, with the goldens these runs wrote carrying
+E_corr −0.207071732083 and −0.126182539677 — the probe's numbers to every
+digit it prints — and it is the second
+argument against tightening the refusal to 1e-7: that would leave the real
+gate well under 2× of headroom, not 4×.
+
 **Where "tens of millihartree" actually comes from.** The CASCI-vs-CASSCF
 *reference* difference, which is real, is the whole reason to want
 CASSCF-orbital goldens:
@@ -222,6 +252,16 @@ uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65
 # file at all (see "The analytic gradient")
 uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46
 uv run python reference_data/nevpt2_grad.py --case acrolein_def2svp_cas65
+
+# a golden on CONVERGED CASSCF orbitals, in two steps -- nothing committed
+# yet (see "The MO sidecar"). The same case flags go to both commands: they
+# are the sidecar's fingerprint, and a mismatch is refused
+uv run python reference_data/generate_golden.py --ncas 4 --nelecas 4 \
+    --name n2_ccpvdz_cas44_casscf --casscf \
+    --mo-out golden/n2_ccpvdz_cas44_casscf.mogold
+uv run python reference_data/generate_golden.py --ncas 4 --nelecas 4 \
+    --name n2_ccpvdz_cas44_casscf \
+    --mo-from golden/n2_ccpvdz_cas44_casscf.mogold
 ```
 
 **Regeneration is a check.** Every committed golden regenerates
@@ -437,6 +477,94 @@ reader accepts both and loads a `G1` file as CASCI, so adding the field
 rewrote no committed file. An unknown kind code is an IO Error, like a bad
 magic: a file this reader cannot interpret, as distinct from a reference it
 can read and will not differentiate.
+
+### The MO sidecar: committed CASSCF orbitals
+
+`--casscf --mo-out FILE` runs a symmetry-adapted `mcscf.CASSCF` **once** and
+writes its converged `mo_coeff` to `FILE` — a `*.mogold` file, the third
+format in this directory. `--mo-from FILE` then builds a golden by running the
+*same deterministic `mcscf.CASCI`* every other golden is built with, on those
+orbitals instead of RHF's. It writes `reference_kind = casscf` ("The file
+format" above) and nothing else about the generator changes: the
+canonicalisation, `_check_degeneracy`, the RDMs, PySCF's per-class answer and
+block2's PC all run exactly as they do on the RHF path.
+
+**Why commit the orbitals instead of optimising them in line.** Not because a
+CASSCF run would wander — it does not, and "A fresh CASSCF reproduces,
+measured" above is that measurement. Because the golden's state should depend
+on a *file*, not on an optimiser: the committed orbitals pin the reference
+across PySCF versions and settings, the expensive optimisation happens once,
+and the second step keeps the property the whole directory rests on — a
+regenerated golden that differs from the committed one means something
+changed. Running `--mo-from` twice on one sidecar gives byte-identical
+`.nevpt2gold` files.
+
+**The sidecar is a fingerprint plus coefficients.** Same flat idiom as
+`.gradgold` — own magic (`NEVPT2M1`), a scalar header, the same named-array
+section — plus one section the other two formats do not have: UTF-8
+key/value text, because a fingerprint has to name a basis and a point group.
+`write_mo_sidecar`'s docstring in `generate_golden.py` has the exact layout.
+It carries `mo_coeff` (already in core/active/virtual column order, so
+`--mo-from` hands it to `mcscf.CASCI` unsorted), the geometry as coordinates
+in the symmetry frame, the AO and MO counts, `ncore`/`ncas`/`nelecas`, the
+detected point group, the basis and auxiliary-basis names, the irrep
+selection, and `e_casscf`. `--mo-from` rebuilds all of that from the molecule
+and flags in front of it and **refuses on any difference**, reporting every
+mismatch at once. Nothing in `src/` reads a `.mogold`: it is an input to the
+generator, not a reference for the demos, so it has no C++ reader.
+
+Two fields are recorded and *not* compared: the `--atom` string as typed
+(which may be a path to an `.xyz` file whose contents can change under it —
+hence comparing coordinates) and the PySCF/NumPy versions (which would turn
+every harmless bump into a refusal). A dependency change that actually moves
+this state does not need a version compare to be caught: it lands in
+`|E_CASCI − E_CASSCF|`, by decades.
+
+**Symmetry is re-derived, and impure orbitals are refused.** `orbsym` comes
+from `symm.label_orb_symm` on the committed coefficients, and
+`_check_mo_symmetry` first measures how much of each orbital's norm lies
+outside its own irrep, refusing above `MO_PURITY_TOL` (1e-9). That refusal
+exists because PySCF's own answer to an impure `mo_coeff` is one of two silent
+ones: above `label_orb_symm`'s 1e-7 it **replaces** the orbitals with
+`symm.symmetrize_space`'s projection of them (a different state than the
+sidecar's), and between 1e-9 and 1e-7 it labels them anyway behind a
+`logger.warn` that `verbose=0` never prints (and the symmetry-adapted FCI
+solver then imposes a symmetry the orbitals do not have). The orbitals
+`--casscf` itself wrote measure 1.3e-14 (CAS(4,4)) and 1.8e-14 (CAS(10,10))
+through this check — five decades inside the refusal. With
+`--cas-irreps`/`--core-irreps`, the irrep composition of the loaded core and
+active windows must also be the one the flags ask for — `--mo-from` does not
+re-sort the orbitals, so that is what checks they are ordered as the flags
+describe.
+
+**The stationarity gate.** `_check_casscf_stationary` runs alongside
+`_check_degeneracy` and takes the same stance — refuse rather than write a
+golden whose answer is not the one it claims:
+
+- the CASSCF orbital-gradient 2-norm at the sidecar's orbitals, above
+  `CASSCF_GRAD_TOL` (1e-6);
+- `|E_CASCI − E_CASSCF(sidecar)|`, above `CASSCF_E_TOL` (1e-9).
+
+Both thresholds, what they measure and the headroom they have are in "The
+`--casscf` / `--mo-from` gate thresholds" above. `--casscf` applies the first
+of them to its own result too, so `--mo-out` never writes a file `--mo-from`
+would turn around and refuse, and it refuses an unconverged optimisation
+outright.
+
+**What the three deliberately broken inputs produce** (CAS(4,4), the sidecar
+above):
+
+| input | refused by | measured |
+|---|---|---|
+| RHF orbitals in the sidecar, everything else unchanged | the gradient gate | ‖g_orb‖ 6.982e-2 |
+| `--atom "N 0 0 0; N 0 0 1.1001"` | the fingerprint | geometry 1.89e-4 Bohr off |
+| `--basis cc-pvtz` | the fingerprint | `nao`/`nmo` 28 → 60, basis name |
+
+`--gradgold` is refused with `--casscf` and with `--mo-from`: the gradient
+derivation is written for the CASCI-on-RHF Lagrangian, whose stationarity
+conditions a CASSCF-orbital state does not satisfy
+([`gradient-theory.md`](gradient-theory.md), §1.1) — the same reason
+`loadGradGold`'s consumers refuse a `casscf`-kind golden.
 
 ### The gradient sidecar
 
@@ -1069,7 +1197,7 @@ not used.
 
 | Path | Role |
 |---|---|
-| `reference_data/generate_golden.py` | the **only** file that defines the golden state (`block2_pc_probe.py` imports its `_build_state`). Runs a deterministic `mcscf.CASCI` (see "What "CASSCF input" means here" above), canonicalises it exactly as `pyscf.mrpt.NEVPT.kernel` does, and writes the CI vector, `dm1`/`dm2`, every MO-integral block, and PySCF's own per-class NEVPT2 answer into one flat binary file. `--df` does the same density-fitted and adds the `B_*` blocks. Unless `--no-pc`, it also runs block2's PC-NEVPT2 on the same state and writes `pc_class_energies` / `e_pc_total` (see "PC fields" above) |
+| `reference_data/generate_golden.py` | the **only** file that defines the golden state (`block2_pc_probe.py` imports its `_build_state`). Runs a deterministic `mcscf.CASCI` (see "What "CASSCF input" means here" above), canonicalises it exactly as `pyscf.mrpt.NEVPT.kernel` does, and writes the CI vector, `dm1`/`dm2`, every MO-integral block, and PySCF's own per-class NEVPT2 answer into one flat binary file. `--df` does the same density-fitted and adds the `B_*` blocks. Unless `--no-pc`, it also runs block2's PC-NEVPT2 on the same state and writes `pc_class_energies` / `e_pc_total` (see "PC fields" above). `--casscf --mo-out` / `--mo-from` is the two-step CASSCF-orbital path, and the only thing here that runs an orbital optimiser (see "The MO sidecar" above) |
 | `reference_data/block2_pc_probe.py` | rebuilds a golden's state with `generate_golden._build_state` (imported, not copied), checks it is bit-identical to the committed CI vector, and runs block2's `WickSCNEVPT2` and `WickICNEVPT2` (PC) on it: per-class energies, timings, peak RSS, and the PC linear-solve / metric conditioning (`--metric`). Writes no golden. See [`pc-nevpt2.md`](pc-nevpt2.md) |
 | `reference_data/nevpt2_numgrad.py` | the **numerical** nuclear gradient: displaced RHF → CASCI → SC-NEVPT2 runs (states built by `generate_golden._build_state`, imported) differenced and Richardson-extrapolated into a sidecar's `grad_num` / `grad_num_residual` / `grad_num_probed` / `grad_num_step`. Refuses a displacement whose detected point group — or whose core/active irrep selection — differs from the reference geometry's, rather than produce a number from a different active space. Writes no golden and no new sidecar; only the two gradient-validation cases carry its arrays (see "The numerical gradient" above) |
 | `reference_data/nevpt2_grad.py` | the **analytic** nuclear gradient: a `pyscf.grad.lagrange.Gradients` subclass that solves the CI and orbital Z-vector equations of [`gradient-theory.md`](gradient-theory.md), §2 and contracts them into a gradient, differentiating one scalar along a frozen orthonormal path. Source terms from PySCF by default, or from a `.gradsrc` dump (`--source dump`) when the GPU side grows one. Writes **nothing** unless `--out` is given, and never a committed file; `--casci-only` is its own validation (see "The analytic gradient" above) |
