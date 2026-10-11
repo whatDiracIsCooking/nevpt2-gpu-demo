@@ -11,10 +11,16 @@ figure names its card.
   a committed golden file (every class energy and the total to 1e-7) and
   prints `PASS:`; the ctest entry matches that line. The gradient work is
   checked the same way: `nevpt2_demo --sc-tangent` for the SC tangent ("The
-  SC tangent's finite-difference cross-check", below) and two non-demo
+  SC tangent's finite-difference cross-check", below), `--gradient-source`
+  for the CI source term ("The CI source term's forward-reverse duality") and
+  two non-demo
   binaries, `nevpt2_sc_pseudodensity` for the SC pseudodensities' exact
-  identities ("The SC pseudodensity identities") and `nevpt2_pc_tangent` for
-  the PC tangent ("The PC tangent against a finite difference").
+  identities ("The SC pseudodensity identities") and its `--kappa-act` for
+  the orbital source term ("The active-rotation source term"), and
+  `nevpt2_pc_tangent` for
+  the PC tangent ("The PC tangent against a finite difference"). What each of
+  them computes, and why the permanent ones are exact identities rather than
+  finite differences, is [`gradients.md`](gradients.md).
   Every golden entry is labelled `gpu`, because there is no CPU path.
   `ctest --preset fast` runs every entry not labelled `slow`.
 - **The unit tier** (`test/`, GoogleTest) checks host logic one component at
@@ -94,10 +100,14 @@ card-free.
 
 `nevpt2_cas44_sc_tangent` and `nevpt2_cas88_sc_tangent` (`gpu`; the CAS(4,4)
 one `small`) run `nevpt2_demo --golden <case> --tiles 3 --sc-tangent` and
-match `PASS: the SC tangent matches Euler`. They are **the SC side's only
-finite difference, and a one-time one** (the PC tangent's, below, is the
-other one in the golden tier): it validates
-`energiesTangentDevice` (`nevpt2.energy`'s `:sc_tangent` partition) so that
+match `PASS: the SC tangent matches Euler`. They are **the SC energy
+stage's own finite difference, and a one-time one** — the golden tier has
+three in all, and they are the three conventions no identity can pin
+(`docs/gradients.md`, §2): this one, the `--kappa-act` entries' third number
+(the device kappa action against the exponential map, below) and the PC
+tangent's (a derivative of a solve, which has no identity at all). It
+validates `energiesTangentDevice` (`nevpt2.energy`'s `:sc_tangent`
+partition) so that
 every later check of the reverse-mode assembly can be an exact dot-product
 identity against the tangent at this tree's usual 1e-7, with no step size
 anywhere. `apps/integral_direct/tangent_check.cppm` has the derivation; the
@@ -179,7 +189,9 @@ conventions — the device kappa action, and "a Dyall block's tangent is its
 own `make_*` called with the dotted integrals" — and a wrong tangent of an
 operand cancels between the two modes; the finite difference is what pins both
 to `nevpt2.kappa_rotation`'s exponential map. Same role, and the same
-plateau-and-Richardson analysis, as `--sc-tangent`'s above.
+plateau-and-Richardson analysis, as `--sc-tangent`'s above — with a
+three-halving run rather than four (`kRichardsonRun` in
+`apps/sc_pseudodensity/kappa_check.cppm`), the same `[3.2, 4.8]` window.
 
 **What is differentiated, and the two pieces that are missing.** The
 functional is the SC total as a function of the MO **integrals** — every array
@@ -274,7 +286,7 @@ avoids. So each entry displaces the state and re-solves:
 | check | against | tolerance |
 |---|---|---|
 | each class energy, from the tangent path's own `S` and `K` | `pcEnergiesDevice`'s answer for the same state | 1e-9 |
-| `Edot(c, c)`, five classes (`Sr`, `Si`, `Srsi`, `Srs`, `Sir`) | `2 E`, exact: those classes are homogeneous of degree 2 in the CI vector | 1e-9 relative |
+| `Edot(c, c)`, five classes (`Sr`, `Si`, `Srsi`, `Srs`, `Sir`) | `2 E`, exact: those classes are homogeneous of degree 2 in the CI vector | 1e-9, scaled by `max(1, \|2E\|)` — so absolute at these class energies |
 | the central difference's error at each `h` | 4× the next one's — second order | 4 ± 0.5 |
 | the Richardson extrapolation of the two finest steps | the analytic `Edot` | 1e-8 |
 | a class refused by the gap or denominator check | nothing: the entry FAILS, and no derivative is reported for it | — |
@@ -290,14 +302,18 @@ them. `Sijr` and `Sij` (the hole-side `delta` terms) and `Sijrs` (no RDM at
 all) are affine or degree 0 in both.
 
 Each displaced state costs a host `dm1`/`dm2` rebuild plus a full device RDM
-build and PC stage — the same price the SC tangent's sweep pays, at 8 states
-rather than 28 but up to 12 orbitals, which makes
-`nevpt2_pc_tangent_cas1012` the slowest entry in the tree (318s; it is `slow`
-and runs three steps instead of four). The measured ratios, residuals and the three findings that
+build and PC stage — the same price the SC tangent's sweep pays, at 8
+displaced states rather than 28 but up to 12 orbitals, which makes
+`nevpt2_pc_tangent_cas1012` the slowest entry in the tree; it is `slow` and
+runs three steps instead of four. Its wall time, the measured ratios and
+residuals, the card and flags they were taken with, the step at which
+round-off takes over (an `--fd-start-pow` sweep past the entries' own steps)
+and the three findings that
 constrain the direction and the step — a random CI direction raises the
 metric's rank and gets the displaced state refused at *any* `h`; the path has
-to be the unit sphere; one `Sir` mode forces `h <= 2^-10` — are in
-[`pc-nevpt2.md`](pc-nevpt2.md), "The tangent with respect to the CI vector".
+to be the unit sphere; one `Sir` mode forces `h <= 2^-10` — all live in
+[`pc-nevpt2.md`](pc-nevpt2.md), "The tangent with respect to the CI vector",
+with the rest of PC's numbers, and are not copied here.
 
 CAS(4,4) and CAS(8,8) are `small`, so the sanitizer tier covers the tangent's
 einsums, GEMMs and second solve. The host halves are card-free: the
@@ -305,6 +321,7 @@ per-tuple arithmetic is `test/energy_finish/` (`pcCoefficients`,
 `pcQuadForm`, `tangentSingle`) and the gate itself `test/pc_tangent/`, which
 locks in that a refused class fails rather than reading as a zero
 derivative.
+
 ## The CI source term's forward-reverse duality
 
 `nevpt2_gradient_source_cas44`, `_cas88` and `_cas1010` (all `gpu`; the first

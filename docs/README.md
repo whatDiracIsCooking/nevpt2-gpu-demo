@@ -11,13 +11,14 @@ is checked.
 | [`pc-nevpt2.md`](pc-nevpt2.md) | How is PC-NEVPT2 done on the device, and how well does it agree? The block2 reference, the once-per-class eigensolve and the singular-metric convention, each class, accuracy and cost. |
 | [`reference-data.md`](reference-data.md) | Where do the golden files come from, and why can they be trusted? Why CASCI, the reproducibility and symmetry settings, the PC fields, density fitting, every committed and gitignored case. |
 | [`testing.md`](testing.md) | How is it checked? The golden and unit tiers, why there is no CI, the local gate, the sanitizer tier with what each tool can and cannot see, and host code coverage. |
+| [`gradients.md`](gradients.md) | What does the gradient path compute, and what does it deliberately not? The source terms that are in the tree — the CI source term `y_I`, the SC pseudodensities, the PC tangent, the active–active orbital block — against the Z-vector solve, the derivative integrals and the nuclear gradient that are not; the forward/reverse duality that makes the permanent tests exact dot products rather than finite differences, and the three differentiability conditions the code enforces. Code, not derivation. |
 | [`gradient-theory.md`](gradient-theory.md) | What would an analytic gradient of this energy require? The Lagrangian for *this* reference — CASCI on RHF orbitals, so CPHF rather than CP-CASSCF — its constraints, Z-vector equations and solve order; the inventory of MO-integral arrays the orbital source term reads, and the one it does not; and the active-space-selection hazard with its settled validation rule. Derivation, not code. |
 | [`references.md`](references.md) | What is this built on? The literature cited, and the software with where each version is pinned. |
 
 ## Where numbers live
 
-**`architecture.md`, `implementation.md`, `gradient-theory.md` and
-`references.md` carry no
+**`architecture.md`, `implementation.md`, `gradients.md`,
+`gradient-theory.md` and `references.md` carry no
 measured numbers.** Every timing, sweep, accuracy figure and negative result
 lives in `performance.md`, `pc-nevpt2.md`, `reference-data.md` or
 `testing.md`, with the card and flags it was measured with — *including the
@@ -30,8 +31,9 @@ drift from its source and become a second, quieter source of truth. So the
 other documents, and the code's comments, cite a section by file and name —
 `docs/testing.md, "Sanitizers"` — rather than repeat the figure.
 
-If you are about to add a figure to `architecture.md`, `implementation.md` or
-`gradient-theory.md`, it belongs in one of the four measured documents
+If you are about to add a figure to any of those five — `architecture.md`,
+`implementation.md`, `gradients.md`, `gradient-theory.md`,
+`references.md` — it belongs in one of the four measured documents
 instead. A *size formula* in `n_mo`, `n_core`, `n_act` and `n_virt` is algebra
 and stays with the derivation; the bytes it works out to for a given case are
 a measurement and live in `reference-data.md`.
