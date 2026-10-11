@@ -345,6 +345,24 @@ if(NEVPT2_BUILD_TESTING)
     endif()
   endforeach()
 
+  # --- --rdm-tangent, small ------------------------------------------------------
+  #
+  # The tangent RDM build (nevpt2.rdm_build's :tangent partition) beside the
+  # plain one, checked against twice it -- Euler's identity, since every output
+  # is quadratic in the CI vector. The entry still PASSes on the SC energies,
+  # so a broken tangent build shows up as the demo's nonzero exit (the
+  # self-check reports a Numerical Error) rather than as a changed number.
+  # `small`, so the tangent build's allocations and launches run under the
+  # sanitizer tier; the derivative itself is checked against a finite
+  # difference in the unit tier (test/rdm/rdm_tangent_tests.cpp). The tangent
+  # build holds about twice the per-tile intermediates, so its tile floors are
+  # its own (docs/performance.md, "Tile floors"); --tiles 3 is far above them
+  # at CAS(8,8).
+  add_golden_test(nevpt2_cas88_rdm_tangent "${_gold_88}" --tiles 3 --rdm-tangent)
+  if(TEST nevpt2_cas88_rdm_tangent)
+    set_tests_properties(nevpt2_cas88_rdm_tangent PROPERTIES LABELS "gpu;small")
+  endif()
+
   # --- *_pc, small ----------------------------------------------------
   #
   # --pc at CAS(4,4)/CAS(8,8), both demos, labelled `small` so the sanitizer

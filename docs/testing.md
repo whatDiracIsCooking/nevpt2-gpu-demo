@@ -212,6 +212,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_cas88_ozaki`, `nevpt2_df_cas88_pc_ozaki` | the int8 Ozaki digest, SC and PC |
 | `nevpt2_df_cas44`, `nevpt2_df_cas88` | density fitting with `--check-blocks`; the default `--batch 8` leaves a ragged last slab on both (19 virtuals = 8 + 8 + 3, 17 = 8 + 8 + 1) |
 | `nevpt2_cas44_pc`, `nevpt2_cas88_pc`, `nevpt2_df_cas44_pc`, `nevpt2_df_cas88_pc` | `--pc`: the solver handle's eigensolves, the `d x d` BLAS GEMMs and the PC slab einsums, on both demos |
+| `nevpt2_cas88_rdm_tangent` | `--rdm-tangent`: the tangent RDM build beside the plain one, checked against twice it (the derivative itself is checked against a finite difference in the unit tier, `test/rdm/rdm_tangent_tests.cpp`) |
 
 They are ordinary golden checks too, so `ctest --preset fast` and
 `ctest --preset hip` run them on every backend.

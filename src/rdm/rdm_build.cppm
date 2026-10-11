@@ -91,5 +91,51 @@ RdmBuildResult buildRdmsDevice(const RdmBuildOptions& opt, const Tensor& ci, int
                                int64_t nelecA, int64_t nelecB, const Tensor& h2e,
                                const DeviceResources& res);
 
+// The DIRECTIONAL DERIVATIVE of that build with respect to the CI vector:
+// d/dt buildRdmsDevice(ci + t * dir) at t = 0, as the same three n^6 tensors
+// (`dm3` holds dm3_dot, `f3ca`/`f3ac` hold f3ca_dot/f3ac_dot). `dir` has
+// `ci`'s shape, one amplitude per determinant.
+//
+// Why no new kernel. produce_generic's R[tu,K] = (E_tu|Psi>)[K] and
+// L2[pqrs,K] = (E_pq E_rs|Psi>)[K] are LINEAR in `ci`, the consume step is
+// linear in L2, and the fdm2 correction and the wedge reconstruction are
+// linear in what they read -- so every output is a BILINEAR form
+// `dm3 = sum_K L2(c) . R(c)`, and its tangent is the symmetrised cross term
+//
+//   dm3_dot = sum_K [ L2(c) . R(u) + L2(u) . R(c) ]
+//
+// (likewise f3, with W(x) = eri . L2(x) in R's place). The tangent build is
+// therefore the SAME pipeline with a second produce call per tile and each
+// digest run twice; it holds two copies of produce's output, so its tile
+// floors are not the plain build's (docs/performance.md, "Tile floors").
+//
+// Runs the emitted digest or the native-fp64 BLAS one (`blasDigest`); the
+// approximate digests and the fused GEMM have no tangent path here and are
+// refused by cli::finalize before this is called (an abort through check() if
+// one reaches it). Every allocation, launch, copy and BLAS call is on
+// res.stream(), which is synchronized before this returns, like the plain
+// build; the --profile spans land in profile::kRdmBuild beside it, each
+// labelled `*_dot`.
+RdmBuildResult buildRdmTangentsDevice(const RdmBuildOptions& opt, const Tensor& ci,
+                                      const Tensor& dir, int64_t norb, int64_t nelecA,
+                                      int64_t nelecB, const Tensor& h2e,
+                                      const DeviceResources& res);
+
+// --rdm-tangent: the tangent build's self-check, which both demos run on the
+// result of their own build. Every output is homogeneous of degree 2 in the CI
+// vector, so Euler's identity makes the tangent along the state itself exactly
+// twice the build:
+//
+//   buildRdmTangentsDevice(opt, ci, ci, ...) == 2 * buildRdmsDevice(opt, ci, ...)
+//
+// `built` is that plain build's result, still device-resident. Prints one line
+// per tensor (the largest |dot - 2 * built| and its relative size) and returns
+// a Numerical Error if any of the three is past 1e-7 relative -- the tier's
+// one tolerance. A general direction is checked against a finite difference of
+// the plain build in the unit tier (test/rdm/rdm_tangent_tests.cpp); this is
+// the check that runs at the sizes the demos run.
+Status checkRdmTangentsDevice(const RdmBuildOptions& opt, const RdmBuildResult& built,
+                              const Tensor& ci, int64_t norb, int64_t nelecA, int64_t nelecB,
+                              const Tensor& h2e, const DeviceResources& res);
 
 }  // namespace nevpt2

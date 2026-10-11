@@ -28,6 +28,8 @@ Result<bool> parseCommonFlag(const std::span<const std::string_view> args, std::
     opt.rdm.fusedDigest = true;
   } else if (a == "--ozaki-check") {
     opt.rdm.ozakiCheck = true;
+  } else if (a == "--rdm-tangent") {
+    opt.rdmTangent = true;
   } else if (!hasValue) {
     return false;  // a valued flag at the end, or not ours: the app's usage
   } else if (a == "--golden") {
@@ -91,6 +93,14 @@ Status finalize(CommonOptions& opt, const std::string_view goldenHint) {
   // digest has no GEMM to fuse.
   if (opt.rdm.fusedDigest && !(opt.rdm.cublas || opt.rdm.blasDigest || opt.rdm.ozaki))
     return err_config("--fused-digest needs a GEMM digest (--blas-digest, --cublas or --ozaki)");
+  // The tangent build runs the emitted digest or the native-fp64 BLAS one; the
+  // approximate digests (--cublas, --ozaki) and the fused GEMM have no tangent
+  // path, so asking for both is a configuration error rather than something
+  // silently ignored.
+  if (opt.rdmTangent && (opt.rdm.cublas || opt.rdm.ozaki || opt.rdm.fusedDigest))
+    return err_config(
+        "--rdm-tangent runs the emitted digest or --blas-digest; not --cublas, --ozaki or "
+        "--fused-digest");
   return {};
 }
 
@@ -98,7 +108,7 @@ std::string usage(const std::string_view prog, const std::string_view goldenHint
                   const std::string_view extraFlags) {
   return std::format(
       "usage: {} --golden <{}> {}{}"
-      "[--tiles N] [--pc] [--profile] "
+      "[--tiles N] [--pc] [--profile] [--rdm-tangent] "
       "[--consume-emitted] [--blas-digest | --digest-emitted] [--fused-digest] "
       "[--cublas] [--mantissa-bits N] [--ozaki [--ozaki-pairs P] [--ozaki-check]] "
       "[--pool-threshold BYTES|max] "

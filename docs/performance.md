@@ -494,11 +494,60 @@ with a clean out-of-memory **during the RDM build**, at the
 | CAS(12,12), emitted or BLAS | RTX 3080 | **17** (16 and 15: out of memory) | `--tiles 40` |
 | CAS(12,12), `--cublas` | RTX 3080 | 17, but it declines there | `--tiles 80` (see `--cublas` above) |
 | CAS(10,12), default digest, SC or `--pc` | RTX 3080 / RX 9060 XT | 14 / 7 | `--tiles 40` |
+| CAS(10,10), `--rdm-tangent` | RTX 3080 | **2** (1 tile: out of memory) | `--tiles 3` |
+| CAS(10,12), `--rdm-tangent` | RTX 3080 | **25** (24 and 23: out of memory) | `--tiles 40` |
+| CAS(12,12), `--rdm-tangent` | RTX 3080 | **34** (33 and 32: out of memory) | `--tiles 40` |
 
 HIP's CAS(12,12) floor has not been measured. The per-tile working set
 (`R`, `L2`, `W`; the build prints it as `per-tile transition blocks`) is
 3423.7 MB at CAS(12,12) `--tiles 40` and 1647 MB at CAS(10,10) `--tiles 3`.
 `--ozaki` adds its digit planes on top (see above).
+
+**The `--rdm-tangent` floors are the tangent build's own** (the three rows
+above, measured 2026-10-11 on the RTX 3080 with the CUDA defaults — emitted
+digest, BLAS consume — through `nevpt2_demo --rdm-tangent`, with 1.3–1.6 GB
+of the card held by other processes, i.e. ~8.6 GB free). The tangent holds
+two `L2` and two `R` blocks per tile against the plain build's one each, so
+its working set is a little over twice as large and the floors are roughly
+twice the plain ones: 2 against 1 at CAS(10,10), 25 against 14 at
+CAS(10,12), 34 against 17 at CAS(12,12). Below the floor the failure is the
+same clean out-of-memory, at one of the two `L2` allocations in
+`buildRdmTangentsDevice` rather than in `buildRdmsDevice`. Its per-tile
+working set (printed as `per-tile transition blocks (R x2, L2 x2, W)`), with
+the pool's used high-water after that build beside it:
+
+| case | per-tile | pool used |
+|---|---:|---:|
+| CAS(10,10) `--tiles 3` | 3278.4 MB | 3333.4 MB |
+| CAS(10,12) `--tiles 25` (its floor) | 8021.6 MB | 8192.9 MB |
+| CAS(12,12) `--tiles 34` (its floor) | 8028.4 MB | 8203.5 MB |
+| CAS(12,12) `--tiles 40` | 6824.0 MB | 6999.2 MB |
+| CAS(12,12) `--tiles 60` | 4549.4 MB | 4724.5 MB |
+
+### The tangent RDM build (`--rdm-tangent`)
+
+`buildRdmTangentsDevice` (`nevpt2.rdm_build`'s `:tangent` partition) is the
+directional derivative of the dm3/f3ac/f3ca build with respect to the CI
+vector. It is the same pipeline with a second `produce` per tile and each
+digest run twice over the swapped operands, so it costs **about twice the
+plain build** and nothing else: RTX 3080, emitted digest, same run as the
+plain build it differentiates —
+
+| case | plain build | tangent build |
+|---|---:|---:|
+| CAS(10,10) `--tiles 3` | 1.07s | 2.00s |
+| CAS(12,12) `--tiles 40` | 39.39s (the median above) | 76.66s |
+| CAS(12,12) `--tiles 60` | — | 75.82s |
+
+There is no cheaper arrangement to look for: both cross terms of a bilinear
+form need both directions' `produce` output, which is also why the tile
+floors above are not the plain build's. `--rdm-tangent` also checks the
+result against twice the plain build (Euler's identity for a form quadratic
+in the CI vector): the largest relative gap is 2.2e-16 (`dm3_dot`) to
+2.8e-16 (`f3ca_dot`/`f3ac_dot`) at CAS(10,10) `--tiles 3`, i.e. rounding.
+The derivative itself is checked against a central finite difference of the
+plain build in the unit tier (docs/testing.md has the tier; the suites are
+`test/rdm/rdm_tangent_tests.cpp`).
 
 ### The memory pool
 
