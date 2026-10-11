@@ -9,23 +9,174 @@ and no Python or PySCF runs at run time.
 
 ## What "CASSCF input" means here, and why the golden state is CASCI
 
-A full CASSCF run is **not reproducible**. Its orbital optimiser converges to
-differently-rotated solutions of the same energy from run to run, so a NEVPT2
-energy built on a fresh CASSCF wanders by tens of millihartree between
-identical invocations, which is useless as a golden value. A **CASCI**
-diagonalisation on converged RHF orbitals is a plain linear-algebra step that
-reproduces bit for bit, given the two settings in "Reproducibility" below. So
-that is what `generate_golden.py` runs.
-
 What the demos read back is what any CASSCF/CASCI package hands a downstream
 NEVPT2 driver, however the orbitals were obtained: a CI vector, the cheap 1-
 and 2-RDMs, and a set of MO-integral blocks. The generator canonicalises the
 state exactly as `pyscf.mrpt.NEVPT.kernel` does, and stores PySCF's own
 per-class SC-NEVPT2 answer alongside.
 
+The orbitals the committed goldens use are **converged RHF** orbitals, and the
+state is a plain `mcscf.CASCI` diagonalisation on them: a linear-algebra step
+with no orbital optimiser anywhere in the chain, which reproduces bit for bit
+given the two settings in "Reproducibility" below. What rules a fresh CASSCF
+out of the committed files is **not** reproducibility — it reproduces too, and
+the next subsection is the measurement — but that its orbitals are a
+*different reference*, worth tens of millihartree in `E_corr`, and that
+optimising them costs a run.
+
 It never writes `dm3`, `f3ac` or `f3ca`. Producing those from the CI vector is
 the expensive step the GPU build exists for, and storing them would let the
 demo skip the part it is supposed to demonstrate.
+
+### A fresh CASSCF reproduces, measured
+
+**This section used to assert that a full CASSCF run is "not reproducible" and
+that a NEVPT2 energy built on one "wanders by tens of millihartree between
+identical invocations". Nothing ever measured that, and the measurement
+contradicts it: the run-to-run spread is exactly zero, in E_CASSCF, in
+E_corr(SC) and in the orbital-gradient norm alike.** The old figure is the
+size of a *different* effect — what changing the reference from CASCI to
+CASSCF costs, the last table below — not of any run-to-run wander. The claim
+is recorded here refuted rather than quietly dropped.
+
+`reference_data/casscf_repro_probe.py` is the measurement, and re-runs it. Per
+run it does, from scratch: RHF, a symmetry-adapted `mcscf.CASSCF`, the orbital
+gradient at the converged orbitals (`mc.get_grad`, i.e. the 2-norm of
+`mc1step.gen_g_hop(...)[0]`, which is what `conv_tol_grad` gates), a **fresh**
+deterministic `mcscf.CASCI` on those orbitals, and then the generator's own
+downstream unchanged — `NEVPT.canonicalize(cas_natorb=True)`,
+`_check_degeneracy`, `_pyscf_dms`, `_pyscf_per_class` — so `E_corr(SC)` is the
+number a golden built on these orbitals would carry.
+
+Conditions: PySCF 2.14.0, NumPy 2.5.3, Python 3.12.3 (the CUDA devcontainer's
+`/opt/venv`), **single-threaded** (forced by importing `generate_golden`), FCI
+`conv_tol` 1e-12, N2/cc-pVDZ at 1.1 Å in the auto-detected D2h, `mcscf.CASSCF`
+with `conv_tol` 1e-12 / `conv_tol_grad` 1e-8 and `max_cycle_macro` 200.
+**Offline CPU only: no card and no build are involved**, on a 24-core host
+used one thread at a time.
+
+Five back-to-back runs per case:
+
+| case | E_CASSCF | ΔE_CASSCF | E_corr(SC) | ΔE_corr | ‖g_orb‖ | \|E_CASCI − E_CASSCF\| | macro |
+|---|---|---|---|---|---|---|---|
+| CAS(4,4) | −109.046139074737 | **0** | −0.207071732083 | **0** | 5.9e-9 | 2.0e-13 | 5 |
+| CAS(10,10) | −109.129689184292 | **0** | −0.126182539677 | **0** | 2.5e-8 | 8.5e-14 | 200 (ceiling) |
+
+Every run of both cases agreed **bit for bit** — E_CASSCF, all eight class
+energies, the gradient norm, the CI vector — and so did three separate
+*processes* at CAS(4,4), compared at full `repr` precision. No run landed on a
+different stationary point: same active irreps, natural occupations identical,
+active- and core-subspace overlap singular values with run 0 of
+1.000000000000, `1 − |⟨ci|ci₀⟩| ≤ 2.3e-15`. `_check_degeneracy` passed on the
+CASSCF orbitals of both cases, and those orbitals came out symmetry-pure to
+1.7e-14 (so a `--mo-from` sidecar could re-derive `orbsym` from them). PySCF's
+`mc1step` is a deterministic algorithm on deterministic input; single-threaded,
+that is all it takes. The one thing it does *not* do at CAS(10,10) is converge
+to `conv_tol_grad` 1e-8 — it hits the 200-macro ceiling at ‖g_orb‖ 2.5e-8 —
+while `conv_tol_grad` 1e-7 **converges** in 16 macro iterations to the same
+energy, class energies and E_corr, bit for bit.
+
+**Different starting points, same solution.** Jitter and a different
+stationary point are different failure modes, and only the second would have
+justified the old claim, so the probe also starts the optimiser somewhere
+else: `--perturb EPS` rotates the RHF start by a random **same-irrep** (so
+symmetry-preserving) rotation of EPS rad, a different seed per run.
+
+| case | perturbation | runs | ΔE_CASSCF | ΔE_corr(SC) | ‖g_orb‖ reached | stationary point |
+|---|---|---|---|---|---|---|
+| CAS(4,4) | 0.1 rad | 5 | 7.8e-13 | 6.3e-9 | 8.7e-8 … 7.4e-7 | unchanged |
+| CAS(4,4) | 0.3 rad | 5 | 4.5e-13 | 1.6e-8 | 2.6e-7 … 9.6e-7 | unchanged |
+| CAS(10,10) | 0.1 rad | 5 | 4.1e-11 | 8.9e-8 | 5.2e-8 … 7.8e-7 | unchanged |
+
+"Unchanged" is the full fingerprint again: no active-orbital permutation, the
+same irrep labels, active-subspace overlap singular values ≥ 0.999999997 with
+run 0, natural occupations within 4.7e-7 and `1 − |⟨ci|ci₀⟩| ≤ 1.0e-11`. What
+differs between these runs is only how far the optimiser got before the macro
+ceiling, and E_corr tracks that residual gradient linearly (next subsection).
+That is the invariance argument holding rather than failing: with
+`cas_natorb` canonicalisation the active space is pinned, so a
+differently-rotated *route* to the same stationary point cannot move E_corr by
+more than the leftover gradient allows — ~1e-8, not ~1e-2.
+
+This measurement is about **one fixed geometry**. The separate statement in
+[`gradient-theory.md`](gradient-theory.md), §1.1 and §4.4 — that a *displaced*
+CASSCF would not give a finite difference a stable reference to be a gradient
+of — is a different claim about a different calculation, and nothing here
+measures it.
+
+### The `--casscf` / `--mo-from` gate thresholds
+
+How much a residual orbital gradient costs E_corr, measured at CAS(10,10) by
+loosening `conv_tol_grad` alone (ΔE_corr against the converged
+−0.126182539677):
+
+| `conv_tol_grad` | ‖g_orb‖ reached | macro | E_corr(SC) | ΔE_corr |
+|---|---|---|---|---|
+| 1e-8 | 2.521e-8 | 200 (ceiling) | −0.126182539677 | — |
+| 1e-7 | 2.521e-8 | 16 | −0.126182539677 | 0 |
+| 1e-6 | 3.372e-7 | 15 | −0.126182503816 | 3.6e-8 |
+| 1e-5 | 8.596e-7 | 17 | −0.126182428117 | 1.1e-7 |
+| 3.16e-4 (PySCF's default) | 2.759e-5 | 15 | −0.126178941415 | 3.6e-6 |
+
+so dE_corr/d‖g_orb‖ ≈ 0.11–0.13 Eh per unit norm at CAS(10,10), and 0.057 at
+CAS(4,4) (the same test there: ‖g_orb‖ 1.126e-5 costs 6.4e-7). And the scale
+of an input a gate must *refuse* — the RHF orbitals, which is what the
+committed goldens are built on:
+
+| orbitals | ‖g_orb‖ | E_CASCI | E_CASCI − E_CASSCF |
+|---|---|---|---|
+| CAS(4,4), RHF | 6.98e-2 | −109.017971290758 | +2.82e-2 |
+| CAS(10,10), RHF | 7.54e-2 | −109.048231643881 | +8.15e-2 |
+
+(both E_CASCI values are the committed goldens' own `e_casci`, which is what
+those files hold: CASCI on RHF orbitals.)
+
+**The two thresholds**, for the stationarity gate a committed-orbital sidecar
+needs:
+
+- **‖g_orb‖ ≤ 1e-6 — the proposal, confirmed**, as the refusal. It is the
+  2-norm of `mc.get_grad(mo, (casdm1, casdm2), eris)` at the sidecar's
+  orbitals, with the RDMs of a fresh CASCI on them. A properly converged run
+  lands 40× under it (2.5e-8 at CAS(10,10), 5.9e-9 at CAS(4,4)); RHF orbitals
+  are five decades over; a PySCF-default-converged CASSCF (2.8e-5) is over by
+  a decade, which it should be, since its E_corr is 3.6e-6 from converged —
+  well outside the 1e-7 the demos check to. The caveat the slope above forces:
+  1e-6 is a **stationarity** check, not an E_corr guarantee, because orbitals
+  accepted right *at* the boundary could sit ~1.2e-7 from the converged E_corr
+  at CAS(10,10). So pair it with `--casscf` optimising at `conv_tol` 1e-12 and
+  `conv_tol_grad` **1e-7** — which converges, unlike 1e-8, and reaches 2.5e-8
+  — and every sidecar this tree writes is 40× inside the gate with an E_corr
+  bit-identical to the converged one. Tightening the refusal itself to 1e-7
+  buys the E_corr guarantee but leaves only 4× of headroom over what
+  `mc1step` reaches at CAS(10,10), so it may refuse a larger case's
+  legitimate sidecar; 1e-6 plus the tight `--casscf` setting is the
+  recommendation.
+- **\|E_CASCI − E_CASSCF\| ≤ 1e-9 — the proposal, confirmed** with four
+  decades of headroom: measured 2.0e-13 (CAS(4,4)) and 8.5e-14 (CAS(10,10))
+  between a run's E_CASSCF and a fresh `mcscf.CASCI` on its orbitals at
+  `FCI_CONV_TOL`. It is a fingerprint check in energy form — a wrong basis,
+  geometry or active space shows up here by decades (RHF orbitals: 2.8e-2 and
+  8.1e-2) — and not a stationarity check, which is the other threshold's job.
+
+**Where "tens of millihartree" actually comes from.** The CASCI-vs-CASSCF
+*reference* difference, which is real, is the whole reason to want
+CASSCF-orbital goldens:
+
+| case | golden E_corr (CASCI on RHF) | E_corr on CASSCF orbitals | difference |
+|---|---|---|---|
+| CAS(4,4) | −0.234921016374 | −0.207071732083 | 2.78e-2 |
+| CAS(10,10) | −0.194651972215 | −0.126182539677 | 6.85e-2 |
+
+A golden built on CASSCF orbitals is a *different* number, not a noisier one.
+
+Re-measure all of the above with:
+
+```bash
+uv run python reference_data/casscf_repro_probe.py --ncas 4 --nelecas 4 --runs 5
+uv run python reference_data/casscf_repro_probe.py --runs 5               # CAS(10,10)
+uv run python reference_data/casscf_repro_probe.py --runs 5 --perturb 0.1
+uv run python reference_data/casscf_repro_probe.py --runs 1 --conv-tol-grad 1e-5
+```
 
 ## Regenerating the golden file
 
@@ -885,6 +1036,7 @@ not used.
 | `reference_data/block2_pc_probe.py` | rebuilds a golden's state with `generate_golden._build_state` (imported, not copied), checks it is bit-identical to the committed CI vector, and runs block2's `WickSCNEVPT2` and `WickICNEVPT2` (PC) on it: per-class energies, timings, peak RSS, and the PC linear-solve / metric conditioning (`--metric`). Writes no golden. See [`pc-nevpt2.md`](pc-nevpt2.md) |
 | `reference_data/nevpt2_numgrad.py` | the **numerical** nuclear gradient: displaced RHF → CASCI → SC-NEVPT2 runs (states built by `generate_golden._build_state`, imported) differenced and Richardson-extrapolated into a sidecar's `grad_num` / `grad_num_residual` / `grad_num_probed` / `grad_num_step`. Refuses a displacement whose detected point group — or whose core/active irrep selection — differs from the reference geometry's, rather than produce a number from a different active space. Writes no golden and no new sidecar; only the two gradient-validation cases carry its arrays (see "The numerical gradient" above) |
 | `reference_data/nevpt2_grad.py` | the **analytic** nuclear gradient: a `pyscf.grad.lagrange.Gradients` subclass that solves the CI and orbital Z-vector equations of [`gradient-theory.md`](gradient-theory.md), §2 and contracts them into a gradient, differentiating one scalar along a frozen orthonormal path. Source terms from PySCF by default, or from a `.gradsrc` dump (`--source dump`) when the GPU side grows one. Writes **nothing** unless `--out` is given, and never a committed file; `--casci-only` is its own validation (see "The analytic gradient" above) |
+| `reference_data/casscf_repro_probe.py` | the **CASSCF reproducibility** measurement: ≥5 back-to-back RHF → symmetry-adapted `mcscf.CASSCF` → orbital-gradient → fresh `mcscf.CASCI` → SC-NEVPT2 runs under `generate_golden`'s own settings (imported, so single-threaded with the same Davidson tolerance), reporting the spread of E_CASSCF / E_corr / ‖g_orb‖ and whether any run changed stationary point. `--perturb EPS` starts the optimiser from a random same-irrep rotation instead. Writes no golden; its output is what "A fresh CASSCF reproduces, measured" above quotes, and where the `--mo-from` gate thresholds come from |
 | `reference_data/pyscf_contract_time.py` | the CPU side of the head-to-head: reads a golden file and times PySCF's `NEVPTcontract` (`make_dm123` + `_contract4pdm` ×2) on the *same frozen CI vector* the demo reads, with no CASCI re-solve (see [`performance.md`](performance.md), "Head-to-head vs PySCF") |
 | `golden/n2_ccpvdz_cas1010.nevpt2gold` | the **default case**: CAS(10,10) on N2/cc-pVDZ |
 | `golden/n2_ccpvdz_cas1212.nevpt2gold` | CAS(12,12) on the same molecule, the scaling case (see [`performance.md`](performance.md), "Scaling with active-space size"). `slow`-labelled; run with `--tiles 40`. Carries **no** PC fields: its PC metric is ungapped (see "PC fields" above) |
