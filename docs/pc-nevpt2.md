@@ -718,8 +718,11 @@ is why their ratios read 4.000 and the shape criterion is the right gate. Past
 the difference quotient measures nothing; CAS(10,12) was not swept (each step
 is two RDM builds at 12 orbitals, see the cost below).
 
-The gate is 1e-8 on the Richardson difference, 4 ± 0.5 on every ratio and
-1e-9 on the two exact checks, so each has two decades or more of margin. The
+The gate is 1e-8 on the Richardson difference, 4 ± 0.5 on every ratio — and
+those ratios a run of at least two, with the gap check's record present and
+passing at every displaced state ([`testing.md`](testing.md), "The PC
+tangent against a finite difference") — and 1e-9 on the two exact checks, so
+each has two decades or more of margin. The
 `|E - pcEnergiesDevice|` column is why the tangent partition may build each
 class's `S` and `K` itself: the two transcriptions agree to rounding, and a
 drift between them fails the entry rather than passing quietly.

@@ -272,7 +272,7 @@ against the other. They read the same reference files, and each prints its own
 | `nevpt2_demo --sc-tangent` | — | the SC total's derivative with respect to the CI vector |
 | `nevpt2_demo --gradient-source` | — | the CI source term `y_I = dE/dc_I`, against that tangent by duality |
 | `nevpt2_sc_pseudodensity` | `--kappa-act` | the SC pseudodensity identities; with `--kappa-act`, the active–active orbital source term instead |
-| `nevpt2_pc_tangent` | `--fd-steps N` (2..8, default 4), `--fd-start-pow N` (1..30, default 12: the first step is `2^-N`) | PC's derivative with respect to the CI vector, against a Richardson-verified finite difference |
+| `nevpt2_pc_tangent` | `--fd-steps N` (3..8, default 4), `--fd-start-pow N` (1..30, default 12: the first step is `2^-N`) | PC's derivative with respect to the CI vector, against a Richardson-verified finite difference |
 
 Everything that builds a *tangent* — the first three rows and
 `nevpt2_pc_tangent` — runs the emitted or the native-fp64 BLAS digest;

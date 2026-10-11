@@ -500,6 +500,8 @@ avoids. So each entry displaces the state and re-solves:
 | each class energy, from the tangent path's own `S` and `K` | `pcEnergiesDevice`'s answer for the same state | 1e-9 |
 | `Edot(c, c)`, five classes (`Sr`, `Si`, `Srsi`, `Srs`, `Sir`) | `2 E`, exact: those classes are homogeneous of degree 2 in the CI vector | 1e-9, scaled by `max(1, \|2E\|)` — so absolute at these class energies |
 | the central difference's error at each `h` | 4× the next one's — second order | 4 ± 0.5 |
+| those ratios as a ladder | a **run** of at least two fourfold halvings (`kPcMinFourfoldRun`), so three steps at least: no steps, or one halving, FAILS | — |
+| every displaced state `c ± h u` | the PC gap check's own record of that state (the smallest `S` gap over the classes), at least `PC_MIN_GAP`; a state with no record FAILS | 1e3 |
 | the Richardson extrapolation of the two finest steps | the analytic `Edot` | 1e-8 |
 | a class refused by the gap or denominator check | nothing: the entry FAILS, and no derivative is reported for it | — |
 
@@ -532,7 +534,9 @@ einsums, GEMMs and second solve. The host halves are card-free: the
 per-tuple arithmetic is `test/energy_finish/` (`pcCoefficients`,
 `pcQuadForm`, `tangentSingle`) and the gate itself `test/pc_tangent/`, which
 locks in that a refused class fails rather than reading as a zero
-derivative.
+derivative, and (`PcTangentLadderTests`) that the difference is gated on a
+run and that a displaced state with no conditioning record fails — the two
+rows added for "Residual-independent checks of the gradient path" below.
 
 ## The CI source term's forward-reverse duality
 
@@ -683,6 +687,13 @@ cite this table for the comparison. All five `PASS`:
 | **max \|g − grad_num\|** | **5.3e-9** | **7.6e-8** | **8.3e-8** | **2.5e-7** | **1.5e-8** |
 | largest component (Eh/bohr) | −0.0072358476 (Li z) | +0.0266017127 (C2 y) | +0.0265842789 (C2 y) | +0.0448803372 (N z) | +0.0452520933 (N z) |
 
+**That table is the `grad_num` line's verdict; each run now prints a second
+one.** The residual-independent checks (below) pass on LiF, acrolein SC and
+N2 PC, and **fail on N2 SC**: its quotients at the shipped `NUC_STEP` and
+`CI_STEP` are each ~1e-6 from converged, and its 2.5e-7 is two such errors
+partly cancelling — "N2 CAS(4,4) SC fails, and that is the finding" has the
+numbers.
+
 N2's own free checks, the two this file owns: `|g|` on the two
 zero-by-symmetry axes is 9.7e-13 (SC and PC alike) and the gradient summed
 over the two atoms is ≤6.2e-11 per column.
@@ -767,6 +778,9 @@ necessary and not sufficient:** at 1e-4 and above the lifted modes clear the
 cut outright, the gap looks healthy, and only the comparison shows the error.
 So `CI_STEP_PC` is a measured constant and not "whatever the guard accepts" —
 1e-7 is where the quotient has converged, and 1e-8 buys nothing (1.6e-8).
+(Since #70 the guard also holds every displaced point's rank to the reference
+state's, and that does see the 1e-4 plateau — "Residual-independent checks of
+the gradient path", error 5.)
 
 **SC's ladder is the ordinary one**, which is the contrast: 5.3e-5 at 1e-3
 (a FAIL, on plain truncation), 2.5e-7 at 1e-4, 7.7e-7 at 1e-5 — truncation
@@ -910,6 +924,152 @@ So this is a **manual gate**, like the sanitizer tier and the cross-backend
 check: the commands are above, they print `PASS:`/`FAIL:` and set an exit
 status, and the protocol is the same one "No CI, and the local gate" states —
 run them and say what they printed.
+
+## Residual-independent checks of the gradient path
+
+**A converged residual is not evidence that a gradient is right**, and the
+gradient work proved it five times: every solve reported a residual at
+round-off while the gradient was wrong by a margin a user would have shipped
+(#40's four, [`reference-data.md`](reference-data.md), "The analytic
+gradient"; #41's one, "The PC CI source term's step is a first-order trap"
+above). Since #70 every solve and every difference quotient of the gradient
+path also has a check that **reads no residual**, and a failing one fails the
+run.
+
+**In `reference_data/nevpt2_grad.py`** (offline, so this is the same manual
+gate as the section above, and needs no card): eleven checks after the
+multipliers and the AO contraction, printed as their own `PASS:`/`FAIL:` line
+beside the `grad_num` one, exit 1 on a failure, `--show-ladders` for every
+table.
+
+| check | what it holds | the solve or quotient it covers |
+|---|---|---|
+| projection of `y` | `\|c·y\| <= 1e-6`: `y` IS the projected gradient | the `y_I` quotients |
+| projection of `z` | `\|c·z\| <= 1e-6`: `z` IS projected | the CI Z-vector solve |
+| `y` linearity, two seeds | `<u, y>` against a step ladder of `E_corr` along `u`, through `Functional.evaluate` — not through `corr_at_ci`, the route `y` was built on | the `y_I` quotients, `CI_STEP` / `CI_STEP_PC` |
+| CI stationarity, two seeds | the Lagrangian's CI part, laddered along `u` at the solved multipliers, has zero slope | the CI Z-vector solve and the CI/(O2) coupling |
+| orbital stationarity, two seeds | the Lagrangian at fixed `c`, laddered along `C exp(t kappa)` over every non-gauge rotation — the set derived from the RHF occupied projector, **not** the solve's own `kappa_pairs` | the orbital Z-vector solve, `KAPPA_STEP`'s `A`, `M` and `Q` |
+| nuclear ladder, two seeds | `Phi` laddered along a totally symmetric displacement against `<d, g>` | `NUC_STEP`'s quotients and their Richardson pass |
+| PC guard at every displaced CI vector | a ledger: every PC energy at a CI vector other than the state's own ran the conditioning guard (counted in a different place from the evaluation), and no guarded point **kept a mode the reference state drops** (a block's smallest kept singular value under `1e-2` of the reference's) | every displaced PC quantity; orbital and nuclear ladder rungs are guarded too, as a sample |
+
+**The ladder rule** (`step_ladder`, the same rule as the C++ checks'
+`nevpt2::longestFourfoldRun`, which `test/gradient_plan/`'s
+`FourfoldRunTests` pin card-free): central differences at `h = 2^-k`, the
+change between neighbouring rungs must fall fourfold — ratio in (3.2, 4.8) —
+for at least **3 consecutive halvings**; the **finest** such run is used, and
+the Richardson extrapolant at its finest pair must sit within **1e-6** (Eh
+per unit direction — `GRAD_NUM_TOL`'s value) of what is being checked. The
+run is read off the ladder alone, so it says only that the quotient has
+converged; comparing a Richardson value rather than the sweep's smallest
+`|fd − ref|` is what stops a wrong reference passing on the rung where `c h²`
+happens to cancel its error. The directions are seeded, orthogonal to the
+state, spin-adapted and totally symmetric (`ci_check_direction`,
+`kappa_check_direction`, `nuclear_check_direction` say why each has to be).
+
+### Each of the five errors, reintroduced
+
+One at a time, in a scratch copy of the script (none of it committed),
+single-threaded on the CUDA devcontainer's CPU (the RTX 3080 box), PySCF
+2.14.0, block2 0.5.4. Errors 1–4 on LiF CAS(4,6) SC, whose unmodified run
+passes all eleven; error 5 on N2 CAS(4,4) PC, likewise. Every residual stayed
+at round-off and every one of them was caught:
+
+| error | caught by (value; the gate is 1e-6) | residuals at the time | gradient vs `grad_num` |
+|---|---|---|---|
+| 1. act_O–act_V taken for a gauge (#40) | orbital stationarity: 2.4e-5 and 2.2e-4 | CI 1.4e-12, orbital 2.2e-15 | 4.3e-4 |
+| 2. `z` solved projected but not projected (#40) | projection of `z`: 0.335 | CI 1.4e-12, orbital 1.0e-15 | 3.9e-3 |
+| 3. `y` as a componentwise quotient (#40) | projection of `y`: 2.04; `y` linearity 8.7e-5 / 1.5e-4; CI stationarity the same | CI 1.4e-12, orbital 1.0e-15 | 4.1e-6 |
+| 4. `y` without the orbital energies' CI derivative (#40) | `y` linearity 6.1e-3 / 4.8e-3; CI stationarity the same | CI 1.3e-12, orbital 1.1e-15 | 7.9e-5 |
+| 5. the PC CI quotient at SC's step, 1e-4 (#41) | `y` linearity 1.8e-3 / 1.6e-3; CI stationarity the same; projection of `y` 4.6e-4; the guard's rank check — 44 guarded points kept a mode the reference drops, worst `iabcpqg*` at 5.4e-12 against the reference's 9.8e-4 | CI 1.5e-15, orbital 8.7e-16 | 2.5e-4 |
+
+Error 3 is the one the gradient itself barely shows on LiF (4.1e-6), and
+error 5 is the one #41 had to find by comparison: its gap guard passed (the
+lifted modes clear the cut outright at 1e-4), and the new rank check is what
+sees it at the guard. A sixth scratch patch — the PC guard skipped at
+displaced CI vectors, everything else intact — leaves the gradient right
+(1.5e-8) and fails only the ledger: `guarded 0 of 88 displaced CI vectors`.
+
+### What the committed cases come out at
+
+Same machine and versions. Worst `|Richardson − ref|` over each pair of
+seeds, against the 1e-6 gate:
+
+| | LiF CAS(4,6) SC | acrolein CAS(6,5) SC | N2 CAS(4,4) PC | N2 CAS(4,4) SC |
+|---|---|---|---|---|
+| projection of `y` / of `z` | 4.4e-11 / 4.0e-19 | 1.9e-10 / 5.7e-19 | 1.0e-10 / 5.4e-19 | **1.1e-6** / 5.4e-19 |
+| `y` linearity | 1.2e-9 | 6.6e-9 | 2.2e-10 | **1.2e-6** (8.0e-7) |
+| CI stationarity | 1.2e-9 | 6.6e-9 | 2.3e-10 | **1.2e-6** (8.0e-7) |
+| orbital stationarity | 7.1e-8 | 2.2e-7 | 9.6e-9 | 5.8e-7 |
+| nuclear ladder | 1.4e-9 | 1.0e-8 | 1.0e-9 | **2.5e-6** |
+| PC guard | — | — | 88 of 88 guarded, 116 rungs sampled, rank unchanged, smallest gap 3.9e9 | — |
+| verdict | PASS, 11 of 11 | PASS, 11 of 11 | PASS, 11 of 11 | **FAIL, 6 of 11** |
+| the checks' own wall | 15 s | 52 s | 36 s | 3 s |
+
+Acrolein SC was run without `--grad-num` (its sidecar is gitignored), so only its checks were gated. Acrolein PC was not re-run for this: it is the 6.3 h pair above.
+
+### N2 CAS(4,4) SC fails, and that is the finding
+
+N2 SC is the run "What is run" above records at **2.5e-7** from `grad_num`.
+Its ladders say that number is not converged on the steps it was taken at:
+
+- **`NUC_STEP` (0.0025 bohr).** Along the symmetric stretch the frozen path's
+  `Phi` converges only slowly — ratios 2.9, 3.2, 3.7, 4.2 down to `2^-16`
+  bohr, where LiF's sits at 4.0 ± 0.1 from `2^-5` — and its converged slope
+  is **2.5e-6** from the gradient's Richardson pair at 0.0025 / 0.00125. The
+  SC energy has a near-singularity on N2's frozen path, within ~1e-4 bohr; the
+  CASCI energy alone on the same path (one atom along `z`) is clean, ratio
+  4.00, and the
+  re-converged energy `grad_num` differences is too — `nevpt2_numgrad.py` at
+  a 20× smaller step moves `grad_num` by 1.7e-8.
+- **`CI_STEP` (1e-4).** `y` is **1.2e-6** off its own ladder (seed 70; 8.0e-7
+  for seed 2026), and `|c·y|` is 1.1e-6 where LiF's is 4.4e-11: the SC energy
+  along a CI direction has a near-pole at `h ~ 2^-7`, and 1e-4 is not far
+  enough inside it.
+
+Rerunning the same case with the steps the ladders converge at (scratch
+copies again, not committed) makes the point: `NUC_STEP = 2^-13` alone moves
+the gradient to **1.5e-6** from `grad_num` (a FAIL), `CI_STEP = 2^-17` alone
+to 7.8e-7, and both plus `KAPPA_STEP = 2^-17` to **4.4e-8** — with all
+eleven checks passing (the orbital ladder closest to its gate, at 8.2e-7: on
+N2 it is not cleanly fourfold below `2^-11` either). So the shipped 2.5e-7 was
+two step errors of ~1e-6 partly cancelling, and the converged answer agrees
+with `grad_num` better than the shipped one does. **The steps are not changed here**: that
+moves every recorded gradient in this section, acrolein PC's 6.3 h run
+included, and is its own piece of work. Until then `nevpt2_grad.py --case
+n2_ccpvdz_cas44` exits 1 on these checks while its `grad_num` line reads
+`PASS` — which is the residual-independent checks doing what they are for.
+
+### A ladder can converge, cleanly, to the wrong branch
+
+The PC CI ladders walk a **one-electron** spin-adapted direction (`sum w_pq
+E_pq |c>` over the pairs the state's `dm1` couples — the C++ PC tangent's
+`pcTangentDirection`) and start at `2^-11`, and neither is a free choice.
+Measured on N2 CAS(4,4) PC:
+
+- along a **two-electron** spin-adapted, totally symmetric direction, one of
+  `Sir`'s null modes (`irabpq1`) lifts as `h²` — smallest kept singular value
+  4.9e-8 at `2^-10`, 1.2e-8 at `2^-11` — and stays above lstsq's cut over the
+  whole ladder. The ladder then converges **cleanly, ratio 4.00 for ten
+  halvings**, to a value **3.04e-6** from `<u, y>`, with the gap guard
+  passing at every rung (gap 8e3 to 1e9): #41's trap, met by a ladder. The
+  rank check is what catches it; the gap check cannot.
+- along the one-electron direction the mode lifts as `h⁴` — kept at
+  1.4e-9 at `2^-5`, astride the cut at `2^-10` (the gap guard refuses one
+  seed there, gap 8.1e2) and dropped from `2^-11` down. There the ladder
+  agrees with `<u, y>` to **2.2e-10**.
+
+### The C++ side
+
+The same rule, shared: `nevpt2::longestFourfoldRun` (`nevpt2.gradient_plan`)
+is now what the SC tangent (`--sc-tangent`, a run of 4), the active-rotation
+and full orbital source terms (`--kappa-act`, `--kappa-full`, runs of 3) and
+the PC tangent gate on. The PC tangent's gate (above) gained the two rows the
+issue asked for: a **run** of at least two fourfold halvings — so a check of
+one halving, or of none, no longer passes on its exact identities alone, and
+`--fd-steps` is 3..8 — and the gap check's record at **every** displaced
+state. Both are host logic, pinned card-free in `test/pc_tangent/`
+(`PcTangentLadderTests`) and `test/gradient_plan/` (`FourfoldRunTests`);
+the three `nevpt2_pc_tangent_*` entries pass under the new gate unchanged.
 
 ## Sanitizers
 

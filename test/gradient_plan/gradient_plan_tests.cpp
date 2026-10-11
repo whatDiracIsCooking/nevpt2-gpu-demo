@@ -31,6 +31,10 @@
 //                             homogeneous-vs-affine distinction (#32)
 //   CiSourceHostTests         ciSourceAddInto / ciSourceSymmetrized /
 //                             ciSourceFolded's basic shape (#63 has the rest)
+//   FourfoldRunTests          longestFourfoldRun, the step-ladder rule: a run
+//                             of halvings inside the open window, broken by a
+//                             wild row or a zero, the longest (then coarsest)
+//                             reported (#70)
 //   GradientPlanDeathTest     a promotion of a non-two-electron slot, and a
 //                             shape mismatch in ciSourceAddInto, abort
 //
@@ -707,6 +711,67 @@ TEST(CiSourceHostTests, FoldOnOneOrbital) {
   const Tensor g2 = Tensor::fromFlat({1, 1, 1, 1}, {4});
   const Tensor g3 = Tensor::fromFlat({1, 1, 1, 1, 1, 1}, {1});
   EXPECT_EQ(ciSourceFolded(g1, g2, g3, 2)(0, 0, 0, 0, 0, 0), 1.0 + 4.0 / 2 + 8.0 / 4);
+}
+
+// ---------------------------------------------------------------------------
+// FourfoldRunTests -- the step-ladder rule every finite-difference check of
+// the gradient path gates on (and reference_data/nevpt2_grad.py's
+// fourfold_runs by the same definition). Dyadic inputs, so every ratio is
+// exact.
+// ---------------------------------------------------------------------------
+
+TEST(FourfoldRunTests, AnExactSecondOrderLadderIsOneRun) {
+  const std::vector<double> err{1.0, 0.25, 0.0625, 0.015625};
+  const FourfoldRun r = longestFourfoldRun(err);
+  EXPECT_EQ(r.length, 3);
+  EXPECT_EQ(r.end, 3u);
+}
+
+TEST(FourfoldRunTests, NoLadderHasNoRun) {
+  EXPECT_EQ(longestFourfoldRun(std::vector<double>{}).length, 0);
+  EXPECT_EQ(longestFourfoldRun(std::vector<double>{1.0}).length, 0);
+}
+
+TEST(FourfoldRunTests, FirstOrderAndFourthOrderAreNotFourfold) {
+  // 2 per halving is a first-order error -- #41's plateau, or worse, a
+  // constant -- and 16 is fourth order; neither is the truncation regime the
+  // window recognises.
+  EXPECT_EQ(longestFourfoldRun(std::vector<double>{8.0, 4.0, 2.0, 1.0}).length, 0);
+  EXPECT_EQ(longestFourfoldRun(std::vector<double>{1.0, 1.0, 1.0}).length, 0);
+  EXPECT_EQ(longestFourfoldRun(std::vector<double>{256.0, 16.0, 1.0}).length, 0);
+}
+
+TEST(FourfoldRunTests, AWildRowBreaksTheRunAndTheLongestRunWins) {
+  // A run of two, a wild row (#32's cancelling denominator), then a run of
+  // three: the longest is reported, ending on its finest rung.
+  const std::vector<double> err{64.0, 16.0, 4.0, 512.0, 128.0, 32.0, 8.0, 8.0};
+  const FourfoldRun r = longestFourfoldRun(err);
+  EXPECT_EQ(r.length, 3);
+  EXPECT_EQ(r.end, 6u);
+}
+
+TEST(FourfoldRunTests, TiesGoToTheCoarserRun) {
+  const std::vector<double> err{16.0, 4.0, 1.0, 100.0, 25.0, 6.25};
+  const FourfoldRun r = longestFourfoldRun(err);
+  EXPECT_EQ(r.length, 2);
+  EXPECT_EQ(r.end, 2u);
+}
+
+TEST(FourfoldRunTests, AZeroErrorHasNoRatioAndBreaksTheRun) {
+  const std::vector<double> err{16.0, 4.0, 0.0, 0.0};
+  EXPECT_EQ(longestFourfoldRun(err).length, 1);
+}
+
+TEST(FourfoldRunTests, TheWindowIsOpenAndAdjustable) {
+  // The default window is (3.2, 4.8), open at both ends: a ratio of exactly
+  // 5 is out, 4.5 is in; the PC tangent's narrower 4 +- 0.5 excludes 4.5 too.
+  const std::vector<double> five{5.0, 1.0};
+  const std::vector<double> fourHalf{4.5, 1.0};
+  EXPECT_EQ(longestFourfoldRun(five).length, 0);
+  EXPECT_EQ(longestFourfoldRun(fourHalf).length, 1);
+  EXPECT_EQ(longestFourfoldRun(fourHalf, 3.5, 4.5).length, 0);
+  EXPECT_DOUBLE_EQ(kFourfoldLow, 3.2);
+  EXPECT_DOUBLE_EQ(kFourfoldHigh, 4.8);
 }
 
 // ---------------------------------------------------------------------------

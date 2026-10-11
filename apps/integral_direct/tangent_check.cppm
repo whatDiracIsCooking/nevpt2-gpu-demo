@@ -75,6 +75,7 @@ export module nevpt2.app.integral_direct:tangent_check;
 import std;
 import nevpt2.energy;  // energiesDevice / energiesTangentDevice and their inputs
 import nevpt2.golden;
+import nevpt2.gradient_plan;  // longestFourfoldRun: the step-ladder rule
 import nevpt2.rdm_build;
 import nevpt2.rdm_host_dm;
 
@@ -101,11 +102,8 @@ constexpr double kTangentExactTol = 1e-10;
 // a factor of ~50 (docs/testing.md, "The SC tangent's finite-difference
 // cross-check").
 constexpr double kTangentFdTol = 1e-6;
-// The Richardson window: while truncation dominates, halving h cuts the error
-// fourfold. A little slack each way -- the coarsest steps still carry a
-// fourth-order term, and the finest are approaching the round-off floor.
-constexpr double kRichardsonLow = 3.2;
-constexpr double kRichardsonHigh = 4.8;
+// The Richardson window is nevpt2.gradient_plan's kFourfoldLow / kFourfoldHigh,
+// the one every finite-difference check of the gradient path shares.
 // How many CONSECUTIVE halvings must show that ratio somewhere in the sweep.
 // Not the whole table: differencing the energy at a small displacement has an
 // intrinsic hazard that can spoil an individual step. A perturber that is
@@ -346,20 +344,12 @@ nevpt2::Result<bool> checkScTangent(const nevpt2::GoldenFile& g,
 
   // Second order: the longest run of consecutive halvings that cut the error
   // fourfold (see kRichardsonRun for why a run and not the whole table).
-  int run = 0, bestRun = 0, bestRunEnd = 0;
-  for (std::size_t i = 1; i < kStepCount; ++i) {
-    const double ratio = err[i] > 0.0 ? err[i - 1] / err[i] : 0.0;
-    run = (ratio > kRichardsonLow && ratio < kRichardsonHigh) ? run + 1 : 0;
-    if (run > bestRun) {
-      bestRun = run;
-      bestRunEnd = static_cast<int>(i);
-    }
-  }
-  const bool richardson = bestRun >= kRichardsonRun;
+  const nevpt2::FourfoldRun run = nevpt2::longestFourfoldRun(err);
+  const bool richardson = run.length >= kRichardsonRun;
   ok = ok && richardson;
   std::printf("  Richardson: %d consecutive halvings cut the error fourfold (ratio in [%.1f, "
               "%.1f]), ending at h = %.3e -- %s, %d needed\n",
-              bestRun, kRichardsonLow, kRichardsonHigh, step[static_cast<std::size_t>(bestRunEnd)],
+              run.length, nevpt2::kFourfoldLow, nevpt2::kFourfoldHigh, step[run.end],
               richardson ? "ok" : "NOT ENOUGH", kRichardsonRun);
 
   std::printf("\n%s: the SC tangent matches Euler and the exact norm increment to %.0e, and "

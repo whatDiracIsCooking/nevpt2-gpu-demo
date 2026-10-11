@@ -16,6 +16,11 @@
 //                         only reported on the other three; a Richardson ratio
 //                         away from 4, or an extrapolation away from the
 //                         analytic tangent, fails
+//   PcTangentLadderTests  the finite difference is gated on a RUN of fourfold
+//                         halvings (kPcMinFourfoldRun), so no steps or a
+//                         single halving fails; and the PC conditioning guard
+//                         must have run, and passed, at every displaced state
+//                         -- a state with no gap recorded fails (#70)
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
 // textual std #include before any import.
@@ -52,25 +57,28 @@ PcTangentCheck cleanCheck() {
     c.totalRef += k.result.energy;
     c.edotTotal += k.edot;
   }
-  // Two steps whose errors sit at 4 e and e, so the Richardson combination is
-  // the tangent exactly: fd = edot + err with err = 4e then e gives
-  // (4 (edot + e) - (edot + 4 e)) / 3 = edot.
+  // Three steps whose errors sit at 16 e, 4 e and e -- a run of two fourfold
+  // halvings, the fewest the gate accepts (kPcMinFourfoldRun) -- so the
+  // Richardson combination of the two finest is the tangent exactly:
+  // fd = edot + err with err = 4e then e gives
+  // (4 (edot + e) - (edot + 4 e)) / 3 = edot. Every displaced state carries
+  // the conditioning guard's record of a healthy gap.
   const double e = 1e-7;
-  PcFdStep coarse;
-  coarse.h = 1.0 / 1024.0;
-  coarse.fdTotal = c.edotTotal + 4.0 * e;
-  coarse.err = 4.0 * e;
-  coarse.ratio = 0.0;
-  PcFdStep fine;
-  fine.h = 1.0 / 2048.0;
-  fine.fdTotal = c.edotTotal + e;
-  fine.err = e;
-  fine.ratio = 4.0;
-  for (int i = 0; i < 8; ++i) {
-    coarse.fdClass[static_cast<std::size_t>(i)] = c.classes[static_cast<std::size_t>(i)].edot;
-    fine.fdClass[static_cast<std::size_t>(i)] = c.classes[static_cast<std::size_t>(i)].edot;
-  }
-  c.steps = {coarse, fine};
+  const auto step = [&](double h, double err, double ratio) {
+    PcFdStep s;
+    s.h = h;
+    s.fdTotal = c.edotTotal + err;
+    s.err = err;
+    s.ratio = ratio;
+    s.displacedGap = {1e6, 2e6};
+    for (int i = 0; i < 8; ++i)
+      s.fdClass[static_cast<std::size_t>(i)] = c.classes[static_cast<std::size_t>(i)].edot;
+    return s;
+  };
+  const PcFdStep coarsest = step(1.0 / 512.0, 16.0 * e, 0.0);
+  const PcFdStep coarse = step(1.0 / 1024.0, 4.0 * e, 4.0);
+  const PcFdStep fine = step(1.0 / 2048.0, e, 4.0);
+  c.steps = {coarsest, coarse, fine};
   c.richardson = (4.0 * fine.fdTotal - coarse.fdTotal) / 3.0;
   c.richardsonErr = std::fabs(c.richardson - c.edotTotal);
   c.allDone = true;
@@ -144,14 +152,53 @@ TEST(PcTangentReportTests, AnExtrapolationAwayFromTheTangentFails) {
   EXPECT_FALSE(gate(c));
 }
 
-TEST(PcTangentReportTests, NoStepsLeavesOnlyTheExactChecks) {
-  // With no finite difference run, the Richardson gate has nothing to say and
-  // the exact checks still do: a clean check passes, a refused class does not.
+// --- PcTangentLadderTests ------------------------------------------------------
+
+TEST(PcTangentLadderTests, NoStepsIsNotALadder) {
+  // A finite difference gated on no step at all has measured nothing: the
+  // exact checks passing is not enough.
   PcTangentCheck c = cleanCheck();
   c.steps.clear();
-  EXPECT_TRUE(gate(c));
-  c.classes[0].result.status = PcStatus::Refused;
   EXPECT_FALSE(gate(c));
+}
+
+TEST(PcTangentLadderTests, OneHalvingIsNotARun) {
+  // Two steps make one ratio -- a single halving that happens to be 4 is not
+  // an order of convergence (#41's error was invisible at any one step).
+  PcTangentCheck c = cleanCheck();
+  c.steps.erase(c.steps.begin());
+  c.steps.front().ratio = 0.0;
+  ASSERT_EQ(c.steps.size(), 2u);
+  EXPECT_FALSE(gate(c));
+}
+
+TEST(PcTangentLadderTests, TheRunIsReadOffTheErrorsNotTheRatioField) {
+  // The run is recomputed from the errors themselves, so a step whose stored
+  // ratio says 4 while its error did not fall fourfold still breaks it.
+  PcTangentCheck c = cleanCheck();
+  c.steps[1].err = c.steps[0].err;  // no fall across the first halving
+  EXPECT_FALSE(gate(c));
+}
+
+TEST(PcTangentLadderTests, ADisplacedStateWithNoGuardRecordFails) {
+  // The conditioning guard must have run at EVERY displaced state; a state
+  // that skipped it (no gap recorded) fails the gate, whichever step and
+  // whichever side of it.
+  for (std::size_t s = 0; s < 3; ++s)
+    for (std::size_t side = 0; side < 2; ++side) {
+      PcTangentCheck c = cleanCheck();
+      c.steps[s].displacedGap[side] = 0.0;
+      EXPECT_FALSE(gate(c)) << "step " << s << " side " << side;
+    }
+}
+
+TEST(PcTangentLadderTests, ADisplacedGapBelowTheFloorFails) {
+  PcTangentCheck c = cleanCheck();
+  c.steps[2].displacedGap[1] = 0.5 * PC_MIN_GAP;
+  EXPECT_FALSE(gate(c));
+  PcTangentCheck ok = cleanCheck();
+  ok.steps[2].displacedGap[1] = PC_MIN_GAP;
+  EXPECT_TRUE(gate(ok));
 }
 
 }  // namespace nevpt2::test::pc_tangent

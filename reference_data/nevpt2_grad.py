@@ -226,6 +226,23 @@ Three further checks are free and always reported:
   re-solves nothing, so unlike ``nevpt2_numgrad.py`` it has no reason to skip
   them -- and reported as the free check it is.
 
+And one set that is **gated**, beside the ``grad_num`` comparison and
+independent of it: the **residual-independent checks**. Every residual this
+file prints has read round-off on a wrong answer -- five times, each one a
+gradient a user would have shipped -- so every solve and every difference quotient
+also gets a check that reads no residual: the projection identities on ``y``
+and ``z``; ``y``'s linearity and the CI and orbital stationarity of the
+Lagrangian, each along a seeded pair of directions through
+:meth:`Functional.evaluate` rather than through the code under test; a
+**step ladder** (a run of fourfold halvings, never one step) behind every
+quotient constant -- ``CI_STEP``, ``CI_STEP_PC``, ``KAPPA_STEP``,
+``NUC_STEP``; and the PC conditioning guard, rank included, at every
+displaced CI vector, with a ledger that fails the run if one skipped it.
+They print their own ``PASS:``/``FAIL:`` line and a failure exits 1 like the
+``grad_num`` gate's. Which check catches which of the five errors, with the
+numbers, and what each comes out at on the committed cases: docs/testing.md,
+"Residual-independent checks of the gradient path".
+
 THE SOURCE TERMS
 ----------------
 
@@ -329,12 +346,20 @@ CASES = ngrad.CASES
 #: dimensionless ``kappa``. A Givens rotation by ``h`` is exact to machine
 #: precision, so the only errors are the quotient's own ``O(h^2)`` truncation
 #: and the energies' round-off divided by ``2h``; 1e-4 sits near the minimum
-#: of that pair for an ``E_corr`` converged to ~1e-12.
+#: of that pair for an ``E_corr`` converged to ~1e-12. Gated, every run, by
+#: the orbital-stationarity ladder (:func:`check_orbital_stationarity`); what
+#: it measures per case is docs/testing.md, "Residual-independent checks of
+#: the gradient path".
 KAPPA_STEP = 1e-4
 
 #: The step for the ``y_I = dE_corr/dc_I`` difference quotients. The RDMs are
 #: exactly quadratic in the CI vector, so ``E_corr`` is a smooth rational
-#: function of it and the same reasoning applies.
+#: function of it and the same reasoning applies -- measured as a ladder in
+#: docs/testing.md, "The PC CI source term's step is a first-order trap", and
+#: gated every run by the ``y``-linearity ladder
+#: (:func:`check_ci_source_linearity`), which finds it unconverged on N2
+#: CAS(4,4) SC (docs/testing.md, "Residual-independent checks of the gradient
+#: path").
 CI_STEP = 1e-4
 
 #: The same step for ``--pc``, and it is **three decades smaller, for a
@@ -360,16 +385,24 @@ CI_STEP = 1e-4
 #: So the step is chosen to keep the lifted modes **below** the cut, and
 #: ``generate_golden._check_pc_conditioning`` -- the guard that gates the
 #: golden's own PC fields -- is what says whether they are: it is run at
-#: every displaced CI vector (:meth:`Functional.corr_at_ci`), so a step too
-#: large is refused rather than quietly returning a number. The measured
-#: ladder, the gap collapse and the gradient error that tracks it are in
-#: docs/testing.md, "The analytic gradient against the numerical one".
+#: every displaced CI vector (:meth:`Functional.pc_energy`), so a step too
+#: large is refused rather than quietly returning a number -- and, past the
+#: cut outright, flagged by the guard's rank check (:func:`_pc_guard`). The
+#: measured ladder, the gap collapse and the gradient error that tracks it are
+#: in docs/testing.md, "The analytic gradient against the numerical one"; the
+#: every-run gate is the ``y``-linearity ladder along a spin-adapted direction
+#: (docs/testing.md, "Residual-independent checks of the gradient path").
 CI_STEP_PC = 1e-7
 
 #: The nuclear step for ``dPhi/dx``, in bohr. Deliberately the step
 #: ``nevpt2_numgrad.py`` differences the *energy* at, so the two gradients are
 #: taken on the same scale -- but note what is differenced here is one scalar
-#: along a frozen path, not a re-converged energy.
+#: along a frozen path, not a re-converged energy, and the two need not be
+#: smooth on the same scale: gated every run by the nuclear ladder
+#: (:func:`check_nuclear_ladder`), which on N2 CAS(4,4) SC finds the frozen
+#: path's quotient at this step short of its converged derivative by more
+#: than the gate (docs/testing.md, "Residual-independent checks of the
+#: gradient path").
 NUC_STEP = ngrad.STEP_BOHR
 
 #: How far the rebuilt state may sit from the golden it claims to
@@ -410,8 +443,154 @@ JACOBIAN_RCOND = 1e-12
 #: published one, not a looser one.
 GRAD_NUM_TOL = 1e-6
 
+# -- the residual-independent checks (docs/testing.md, "Residual-independent
+# -- checks of the gradient path") --------------------------------------------
+#
+# A converged residual says a solve found the answer to the equations it was
+# given; it says nothing about whether those were the right equations, and in
+# this file five wrong answers have had residuals at round-off. So every solve
+# and every difference quotient also gets a check that reads no residual --
+# :func:`run` lists them, and docs/testing.md records which of the five errors
+# each one was demonstrated against.
+
+#: The Richardson window of a step ladder: while truncation dominates,
+#: halving a central difference's step cuts its error fourfold. The C++
+#: checks' window (nevpt2.gradient_plan, ``kFourfoldLow`` / ``kFourfoldHigh``).
+LADDER_LOW = 3.2
+LADDER_HIGH = 4.8
+
+#: How many CONSECUTIVE fourfold halvings a ladder must show. A run and not
+#: the whole table, for the reason docs/testing.md, "The SC tangent's
+#: finite-difference cross-check" found: one rung can go wild (a perturber
+#: empty at the base point whose ``Delta N + H`` cancels to round-off), and
+#: below the crossover the error is round-off and rises again.
+LADDER_RUN = 3
+
+#: The ladders' steps, ``h = 2^-k`` for ``k`` in ``[first, last]``: powers of
+#: two so ``h`` is exact and the ratio across a halving is exactly the
+#: Richardson factor. Each starts where truncation dominates and ends past the
+#: round-off crossover (docs/testing.md, "Residual-independent checks of the
+#: gradient path", has the measured ladders).
+#:
+#: PC's CI ladder starts at 2^-11, and that is not a choice: its direction
+#: (:func:`ci_check_direction`) still lifts one Sir mode as ``h^4``, which is
+#: kept -- the energy then on another branch of the pseudo-inverse -- above
+#: ``h ~ 2^-9``, sits astride lstsq's cut at ``2^-10`` (the gap guard refuses
+#: it there), and is dropped like the structural ones from ``2^-11`` down: the
+#: same bound the C++ PC tangent's ``kStartPow`` keeps under (docs/pc-nevpt2.md,
+#: "The tangent with respect to the CI vector").
+CI_LADDER = (4, 18)
+CI_LADDER_PC = (11, 18)
+KAPPA_LADDER = (3, 17)
+NUC_LADDER = (3, 16)
+
+#: How far a ladder's converged value may sit from what it checks, in Eh per
+#: unit of the ladder's direction (unit CI vector, unit ``kappa``, one bohr):
+#: :data:`GRAD_NUM_TOL`'s 1e-6, the precision the gradient itself is gated
+#: at. A quotient whose own step error is larger than that has not delivered
+#: the number the gradient needs, whatever its residual says. Where the clean
+#: cases and the five errors land against it is docs/testing.md,
+#: "Residual-independent checks of the gradient path".
+LADDER_TOL = GRAD_NUM_TOL
+
+#: ``|c . y|`` (Eh) and ``|c . z|``: ``y`` is built as the PROJECTED gradient
+#: (:func:`pyscf_ci_source`) and ``z`` is projected after its solve
+#: (:meth:`Gradients.solve_lagrange`), so both are orthogonal to the state up
+#: to the quotients' own error -- the same 1e-6 as the ladders.
+PROJECTION_TOL = GRAD_NUM_TOL
+
+#: A displaced PC state's smallest kept singular value, per block, against
+#: the reference state's: below this fraction of it, the block has KEPT a mode
+#: the reference drops -- a lifted null mode that cleared lstsq's cut outright,
+#: which the gap guard cannot see (its gap looks healthy) and which puts the
+#: energy on another branch of the pseudo-inverse. #41's 1e-4 plateau is that
+#: (docs/testing.md, "The PC CI source term's step is a first-order trap"). A
+#: kept mode's own fluctuation under a displacement is ``O(h)`` relative; a
+#: lifted one is ``h^2`` or ``h^4`` of ``s_max``, decades below.
+PC_RANK_KEPT_FRACTION = 1e-2
+
+#: The seeds of the pair of directions every linearity check draws. Fixed, so
+#: a run is reproducible; a pair, so a check does not rest on one direction.
+CHECK_SEEDS = (70, 2026)
+
 #: Component names, in the order they index a coordinate.
 AXES = ngrad.AXES
+
+
+def _ci_key(ci: np.ndarray) -> bytes:
+    """A CI vector's identity, by its bytes: what :class:`Functional` caches
+    block2's 4-RDM on, and how it tells the state's own vector from a
+    displaced one."""
+    return hashlib.blake2b(np.ascontiguousarray(ci, dtype=float).tobytes(),
+                           digest_size=16).digest()
+
+
+@dataclass
+class PcGuardLedger:
+    """Every run of the PC conditioning guard, counted where it runs.
+
+    ``displaced`` is incremented where a PC energy is evaluated at a CI
+    vector that is not the state's own, and ``displaced_guarded`` where the
+    guard passes at one -- two different places, so a code path that
+    evaluates a displaced PC energy and skips the guard leaves them unequal,
+    and :func:`check_pc_guard_ledger` fails the run.
+
+    ``rank_changed`` collects every guarded point where a block KEPT a mode
+    the reference state drops (:data:`PC_RANK_KEPT_FRACTION`). It does not
+    stop the run -- the energy there exists, it is just the wrong function --
+    so the run finishes, prints every residual, and fails at the end; that is
+    how #41's error is shown converging to round-off and failing anyway."""
+
+    displaced: int = 0
+    displaced_guarded: int = 0
+    #: guard runs at a fixed CI vector: the ladders' orbital and nuclear
+    #: rungs, which sample the argument that only ``c`` can move the rank.
+    sampled: int = 0
+    min_gap: float = float("inf")
+    #: the reference state's smallest kept singular value per PC block
+    #: (:func:`build_state`), what every guarded point is held against.
+    reference_kept: dict = field(default_factory=dict)
+    rank_changed: list = field(default_factory=list)
+
+
+#: The ledger of the current run (:func:`run` resets it).
+PC_GUARD = PcGuardLedger()
+
+
+def _pc_guard(gaps: list, *, displaced: bool, where: str) -> None:
+    """The PC guard at one evaluation, recorded in :data:`PC_GUARD`: first
+    ``generate_golden._check_pc_conditioning`` on its per-tuple cuts -- a
+    spectrum that is a continuum through the cut is refused outright, naming
+    where -- then the **rank** against the reference state's.
+
+    The gap check alone is necessary and not sufficient (docs/testing.md,
+    "The PC CI source term's step is a first-order trap"): a mode the
+    reference state has null, lifted by the displacement far enough to clear
+    the cut, is simply kept, the gap looks healthy, and the energy is a
+    different branch of the pseudo-inverse. That shows as the block's
+    smallest kept singular value collapsing by decades, which is what the
+    second test reads."""
+    try:
+        gg._check_pc_conditioning(gaps)
+    except SystemExit as exc:
+        hint = (
+            "\nThat is a displacement lifting the PC metric's null modes past "
+            "the lstsq cut, not a property of the state -- the reference state "
+            "passed the same guard. For the y_I quotients use a smaller "
+            f"--ci-step (the default for --pc is {CI_STEP_PC:g}; see CI_STEP_PC "
+            "and docs/testing.md, \"The analytic gradient against the numerical "
+            "one\")."
+        ) if displaced else ""
+        raise SystemExit(f"at {where or 'a displaced point'}: {exc}{hint}") from None
+    PC_GUARD.min_gap = min(PC_GUARD.min_gap, min(g[2] for g in gaps))
+    for key, _d, _gap, _dropped, kept in gaps:
+        ref = PC_GUARD.reference_kept.get(key)
+        if ref is not None and np.isfinite(ref) and kept < PC_RANK_KEPT_FRACTION * ref:
+            PC_GUARD.rank_changed.append((where or "a displaced point", key, kept, ref))
+    if displaced:
+        PC_GUARD.displaced_guarded += 1
+    else:
+        PC_GUARD.sampled += 1
 
 
 # --------------------------------------------------------------------------
@@ -591,6 +770,8 @@ def build_state(case: str, spec: dict, *, pc: bool = False) -> State:
             mo, st.ci, np.diag(f).copy(), gaps=gaps)
         gg._check_pc_conditioning(gaps)
         st.pc_gap = min(g[2] for g in gaps)
+        # What every displaced point's rank is held against (_pc_guard).
+        PC_GUARD.reference_kept = {key: kept for key, _d, _gap, _dropped, kept in gaps}
     return st
 
 
@@ -644,6 +825,9 @@ class Functional:
         #: against the previous state's 4-RDM would be silently wrong.
         self._pc_key: bytes | None = None
         self._pc_dm4: dict = {}
+        #: the state's own CI vector, by the same key: any other vector handed
+        #: to :meth:`pc_energy` is a DISPLACED one, and is guarded there.
+        self._ref_key = _ci_key(state.ci)
 
     # -- the pieces -------------------------------------------------------
 
@@ -707,7 +891,8 @@ class Functional:
         return fci.direct_spin1.absorb_h1e(h1, g, st.nact, st.nelecas, 0.5)
 
     def pc_energy(self, C: np.ndarray, ci: np.ndarray, eps: np.ndarray,
-                  *, gaps: list | None = None) -> float:
+                  *, gaps: list | None = None, guard: bool = False,
+                  where: str = "") -> float:
         """block2's partially-contracted correlation energy at these
         orbitals, this CI vector and these orbital energies.
 
@@ -717,66 +902,62 @@ class Functional:
         holding them fixed would differentiate a different functional
         (:func:`pyscf_ci_source`, on the same omission).
 
-        ``gaps`` passes the per-tuple lstsq cuts back out for
-        ``generate_golden._check_pc_conditioning``, and it costs an SVD per PC
-        block, so it is asked for exactly where the rank can move: the
-        reference state (:func:`build_state`) and **every displaced CI
-        vector** (:meth:`corr_at_ci`). The orbital and nuclear sweeps leave it
-        ``None`` -- the rank that can move is the metric's, the metric is
-        built from the active-space RDMs, and those are a function of the CI
-        vector alone, so a rotation at fixed ``c`` cannot move it."""
+        **The PC conditioning guard runs here, at every CI vector that is not
+        the state's own, and no caller can opt out of it.** That is the one
+        place this pipeline can silently differentiate the wrong function: a
+        displacement that is not a spin eigenfunction lifts the PC metric's
+        structurally null modes, and past the lstsq cut they are kept and
+        divided by (:data:`CI_STEP_PC`). The guard is
+        ``generate_golden._check_pc_conditioning``, the golden's own, so the
+        refusal reads the same way; every run of it is counted in
+        :data:`PC_GUARD`, and the run fails at the end if a displaced CI
+        vector was evaluated without it (:func:`check_pc_guard_ledger`).
+
+        At the state's own CI vector it is an SVD per PC block that cannot
+        find anything new -- the rank that can move is the metric's, the
+        metric is built from the active-space RDMs, and those are a function
+        of the CI vector alone -- so the orbital and nuclear sweeps skip it.
+        ``guard`` runs it there anyway, which the step ladders do at every
+        rung, to *sample* that argument rather than assume it; ``gaps``
+        passes the per-tuple cuts back out (:func:`build_state` reads the
+        reference state's)."""
         mc = self.mc
         mc.mo_coeff, mc.ci, mc.mo_energy = C, ci, eps
-        key = hashlib.blake2b(np.ascontiguousarray(ci, dtype=float).tobytes(),
-                              digest_size=16).digest()
+        key = _ci_key(ci)
         if key != self._pc_key:
             self._pc_key, self._pc_dm4 = key, {}
+        displaced = key != self._ref_key
+        if displaced:
+            PC_GUARD.displaced += 1
+        if (displaced or guard) and gaps is None:
+            gaps = []
         self.nevals += 1
         pc = gg._block2_icmr(mc, "pc", dm4_cache=self._pc_dm4, gaps=gaps)
+        if displaced or guard:
+            _pc_guard(gaps, displaced=displaced, where=where)
         return float(sum(pc.values()))
 
-    def corr_at_ci(self, eris: dict, C: np.ndarray, ci: np.ndarray,
-                   *, check_pc: bool = False) -> float:
+    def corr_at_ci(self, eris: dict, C: np.ndarray, ci: np.ndarray) -> float:
         """``E_corr`` at fixed orbitals and a moved CI vector, with the
         orbital energies rebuilt from it -- the quotient
         :func:`pyscf_ci_source` differences, in whichever mode is active.
-
-        ``check_pc`` gates the displaced CI vector's **own** PC conditioning,
-        which is the one place this pipeline can silently differentiate the
-        wrong function: a determinant-axis displacement is not a spin
-        eigenfunction, so it lifts the PC metric's structurally null modes,
-        and past the lstsq cut they are kept and divided by (see
-        :data:`CI_STEP_PC`). The guard is the golden's own, so the refusal
-        reads the same way."""
+        A PC energy here is at a displaced CI vector, so :meth:`pc_energy`
+        guards it."""
         self.pt.ci = ci
         self.mc.ci = ci
         dm1, _dm2, dms, _ = _dms_from(self.pt, eris, self.state)
         eps = np.diag(self.generalized_fock(eris, dm1)).copy()
         self.pt.mo_energy = eps
         if self.pc:
-            gaps: list | None = [] if check_pc else None
-            e = self.pc_energy(C, ci, eps, gaps=gaps)
-            if gaps is not None:
-                try:
-                    gg._check_pc_conditioning(gaps)
-                except SystemExit as exc:
-                    raise SystemExit(
-                        f"at a DISPLACED CI vector: {exc}\n"
-                        "That is this quotient's step lifting the PC metric's "
-                        "null modes past the lstsq cut, not a property of the "
-                        "state -- the reference state passed the same guard. "
-                        "Use a smaller --ci-step (the default for --pc is "
-                        f"{CI_STEP_PC:g}; see CI_STEP_PC and docs/testing.md, "
-                        "\"The analytic gradient against the numerical one\")."
-                    ) from None
-            return e
+            return self.pc_energy(C, ci, eps, where="a y_I quotient's displaced CI vector")
         per_class = gg._pyscf_per_class(self.pt, dms, eris)
         return float(sum(per_class[c][1] for c in gg.CLASSES))
 
     # -- the whole bundle -------------------------------------------------
 
     def evaluate(self, C: np.ndarray, ci: np.ndarray, *, with_corr: bool = True,
-                 dm1: np.ndarray | None = None) -> dict:
+                 dm1: np.ndarray | None = None, guard: bool = False,
+                 where: str = "") -> dict:
         """Everything ``Phi``, the source terms and the Jacobian read, at one
         point: the two energies, the two Fock matrices, and ``H|c>`` as a
         **vector** over determinants.
@@ -787,7 +968,8 @@ class Functional:
 
         ``dm1`` overrides the active 1-RDM used to build ``f``. It is the
         state's own in every call but the ``y_I`` sweep, where the CI vector
-        moves and the RDMs must move with it."""
+        moves and the RDMs must move with it. ``guard`` and ``where`` go to
+        :meth:`pc_energy`."""
         st = self.state
         eris = self.eris(C)
         dms = None
@@ -812,7 +994,7 @@ class Functional:
             eps = np.diag(f).copy()
             self.pt.mo_energy = eps
             if self.pc:
-                out["e_corr"] = self.pc_energy(C, ci, eps)
+                out["e_corr"] = self.pc_energy(C, ci, eps, guard=guard, where=where)
             else:
                 per_class = gg._pyscf_per_class(self.pt, dms, eris)
                 out["e_corr"] = float(sum(per_class[c][1] for c in gg.CLASSES))
@@ -1128,7 +1310,7 @@ def pyscf_ci_source(fn: Functional, st: State,
     eris = fn.eris(st.mo_coeff)
 
     def e_corr_at(ci: np.ndarray) -> float:
-        return fn.corr_at_ci(eris, st.mo_coeff, ci, check_pc=fn.pc)
+        return fn.corr_at_ci(eris, st.mo_coeff, ci)
 
     y = np.zeros(st.ci.size)
     c = st.ci.ravel().copy()
@@ -1384,13 +1566,15 @@ class Gradients(lagrange.Gradients):
 
     # -- hooks 3 and 4: the nuclear derivatives --------------------------
 
-    def _phi(self, geom, *, ham_only: bool, lag_only: bool) -> float:
+    def _phi(self, geom, *, ham_only: bool, lag_only: bool, guard: bool = False,
+             where: str = "") -> float:
         """One evaluation of ``Phi`` (or of either half) along the frozen
-        orthonormal path at a displaced geometry."""
+        orthonormal path at a displaced geometry. ``guard`` runs the PC
+        conditioning guard there too (:meth:`Functional.pc_energy`)."""
         st = self.st
         fn = self._geom_fn(geom)
         C = frozen_coeff(st.mo_coeff, self._S0_half, fn.ovlp)
-        b = fn.evaluate(C, st.ci, with_corr=self.with_corr)
+        b = fn.evaluate(C, st.ci, with_corr=self.with_corr, guard=guard, where=where)
         ham = b["e_casci"] + b["e_corr"]
         # <z|H(x)|c>: z is projected against c, so the -E_CASCI <z|c> half of
         # the (C1) constraint contributes nothing and this one term is the
@@ -1726,6 +1910,433 @@ class Gradients(lagrange.Gradients):
         return self.de
 
 
+# --------------------------------------------------------------------------
+# Residual-independent checks
+# --------------------------------------------------------------------------
+#
+# docs/testing.md, "Residual-independent checks of the gradient path" has the
+# measured ladders and the record of which check caught which of the five
+# errors below; this is the code.
+
+
+def ladder_steps(exps: tuple[int, int]) -> list[float]:
+    """``h = 2^-k`` for ``k`` in ``[first, last]``: exact in binary, so the
+    ratio across a halving is exactly the Richardson factor."""
+    return [2.0 ** -k for k in range(exps[0], exps[1] + 1)]
+
+
+def fourfold_runs(err: list[float]) -> list[tuple[int, int]]:
+    """Every maximal run of consecutive halvings that cut ``err`` by a factor
+    in ``(LADDER_LOW, LADDER_HIGH)``, as ``(length, index of the finer rung of
+    its last halving)``, coarsest first. A halving whose finer error is zero
+    has no ratio and breaks a run.
+
+    The rule is the C++ checks' ``nevpt2::longestFourfoldRun``
+    (src/gradient/gradient_plan.cppm, pinned by test/gradient_plan/'s
+    FourfoldRunTests), which reports the longest of these."""
+    runs, run = [], 0
+    for i in range(1, len(err)):
+        ratio = err[i - 1] / err[i] if err[i] > 0.0 else 0.0
+        if LADDER_LOW < ratio < LADDER_HIGH:
+            run += 1
+            continue
+        if run:
+            runs.append((run, i - 1))
+        run = 0
+    if run:
+        runs.append((run, len(err) - 1))
+    return runs
+
+
+@dataclass
+class Check:
+    """One residual-independent check: its verdict, a one-line summary, and
+    (for a ladder) the table it was read from."""
+
+    name: str
+    ok: bool
+    summary: str
+    table: list = field(default_factory=list)
+    numbers: dict = field(default_factory=dict)
+
+
+def step_ladder(name: str, f, steps: list[float], ref: float) -> Check:
+    """Central differences of ``f`` at every step of ``steps``, gated on a
+    **run** of fourfold halvings rather than on any single step.
+
+    Two separate facts, both required:
+
+    * **the ladder converges.** The change between neighbouring rungs must
+      fall fourfold for at least :data:`LADDER_RUN` consecutive halvings --
+      an ``O(h^2)`` truncation error, walked down through. Read off the
+      ladder alone, with no reference in it. Of several such runs the
+      **finest** is used: it is the one nearest ``h -> 0``, and a coarser
+      one can end where the function stops being analytic on the ladder's
+      scale (a near-pole, as the SC energy has on N2) rather than at the
+      round-off floor;
+    * **it converges to** ``ref`` -- the assembled quantity under test,
+      contracted with the ladder's direction, or zero for a stationarity
+      condition. The ladder's own value is the Richardson extrapolant
+      ``(4 fd(h) - fd(2h)) / 3`` at the finest pair of that run, and
+      ``|it - ref|`` must be under :data:`LADDER_TOL`.
+
+    Comparing a Richardson extrapolant, and not the smallest ``|fd - ref|``
+    in the sweep, is what keeps the check honest: ``fd(h) - ref = c h^2 -
+    delta`` crosses zero at some ``h`` whenever ``ref`` is wrong by
+    ``delta``, so a sweep minimum can sit on that crossing and look like
+    agreement."""
+    fd = [(f(+h) - f(-h)) / (2.0 * h) for h in steps]
+    dif = [abs(fd[i] - fd[i + 1]) for i in range(len(fd) - 1)]
+    runs = fourfold_runs(dif)
+    good = [r for r in runs if r[0] >= LADDER_RUN]
+    run, end = good[-1] if good else max(runs, default=(0, 0))
+    if run:
+        value = (4.0 * fd[end + 1] - fd[end]) / 3.0
+        err = abs(value - ref)
+    else:
+        value, err = float("nan"), float("inf")
+    ok = run >= LADDER_RUN and err <= LADDER_TOL
+    table = []
+    for i, h in enumerate(steps):
+        d = f"{dif[i - 1]:10.3e}" if i else f"{'-':>10}"
+        ratio = f"{dif[i - 2] / dif[i - 1]:8.3f}" if i > 1 and dif[i - 1] > 0.0 else f"{'-':>8}"
+        mark = " <" if run and end - run + 1 <= i <= end + 1 else ""
+        table.append(f"      2^-{round(-np.log2(h)):<3d} {fd[i]:+.12e} {d} {ratio}{mark}")
+    summary = (f"{run} consecutive fourfold halvings (need {LADDER_RUN})"
+               + (f", ending at h = 2^-{round(-np.log2(steps[end + 1]))}" if run else "")
+               + f"; |Richardson - ref| = {err:.2e} (allowed {LADDER_TOL:g}), "
+               f"ref {ref:+.10e}")
+    return Check(name, ok, summary, table,
+                 dict(ref=ref, value=value, err=err, run=run, steps=np.array(steps),
+                      fd=np.array(fd)))
+
+
+def ci_check_direction(g: Gradients, seed: int) -> np.ndarray:
+    """A seeded unit CI direction **orthogonal to the state, in its spatial
+    irrep and a spin eigenfunction**: ``u = P W |c>`` with ``W`` spin-free
+    and totally symmetric, so ``W|c>`` is a spin eigenfunction of the
+    state's own irrep. A bare determinant direction is neither
+    (:data:`CI_STEP_PC`; docs/gradients.md, section 7).
+
+    * **SC**: ``W`` is the active Hamiltonian's own one- and two-electron
+      integrals, each multiplied elementwise by a seeded random tensor of the
+      same permutational symmetry -- nonzero only where the integrals are, so
+      totally symmetric in any active basis, even one that mixes degenerate
+      partners; and two-electron, because with one orbital per irrep (N2's
+      CAS(4,4)) every totally symmetric one-electron operator is diagonal and
+      the directions it generates collapse onto one.
+    * **PC**: ``W = sum w_pq E_pq`` over the pairs the state's ``dm1``
+      couples -- nevpt2.pc_tangent's own ``pcTangentDirection``. A two-electron
+      ``W`` lifts one of Sir's null modes as ``h^2`` relative, which stays
+      above lstsq's cut over the whole ladder: the ladder then converges --
+      cleanly, fourfold -- to the derivative of *another branch* of the
+      pseudo-inverse, and the gap guard passes it (docs/testing.md,
+      "Residual-independent checks of the gradient path", has the N2 numbers).
+      A one-electron one lifts it only as ``h^4``, under the cut below
+      ``2^-10`` (:data:`CI_LADDER_PC`), and :func:`_pc_guard`'s rank check
+      holds the ladder to that."""
+    st = g.st
+    n = st.nact
+    rng = np.random.default_rng(seed)
+    if g.pc:
+        dm1 = np.asarray(fci.direct_spin1.make_rdm1(st.ci, n, st.nelecas))
+        w = rng.uniform(-1.0, 1.0, (n, n)) * (np.abs(dm1) > 1e-12 * np.abs(dm1).max())
+        u = np.asarray(fci.direct_spin1.contract_1e(w + w.T, st.ci, n, st.nelecas)).ravel()
+    else:
+        r1 = rng.uniform(-1.0, 1.0, (n, n))
+        r1 = r1 + r1.T
+        r2 = rng.uniform(-1.0, 1.0, (n, n, n, n))
+        r2 = r2 + r2.transpose(1, 0, 2, 3)
+        r2 = r2 + r2.transpose(0, 1, 3, 2)
+        r2 = r2 + r2.transpose(2, 3, 0, 1)
+        op = fci.direct_spin1.absorb_h1e(np.asarray(g._h1_act) * r1,
+                                         np.asarray(g._g_act) * r2, n, st.nelecas, 0.5)
+        u = np.asarray(fci.direct_spin1.contract_2e(op, st.ci, n, st.nelecas)).ravel()
+    u = u * g.allowed
+    c = st.ci.ravel()
+    u = u - float(c @ u) * c
+    norm = float(np.linalg.norm(u))
+    if norm < 1e-12:
+        raise SystemExit(
+            f"the seeded CI check direction (seed {seed}) came out zero: the state "
+            "is an eigenfunction of the operator it is generated by"
+        )
+    return u / norm
+
+
+def on_sphere(st: State, u: np.ndarray, h: float) -> np.ndarray:
+    """``(c + h u) / |c + h u|``: the CI ladders walk the unit sphere. With
+    ``<c|u> = 0`` its tangent at ``h = 0`` is the straight line's, and off
+    the sphere the SC functional has poles (:func:`pyscf_ci_source`) and the
+    hole-side metrics' constants stop being hole RDMs."""
+    v = st.ci.ravel() + h * u
+    return (v / np.linalg.norm(v)).reshape(st.ci.shape)
+
+
+def non_gauge_rotations(st: State) -> list[tuple[int, int]]:
+    """Every rotation the Lagrangian must be stationary along, derived
+    **independently of** :func:`kappa_pairs`: a rotation is a gauge exactly
+    when it stays inside the active space AND inside one side of the RHF
+    occupied/virtual divide (:meth:`State.occ_projector`) -- the energy is
+    invariant to it with the CI vector carried along, and it moves no
+    constraint. Anything else (an act_O-act_V rotation included: it moves the
+    RHF occupied space) is a direction whose stationarity the multipliers
+    owe. Derived from the projector rather than from the bookkeeping the
+    solve uses, so the check does not inherit that bookkeeping's mistakes --
+    which is the error #40 found."""
+    occ = np.diag(st.occ_projector()) > 0.5
+    active = np.zeros(st.nmo, dtype=bool)
+    active[st.act] = True
+    return [(p, q) for p in range(st.nmo) for q in range(p + 1, st.nmo)
+            if not (active[p] and active[q] and occ[p] == occ[q])]
+
+
+def kappa_check_direction(g: Gradients, pairs: list, seed: int) -> np.ndarray:
+    """A seeded antisymmetric ``kappa`` of unit norm over ``pairs``, and
+    **totally symmetric**: ``X - X^T`` summed over seeded multiples of
+    products of the state's own totally symmetric MO matrices -- ``h``, the
+    generalized Fock ``f`` and the RHF Fock ``F``.
+
+    Totally symmetric because a symmetry-breaking rotation is where the SC
+    functional stops being a smooth function of the step: a perturber the
+    state's symmetry leaves empty (``N = H = 0``) fills as ``t^2`` along one,
+    and its ``-N^2 / (Delta N + H)`` term can put a pole near ``t = 0``. A
+    product of matrices that commute with the point group commutes with it
+    too, in any MO basis; a random matrix does not. Nothing is lost by it:
+    along a symmetry-breaking rotation every term of the stationarity
+    condition vanishes by symmetry."""
+    st = g.st
+    h = st.mo_coeff.T @ g.fn.hcore @ st.mo_coeff
+    f, F = st.f, st.fock_rhf
+    prods = [h @ f, h @ F, f @ F, h @ f @ F, f @ h @ F @ h]
+    rng = np.random.default_rng(seed)
+    x = sum(a * p / max(np.abs(p).max(), 1e-300)
+            for a, p in zip(rng.uniform(-1.0, 1.0, len(prods)), prods, strict=True))
+    x = x - x.T
+    k = np.zeros((st.nmo, st.nmo))
+    for p, q in pairs:
+        k[p, q], k[q, p] = x[p, q], -x[p, q]
+    norm = float(np.linalg.norm(k[np.triu_indices(st.nmo, 1)]))
+    if norm < 1e-12:
+        raise SystemExit(f"the seeded kappa check direction (seed {seed}) came out zero")
+    return k / norm
+
+
+def nuclear_check_direction(g: Gradients, seed: int) -> np.ndarray:
+    """A seeded unit nuclear displacement that is **totally symmetric**: a
+    seeded combination of the assembled gradient and the nuclear repulsion's
+    own -- both derivatives of a function the point group leaves invariant,
+    so both are. For :func:`kappa_check_direction`'s reason."""
+    from pyscf.grad import rhf as rhf_grad
+
+    gnuc = np.asarray(rhf_grad.grad_nuc(g.fn.mol))
+    rng = np.random.default_rng(seed)
+    a, b = rng.uniform(-1.0, 1.0, 2)
+    d = (a * g.de / max(float(np.linalg.norm(g.de)), 1e-300)
+         + b * gnuc / max(float(np.linalg.norm(gnuc)), 1e-300))
+    norm = float(np.linalg.norm(d))
+    if norm < 1e-12:
+        raise SystemExit(f"the seeded nuclear check direction (seed {seed}) came out zero")
+    return d / norm
+
+
+def displace_along(geom, d: np.ndarray, h: float):
+    """``geom`` with every atom moved by ``h d`` bohr (the geometry is in
+    Angstrom)."""
+    return [(sym, tuple(float(v + h * dv * ngrad.BOHR)
+                        for v, dv in zip(xyz, d[i], strict=True)))
+            for i, (sym, xyz) in enumerate(geom)]
+
+
+def check_projection(g: Gradients, src: SourceTerms) -> list[Check]:
+    """The projection identities -- ``y`` IS the projected gradient and
+    ``z`` IS projected -- asserted on the numbers rather than trusted to the
+    construction.
+
+    ``c . y = 0``: :func:`pyscf_ci_source` differences along ``P e_I``, so
+    ``y = P g`` and its overlap with the state is zero up to the quotients'
+    own error. A componentwise quotient along a bare ``e_I`` walks off the
+    unit sphere, and its ``c . y`` is the *radial* derivative of a functional
+    that has poles there -- #40's third error, whose quotients converged
+    over three decades. A dump is projected on read (:meth:`get_wfn_response`),
+    so this is the pyscf source's check.
+
+    ``c . z = 0``: ``Phi``'s CI term drops ``-(dE_CASCI/dx)(z . c)``, and the
+    CI solve cannot see a multiple of ``|c>`` -- it is a null vector of
+    ``P (H - E) P``, so the residual is unchanged by it (#40's second
+    error)."""
+    st = g.st
+    c = st.ci.ravel()
+    out = []
+    y = src.ci.ravel()
+    if src.origin == "pyscf" and np.any(y):
+        r = abs(float(c @ y))
+        out.append(Check("projection of y", r <= PROJECTION_TOL,
+                         f"|c . y| = {r:.2e} (allowed {PROJECTION_TOL:g}), "
+                         f"|y| = {np.linalg.norm(y):.3e}", numbers=dict(value=r)))
+    else:
+        out.append(Check("projection of y", True,
+                         "not applicable: " + ("y = 0" if not np.any(y) else
+                                               "a dump's y is projected on read")))
+    r = abs(float(c @ g.z.ravel()))
+    out.append(Check("projection of z", r <= PROJECTION_TOL,
+                     f"|c . z| = {r:.2e} (allowed {PROJECTION_TOL:g}), "
+                     f"|z| = {np.linalg.norm(g.z):.3e}", numbers=dict(value=r)))
+    return out
+
+
+def check_ci_source_linearity(g: Gradients, src: SourceTerms) -> list[Check]:
+    """``y`` is linear in its direction: for each seeded direction ``u``, the
+    directional derivative of ``E_corr`` -- step-laddered, along the unit
+    sphere, through :meth:`Functional.evaluate` -- must converge to
+    ``<u, y>``.
+
+    ``evaluate`` is the route ``Phi`` is differentiated through, and it is
+    not the route ``y`` was built through (:meth:`Functional.corr_at_ci`), so
+    a ``y`` of a different functional is caught: one that holds the orbital
+    energies fixed (#40's fourth error), one taken componentwise along bare
+    determinant axes (#40's third, not a gradient at all), or a PC one whose
+    quotient was stepped onto another branch of the pseudo-inverse (#41's,
+    which the ladder's spin-adapted direction does not share)."""
+    st = g.st
+    y = src.ci.ravel()
+    exps = CI_LADDER_PC if g.pc else CI_LADDER
+    out = []
+    for seed in CHECK_SEEDS:
+        u = ci_check_direction(g, seed)
+
+        def e_corr(h: float, u=u) -> float:
+            return g.fn.evaluate(st.mo_coeff, on_sphere(st, u, h), with_corr=True,
+                                 where=f"the CI ladder at h = {h:.3e}")["e_corr"]
+
+        out.append(step_ladder(f"y linearity, seed {seed}", e_corr, ladder_steps(exps),
+                               float(u @ y)))
+    g.fn.pt.ci = st.ci
+    g.fn.mc.ci = st.ci
+    return out
+
+
+def check_ci_stationarity(g: Gradients) -> list[Check]:
+    """The CI Z-vector solve, checked by what it is FOR: the Lagrangian's CI
+    part
+
+        L(c) = E_corr(c) + sum_m lambda_m G_m(c) + <z|H - E_CASCI(c)|c>
+
+    must be stationary along every in-sector direction orthogonal to the
+    state. Step-laddered along the unit sphere through
+    :meth:`Functional.evaluate`, with the multipliers held at their solved
+    values -- so ``ci_hop``, ``ci_coupling`` and the source term are all
+    bypassed, and a CI equation that was solved exactly but was the wrong
+    equation shows up as a slope. (``E_CASCI(c)`` itself is left out: its
+    stationarity is the CASCI eigen-equation's, a residual the Davidson
+    tolerance owns, not something the Z-vector solve can be asked for.)"""
+    st = g.st
+    exps = CI_LADDER_PC if g.pc else CI_LADDER
+    z, lam = g.z.ravel(), g.lam
+    out = []
+    for seed in CHECK_SEEDS:
+        u = ci_check_direction(g, seed)
+
+        def lagrangian(h: float, u=u) -> float:
+            ci = on_sphere(st, u, h)
+            b = g.fn.evaluate(st.mo_coeff, ci, with_corr=g.with_corr,
+                              where=f"the CI-stationarity ladder at h = {h:.3e}")
+            return (b["e_corr"] + float(lam @ constraint_vector(b, g.cons))
+                    + float(z @ b["hvec"]) - b["e_casci"] * float(z @ ci.ravel()))
+
+        out.append(step_ladder(f"CI stationarity, seed {seed}", lagrangian,
+                               ladder_steps(exps), 0.0))
+    g.fn.pt.ci = st.ci
+    g.fn.mc.ci = st.ci
+    return out
+
+
+def check_orbital_stationarity(g: Gradients) -> list[Check]:
+    """The orbital Z-vector solve, checked by what it is for: the Lagrangian
+    at fixed CI vector,
+
+        L(kappa) = E_CASCI + E_corr + sum_m lambda_m G_m(kappa) + <z|H(kappa)|c>,
+
+    is stationary along every NON-GAUGE rotation -- the set
+    :func:`non_gauge_rotations` derives from the RHF occupied projector, not
+    the solve's own :func:`kappa_pairs`. Step-laddered along a seeded
+    rotation ``C exp(t kappa)``, so ``KAPPA_STEP``'s single-step quotients
+    (the source term, the Jacobian and ``Q``) are gated by a ladder too.
+
+    A solve whose bookkeeping drops a direction (#40's first error: the
+    act_O-act_V block taken for a gauge) converges to round-off on the
+    system it was given and leaves the Lagrangian sloped along exactly that
+    direction."""
+    from scipy.linalg import expm
+
+    st = g.st
+    pairs = non_gauge_rotations(st)
+    dm1 = None if g.with_corr else g.fn.reference_dm1(st)
+    z, lam = g.z.ravel(), g.lam
+    out = []
+    for seed in CHECK_SEEDS:
+        k = kappa_check_direction(g, pairs, seed)
+
+        def lagrangian(t: float, k=k) -> float:
+            b = g.fn.evaluate(st.mo_coeff @ expm(t * k), st.ci, with_corr=g.with_corr,
+                              dm1=dm1, guard=g.pc,
+                              where=f"the orbital-stationarity ladder at t = {t:.3e}")
+            return (b["e_casci"] + b["e_corr"] + float(lam @ constraint_vector(b, g.cons))
+                    + float(z @ b["hvec"]))
+
+        out.append(step_ladder(f"orbital stationarity, seed {seed} ({len(pairs)} rotations)",
+                               lagrangian, ladder_steps(KAPPA_LADDER), 0.0))
+    return out
+
+
+def check_nuclear_ladder(g: Gradients) -> list[Check]:
+    """``NUC_STEP``'s quotients, gated by a ladder: ``Phi`` differenced along
+    a seeded totally symmetric displacement of every atom must converge to
+    the assembled gradient contracted with it. Run after
+    :meth:`Gradients.kernel`, with the PC guard sampled at every rung."""
+    st = g.st
+    out = []
+    for seed in CHECK_SEEDS:
+        d = nuclear_check_direction(g, seed)
+
+        def phi(h: float, d=d) -> float:
+            return g._phi(displace_along(st.geom, d, h), ham_only=False, lag_only=False,
+                          guard=g.pc, where=f"the nuclear ladder at h = {h:.3e} bohr")
+
+        out.append(step_ladder(f"nuclear ladder, seed {seed}", phi, ladder_steps(NUC_LADDER),
+                               float(np.sum(d * g.de))))
+    return out
+
+
+def check_pc_guard_ledger(pc: bool) -> Check:
+    """Every displaced CI vector a PC energy was evaluated at was guarded,
+    and no guarded point kept a mode the reference state drops.
+    :data:`PC_GUARD` counts the evaluations and the guard runs in different
+    places, so a path that skips the guard leaves them unequal and fails
+    here."""
+    led = PC_GUARD
+    name = "PC guard at every displaced CI vector"
+    if not pc:
+        return Check(name, True, "not applicable: no PC energy is evaluated")
+    ok = (led.displaced > 0 and led.displaced == led.displaced_guarded
+          and not led.rank_changed)
+    summary = (f"guarded {led.displaced_guarded} of {led.displaced} displaced CI vectors, "
+               f"and sampled at {led.sampled} fixed-CI ladder rungs; smallest gap "
+               f"{led.min_gap:.2e} (need {gg.PC_MIN_GAP:g}); rank as the reference's at ")
+    if led.rank_changed:
+        where, key, kept, ref = min(led.rank_changed, key=lambda r: r[2] / r[3])
+        summary += (f"{led.displaced_guarded + led.sampled - len(led.rank_changed)} of them "
+                    f"-- {len(led.rank_changed)} block(s) KEPT a mode the reference drops, "
+                    f"worst {key} at {where}: smallest kept {kept:.1e} against the "
+                    f"reference's {ref:.1e}")
+    else:
+        summary += "every one"
+    return Check(name, ok, summary,
+                 numbers=dict(displaced=led.displaced, guarded=led.displaced_guarded,
+                              sampled=led.sampled, min_gap=led.min_gap,
+                              rank_changed=len(led.rank_changed)))
+
+
 def load_grad_num(path: Path, case: str, *, pc: bool,
                   casci_only: bool = False) -> dict:
     """The numerical gradient to gate against, from a
@@ -1803,6 +2414,8 @@ def run(args) -> dict:
             "plain .npz by `nevpt2_numgrad.py --pc --npz PATH`"
         )
     t0 = time.perf_counter()
+    # A fresh ledger: every PC guard run from here on is this run's.
+    PC_GUARD.__dict__.update(PcGuardLedger().__dict__)
     print(f"[{args.case}] building the golden's own CASCI-on-RHF state")
     st = build_state(args.case, spec, pc=args.pc)
     print(f"  n_mo = {st.nmo} = {st.ncore} core + {st.nact} active + {st.nvirt} virtual; "
@@ -1820,7 +2433,7 @@ def run(args) -> dict:
                nelecas=spec["nelecas"], nmo=st.nmo, ncore=st.ncore, nact=st.nact,
                nvirt=st.nvirt, ndet=int(st.ci.size), natm=len(st.geom),
                e_casci=st.e_casci, e_corr=st.e_corr, casci_only=args.casci_only,
-               pc=args.pc, step=args.step,
+               pc=args.pc, step=args.step, show_ladders=args.show_ladders,
                invariants={k: v for k, v in st.invariants.items()
                            if k != "o1_each"})
     if args.pc:
@@ -1905,8 +2518,31 @@ def run(args) -> dict:
     g.solve_multipliers(log=print)
     rec["residuals"] = dict(g.residuals)
 
+    # The residuals above say each solve found the answer to the equations it
+    # was given. These say whether those were the right equations -- none of
+    # them reads a residual (docs/testing.md, "Residual-independent checks of
+    # the gradient path").
+    print("\nresidual-independent checks of the source terms and the multipliers")
+    t_chk = time.perf_counter()
+    checks = check_projection(g, src)
+    if with_corr:
+        checks += check_ci_source_linearity(g, src)
+    checks += check_ci_stationarity(g)
+    checks += check_orbital_stationarity(g)
+    for chk in checks:
+        print(f"  {'ok  ' if chk.ok else 'FAIL'} {chk.name}: {chk.summary}")
+    checks_seconds = time.perf_counter() - t_chk
+
     print("\nthe AO contraction")
     de = g.kernel()
+    print("\nresidual-independent checks of the nuclear quotients")
+    t_chk = time.perf_counter()
+    tail = check_nuclear_ladder(g) + [check_pc_guard_ledger(args.pc)]
+    for chk in tail:
+        print(f"  {'ok  ' if chk.ok else 'FAIL'} {chk.name}: {chk.summary}")
+    checks += tail
+    rec["checks"] = checks
+    rec["checks_seconds"] = checks_seconds + time.perf_counter() - t_chk
     rec["residuals"] = dict(g.residuals)  # kernel() adds the Richardson bars
     rec["grad"] = de
     rec["ham_response"] = g.ham_response
@@ -2033,6 +2669,24 @@ def report(rec: dict) -> None:
               f"the gradient above): {rec['residuals']['ham_response_richardson']:.1e} "
               f"(skeleton), {rec['residuals']['ldotjnuc_richardson']:.1e} "
               f"(multipliers)")
+
+    # The second verdict, independent of the first: every residual above can
+    # read round-off on a wrong answer, and these do not read one.
+    checks = rec["checks"]
+    print("\nresidual-independent checks (docs/testing.md, \"Residual-independent "
+          "checks of the gradient path\")")
+    for chk in checks:
+        print(f"  {'ok  ' if chk.ok else 'FAIL'} {chk.name}: {chk.summary}")
+        if chk.table and (rec["show_ladders"] or not chk.ok):
+            print(f"      {'h':<6} {'central difference':>19} {'|change|':>10} {'ratio':>8}"
+                  "   (change from the previous rung; '<' = the fourfold run)")
+            for row in chk.table:
+                print(row)
+    failed = [chk.name for chk in checks if not chk.ok]
+    print(f"{'FAIL' if failed else 'PASS'}: {rec['case']} {scheme} residual-independent "
+          f"checks, {len(checks) - len(failed)} of {len(checks)} hold"
+          + (f" -- failed: {'; '.join(failed)}" if failed else "")
+          + f" ({rec['checks_seconds']:.1f}s)")
     print(f"\n{rec['wall']:.1f}s, {rec['kappa_evals']} functional evaluations")
 
 
@@ -2111,6 +2765,10 @@ def main() -> None:
                          "this repo's 1e-7: the oracle is a finite difference "
                          "(docs/testing.md, \"The analytic gradient against the "
                          "numerical one\")")
+    ap.add_argument("--show-ladders", action="store_true",
+                    help="print every step ladder's table, not only a failing "
+                         "one's (docs/testing.md, \"Residual-independent checks "
+                         "of the gradient path\" is read off these)")
     args = ap.parse_args()
     if args.source == "dump" and args.source_path is None:
         raise SystemExit("--source dump needs --source-path PATH")
@@ -2128,16 +2786,26 @@ def main() -> None:
                 payload[k] = np.array(v)
         for k, v in rec["residuals"].items():
             payload[f"residual_{k}"] = np.array(0.0 if v is None else v)
+        for n, chk in enumerate(rec["checks"]):
+            payload[f"check{n}_ok"] = np.array(chk.ok)
+            for k, v in chk.numbers.items():
+                payload[f"check{n}_{k}"] = np.asarray(v)
         np.savez(args.out, **payload)
         print(f"wrote {args.out} ({len(payload)} arrays)")
     # The comparison against the numerical gradient is a GATE, and the exit
     # status is how it is read from a script: 1 on a FAIL, as the demos'
     # `PASS:` lines are read from ctest. A run with no numerical gradient in
     # reach checked nothing and says so.
+    # The residual-independent checks are a gate of their own, read the same
+    # way: any one failing is exit 1 whatever grad_num said.
+    failed = not all(chk.ok for chk in rec["checks"])
     if "grad_num" not in rec:
-        print("no numerical gradient in reach: nothing was gated (pass "
-              "--grad-num PATH, or run nevpt2_numgrad.py for this case first)")
+        print("no numerical gradient in reach: only the residual-independent "
+              "checks were gated (pass --grad-num PATH, or run "
+              "nevpt2_numgrad.py for this case first)")
     elif not rec["grad_num_pass"]:
+        failed = True
+    if failed:
         raise SystemExit(1)
 
 
