@@ -12,6 +12,22 @@ add_cxx_module_library(
   LINK_PUBLIC nevpt2::common
 )
 
+# nevpt2.rdm_host_dm -- the active-space dm1/dm2 rebuilt on the HOST from a CI
+# vector over the link tables above, plus their tangents along a CI direction.
+# No GPU and no kernel: it is the reference the golden file's dm1/dm2 (PySCF
+# inputs, never computed here) are checked against, and the differentiable
+# bilinear forms the gradient work needs. Neither demo links it; the unit tier
+# tests it card-free (test/rdm_host_dm/).
+add_cxx_module_library(
+  NAME nevpt2.rdm_host_dm
+  PRIMARY_INTERFACE rdm_host_dm.cppm
+  IMPLEMENTATION rdm_host_dm.cpp
+  # tensor (re-exports nevpt2.common): dm1/dm2 are Tensors. error_handling:
+  # create() hands back a Result, and the shape checks abort through check().
+  LINK_PUBLIC nevpt2::tensor nevpt2::error_handling
+  LINK_PRIVATE nevpt2::link_tables
+)
+
 # nevpt2.rdm_plan -- the RDM build's pure host index arithmetic: the tile plan
 # (tileWidthForCount, planTiles), the consume GEMM's chunking (evenChunks) and
 # its permuted integral copy (permuteEriConsume). No GPU, so the unit tier

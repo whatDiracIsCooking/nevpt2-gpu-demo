@@ -167,6 +167,8 @@ demo links. In dependency order:
   ozaki ............ nevpt2.ozaki.device    --ozaki digest: int8 tensor cores via
                                             WarpWraps' <wmma.h>  (device lib only)
   rdm .............. nevpt2.link_tables     Knowles-Handy tables          (no GPU)
+                     nevpt2.rdm_host_dm     host dm1/dm2 from a CI vector,
+                                            and their tangents           (no GPU)
                      nevpt2.rdm_plan        tile plan, consume chunking   (no GPU)
                      nevpt2.rdm_build       the tiled dm3/f3ac/f3ca build
                      + device libs: rdm_launch.cu (#includes kernels.cu),
@@ -220,6 +222,7 @@ Python tools are in [`reference-data.md`](reference-data.md), "The files in
 | `src/rdm/f3_digest.cu` | the emitted path's f3 digest GEMM: `kernels.cu`'s 16×16 tile, reading `L2` directly instead of `R2` and adding into the f3 accumulator (`+=`) instead of a per-tile output. A linked-in device library on both backends (`f3_digest_bridge.h`). See "What did not help" in docs/performance.md |
 | `src/rdm/rdm_accumulate.cu` | the one kernel the device-resident RDM-build launcher needs — an on-device tile-partial accumulate, replacing a download+host-add+discard round trip (see "Device-resident RDM build" in docs/performance.md) |
 | `src/rdm/link_tables.*` | `nevpt2.link_tables`: Knowles–Handy link tables, pure host C++, in PySCF's `fci.cistring` convention |
+| `src/rdm/rdm_host_dm.*` | `nevpt2.rdm_host_dm`: the active-space `dm1`/`dm2` rebuilt **on the host** from a CI vector over `nevpt2.link_tables` — `dm1[p,q]` the expectation of `E_pq` and `dm2[p,q,r,s]` that of `E_pq E_rs`, the golden file's (PySCF `make_dm123`) convention — plus `dm12Dot`, the same bilinear forms with one copy of `c` replaced by a direction. No GPU and no kernel: neither demo links it. It exists because `dm1`/`dm2` are golden *inputs*, so nothing else recomputes them from the `ci` beside them; `test/rdm_host_dm/` rebuilds each committed pair card-free |
 | `src/rdm/rdm_plan.cppm` | `nevpt2.rdm_plan`: the RDM build's pure host index arithmetic — the determinant-axis tile plan (`tileWidthForCount`, `planTiles`), the consume GEMM's chunking (`evenChunks`) and its permuted integral copy (`permuteEriConsume`). No GPU; `nevpt2.rdm_build` imports it, and `test/rdm_plan/` tests it card-free |
 | `src/rdm/rdm_build.*` | `nevpt2.rdm_build`: the tiled, device-resident dm3/f3ac/f3ca build (link tables → produce → digests → fdm2/wedge, `--tiles`, `--cublas`), lifted out of `nevpt2_demo`'s `main` unchanged so `nevpt2_df_demo` runs the same build. Shared because it contracts only the **active** `h2e`, which density fitting rebuilds exactly |
 | `src/rdm/f3_scatter.cu` | the f3 permute-scatter the GEMM digests (`--cublas`, `--blas-digest` — HIP's default — and `--ozaki`) fold the winning `M=n^4,N=n^2` f3 GEMM into — a linked-in device library (`f3_scatter_bridge.h`) built on **both** backends; its ac order is `rdm_accumulate`'s `accumulateInplace`. Also `fusedDigestSplit`, the one-kernel fold of `--fused-digest`'s `(n^4, 3·n^2)` product into all three accumulators. It lived in `src/cublas/` until 2026-10-08, from when `--cublas` was its only caller |
