@@ -34,7 +34,7 @@ const Tensor& GoldenFile::get(const std::string& name) const {
 }
 
 Result<GoldenFile> loadGolden(const std::string& path) {
-  Reader r = NEVPT2_TRY(Reader::open(path));
+  Reader r = NEVPT2_TRY(Reader::open(path, "golden file"));
   const std::string magic = NEVPT2_TRY(r.str(8));
   if (magic != "NEVPT2G1")
     return err_io("golden file: bad magic (got '" + magic + "', expected 'NEVPT2G1') -- " + path);
@@ -48,15 +48,7 @@ Result<GoldenFile> loadGolden(const std::string& path) {
   g.eCasci = NEVPT2_TRY(r.f64());
   g.eNevpt2Total = NEVPT2_TRY(r.f64());
 
-  const int64_t nArrays = NEVPT2_TRY(r.i32());
-  if (nArrays < 0)
-    return err_io(std::format("golden file: negative array count {} -- {}", nArrays, path));
-  for (int64_t a = 0; a < nArrays; ++a) NEVPT2_TRY(readArray(r, g));
-  // The writer stops after the last array, so anything left is a truncated
-  // or miscounted header, not padding.
-  if (r.remaining() != 0)
-    return err_io(std::format("golden file: {} bytes after the last of its {} arrays -- {}",
-                              r.remaining(), nArrays, path));
+  NEVPT2_TRY(readArraySection(r, g.arrays));
   // The header's determinant count is the CI vector's length.
   if (const auto ci = g.arrays.find("ci"); ci != g.arrays.end() && ci->second.size() != g.ndet)
     return err_io(std::format("golden file: ci has {} elements but the header says ndet = {} -- {}",

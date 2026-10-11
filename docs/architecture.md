@@ -160,7 +160,7 @@ demo links, and `gradient`, which neither demo links. In dependency order:
   profile .......... nevpt2.profile         --profile event pairs
   tensor ........... nevpt2.tensor          host N-d Tensor               (no GPU)
                      nevpt2.device_tensor   DeviceTensor + upload/download
-  golden ........... nevpt2.golden          the .nevpt2gold reader
+  golden ........... nevpt2.golden          .nevpt2gold + .gradgold readers
   einsum ........... nevpt2.einsum          planner/launcher + device_einsum.cu
                      nevpt2.einsum.plan     INTERFACE: einsum_plan.h
   cublas ........... nevpt2.cublas_emul     --cublas digest (CUDA real, HIP stubs)
@@ -238,7 +238,7 @@ Python tools are in [`reference-data.md`](reference-data.md), "The files in
 | `src/rdm/f3_scatter.cu` | the f3 permute-scatter the GEMM digests (`--cublas`, `--blas-digest` — HIP's default — and `--ozaki`) fold the winning `M=n^4,N=n^2` f3 GEMM into — a linked-in device library (`f3_scatter_bridge.h`) built on **both** backends; its ac order is `rdm_accumulate`'s `accumulateInplace`. Also `fusedDigestSplit`, the one-kernel fold of `--fused-digest`'s `(n^4, 3·n^2)` product into all three accumulators. It lived in `src/cublas/` until 2026-10-08, from when `--cublas` was its only caller |
 | `src/cublas/` | **CUDA only.** `nevpt2.cublas_emul`, the `--cublas` digest: a `cublasGemmEx` (**not** `cublasDgemm`) wrapper requesting `CUBLAS_COMPUTE_64F_EMULATED_FIXEDPOINT` (EAGER/FIXED/`max-mantissa-bits`), plus the engaged-bits probe (see "The cuBLAS fixed-point-emulation digest" in docs/performance.md); compiled to refusing stubs on HIP, where only its `requireCublasEmul()` is called (an `Unsupported` error, to reject `--cublas`) |
 | `src/ozaki/` | **Both backends.** `nevpt2.ozaki.device`, the `--ozaki` digest: the three digest GEMMs on int8 tensor cores by the Ozaki scheme, through WarpWraps' `<wmma.h>` (`wwr::wwrwmma` — `nvcuda::wmma` / rocWMMA), so it names no vendor. A device library only, called from `rdm_build.cpp` through `ozaki_digest_bridge.h`. Accurate to fp64 rounding with all 64 digit pairs, and slower than the default digest on both cards (see "The int8 Ozaki digest" in docs/performance.md) |
-| `src/golden/` | `nevpt2.golden`: reads the golden binary file |
+| `src/golden/` | `nevpt2.golden`: reads the golden binary file (`loadGolden`), and the analytic-gradient **sidecar** beside it (`loadGradGold`, `gradgold.cpp`) — a separate `*.gradgold` file so the committed goldens' bytes never change, carrying the general-range MO integrals a gradient reads (docs/gradient-theory.md, §3; docs/reference-data.md, "The gradient sidecar"). Both formats end with the same named-array section, so both parse it with the one `nevpt2.golden:reader` partition |
 | `src/tensor/tensor.*` | `nevpt2.tensor`: a small dense host N-d tensor — the container the golden file loads into and that `DeviceTensor` wraps — plus a `transpose` (still used by `rdm_build.cpp`, for the chemists'-order `h2e` both demos' RDM build reads). The generic host `einsum` it was originally built around went with `energy.cpp`; the device kernel is the demo's only einsum now |
 | `src/tensor/device_tensor.*` | `nevpt2.device_tensor`: a device-resident tensor (shape/stride bookkeeping + an owning `DeviceBuffer<double>` or a non-owning `DeviceBufferView<double>`) — the GPU twin of `Tensor`. Move-only; `view()` and `sliceAxis` make views. Allocating calls take the `DeviceResources`, copies the stream |
 | `src/einsum/einsum_plan.h` | the POD contraction descriptor shared between the host planner and the device kernel — a header, not a module, because the device side is not a module-aware compile |
@@ -406,6 +406,10 @@ returns one:
   arrays it reads before any GPU work (the DF demo a second time for
   `--check-blocks`'s; its `B_*` tensors and both demos' `--pc` fields are
   tested with `arrays.contains` instead).
+- `loadGradGold` → `Result<GradGoldFile>`, the same contract on the gradient
+  sidecar, plus the header checks its array shapes are written in terms of: a
+  space partition that does not add up to `nmo`, an RHF electron count that
+  cannot fill the core, an `mo_coeff` that is not `[nao, nmo]` (`IO`).
 - `parsePoolThreshold` and each demo's `parseMantissaBits` → `Result`
   (`InvalidConfig`).
 - `DeviceResources::create` → `Result` (no selectable device, or one without

@@ -45,6 +45,10 @@ uv run python reference_data/generate_golden.py --df                     # n2_cc
 uv run python reference_data/generate_golden.py --df --ncas 12 --nelecas 12 --no-pc --name n2_ccpvdz_cas1212_df
 uv run python reference_data/generate_golden.py --df --basis cc-pvtz --name n2_ccpvtz_cas1010_df
 
+# the small cases, with their gradient sidecars (see "The gradient sidecar")
+uv run python reference_data/generate_golden.py --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44 --gradgold
+uv run python reference_data/generate_golden.py --ncas 8 --nelecas 8 --name n2_ccpvdz_cas88 --gradgold
+
 # the 12-orbital files: CAS(10,12) is the PC case, CAS(12,12) is refused one
 uv run python reference_data/generate_golden.py --ncas 12 --nelecas 10 --name n2_ccpvdz_cas1012
 uv run python reference_data/generate_golden.py --ncas 12 --nelecas 12 --no-pc --name n2_ccpvdz_cas1212
@@ -227,6 +231,83 @@ and `.npy` headers in C++ would need a dependency or a hand-written zip
 reader for no benefit. `write_golden`'s docstring in `generate_golden.py`
 has the exact layout, and `src/golden/golden.cppm`/`.cpp` is the reader.
 
+### The gradient sidecar
+
+An analytic NEVPT2 gradient reads MO integrals the energy never touches —
+blocks with one index over the **full** MO range
+([`gradient-theory.md`](gradient-theory.md), §3). Those live in a **separate**
+file beside the golden, `<case>.gradgold`, written by
+`generate_golden.py --gradgold` and read by `loadGradGold`
+(`src/golden/gradgold.cpp`).
+
+**Why a sidecar and not more arrays in the golden.** The golden format is
+extensible in principle — a magic plus an array count — but adding arrays
+would change every committed golden's bytes, and "a regenerated file that
+differs from the committed one means something changed" is the invariant this
+whole directory rests on (above). A sidecar keeps that intact and keeps the
+big goldens from growing. Adding `--gradgold` to the two small cases'
+generator commands left both `.nevpt2gold` files byte-identical, which is the
+check that it did.
+
+**What it carries**, and nothing else: the seventeen one-general-index
+MO-integral blocks of [`gradient-theory.md`](gradient-theory.md), §3.3 — as
+eighteen arrays, because `(xc|cc)` is stored on its two independent restricted
+slices — plus §3.5's full-MO-range matrices (`h`, `heff`, `f`, `f_h`,
+`fock_rhf`) and `mo_coeff`: 24 arrays. Three blocks are stored only on the
+slices the gradient reaches (`(xc|cc)` with two core labels tied, `(xa|vv)`
+and `(xc|vv)` with the two virtual labels coinciding), and the eighteenth
+block `(xv|vv)` is **absent** — §3.4. Its absence is a constant factor, not a
+change of order, and the two committed cases show exactly how modest that is:
+
+| | CAS(4,4) | CAS(8,8) |
+|---|---|---|
+| ncore / nact / nvirt (nmo = 28) | 5 / 4 / 19 | 3 / 8 / 17 |
+| `*.nevpt2gold` | 0.24 MB | 0.48 MB |
+| `*.gradgold` | 1.52 MB | 1.86 MB |
+| its two largest rows, `(xv\|cv)` + `(xv\|va)` | 0.73 MB | 0.71 MB |
+| the omitted `(xv\|vv)`, had it been stored | 1.54 MB | 1.10 MB |
+
+At CAS(4,4) the one omitted block alone would have outweighed the whole file;
+at CAS(8,8), with a smaller virtual space, it would have added 59%. Neither
+is a change of asymptotics — which is why the gradient validation set is small
+molecules (§3.4, and "The active-space-selection hazard" in the same
+document).
+
+**The invariants are asserted before a file is written.** `generate_golden.py`
+refuses to write a sidecar whose state is not the one the derivation describes
+(§3.6), the way `_check_degeneracy` refuses a noise-dependent SC energy:
+
+- **(O1)** the RHF Fock's core–active, core–virtual and active–virtual blocks
+  are zero. Measured on both committed cases, the largest element of any of
+  the three is **1.0e-7** (CAS(4,4): core–act exactly 0 — those pairs are in
+  different D2h irreps — core–virt 9.4e-8, act–virt 1.0e-7; CAS(8,8): 7.3e-8
+  / 5.6e-8 / 1.0e-7). That is the RHF convergence, not machine precision:
+  `mf.get_fock()` is built from the converged density while `mf.mo_coeff`
+  diagonalises the previous iteration's Fock. It cannot be tightened without
+  raising `mf.conv_tol`, which would change the golden state, so the refusal
+  threshold (`O1_FOCK_TOL`) is 1e-5 — two decades of headroom, and still four
+  decades below what a wrongly selected active space would show.
+- **(O2)** the generalized Fock is diagonal inside core and inside virtual,
+  and those diagonals reproduce the golden's `e_core` / `e_virt`: **1.8e-13**
+  at CAS(4,4), **5.9e-13** at CAS(8,8), against a 1e-10 threshold.
+- **(O3)** `F`'s active block splits at the RHF gap: 2 of 4 active orbitals
+  below the HOMO at CAS(4,4), 4 of 8 at CAS(8,8), none inside the gap. Both
+  are `nelec_rhf/2 − ncore = 7 − ncore`, as §2.6 requires.
+
+**Committed, and still to come.** The two small cases are committed:
+
+```bash
+uv run python reference_data/generate_golden.py --ncas 4 --nelecas 4 \
+    --name n2_ccpvdz_cas44 --gradgold
+uv run python reference_data/generate_golden.py --ncas 8 --nelecas 8 \
+    --name n2_ccpvdz_cas88 --gradgold
+```
+
+The gradient validation molecules (LiF and acrolein) take the same flag once
+their geometries exist. `--gradgold` is conventional-integral only and is
+refused with `--df`: the derivation names the conventional Fock, and a fitted
+sidecar's (O1)/(O2) would hold against a different one.
+
 ## Density fitting
 
 `nevpt2_df_demo` computes SC-NEVPT2 from three-index `(L|pq)` tensors
@@ -307,7 +388,9 @@ with the same generator settings (0.2–0.8 MB each). They exist for the
 sanitizer tier, because compute-sanitizer is too slow for the production
 sizes (see [`testing.md`](testing.md)), and they are ordinary `small`-labelled
 entries in `ctest --preset fast` too. CAS(8,8) is the one with all eight
-classes non-zero.
+classes non-zero. They are also the two cases that carry a gradient sidecar
+(see "The gradient sidecar" above), for the same reason: small enough that the
+general-range integral inventory is cheap.
 
 ## Salicylaldimine CAS(8,8)
 
@@ -436,5 +519,6 @@ not used.
 | `golden/n2_ccpvdz_cas1012.nevpt2gold` | the 12-orbital **PC** case: CAS(10,12) on the same molecule (both N 1s in the core, n_det = 627k), with SC and PC fields. Exists because CAS(12,12) cannot be a PC golden. Its SC fields pass `nevpt2_demo --tiles 40` (CUDA, \|ΔE_corr\| 4e-15); its ctest entry is the PC one, `nevpt2_cas1012_pc` (`--pc --tiles 40`, `slow`) |
 | `golden/n2_ccpvdz_cas1010_df.nevpt2gold`, `golden/n2_ccpvdz_cas1212_df.nevpt2gold`, `golden/n2_ccpvtz_cas1010_df.nevpt2gold` | the **density-fitted** goldens (`--df`, aux basis `<basis>-jkfit`), the oracle for `nevpt2_df_demo`: PySCF's DF-NEVPT2 as the answer, plus the four three-index `B_*` blocks. A different reference from the conventional files (see "Density fitting" above). The cc-pVTZ one (nvirt = 48) exists for slab boundaries, not memory pressure |
 | `golden/n2_ccpvdz_cas44.nevpt2gold`, `golden/n2_ccpvdz_cas88.nevpt2gold` and their `_df` twins | the **small** cases (see "The small cases" above) |
+| `golden/n2_ccpvdz_cas44.gradgold`, `golden/n2_ccpvdz_cas88.gradgold` | the **gradient sidecars** for those two cases: the general-range MO-integral blocks an analytic gradient reads, plus the full-range Fock matrices and `mo_coeff` (see "The gradient sidecar" above). Separate files, so the goldens beside them are untouched. `test/golden/gradgold_tests.cpp` round-trips the reader and checks the CAS(4,4) one against the golden beside it |
 | `reference_data/geometries/salicylaldimine.xyz`, `reference_data/basis/6-31gss-rifit.nw`, `golden/salicylaldimine_631gss_cas88[_df].nevpt2gold` | the non-N2 case (see "Salicylaldimine CAS(8,8)" above). The two goldens are **gitignored** and regenerate byte-identically in ~2.5 min each; their four ctest entries register only once they exist |
 | `golden/n2_ccpvdz_cas1414.nevpt2gold` | **not committed**; see "CAS(14,14)" above |
