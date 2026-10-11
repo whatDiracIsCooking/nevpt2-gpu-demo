@@ -60,6 +60,36 @@
 // "the forward tangent" below for why that needs no new contraction -- the
 // class einsums are linear in the RDMs, so the tangent reruns them with the
 // tangent RDMs substituted and differentiates only the scalar finish.
+//
+// PC'S TANGENT IS NOT LIKE THAT: IT DIFFERENTIATES THE SOLVE, NOT THE
+// EIGENDECOMPOSITION -- and, unlike the SC tangent above, it cannot be a
+// rerun of the energy's own contractions, because a pseudo-inverse sits
+// between the RDMs and the energy
+// (pcTangentsDevice, energy_pc_tangent.cppm). Only S, K and S_1 carry the CI
+// vector, so with x_vec = A_t^+ b_t -- the solve the energy already ran --
+// the derivative of E_t = -c b_t^T A_t^+ b_t along a CI direction is
+//
+//   Edot_t = -c * (2 x_vec^T bdot_t - x_vec^T Adot_t x_vec).
+//
+// No eigenvector derivative appears, so there is no degenerate-eigenvalue
+// case to handle. WHY THAT IS LEGITIMATE, and where it stops being so: A^+ is
+// a PSEUDO-inverse, and a pseudo-inverse is differentiable only where the
+// rank is locally constant -- otherwise dA^+ does not exist and the line
+// above is meaningless. Local rank constancy is exactly what PC_MIN_GAP
+// already enforces: the modes the cut drops are STRUCTURAL -- linear
+// dependencies among the class's active-space operator strings, null for
+// every CI vector, measured at <=1.2e-15 of s_max -- and PC_MIN_GAP = 1e3
+// demands three decades between them and the smallest kept mode, so no mode
+// can cross the cut under a small change of the state
+// (docs/pc-nevpt2.md, "The singular-metric convention"). The two extra terms
+// of the general pseudo-inverse derivative, A^+ A^+ Adot (I - A A^+) and its
+// transpose, drop because b_t lies in the kept range. So the tangent is valid
+// precisely on the states pcEnergiesDevice already accepts -- and ONLY there:
+// a class the gap or denominator check refuses is refused in the tangent too,
+// through the same PcStatus::Refused (PcClassTangent carries that class's own
+// PcClassResult), never reported as a zero derivative. The per-class algebra
+// and the slab walk are in energy_pc_tangent.cppm; the step from dA^+ to the
+// line above is at `tangentClass` in energy_pc_solve.cppm.
 export module nevpt2.energy;
 
 import std;
@@ -366,5 +396,60 @@ Result<PcEnergyResult> pcEnergiesDevice(const NevptIntegralsDevice& ints, const 
 // all eight classes were computed (none refused, none not yet), each is within
 // `atol` of `ref`, and the total is within `atol` of `refTotal`.
 bool printPcReport(const PcEnergyResult& r, const Tensor& ref, double refTotal, double atol);
+
+// --- PC-NEVPT2's tangent ------------------------------------------------------
+
+// The eight classes' tangents, CLASSES order. PcClassTangent is
+// nevpt2.energy_finish's: each carries the class's own PcClassResult (status,
+// energy, spectrum) beside `edot`, so a refused class is refused here too and
+// its `edot` is meaningless by construction rather than a zero that reads
+// like an answer.
+struct PcTangentResult {
+  std::array<PcClassTangent, 8> classes;
+};
+
+// The directional derivative of pcEnergiesDevice with respect to the CI
+// vector: d/dh of every class energy, along the direction whose RDM tangents
+// are `dm1Dot`...`f3caDot` (nevpt2.rdm_host_dm's dm12Dot for the first two,
+// nevpt2.rdm_build's buildRdmTangentsDevice for the other three -- the
+// tangents of exactly the arrays passed as `dm1`...`f3ca`). The energies
+// themselves come back too, from the same solves, so the derivative and the
+// number it differentiates are never two different runs.
+//
+// Why this is legitimate -- and why a class the gap check refuses stays
+// refused -- is the module header above, "PC'S TANGENT DIFFERENTIATES THE
+// SOLVE". The integrals and orbital energies are held FIXED: this is the CI
+// half of the derivative, the source term the Z-vector work needs, not a
+// nuclear gradient.
+//
+// Everything runs on res.stream(), each class's intermediates drawn from
+// res's pool and freed when it returns, the eigensolves on res.solver() and
+// the d x d products on res.blas(), exactly as pcEnergiesDevice does; every
+// read-back is a downloadTensor (which synchronizes), so all work is complete
+// when this returns. `batch` bounds every slab as in energiesDevice. An
+// eigensolve that reports devInfo != 0 is a Numerical Error -- the first one
+// stops the stage.
+//
+// Sijrs's tangent is EXACTLY zero (status Done): the MP2-like class contracts
+// no RDM at all, so no CI direction can move it.
+Result<PcTangentResult> pcTangentsDevice(const ActiveIntegralsDevice& active,
+                                         IntegralSource& source, int64_t batch,
+                                         const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                         const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                         const DeviceTensor& f3ca, const DeviceTensor& dm1Dot,
+                                         const DeviceTensor& dm2Dot, const DeviceTensor& dm3Dot,
+                                         const DeviceTensor& f3acDot,
+                                         const DeviceTensor& f3caDot,
+                                         const DeviceResources& res);
+
+// The integral-direct entry point: full blocks, one slab each.
+Result<PcTangentResult> pcTangentsDevice(const NevptIntegralsDevice& ints,
+                                         const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                         const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                         const DeviceTensor& f3ca, const DeviceTensor& dm1Dot,
+                                         const DeviceTensor& dm2Dot, const DeviceTensor& dm3Dot,
+                                         const DeviceTensor& f3acDot,
+                                         const DeviceTensor& f3caDot,
+                                         const DeviceResources& res);
 
 }  // namespace nevpt2

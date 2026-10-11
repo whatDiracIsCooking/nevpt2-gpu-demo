@@ -1,15 +1,18 @@
 # nevpt2.energy_finish -- the class energies' pure host arithmetic: the slab
 # walk (forBatches), the SC finish (normToEnergy) and its derivative
-# (normToEnergyDerivative, normToEnergyTangent -- the forward tangent's only
-# calculus), the PC finish and denominator check (finishSingle,
-# checkDenominator) and the PC result types they fill. No GPU, so the unit
-# tier tests it card-free (test/energy_finish/); nevpt2.energy re-exports it.
+# (normToEnergyDerivative, normToEnergyTangent -- the SC forward tangent's
+# only calculus), the PC finish and denominator check (finishSingle,
+# checkDenominator), the PC tangent's per-tuple arithmetic (pcCoefficients,
+# pcQuadForm, tangentSingle) and the result types they fill. No GPU, so the
+# unit tier tests it card-free (test/energy_finish/); nevpt2.energy
+# re-exports it.
 add_cxx_module_library(
   NAME nevpt2.energy_finish
   PRIMARY_INTERFACE energy_finish.cppm
   LINK_PUBLIC nevpt2::tensor
   # error_handling: check(), which normToEnergyTangent (inline, in the
-  # interface) calls on its five vector lengths -- the abort tier.
+  # interface) calls on its five vector lengths, and the PC tangent's helpers
+  # on their (m, m) block shapes -- the abort tier.
   LINK_PRIVATE nevpt2::error_handling
 )
 
@@ -28,14 +31,18 @@ add_cxx_module_library(
 # sees. energy_sc_tangent.cppm is nevpt2.energy:sc_tangent, the SC classes'
 # forward tangent with respect to the RDMs (energiesTangentDevice): it reruns
 # :sc_classes' own per-slab chains with the tangent RDMs substituted, so it
-# needs no kernel and no subscript of its own. (The metric / Dyall-Hamiltonian intermediates ARE exported, from
+# needs no kernel and no subscript of its own. energy_pc_tangent.cppm is
+# nevpt2.energy:pc_tangent, the per-class work behind pcTangentsDevice -- the
+# PC class energies' derivative with respect to the CI vector, which
+# differentiates the SOLVE and not the eigendecomposition. No importer sees
+# either. (The metric / Dyall-Hamiltonian intermediates ARE exported, from
 # energy.cppm: nevpt2.gradient differentiates the same class einsums.)
 add_cxx_module_library(
   NAME nevpt2.energy
   PRIMARY_INTERFACE energy.cppm
   PARTITIONS energy_shared.cppm energy_sc_finish.cppm energy_sc_classes.cppm
              energy_sc_tangent.cppm
-             energy_pc_solve.cppm energy_pc_classes.cppm
+             energy_pc_solve.cppm energy_pc_classes.cppm energy_pc_tangent.cppm
   IMPLEMENTATION energy.cpp energy_pc.cpp
   LINK_PUBLIC nevpt2::einsum nevpt2::energy_finish
   LINK_PRIVATE nevpt2::profile wwr::solver wwr::extension::solver

@@ -576,6 +576,131 @@ the RDM build's. `n2_ccpvdz_cas1012`, pool used / reserved, MB:
   against SC's 0.4 MB on the RTX 3080, 0.6 MB against 0.4 MB on the RX
   9060 XT.
 
+## The tangent with respect to the CI vector
+
+`pcTangentsDevice` (`src/energy/energy_pc_tangent.cppm`) differentiates every
+PC class energy with respect to the CI vector, with the integrals held fixed
+— the CI half of the analytic gradient, which is where PC is the branch worth
+carrying (Park's Table 3: PC within 5.0e-6 of numerical, SC unstable).
+`nevpt2_pc_tangent` (`apps/pc_tangent/`, over `nevpt2.pc_tangent`) is what
+checks it.
+
+**It differentiates the solve, not the eigendecomposition.** Only `S`, `K`
+and `S_1` carry the CI vector, so with `x = A_t^+ b_t` — the solve the energy
+already ran —
+
+```
+Edot_t = -c (2 x^T bdot_t - x^T Adot_t x)
+```
+
+and no `dU/dh` or `dlambda/dh` appears. `A^+` is a pseudo-inverse, so this is
+legitimate only where the rank is locally constant, which is exactly what
+`PC_MIN_GAP` enforces (see "The singular-metric convention"): the dropped
+modes are structural, three decades below the smallest kept one, so the cut
+cannot move under a small change of the state. **A class the gap or
+denominator check refuses is refused in the tangent too** — never given a
+zero derivative. The full argument is in `src/energy/energy.cppm`'s header
+and at `tangentClass` in `energy_pc_solve.cppm`.
+
+### What the check can and cannot displace
+
+A derivative of a *solve* has no algebraic identity to check it against (that
+is what the SC pseudodensities have — `docs/testing.md`, "The SC
+pseudodensity identities"), so the check displaces the state and re-solves.
+Three things had to be measured before that worked, all of them on
+`n2_ccpvdz_cas44` with the RTX 3080:
+
+- **A random direction raises the metric's rank, at every step size.** `Sr`
+  and `Si` drop 44 of 64 modes at the state and only 20 at `c + h u`; the 24
+  new modes come in with eigenvalues `~h^2` relative and Dyall eigenvalues
+  that make `lambda_k + Delta_t` negative — `minDen` = −7.1 at `h = 2^-3` and
+  −6.9 at `h = 2^-8`, so the PC stage refuses the displaced state at *any*
+  `h`. That is the pseudo-inverse's rank condition failing, as the derivation
+  says it must, and it is a property of the direction. The structural nullity
+  is the state's own symmetry: `|ci>` is a spin eigenstate in one spatial
+  irrep. The direction is therefore built as `u = sum_pq w_pq E_pq|ci>` over
+  the pairs where `dm1[p,q]` is nonzero — the spin-free generators commute
+  with `S^2`, and those pairs are the ones whose orbitals share an irrep — and
+  then every displaced state comes back with the state's own dropped counts.
+  It is also the only kind of direction phase 2 needs: a CI response stays
+  inside the sector it was solved in.
+- **The path must be the unit sphere, not the straight line.** The hole-side
+  metrics carry RDM-free Kronecker-delta terms (`make_hdm1`'s `2 delta`,
+  `make_hdm2`'s two `delta delta`), which are the hole RDMs only at unit
+  norm. At `norm^2 = 1 + h^2` they are on a different scale from the RDM
+  terms, and the difference appears as metric eigenvalues of order `h^2` *of
+  the wrong sign*: at `h = 2^-4` on the straight line, `Sij`'s metric grew 7
+  eigenvalues at −4.1e-3 relative (= −`h^2`) and the class was refused for its
+  gap (0.79). On the normalized path they are gone. With `<c|u> = 0` and
+  `||c|| = 1` the two paths have the same tangent at `h = 0`, so nothing is
+  lost.
+- **`Sir` still grows one mode, at `~h^4`, so the step must be small.** With
+  the direction and path above, `Sir` drops 1 of 32 instead of 2 at
+  `h = 2^-8`, the new mode sitting at 5.4e-12 relative with `minDen` = −33.7.
+  It scales as `h^4`, so below `h ~ 2^-10` it falls under `PC_TAU = 1e-13 *
+  s_max` and is dropped like the structural ones. The check runs from
+  `h = 2^-12`, where every class comes back with the state's own dropped
+  counts and the `h^2` truncation error is ~3e-6 Eh — five decades above the
+  difference's own noise floor (~1e-11 Eh: the RDM build's reassociation
+  divided by `2h`).
+
+### What it checks, and the measured agreement
+
+Two checks, both in `printPcTangentReport`:
+
+- **Euler, exact and step-free, on five classes.** Where a class's `S`, `K`
+  and `S_1` are *linear* in the RDMs, its energy is homogeneous of degree 2
+  in the CI vector, so `Edot(c, c) = 2 E` exactly. That is `Sr`, `Si`,
+  `Srsi`, `Srs` and `Sir`. It does **not** hold for `Sijr` and `Sij` (the
+  hole-side delta terms above make them affine, not linear) or for `Sijrs`
+  (no RDM at all, so degree 0 and tangent exactly 0) — those are printed and
+  not gated (`kPcHomogeneousInCi`).
+
+  **Five here, three for the SC tangent** (`Sr`, `Srsi`, `Srs` —
+  `docs/testing.md`, "The SC tangent's finite-difference cross-check"), and
+  the two are consistent: the extra pair is `Si` and `Sir`, and what makes
+  them affine on the SC side is machinery PC does not use. SC's `Si` reads
+  `a25`, whose `2 h1e^T` carries no RDM, and SC's `Sir` norm has a term that
+  is purely one-electron; PC needs neither, because its one-body part enters
+  only as `S_1 h1_t` inside `b_t`, and `S_1` is linear in the RDMs. Both
+  tangents agree on the other six classes.
+- **A central finite difference of the PC total**, `(E(c(h)) - E(c(-h)))/2h`,
+  whose error must fall 4× per halving of `h` and whose Richardson
+  extrapolation must be the analytic tangent. The PC energy is not a
+  polynomial in the CI vector (there is a solve), so unlike the RDMs' own
+  tangents this is a genuine second-order difference — the RDMs are quadratic
+  in the CI vector, so a straight-line difference of *theirs* has no
+  truncation error at all and their own Richardson table needs a curved path
+  (`test/rdm_host_dm/`).
+
+RTX 3080, CUDA, the default (emitted) digest, steps halving from `h = 2^-12`:
+
+| case | `--tiles` | steps | ratios | \|Richardson − Edot\| | Euler, worst of the five | \|E − `pcEnergiesDevice`\| | wall |
+|---|---:|---:|---|---:|---:|---:|---:|
+| CAS(4,4) | 3 | 4 | 4.000, 4.000, 4.000 | 5.6e-12 | 1.5e-16 | 9.0e-17 | 0.2s |
+| CAS(8,8) | 3 | 4 | 4.003, 4.001, 4.000 | 1.6e-10 | 8.3e-15 | 3.3e-16 | 2.0s |
+| CAS(10,12) | 40 | 3 | 4.002, 4.000 | 7.4e-10 | 5.0e-16 | 1.4e-15 | 318s |
+
+The two right-hand columns, and the Richardson residual, move by up to about
+a factor of two run to run — the RDM build's `atomicAdd`s reassociate, so the
+energies themselves carry ~1e-15 relative and the difference quotient divides
+that by `2h` (the same effect the SC tangent's sweep records in
+[`testing.md`](testing.md), "The SC tangent's finite-difference
+cross-check"). The ratios do not move at this `h`.
+
+The gate is 1e-8 on the Richardson difference, 4 ± 0.5 on every ratio and
+1e-9 on the two exact checks, so each has two decades or more of margin. The
+`|E - pcEnergiesDevice|` column is why the tangent partition may build each
+class's `S` and `K` itself: the two transcriptions agree to rounding, and a
+drift between them fails the entry rather than passing quietly.
+
+**Cost: the CAS(10,12) entry is the slowest in the tree.** Every step is two
+displaced states, each a host `dm1`/`dm2` rebuild
+(`nevpt2.rdm_host_dm` — the golden's arrays are the state's own) plus a full
+device RDM build and PC stage; the three sizes above run 10, 10 and 8 of
+them. At CAS(10,12) that is the 318s, nearly all of it RDM builds, which is
+why that entry is `slow` and takes `--fd-steps 3`.
+
 ## What is not supported
 
 - **N2 CAS(12,12)**, conventional or DF: its metric has no gap (see
@@ -585,4 +710,8 @@ the RDM build's. `n2_ccpvdz_cas1012`, pool used / reserved, MB:
 - **Any golden without `pc_class_energies` and `e_pc_total`**, for the same
   reason: there is nothing to check against.
 - **A state whose metric is not gapped** by at least `PC_MIN_GAP`: the class
-  is refused, with no energy, rather than reported at an arbitrary cut.
+  is refused, with no energy, rather than reported at an arbitrary cut. The
+  tangent is refused with it ("The tangent with respect to the CI vector").
+- **A CI direction that leaves the state's spin and spatial symmetry**: the
+  metric gains rank there, so the pseudo-inverse is not differentiable along
+  it and the displaced state has no PC energy at all. Measured above.

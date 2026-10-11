@@ -9,9 +9,12 @@ figure names its card.
 
 - **The golden tier** is the numerical one. Each demo checks itself against
   a committed golden file (every class energy and the total to 1e-7) and
-  prints `PASS:`; the ctest entry matches that line. The one non-demo binary
-  in it, `nevpt2_sc_pseudodensity`, checks the gradient pseudodensities'
-  exact identities the same way ("The SC pseudodensity identities", below).
+  prints `PASS:`; the ctest entry matches that line. The gradient work is
+  checked the same way: `nevpt2_demo --sc-tangent` for the SC tangent ("The
+  SC tangent's finite-difference cross-check", below) and two non-demo
+  binaries, `nevpt2_sc_pseudodensity` for the SC pseudodensities' exact
+  identities ("The SC pseudodensity identities") and `nevpt2_pc_tangent` for
+  the PC tangent ("The PC tangent against a finite difference").
   Every golden entry is labelled `gpu`, because there is no CPU path.
   `ctest --preset fast` runs every entry not labelled `slow`.
 - **The unit tier** (`test/`, GoogleTest) checks host logic one component at
@@ -91,8 +94,9 @@ card-free.
 
 `nevpt2_cas44_sc_tangent` and `nevpt2_cas88_sc_tangent` (`gpu`; the CAS(4,4)
 one `small`) run `nevpt2_demo --golden <case> --tiles 3 --sc-tangent` and
-match `PASS: the SC tangent matches Euler`. They are **the only finite
-difference in the golden tier, and a one-time one**: it validates
+match `PASS: the SC tangent matches Euler`. They are **the SC side's only
+finite difference, and a one-time one** (the PC tangent's, below, is the
+other one in the golden tier): it validates
 `energiesTangentDevice` (`nevpt2.energy`'s `:sc_tangent` partition) so that
 every later check of the reverse-mode assembly can be an exact dot-product
 identity against the tangent at this tree's usual 1e-7, with no step size
@@ -252,6 +256,55 @@ The host half — `exp(kappa)` orthogonal to 1e-14, and a rotation by
 with a `-0.0` and a denormal in the data) — is `test/gradient/`, card-free:
 `AntisymmetricKappaTests`, `ExpKappaTests`, `RotateAxesTests`,
 `RotateByZeroTests` and `KappaRotationDeathTest`.
+
+## The PC tangent against a finite difference
+
+The PC side's own entries: `nevpt2_pc_tangent_cas44`, `_cas88` and `_cas1012`,
+all `gpu`, run `nevpt2_pc_tangent` (`apps/pc_tangent/`) and match
+`PASS: the PC-NEVPT2 tangent matches the central finite difference`.
+
+A finite difference again, as in the two SC sections above, and here with no
+exact check to lean on at all: `pcTangentsDevice` differentiates a *solve*
+(`E_t = -c b_t^T (K + Delta_t S)^+ b_t` with respect to the CI vector). The SC
+tangent has its norms' affine increment and the active-rotation term has
+`A == B`; a solve's derivative has no algebraic identity short of
+differentiating the eigendecomposition, which is exactly what that code
+avoids. So each entry displaces the state and re-solves:
+
+| check | against | tolerance |
+|---|---|---|
+| each class energy, from the tangent path's own `S` and `K` | `pcEnergiesDevice`'s answer for the same state | 1e-9 |
+| `Edot(c, c)`, five classes (`Sr`, `Si`, `Srsi`, `Srs`, `Sir`) | `2 E`, exact: those classes are homogeneous of degree 2 in the CI vector | 1e-9 relative |
+| the central difference's error at each `h` | 4× the next one's — second order | 4 ± 0.5 |
+| the Richardson extrapolation of the two finest steps | the analytic `Edot` | 1e-8 |
+| a class refused by the gap or denominator check | nothing: the entry FAILS, and no derivative is reported for it | — |
+
+**Five Euler classes here, against the SC tangent's three** (`Sr`, `Srsi`,
+`Srs`, above) — the two are consistent, and the difference is what PC does
+*not* contract. SC's `Si` reads `a25`, whose `2 h1e^T` is RDM-free, and SC's
+`Sir` norm has a purely one-electron term; both make those class energies
+affine in the RDMs rather than homogeneous. PC uses neither: its one-body
+part enters only through `b_t = S x_t + S_1 h1_t`, and `S_1` is linear in the
+RDMs, so PC's `Si` and `Sir` are homogeneous and Euler's identity holds for
+them. `Sijr` and `Sij` (the hole-side `delta` terms) and `Sijrs` (no RDM at
+all) are affine or degree 0 in both.
+
+Each displaced state costs a host `dm1`/`dm2` rebuild plus a full device RDM
+build and PC stage — the same price the SC tangent's sweep pays, at 8 states
+rather than 28 but up to 12 orbitals, which makes
+`nevpt2_pc_tangent_cas1012` the slowest entry in the tree (318s; it is `slow`
+and runs three steps instead of four). The measured ratios, residuals and the three findings that
+constrain the direction and the step — a random CI direction raises the
+metric's rank and gets the displaced state refused at *any* `h`; the path has
+to be the unit sphere; one `Sir` mode forces `h <= 2^-10` — are in
+[`pc-nevpt2.md`](pc-nevpt2.md), "The tangent with respect to the CI vector".
+
+CAS(4,4) and CAS(8,8) are `small`, so the sanitizer tier covers the tangent's
+einsums, GEMMs and second solve. The host halves are card-free: the
+per-tuple arithmetic is `test/energy_finish/` (`pcCoefficients`,
+`pcQuadForm`, `tangentSingle`) and the gate itself `test/pc_tangent/`, which
+locks in that a refused class fails rather than reading as a zero
+derivative.
 
 ## Sanitizers
 
@@ -425,6 +478,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_cas88_rdm_tangent` | `--rdm-tangent`: the tangent RDM build beside the plain one, checked against twice it (the derivative itself is checked against a finite difference in the unit tier, `test/rdm/rdm_tangent_tests.cpp`) |
 | `nevpt2_cas44_sc_tangent` | `--sc-tangent`: the SC class energies' tangent with respect to the RDMs, against the norms' exact affine increment, Euler's identity and a finite difference ("The SC tangent's finite-difference cross-check", below). `nevpt2_cas88_sc_tangent` runs the same at CAS(8,8) and is **not** `small` |
 | `nevpt2_sc_pseudodensity_cas44`, `nevpt2_sc_pseudodensity_cas88` | the SC gradient's pseudodensity assembly and its identities ("The SC pseudodensity identities", above) |
+| `nevpt2_pc_tangent_cas44`, `nevpt2_pc_tangent_cas88` | the PC tangent: a second solve per class, the tangent slab einsums and the `(m, m)` blocks' GEMMs, plus ten RDM builds and PC stages per entry ("The PC tangent against a finite difference", above) |
 
 They are ordinary golden checks too, so `ctest --preset fast` and
 `ctest --preset hip` run them on every backend.
@@ -541,6 +595,8 @@ memcheck with the leak check. "plain" is the same entry unsanitized
 | `nevpt2_df_cas44_pc` | 0.51 | 0.35 | 0.72 | 0.67 | — | — | 1.42 | 0.41 | — | — |
 | `nevpt2_df_cas88_pc` | 0.67 | 0.51 | 4.17 | 2.17 | — | — | 2.94 | 1.64 | — | — |
 | `nevpt2_sc_pseudodensity_kappa_cas44` | 0.88 | 0.67 | 1.42 | 1.17 | — | — | — | — | 0.38 | — |
+| `nevpt2_pc_tangent_cas44` | 0.72 | 0.51 | 1.72 | 1.32 | — | — | — | — | 0.44 | — |
+| `nevpt2_pc_tangent_cas88` | 3.07 | 3.05 | 45.22 | 19.25 | — | — | — | — | 2.27 | — |
 | each canary | 0.36 | 0.35 | 0.75–0.86 | 0.49 | 0.53 | 0.77 | 0.37 | 0.36 | — | — |
 
 The `nevpt2_cas88_profile` row was measured with the RDM-build-only profiler
@@ -549,11 +605,15 @@ that `--profile` has since absorbed. `nevpt2_df_cas88_profile` and the two
 pair has been run clean under memcheck (with the leak check), racecheck,
 initcheck, synccheck, `asan` and `ubsan`, but not yet `hip-asan` /
 `hip-ubsan`. racecheck and synccheck have not been run on the `--pc` entries,
-nor on `nevpt2_sc_pseudodensity_kappa_cas44`, which has been run clean under
-`asan`, `ubsan`, memcheck (with the leak check) and initcheck.
+nor on `nevpt2_sc_pseudodensity_kappa_cas44` or the two
+`nevpt2_pc_tangent_*` entries, all of which have been run clean under `asan`,
+`ubsan`, memcheck (with the leak check) and initcheck on CUDA, and none of
+which has been run on HIP.
 
 Everything except racecheck finishes in well under a minute, so CAS(8,8) is
-affordable under every tool. racecheck costs ~100s per CAS(8,8) entry on the
+affordable under every tool — `nevpt2_pc_tangent_cas88` is the dearest of the
+non-racecheck entries at 45s under memcheck, since it runs ten RDM builds and
+ten PC stages. racecheck costs ~100s per CAS(8,8) entry on the
 emitted digest's 16×16 shared-memory tiles (the BLAS paths are cheaper
 because cuBLAS is excluded), ~7 minutes for the whole preset. memcheck takes
 ~8× the plain run at CAS(8,8), and initcheck ~3.5×. On HIP the sanitizer

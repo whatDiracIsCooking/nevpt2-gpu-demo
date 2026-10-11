@@ -35,6 +35,17 @@
 // finite difference of the energy itself on a card); the derivative of the
 // scalar finish is the one piece that had to be differentiated, and it is
 // pure host arithmetic, so it is checked here on hand cases.
+//   PcCoefficientsTests    g_k = y_k / (lambda_k + Delta), the solve in the
+//                          eigenbasis; the buffer is resized, not appended to,
+//                          and a non-positive denominator is recorded
+//   PcQuadFormTests        g1^T (mK + delta nS) g2 on a hand case, its
+//                          linearity in each argument, and its symmetry when
+//                          the blocks are symmetric (what the two-spin classes
+//                          rely on)
+//   TangentSingleTests     the PC tangent's Sr/Si finish: the energy
+//                          finishSingle gives AND
+//                          Edot -= 2 g . ydot - g^T (mK + Delta nS) g, on the
+//                          same hand case; a zero tangent gives exactly zero
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
 // textual std #include before any import.
@@ -420,6 +431,124 @@ TEST(NormToEnergyTangentDeathTest, MismatchedLengthsAbort) {
                "normToEnergyTangent: norm/h/diff/normDot/hDot lengths differ");
   EXPECT_DEATH((void)normToEnergyTangent({1.0}, {1.0}, {1.0}, {}, {1.0}),
                "normToEnergyTangent: norm/h/diff/normDot/hDot lengths differ");
+}
+
+// --- PcCoefficientsTests -------------------------------------------------------
+
+TEST(PcCoefficientsTests, DividesByTheDenominatorsAndTracksTheSmallest) {
+  // lambda = (1, 2), Delta = 0.5: denominators 1.5 and 2.5.
+  const std::array<double, 2> y{3.0, 5.0};
+  std::vector<double> g{42.0};  // overwritten, not appended to
+  double minDen = 10.0;
+  pcCoefficients(y, {1.0, 2.0}, 0.5, g, minDen);
+  ASSERT_EQ(g.size(), 2u);
+  EXPECT_DOUBLE_EQ(g[0], 3.0 / 1.5);
+  EXPECT_DOUBLE_EQ(g[1], 5.0 / 2.5);
+  EXPECT_DOUBLE_EQ(minDen, 1.5);
+}
+
+TEST(PcCoefficientsTests, ANonPositiveDenominatorIsRecordedNotHidden) {
+  // The class is refused by checkDenominator afterwards; these coefficients
+  // are computed all the same, and minDen is what says so.
+  const std::array<double, 2> y{1.0, 1.0};
+  std::vector<double> g;
+  double minDen = std::numeric_limits<double>::infinity();
+  pcCoefficients(y, {-0.75, 1.0}, 0.5, g, minDen);
+  EXPECT_DOUBLE_EQ(minDen, -0.25);
+  EXPECT_DOUBLE_EQ(g[0], 1.0 / -0.25);
+}
+
+// --- PcQuadFormTests -----------------------------------------------------------
+
+TEST(PcQuadFormTests, HandCase) {
+  // mK = [[1, 2], [3, 4]], nS = [[10, 0], [0, 10]], delta = 0.5, so
+  // mK + delta nS = [[6, 2], [3, 9]]; g1 = (1, 2), g2 = (3, 4):
+  //   g1^T M g2 = 1*(6*3 + 2*4) + 2*(3*3 + 9*4) = 26 + 90 = 116
+  const std::vector<double> mK{1.0, 2.0, 3.0, 4.0};
+  const std::vector<double> nS{10.0, 0.0, 0.0, 10.0};
+  EXPECT_DOUBLE_EQ(pcQuadForm({1.0, 2.0}, {3.0, 4.0}, mK, nS, 0.5), 116.0);
+  // Linear in each argument, as the derivative of a bilinear form must be.
+  EXPECT_DOUBLE_EQ(pcQuadForm({2.0, 4.0}, {3.0, 4.0}, mK, nS, 0.5), 232.0);
+  EXPECT_DOUBLE_EQ(pcQuadForm({0.0, 0.0}, {3.0, 4.0}, mK, nS, 0.5), 0.0);
+}
+
+TEST(PcQuadFormTests, SymmetricBlocksGiveASymmetricForm) {
+  // The blocks the solve builds are U^T sym(Xdot) U, so symmetric: then
+  // g1^T M g2 == g2^T M g1, which the two-spin classes rely on.
+  const std::vector<double> mK{1.0, 2.0, 2.0, 5.0};
+  const std::vector<double> nS{3.0, -1.0, -1.0, 4.0};
+  EXPECT_DOUBLE_EQ(pcQuadForm({1.0, -2.0}, {0.5, 3.0}, mK, nS, 0.25),
+                   pcQuadForm({0.5, 3.0}, {1.0, -2.0}, mK, nS, 0.25));
+}
+
+// --- TangentSingleTests --------------------------------------------------------
+
+// The same hand case as FinishSingleTests, with a tangent on top:
+//   y = [[1, 2], [3, 4]], lambda = (1, 2), Delta = (0.5, 1.5)
+//   g_0 = (1/1.5, 2/2.5), g_1 = (3/2.5, 4/3.5)
+//   Edot = -sum_t (2 g_t . ydot_t - g_t^T (mK + Delta_t nS) g_t)
+TEST(TangentSingleTests, HandCaseAndTheEnergyBeside) {
+  const Tensor y = Tensor::fromFlat({2, 2}, {1.0, 2.0, 3.0, 4.0});
+  const Tensor ydot = Tensor::fromFlat({2, 2}, {0.5, -1.0, 2.0, 0.25});
+  const std::vector<double> lambda{1.0, 2.0}, delta{0.5, 1.5};
+  const std::vector<double> mK{1.0, 0.5, 0.5, 2.0}, nS{4.0, 0.0, 0.0, 1.0};
+  double e = 0.0, edot = 0.0;
+  double minDen = std::numeric_limits<double>::infinity();
+  tangentSingle(y, ydot, lambda, delta, mK, nS, e, edot, minDen);
+
+  // The energy is finishSingle's, from the same pass.
+  EXPECT_DOUBLE_EQ(e, -(1.0 / 1.5 + 4.0 / 2.5 + 9.0 / 2.5 + 16.0 / 3.5));
+  EXPECT_DOUBLE_EQ(minDen, 1.5);
+
+  double want = 0.0;
+  for (int t = 0; t < 2; ++t) {
+    const std::vector<double> g{y(t, 0) / (lambda[0] + delta[static_cast<std::size_t>(t)]),
+                                y(t, 1) / (lambda[1] + delta[static_cast<std::size_t>(t)])};
+    const double dot = g[0] * ydot(t, 0) + g[1] * ydot(t, 1);
+    want -= 2.0 * dot - pcQuadForm(g, g, mK, nS, delta[static_cast<std::size_t>(t)]);
+  }
+  EXPECT_DOUBLE_EQ(edot, want);
+}
+
+TEST(TangentSingleTests, IsLinearInYdotPlusTheQuadraticPart) {
+  // Doubling ydot alone doubles the 2 g . ydot half and leaves the
+  // g^T (mK + Delta nS) g half alone, so the difference of the two runs is
+  // exactly that half.
+  const Tensor y = Tensor::fromFlat({1, 2}, {1.0, 2.0});
+  const Tensor ydot = Tensor::fromFlat({1, 2}, {0.5, -1.0});
+  const Tensor ydot2 = Tensor::fromFlat({1, 2}, {1.0, -2.0});
+  const std::vector<double> lambda{1.0, 2.0}, delta{0.5};
+  const std::vector<double> mK{1.0, 0.5, 0.5, 2.0}, nS{4.0, 0.0, 0.0, 1.0};
+  double e1 = 0.0, d1 = 0.0, e2 = 0.0, d2 = 0.0;
+  double min1 = std::numeric_limits<double>::infinity(), min2 = min1;
+  tangentSingle(y, ydot, lambda, delta, mK, nS, e1, d1, min1);
+  tangentSingle(y, ydot2, lambda, delta, mK, nS, e2, d2, min2);
+  const std::vector<double> g{1.0 / 1.5, 2.0 / 2.5};
+  const double dot = g[0] * 0.5 + g[1] * -1.0;
+  EXPECT_DOUBLE_EQ(d2 - d1, -2.0 * dot);
+  EXPECT_DOUBLE_EQ(e1, e2);
+}
+
+TEST(TangentSingleTests, ZeroTangentBlocksLeaveOnlyTheDotTerm) {
+  // With mK = nS = 0 (an RDM tangent of zero -- a direction that moves no
+  // RDM) and ydot = 0 too, the tangent is exactly 0: never a stray value.
+  const Tensor y = Tensor::fromFlat({2, 2}, {1.0, 2.0, 3.0, 4.0});
+  const Tensor ydot = Tensor::fromFlat({2, 2}, {0.0, 0.0, 0.0, 0.0});
+  double e = 0.0, edot = 0.0;
+  double minDen = std::numeric_limits<double>::infinity();
+  tangentSingle(y, ydot, {1.0, 2.0}, {0.5, 1.5}, {0.0, 0.0, 0.0, 0.0}, {0.0, 0.0, 0.0, 0.0}, e,
+                edot, minDen);
+  EXPECT_EQ(edot, 0.0);
+  EXPECT_LT(e, 0.0);
+}
+
+TEST(TangentSingleTests, EmptySlabChangesNothing) {
+  double e = -3.0, edot = 7.0, minDen = 0.9;
+  tangentSingle(Tensor::fromFlat({0, 2}, {}), Tensor::fromFlat({0, 2}, {}), {1.0, 2.0}, {},
+                {1.0, 0.0, 0.0, 1.0}, {1.0, 0.0, 0.0, 1.0}, e, edot, minDen);
+  EXPECT_EQ(e, -3.0);
+  EXPECT_EQ(edot, 7.0);
+  EXPECT_EQ(minDen, 0.9);
 }
 
 }  // namespace nevpt2::test::energy_finish

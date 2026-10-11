@@ -503,6 +503,52 @@ if(NEVPT2_BUILD_TESTING)
     endif()
   endforeach()
 
+  # --- the PC tangent with respect to the CI vector -------------------------------
+  #
+  # nevpt2_pc_tangent (apps/pc_tangent/, the only binary that links
+  # nevpt2::pc_tangent): nevpt2.energy's analytic derivative of the PC solve
+  # (pcTangentsDevice) against Euler's identity -- exact on the five classes
+  # whose matrices are linear in the RDMs -- and against a central finite
+  # difference of the PC total on the unit sphere, Richardson-verified: the
+  # error must fall 4x per halving and the extrapolation must land on the
+  # analytic tangent (docs/pc-nevpt2.md, "The tangent with respect to the CI
+  # vector"). A finite difference like the *_sc_tangent entries above, and for
+  # a sharper reason: the derivative of a solve has no algebraic identity at
+  # all short of differentiating the eigendecomposition, which is what this
+  # avoids. Its PASS line is worded differently from every other entry's, so
+  # none can pass on another's output.
+  #
+  # Each step costs TWO more states, each a full RDM build (host dm1/dm2 too:
+  # the golden's arrays are only the state's own) and a full PC stage, so these
+  # are the slowest entries per case in the tree. CAS(4,4) and CAS(8,8) are
+  # `small` as well -- the sanitizer tier then covers the tangent's einsums,
+  # GEMMs and the second solve -- and the 12-orbital PC case is `slow`.
+  foreach(_case cas44 cas88)
+    set(_pc_tan_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.nevpt2gold")
+    _add_golden_test_with(nevpt2_pc_tangent nevpt2_pc_tangent_${_case}
+                          "${_pc_tan_gold}" --tiles 3)
+    if(TEST nevpt2_pc_tangent_${_case})
+      set_tests_properties(nevpt2_pc_tangent_${_case} PROPERTIES
+        PASS_REGULAR_EXPRESSION "PASS: the PC-NEVPT2 tangent matches the central finite difference"
+        LABELS "gpu;small")
+    endif()
+    unset(_pc_tan_gold)
+  endforeach()
+
+  # CAS(10,12), the 12-orbital PC case (the cas1212 goldens carry no PC
+  # fields). --tiles 40 is above BOTH measured floors that matter here: the
+  # plain build's 14 and the TANGENT build's 25, which is its own because it
+  # holds about twice the per-tile intermediates (docs/performance.md, "Tile
+  # floors"). Three steps rather than four: every step is two more 12-orbital
+  # RDM builds.
+  _add_golden_test_with(nevpt2_pc_tangent nevpt2_pc_tangent_cas1012 "${_gold_1012}"
+                        --tiles 40 --fd-steps 3)
+  if(TEST nevpt2_pc_tangent_cas1012)
+    set_tests_properties(nevpt2_pc_tangent_cas1012 PROPERTIES
+      PASS_REGULAR_EXPRESSION "PASS: the PC-NEVPT2 tangent matches the central finite difference"
+      LABELS "gpu;slow")
+  endif()
+
   # --- salicylaldimine CAS(8,8)/6-31G** -------------------------------------------
   #
   # The first molecule that is not N2: salicylaldimine (C7H7NO, PubChem CID
