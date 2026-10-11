@@ -27,6 +27,16 @@
   J. Chem. Phys. **117**, 9138 (2002).
   [doi:10.1063/1.1515317](https://doi.org/10.1063/1.1515317)
 
+## Analytic gradients
+
+- J. W. Park, *Analytical gradient theory for strongly contracted (SC-) and
+  partially contracted (PC-) N-electron valence state perturbation theory
+  (NEVPT2)*, J. Chem. Theory Comput. **15**, 5417 (2019).
+  [doi:10.1021/acs.jctc.9b00762](https://doi.org/10.1021/acs.jctc.9b00762),
+  [arXiv:1907.10180](https://arxiv.org/abs/1907.10180). The paper
+  [`gradient-theory.md`](gradient-theory.md) derives from; its equation
+  numbers are the ones that document cites.
+
 ## Related work
 
 - A. Y. Sokolov, G. K.-L. Chan, *A time-dependent formulation of
