@@ -43,14 +43,24 @@
 //
 // (P_k N_k + Q_k H_k = 2 T_k N_k + T_k^2 (Delta_k N_k + H_k) and
 // Delta_k N_k + H_k = -N_k / T_k). R_k is what Eq. 39's orbital-energy
-// pseudodensity d^Fock is built from; nothing consumes it yet.
+// pseudodensity d^Fock is built from, and nevpt2.gradient's full source term
+// contracts it against the orbital energies' response.
+//
+// AND THE PSEUDOCANONICAL MULTIPLIERS ARE HERE TOO (Park Eqs. 56-57, the
+// bottom of this file): one division per core and per virtual pair of the
+// assembled source term, which is pure host arithmetic on a matrix and so
+// belongs beside the other multipliers rather than in the device half.
 export module nevpt2.sc_amplitudes;
 
 import std;
 // Re-exported: NUMERICAL_ZERO is the guard normToEnergy applies, and the
-// identity above is checked against normToEnergy's own answer.
+// identity above is checked against normToEnergy's own answer. It re-exports
+// nevpt2.tensor in turn -- Eqs. 56-57 read a Tensor and hand two back.
 export import nevpt2.energy_finish;
-import nevpt2.error_handling;  // check(): the abort tier for a malformed call
+// Re-exported: check() is the abort tier for a malformed call, and Eqs. 56-57
+// hand back a Result -- a degeneracy they cannot divide through is a
+// NUMERICAL REFUSAL, not our bug.
+export import nevpt2.error_handling;
 
 export namespace nevpt2 {
 
@@ -170,6 +180,120 @@ std::string derivativeSubscripts(const std::string& subs, int slot,
   out += rhs;  // the multiplier, over the term's original output labels
   out += "->";
   out += dropped;
+  return out;
+}
+
+// --- The pseudocanonical multipliers (Park Eqs. 56-57) ----------------------
+//
+// The orbital convention `canonicalize(..., cas_natorb=True)` establishes is
+// that the generalized Fock is DIAGONAL inside the core space and inside the
+// virtual space -- constraint (O2) of docs/gradient-theory.md, Sec. 1.2. The
+// energy functional reads f only on that diagonal (`Delta_t` is a sum of
+// eps), so f's off-diagonal response there is unconstrained by the energy and
+// has to be pinned by the convention instead: one multiplier per pair, and
+// because f IS diagonal on both spaces the stationarity condition collapses
+// to a division (Sec. 2.3):
+//
+//   z^c_ij = (1/2) (Y_ij - Y_ji) / (eps_i - eps_j)      i != j in core
+//   z^c_rs = (1/2) (Y_rs - Y_sr) / (eps_r - eps_s)      r != s in virtual
+//
+// -- Park's Eqs. 56-57 verbatim, in the golden's own gauge, and the one place
+// in Sec. 2.3 where his form transcribes unchanged (the SELECTION boundaries,
+// which read the RHF Fock instead, are small Sylvester equations and are not
+// these).
+//
+// THE TWO BLOCKS OF Y THESE READ ARE EXACT. A rotation inside core, or inside
+// virtual, moves no orbital energy (f is diagonal there, and the promoted
+// densities have no column outside their own space) and no active integral
+// (so the f3 digests do not move either), so Y_ij and Y_rs are the integral
+// half alone and carry none of the full source term's held-fixed inputs
+// (nevpt2.gradient, "The full source term Y_xy").
+//
+// EVERY DIVISION IS SINGULAR WHERE ITS DIVISOR VANISHES, and a degenerate
+// core or virtual pair is not hypothetical: an abelian subgroup splits a
+// degenerate set across irreps, so the two partners have the SAME energy, and
+// the golden generator only refuses a degeneracy WITHIN one irrep
+// (docs/reference-data.md, "The degeneracy refusal"). The energy is invariant
+// under the group, so a rotation mixing two different irreps does not move
+// it: for such a pair the numerator vanishes too, the multiplier is a 0/0
+// that the constraint simply does not determine, and zero is the right
+// representative. So a gap at or below `gapFloor` is accepted only when its
+// numerator is at or below `zeroTol`; anything else is a state whose
+// multipliers would be noise, and it comes back as a NUMERICAL REFUSAL rather
+// than a number (the stance `_check_degeneracy` takes on the energy side).
+struct ScPseudocanonical {
+  Tensor zCore;              // (n_core, n_core), antisymmetric, zero diagonal
+  Tensor zVirt;              // (n_virt, n_virt)
+  double maxZ = 0.0;         // the largest |z^c| over both blocks
+  double smallestGap = 0.0;  // the smallest |eps_p - eps_q| actually divided by
+  int64_t divided = 0;       // pairs with a usable gap
+  int64_t degenerate = 0;    // pairs set to zero because both sides vanish
+};
+
+// `y` is the full (n_mo, n_mo) source term (only its core-core and
+// virtual-virtual blocks are read). The antisymmetrization is written out
+// because Park's is -- for a Y that is already antisymmetric, as
+// `scFullRotationMatrix` hands it back, `(Y_pq - Y_qp) / 2` is just `Y_pq`.
+// `eCore` / `eVirt` are the golden's orbital
+// energies, and the spaces are laid out core, then `nact` active, then
+// virtual -- the sidecar's own order. A shape that does not fit that is our
+// bug at the call site, so it aborts; an undetermined multiplier is the
+// state's and comes back as an Error.
+Result<ScPseudocanonical> scPseudocanonicalMultipliers(
+    const Tensor& y, const Tensor& eCore, const Tensor& eVirt, int64_t nact, double gapFloor,
+    double zeroTol, std::source_location loc = std::source_location::current()) {
+  const int64_t ncore = eCore.size(), nvirt = eVirt.size();
+  const int64_t nmo = ncore + nact + nvirt;
+  if (y.rank() != 2 || y.dim(0) != nmo || y.dim(1) != nmo)
+    check(false,
+          std::format("scPseudocanonicalMultipliers: Y is not a {} x {} matrix for a {} / {} / "
+                      "{} partition",
+                      nmo, nmo, ncore, nact, nvirt),
+          loc);
+  if (gapFloor < 0.0 || zeroTol < 0.0)
+    check(false, "scPseudocanonicalMultipliers: the tolerances must not be negative", loc);
+
+  ScPseudocanonical out;
+  out.zCore = Tensor({ncore, ncore});
+  out.zVirt = Tensor({nvirt, nvirt});
+  // The two blocks differ only in where they sit in Y and which energies they
+  // read, so one loop does both.
+  struct Block {
+    const char* name;
+    int64_t offset;
+    int64_t n;
+    const Tensor* eps;
+    Tensor* z;
+  };
+  const std::array<Block, 2> blocks{
+      Block{"core", 0, ncore, &eCore, &out.zCore},
+      Block{"virtual", ncore + nact, nvirt, &eVirt, &out.zVirt}};
+  for (const Block& b : blocks) {
+    for (int64_t p = 0; p < b.n; ++p)
+      for (int64_t q = p + 1; q < b.n; ++q) {
+        const double num = 0.5 * (y(b.offset + p, b.offset + q) - y(b.offset + q, b.offset + p));
+        const double gap = (*b.eps)(p) - (*b.eps)(q);
+        if (std::fabs(gap) <= gapFloor) {
+          if (std::fabs(num) > zeroTol)
+            return err_numerical(std::format(
+                "the pseudocanonical multiplier of {} pair ({}, {}) is not determined: the "
+                "orbital energies differ by {:.3e} (at or below {:.0e}) while (Y_pq - Y_qp) / 2 "
+                "is {:.3e} (above {:.0e}) -- Park Eqs. 56-57 divide by that gap "
+                "(docs/gradient-theory.md, Sec. 2.3)",
+                b.name, p, q, gap, gapFloor, num, zeroTol));
+          ++out.degenerate;
+          continue;  // 0/0: the constraint does not determine it, and zero is a
+                     // representative of the gauge it leaves free
+        }
+        const double z = num / gap;
+        (*b.z)(p, q) = z;
+        (*b.z)(q, p) = -z;
+        out.maxZ = std::max(out.maxZ, std::fabs(z));
+        out.smallestGap =
+            out.divided == 0 ? std::fabs(gap) : std::min(out.smallestGap, std::fabs(gap));
+        ++out.divided;
+      }
+  }
   return out;
 }
 

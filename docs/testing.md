@@ -198,13 +198,15 @@ functional is the SC total as a function of the MO **integrals** — every array
 carrying an active index rotated — with `dm1`/`dm2`/`dm3`, the `f3ac`/`f3ca`
 digests and the orbital energies all held fixed. The RDMs being fixed is the
 derivative's own definition (they are functions of the CI vector). The other
-two are this functional's limits, and are the core/virtual work's to lift:
-the digests carry an `h2e` dependence whose reverse mode needs the 4-RDM
-contraction's transpose, and the orbital energies respond through the active
-density inside the generalized Fock matrix, which needs the `(xa|cc)` and
-`(xa|vv)` blocks the golden does not carry
+two are this functional's limits: the digests carry an `h2e` dependence whose
+reverse mode needs the 4-RDM contraction's transpose, and the orbital energies
+respond through the active density inside the generalized Fock matrix, which
+needs the `(xa|cc)` and `(xa|vv)` blocks the golden does not carry
 ([`gradient-theory.md`](gradient-theory.md), §1.3). `gradient.cppm`, "The
-active-rotation source term", says it where the code is.
+active-rotation source term", says it where the code is. **The second of the
+two is lifted by the next section's entries**, which read those blocks out of
+the gradient sidecar; this one's functional is unchanged, so that its
+comparison against them stays exact.
 
 Measured on an RTX 3080 (CUDA, Release, `--tiles 3`), four seeded
 antisymmetric directions of unit Frobenius norm per case:
@@ -268,6 +270,180 @@ The host half — `exp(kappa)` orthogonal to 1e-14, and a rotation by
 with a `-0.0` and a denormal in the data) — is `test/gradient/`, card-free:
 `AntisymmetricKappaTests`, `ExpKappaTests`, `RotateAxesTests`,
 `RotateByZeroTests` and `KappaRotationDeathTest`.
+
+## The full orbital source term
+
+`nevpt2_sc_pseudodensity_kappa_full_n2_ccpvdz_cas44`, `_n2_ccpvdz_cas88` and
+`_lif_def2svp_cas46` (`gpu`) run `nevpt2_sc_pseudodensity --golden <case>
+--tiles 3 --kappa-full` and match `PASS: the full orbital source term's
+adjoint and tangent agree`. They are the section above over the **whole**
+`kappa` space — the core-core, virtual-virtual and mixed blocks of Park
+Eq. 26's `Y_xy` as well as the active-active one — reading the **gradient
+sidecar** beside each golden ("The gradient sidecar" in
+[`reference-data.md`](reference-data.md)) for the one-general-index integral
+blocks and the full-MO-range `h`, `h^eff` and generalized Fock that a rotation
+leaving the active space needs. Only a case with a sidecar can run it, which
+is why the three are these three.
+
+**What moves now, and the one thing that still does not.** The functional is
+the SC total as a function of every stored MO-integral array *and* of the
+orbital-energy vectors `e_core` / `e_virt`, with `dm1`/`dm2`/`dm3` fixed (the
+derivative's own definition). The orbital energies were one of the two gaps
+the active block left: they are the generalized Fock's diagonals, and `f` plus
+the inventory's restricted rows is exactly what their response needs
+([`gradient-theory.md`](gradient-theory.md), §3.1's second structural fact).
+What is still held fixed is the `f3ac`/`f3ca` digests' own `h2e` dependence —
+present on the blocks `h2e` moves under (active-active and the two mixed
+blocks with an active index) and **absent by construction from the core-core
+and virtual-virtual ones**, where no `h2e` index and no orbital energy moves
+at all. So the two blocks Park Eqs. 56-57 read are an exact derivative.
+`gradient.cppm`, "The full source term Y_xy", says it where the code is, and
+records that the forward route to the digests (they are linear in `h2e`, so
+`buildRdmsDevice` at the dotted `h2e` *is* their tangent) costs one digest
+rebuild per direction while reverse mode still needs a transpose kernel this
+tree does not have.
+
+**Five checks, and the gate is their conjunction.** Measured on an RTX 3080
+(CUDA, Release, `--tiles 3`):
+
+| | CAS(4,4) | CAS(8,8) | LiF CAS(4,6) |
+|---|---|---|---|
+| **1** the promotion table against the arrays it reads, worst of four families | 3.5e-14 | 2.8e-13 | 6.1e-15 |
+| **2** `<kappa, Y>`'s integral half vs the tangent's, worst of four seeded FULL directions | **3.5e-17** | **5.1e-16** | **6.9e-16** |
+| `<kappa, Y>`, direction 0 | 2.538664648720e-03 | 1.508419492916e-02 | 4.643210528103e-02 |
+| of which the orbital energies' response | −6.687e-04 | −7.060e-04 | 1.781e-03 |
+| **3** the active block vs `--kappa-act`'s own entry point (vs what that entry point reproduces from itself) | 5.5e-28 (1.3e-28) | 2.2e-15 (5.3e-16) | 5.2e-15 (3.8e-15) |
+| **4a** core-internal finite difference: plateau, fourfold halvings | 4.4e-12, 8 | 1.3e-12, 8 | 3.0e-12, 6 |
+| **4b** virtual-internal: plateau, fourfold halvings | 1.8e-12, 6 | 1.2e-11, 5 | 1.0e-11, 6 |
+| the same two directions' `eps` term, zero by (O2) | ≤3.1e-17 | ≤2.5e-17 | ≤2.7e-17 |
+| the probed matrix's pairing vs the direct one, inactive-restricted | 2.6e-18 | 2.1e-17 | 6.5e-19 |
+| **5** Eqs. 56-57: pairs divided / left zero as degenerate | 175 / 6 | 133 / 6 | 81 / 3 |
+| max \|z^c\|, at the smallest gap divided by | 5.91e-03, 3.310e-03 Eh | 3.52e-03, 3.305e-03 Eh | 5.31e-03, 3.566e-04 Eh |
+| `Y`'s two inactive blocks: basis directions probed, wall | 181, 0.45 s | 139, 7.74 s | 84, 0.63 s |
+| the whole entry, wall (`ctest`, Release) | 1.11 s | 14.04 s | 1.75 s |
+
+One run of each (the three entries, in that order, on one card). The last
+digits of a pairing and the exact height of a finite-difference plateau are
+the kernels' `atomicAdd` order and the round-off floor respectively, so they
+move run to run — these are the values one run gave; the orders of magnitude,
+the halving counts and the ratios do not move.
+
+Check 2 is the gate, at this tree's 1e-7 against a measured 1e-16 — **nine
+decades**, and exact arithmetic rather than a step size.
+
+**The new blocks are where the content is, and CAS(4,4) shows it cleanly.**
+Its active-active block is a symmetry zero of order 1e-16 (four active
+orbitals in four distinct D2h irreps — "The active-rotation source term"
+above), while a full direction pairs to 2.5e-03 and the inactive blocks of
+`Y` reach 7.6e-03: at that case the source term is *entirely* core, virtual
+and mixed. CAS(8,8) and LiF have both halves of order 1e-2.
+
+The rest of the tier is what makes check 2 mean something:
+
+- **Check 1 is what pins the promotion table**, which neither mode of check 2
+  can see: both read the same operand tangents, so a wrong one cancels between
+  them (the same reason the active block needs its finite difference). Every
+  promotion rule's source array, restricted to the promoted slot's own space,
+  must be the stored block under exactly the permutation that rule uses — four
+  identities per two-electron block, over all of them, which pins the array
+  choice and the index order; `h^eff` must come back out of `h` and the
+  dressing rules' own Coulomb and exchange sources; and the generalized Fock's
+  core and virtual diagonals must come back out of `h^eff` and the
+  orbital-energy rules' own tied arrays, *and* be the golden's `e_core` /
+  `e_virt`, which is (O2) ([`gradient-theory.md`](gradient-theory.md), §3.6)
+  seen from this side and is what says the sidecar belongs to this golden.
+  The residuals are two PySCF transforms of the same integrals compared, so
+  1e-13 is reassociation.
+- **Check 3 is "bit for bit" in the only form this tree has.** The
+  construction is exact: the general part of every slot's sum is an
+  *exactly*-zero tensor for an active-restricted kappa, and adding zero to a
+  double changes no bit. But the two numbers come out of two separate runs of
+  kernels that accumulate with `atomicAdd`, whose order the hardware picks,
+  and that is measurably not reproducible: running `--kappa-act`'s own entry
+  point **twice on the same input** moves its answer by 1.3e-28 at CAS(4,4),
+  5.3e-16 at CAS(8,8) and 3.8e-15 at LiF, and by a different amount on the
+  next run. So the two paths are held to the LARGER of that same-run spread
+  and a relative 1e-11 of the pairing itself — the spread alone is a coin flip
+  between two draws of one noise, while anything a wrong construction could do
+  is many decades above either. Measured, the two paths differ by 5.5e-28,
+  2.2e-15 and 5.2e-15: the same size as the kernels' own spread, which is the
+  statement. (CAS(4,4)'s pairing is a symmetry zero of order 1e-16, which is
+  why both numbers there are 1e-28; CAS(8,8)'s is 2.1e-2 and LiF's −4.0e-2,
+  where 1e-15 is a relative 7e-14.)
+- **Check 4 is the only finite difference the new blocks can have, and it
+  covers them.** A rotation *inside* core, or inside virtual, keeps every
+  index in its own space, so the displaced integrals are the stored blocks
+  with those axes transformed on the host — and the displaced orbital
+  energies are the rotated generalized Fock's diagonal, which the sidecar
+  carries. So the unmodified energy stage can be rerun at `exp(h kappa)` and
+  differenced, with the same plateau-and-Richardson reading as the two
+  sections above (ratio 4.00 to two decimals through the truncation regime,
+  for five to eight consecutive halvings, down to a plateau of 1e-12 to
+  1e-11). A **mixed** rotation cannot be
+  displaced this way — its indices leave their spaces, which would need
+  integrals with two general indices — and does not need to be: each
+  promotion is ONE einsum over the whole general index, so the rows these two
+  exercise are the same code the mixed rows run, and what is left for the
+  mixed rows alone is which rows of `kappa` are non-zero. The two directions
+  also assert a derived exactness: an intra-space rotation moves no orbital
+  energy — `f` is diagonal there by (O2) and the promoted densities have no
+  column outside their own space — so their `eps` term must vanish, and it
+  does to 3e-17. It is held to 1e-9 rather than to machine precision because
+  it inherits (O2)'s own residual, which is the canonicalisation's 1e-13 and
+  not exact ([`reference-data.md`](reference-data.md), "The gradient
+  sidecar").
+- **Check 5 exercises Park Eqs. 56-57 on a case with distinct core and
+  virtual orbital energies.** LiF is the well-separated one: all **six** of
+  its core pairs are divided through, its four core energies being distinct
+  with a smallest gap of 0.849 Eh, where N2's core carries a 3.3e-3 Eh 1s pair
+  (the smallest gap either N2 case divides by). On the virtual side LiF
+  divides 75 of its 78 pairs, the tightest at 3.57e-4 Eh — a π/σ splitting,
+  above the golden generator's 1e-4 refusal and where its largest multiplier
+  comes from. The three it does not, and the six each N2 case does not, are
+  **exactly degenerate** pairs, and they are the other half of the same test:
+  an abelian subgroup puts the two partners of a degenerate set in different
+  irreps, so the energy does not move along that rotation at all, the
+  numerator vanishes with the gap, and the multiplier is a 0/0 the constraint
+  leaves free — left zero rather than divided through. A degenerate pair whose
+  numerator did **not** vanish would be a numerical refusal, not a large
+  number. The host arithmetic itself, including that refusal, is
+  `test/gradient/`'s `ScPseudocanonicalTests`, card-free.
+
+**The core-internal finite difference is what caught the one real bug in
+this,** and it is worth recording what it was: `h^eff`'s core dressing has its
+two core labels tied, so differentiating promotes each in turn, and while the
+Coulomb pair's two promotions collapse (`(pq|xj)` is symmetric in `x` and `j`),
+the exchange pair's do **not** — `(px|jq)` and `(pj|xq)` are different
+integrals. Writing the exchange as twice either one leaves a term that
+survives even a core-internal rotation, where the true dressing response is
+zero: the difference quotient sat 6.7e-04 away from the analytic derivative
+and flatlined instead of falling as `h^2`. Nothing else in the tier saw it —
+not the duality (both modes share the tangent), not the restriction identities
+(a derivative-only term has no stored block to be the restriction of).
+
+**Not `small`, but run under every tool anyway.** The two 13-point sweeps and
+the ~180 basis probes are each a full pass over everything, which is what made
+the CAS(8,8) `--kappa-act` entry too slow for the sanitizer tier, and
+CAS(4,4)'s `--kappa-act` entry already covers this code's device work there.
+Since the sanitizer test presets filter on `small`, the three entries were run
+**by name** under `asan`, `ubsan`, memcheck (with the leak check) and
+initcheck instead — `ctest --test-dir build-<preset> -R
+nevpt2_sc_pseudodensity_kappa_full` — and are clean under all four:
+
+| seconds per entry | asan | ubsan | memcheck | initcheck |
+|---|---:|---:|---:|---:|
+| CAS(4,4) | 3 | 3 | 10.3 | 7 |
+| CAS(8,8) | 15 | 15 | 349.7 | 114 |
+| LiF CAS(4,6) | 3.0 | 2.7 | 31.2 | 12.2 |
+
+The CAS(8,8) column is the whole argument for leaving them out of `small`:
+350 s under memcheck alone is more than that preset's entire current runtime
+(237 s for all 148 of its entries). Worth noting what the four runs caught:
+the first version of the Fock-diagonal self-check took a view of a
+*temporary* device tensor, so the pool could hand the memory to the very
+einsum reading it. The self-check's own number gave it away (2.4e-01 where a
+reassociation residual belongs), but it is exactly the class of bug memcheck
+exists for, and the reason these entries are worth the four extra runs.
 
 ## The PC tangent against a finite difference
 
@@ -696,10 +872,13 @@ pair has been run clean under memcheck (with the leak check), racecheck,
 initcheck, synccheck, `asan` and `ubsan`, but not yet `hip-asan` /
 `hip-ubsan`. racecheck and synccheck have not been run on the `--pc` entries,
 nor on `nevpt2_sc_pseudodensity_kappa_cas44`, the two `nevpt2_pc_tangent_*`
-entries or the two `nevpt2_gradient_source_*` ones. The first three have been
-run clean under `asan`, `ubsan`, memcheck (with the leak check) and initcheck
-on CUDA, as have the last two; none of the five has been run on HIP, and
-their `—` columns above mean "not measured", not "clean".
+entries, the two `nevpt2_gradient_source_*` ones or the three
+`nevpt2_sc_pseudodensity_kappa_full_*` ones. All seven have been run clean
+under `asan`, `ubsan`, memcheck (with the leak check) and initcheck on CUDA —
+the `kappa_full` three by name, since they are not in the tier at all ("The
+full orbital source term" above says why, and what they cost under each tool);
+none of the seven has been run on HIP, and their `—` columns above mean "not
+measured", not "clean".
 
 Everything except racecheck and `nevpt2_gradient_source_cas88` finishes in
 well under a minute, so CAS(8,8) is affordable under every tool. racecheck

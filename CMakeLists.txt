@@ -307,6 +307,61 @@ if(NEVPT2_BUILD_TESTING)
     unset(_ci_src_gold)
   endforeach()
 
+  # --- the FULL orbital source term, --kappa-full ---------------------------------
+  #
+  # nevpt2_sc_pseudodensity --kappa-full
+  # (apps/sc_pseudodensity/kappa_full_check.cppm): Park Eq. 26's Y_xy over the
+  # WHOLE kappa space -- the core-core, virtual-virtual and mixed blocks on top
+  # of the active-active one the entries above check -- assembled from the
+  # gradient SIDECAR beside each golden (`<case>.gradgold`, so only the cases
+  # that have one can run this). Five checks, and the gate is their conjunction:
+  # the duality on four seeded full directions (1e-7, exact arithmetic), the
+  # sidecar's promotion table against the arrays it reads (1e-10), the active
+  # block unchanged bit for bit when kappa is active-restricted, two
+  # finite differences -- a core-internal and a virtual-internal rotation,
+  # which are the only ones the stored blocks can displace -- and Park
+  # Eqs. 56-57's pseudocanonical multipliers coming out determined. Its PASS
+  # line is its own, so no entry can pass on another's output
+  # (docs/testing.md, "The full orbital source term").
+  #
+  # LiF is here for the Eqs. 56-57 half: its four core orbital energies are all
+  # distinct, the smallest gap 0.85 Eh against the 3.3e-3 Eh 1s pair in N2's
+  # core, so its core multipliers are the well-separated case those divisions
+  # want. N2's exactly degenerate virtual pairs are the other half of that
+  # test -- they sit in different irreps, so their numerators vanish with the
+  # gap and the multiplier is left zero rather than divided through.
+  #
+  # Not `small`: the two 26-point finite-difference sweeps and the ~180 basis
+  # probes are each a full pass over everything, which is what made the
+  # CAS(8,8) --kappa-act entry too slow for the sanitizer tier
+  # (docs/testing.md, "The active-rotation source term"); CAS(4,4)'s --kappa-act
+  # entry already covers this code's device work there.
+  set(_nevpt2_kappa_full_pass
+      "PASS: the full orbital source term's adjoint and tangent agree")
+  foreach(_case n2_ccpvdz_cas44 n2_ccpvdz_cas88 lif_def2svp_cas46)
+    set(_kf_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.nevpt2gold")
+    set(_kf_side "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.gradgold")
+    # Both files are committed for these three cases; the sidecar is checked
+    # for anyway, as the golden is, so a tree missing one warns instead of
+    # registering an entry that cannot run (acrolein's 57 MB sidecar, for
+    # instance, is gitignored -- docs/reference-data.md, "The gradient
+    # sidecar").
+    if(NOT EXISTS "${_kf_side}")
+      message(WARNING "nevpt2: gradient sidecar missing, test "
+                      "'nevpt2_sc_pseudodensity_kappa_full_${_case}' not registered: "
+                      "${_kf_side}")
+    else()
+      _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_kappa_full_${_case}
+                            "${_kf_gold}" --tiles 3 --kappa-full)
+      if(TEST nevpt2_sc_pseudodensity_kappa_full_${_case})
+        set_tests_properties(nevpt2_sc_pseudodensity_kappa_full_${_case} PROPERTIES
+          PASS_REGULAR_EXPRESSION "${_nevpt2_kappa_full_pass}")
+      endif()
+    endif()
+    unset(_kf_gold)
+    unset(_kf_side)
+  endforeach()
+
   # --- *_pc: PC-NEVPT2 ----------------------------------------------
   #
   # The same RDM build as the SC entry at the same --tiles; the PC stage runs

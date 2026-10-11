@@ -20,6 +20,9 @@ import nevpt2.gradient;
 // one, and the ScGDot pairing of an active block with its own tangent: the
 // rotation machinery assembleSlab pairs and differentiates along.
 import :rotation;
+// The promotion table (RotBlock, activeAxesOf), the general-range action a
+// slab's tangent adds when a direction came with a sidecar, and addTensorInto.
+import :general;
 
 namespace nevpt2 {
 
@@ -65,14 +68,6 @@ void evalTerms(const std::vector<ScTerm>& terms, const DeviceTensor& out, ScTerm
     for (const ScOperand& o : term.ops) ops.push_back(o.t);
     deviceEinsumAccum(term.subs, ops, out, term.coef, stream);
   }
-}
-
-// out += x, same shape: a no-permutation transpose, the one way this tree
-// adds two device tensors.
-void addInto(const DeviceTensor& x, const DeviceTensor& out, wwrStream_t stream) {
-  std::vector<int> axes(static_cast<std::size_t>(x.rank()));
-  for (std::size_t a = 0; a < axes.size(); ++a) axes[a] = static_cast<int>(a);
-  deviceTransposeAccum(x, axes, out, 1.0, stream);
 }
 
 // <x, d>: the elementwise product of two equal-shaped tensors, summed. Issued
@@ -176,27 +171,61 @@ void evalTermsTangent(const std::vector<ScTerm>& terms,
 }
 
 // One slab's blocks dotted along ONE direction: the tangent of each block
-// that carries an active index (`blockAxes[i]`, in `blocks`' order), and a
-// nullptr for each block that carries none -- which is what the product rule
-// skips. The tensors own their memory and are freed with the returned value,
-// so a direction's slab tangents do not outlive its iteration.
+// something in the direction moves, and a nullptr for each block nothing
+// does -- which is what the product rule skips. The tensors own their memory
+// and are freed with the returned value, so a direction's slab tangents do
+// not outlive its iteration.
+//
+// Each tangent is the two halves of the chain rule added: the INTRA-ACTIVE
+// action on the stored block (its active axes, from `kinds[i]`), and -- for a
+// direction built with a sidecar (`gen`) -- the GENERAL part, every slot's
+// promotion whose index leaves its own space (:general). With an
+// active-restricted kappa the second is an exactly-zero tensor, so the sum is
+// bit for bit the first.
 struct ScSlabDots {
   std::vector<DeviceTensor> owned;
   std::vector<const DeviceTensor*> ptr;  // &owned[i], or nullptr
 };
 
 ScSlabDots slabDots(const std::vector<const DeviceTensor*>& blocks,
-                    const std::vector<std::vector<int>>& blockAxes, const ScRotationDir& dir,
-                    const DeviceResources& res,
+                    const std::vector<RotBlock>& kinds, const ScRotationDir& dir,
+                    const GeneralIntegralsDevice* gen, const DeviceResources& res,
                     std::source_location loc = std::source_location::current()) {
-  if (blockAxes.size() != blocks.size())
-    check(false, "slabDots: one axis list per block", loc);
+  if (kinds.size() != blocks.size()) check(false, "slabDots: one kind per block", loc);
   ScSlabDots out;
   out.owned.resize(blocks.size());
   out.ptr.assign(blocks.size(), nullptr);
+  // Each block's GENERAL part, kept alive until the walk over `blocks` is
+  // done: V2tr's tangent is the trace of Sir2's.
+  std::vector<DeviceTensor> general(blocks.size());
+  const auto columns = [&dir](RotSpace s) { return dir.columns(s); };
+  for (std::size_t i = 0; i < blocks.size(); ++i)
+    if (gen != nullptr && kinds[i] != RotBlock::V2tr)
+      general[i] = generalBlockAction(kinds[i], *gen, columns, blocks[i]->dims, res);
+
   for (std::size_t i = 0; i < blocks.size(); ++i) {
-    if (blockAxes[i].empty()) continue;
-    out.owned[i] = kappaActionDevice(*blocks[i], blockAxes[i], dir.kappa, res);
+    const std::vector<int> axes = activeAxesOf(kinds[i]);
+    if (kinds[i] == RotBlock::V2tr) {
+      // v2tr[r, i] = sum_a h2e_v2_Sir[r, a, a, i], so its tangent is the
+      // trace of that block's. The INTRA-ACTIVE half of that trace cancels
+      // exactly -- the two active promotions map onto each other under the
+      // traced pair, against an antisymmetric kappa -- so what is left is
+      // the trace of the general half, and it is exactly zero (not zero to
+      // rounding) for an active-restricted direction.
+      if (gen == nullptr) continue;
+      std::size_t src = blocks.size();
+      for (std::size_t j = 0; j < kinds.size(); ++j)
+        if (kinds[j] == RotBlock::Sir2) src = j;
+      if (src == blocks.size())
+        check(false, "slabDots: v2tr's tangent needs the Sir2 block beside it", loc);
+      out.owned[i] = deviceEinsumNew("raai->ri", {&general[src]}, 1.0, res);
+      out.ptr[i] = &out.owned[i];
+      continue;
+    }
+    if (axes.empty() && general[i].rank() == 0) continue;  // nothing moves it
+    out.owned[i] = axes.empty() ? DeviceTensor::zeros(blocks[i]->dims, res)
+                                : kappaActionDevice(*blocks[i], axes, dir.kappa, res);
+    addTensorInto(general[i], out.owned[i], res.stream());
     out.ptr[i] = &out.owned[i];
   }
   return out;
@@ -221,9 +250,15 @@ double pairSlabDots(const ScSlabDots& dots, const std::vector<DeviceTensor>& dBl
 // perturbers this is scMultipliers applied elementwise (plainMultipliers
 // below); Sijr and Srsi first symmetrize and pack a triangle, then scatter
 // the triangle's multipliers back over the full tuple shape.
+// `p` and `q` are shaped as the tuple vector -- scattered back over it for a
+// class whose perturbers are symmetrized pairs. `r` (Park Eq. 38, the
+// multiplier of the orbital-energy sum) is NOT: it stays in PERTURBER order,
+// the order the class's `delta` vector was built in, because that is the
+// vector it is contracted against (`deltaOf` in assembleSlab).
 struct ScSlabMultipliers {
   Tensor p;
   Tensor q;
+  std::vector<double> r;
   double norm = 0.0;
   double energy = 0.0;
 };
@@ -238,7 +273,7 @@ ScSlabMultipliers plainMultipliers(const Tensor& norm, const Tensor& h,
                                    const std::vector<double>& delta) {
   const ScMultipliers m = scMultipliers(norm.data(), h.data(), delta);
   return ScSlabMultipliers{Tensor::fromFlat(norm.dims(), m.p),
-                           Tensor::fromFlat(norm.dims(), m.q), m.norm, m.energy};
+                           Tensor::fromFlat(norm.dims(), m.q), m.r, m.norm, m.energy};
 }
 
 // The per-slab core every class but Sijrs and Srsi runs:
@@ -261,22 +296,32 @@ ScSlabMultipliers plainMultipliers(const Tensor& norm, const Tensor& h,
 // contracts them back (and frees them) once the walk is done --
 // activeContraction() below.
 //
-// `rot` adds the ACTIVE-ROTATION work, and nothing happens for a caller with
-// no directions. Per direction: this slab's own blocks dotted along it
-// (`blockAxes` lists each block's active axes, in `blocks`' order -- empty for
-// a block that carries none), the EXTERNAL half of the adjoint pairing
-// <D, Xdot> accumulated into acc.rotExt, and -- for a direction that asked
-// for it -- the forward tangent of the same terms under the product rule,
-// finished with THIS slab's own multipliers as Park Eqs. 36-37 prescribe,
-// P.Ndot + Q.Hdot. `gDots[d]` is the class's active-block tangents along
-// direction d (rotationTangentBlocks), and is empty for a direction that
-// wants the adjoint alone.
-template <class MultiplierFn>
+// `rot` adds the ROTATION work, and nothing happens for a caller with no
+// directions. Per direction: this slab's own blocks dotted along it (`kinds`
+// names each block, in `blocks`' order, so :general's one table supplies both
+// its active axes and its promotion rule), the EXTERNAL half of the adjoint
+// pairing <D, Xdot> accumulated into acc.rotExt, and -- for a direction that
+// asked for it -- the forward tangent of the same terms under the product
+// rule, finished with THIS slab's own multipliers as Park Eqs. 36-37
+// prescribe, P.Ndot + Q.Hdot. `gDots[d]` is the class's active-block tangents
+// along direction d (rotationTangentBlocks), and is empty for a direction
+// that wants the adjoint alone.
+//
+// `deltaOf(e_core, e_virt)` is the class's own `delta` construction as a
+// FUNCTION of the orbital-energy vectors -- `multiplierFn` reads it once at
+// the real ones, and a general direction reads it again at the response
+// `deps` (Park Eq. 38's multiplier R against Deltadot, the orbital-energy
+// half of the source term). That works because Delta_t is a signed sum of
+// orbital energies, linear and homogeneous in them, so its tangent is the
+// same formula at the dotted vectors -- the same reason a Dyall block's
+// tangent is its own make_* at the dotted integrals.
+template <class MultiplierFn, class DeltaFn>
 void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm>& hTerms,
                   const std::vector<int64_t>& tupleDims,
                   const std::vector<const DeviceTensor*>& blocks,
                   std::vector<ScActiveAccum>& dActive, MultiplierFn&& multiplierFn,
-                  const ScRotation& rot, const std::vector<std::vector<int>>& blockAxes,
+                  DeltaFn&& deltaOf, const ScRotation& rot,
+                  const std::vector<RotBlock>& kinds,
                   const std::vector<std::vector<ScGDot>>& gDots, ScClassGradient& acc,
                   const DeviceResources& res) {
   const wwrStream_t stream = res.stream();
@@ -291,8 +336,8 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
   evalTerms(hTerms, hActive, ScTermFilter::WithActive, stream);
   evalTerms(normTerms, norm, ScTermFilter::WithoutActive, stream);
   evalTerms(hTerms, h, ScTermFilter::WithoutActive, stream);
-  addInto(normActive, norm, stream);
-  addInto(hActive, h, stream);
+  addTensorInto(normActive, norm, stream);
+  addTensorInto(hActive, h, stream);
 
   // No sync before the downloads: each is enqueued on the same stream as the
   // einsums that wrote its source, behind them, and downloadTensor
@@ -321,10 +366,16 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
   for (std::size_t i = 0; i < blocks.size(); ++i) ext += dotTensors(*blocks[i], dBlocks[i], res);
   acc.extContraction += 0.5 * ext;
 
-  // --- the active rotation, one direction at a time -------------------------
+  // --- the rotation, one direction at a time --------------------------------
   for (std::size_t d = 0; d < rot.size(); ++d) {
-    const ScSlabDots dots = slabDots(blocks, blockAxes, rot.dirs[d], res);
+    const ScSlabDots dots = slabDots(blocks, kinds, rot.dirs[d], rot.gen, res);
     acc.rotExt[d] += pairSlabDots(dots, dBlocks, res);
+    // The orbital-energy half, R_t against this slab's Deltadot. One
+    // contraction, and the adjoint's and the tangent's alike -- it is
+    // reported once (acc.rotEps) and added to both.
+    if (rot.dirs[d].general)
+      acc.rotEps[d] +=
+          dotHost(m.r, deltaOf(rot.dirs[d].epsCoreDot, rot.dirs[d].epsVirtDot));
     if (!rot.dirs[d].tangent) continue;
     const DeviceTensor normDot = DeviceTensor::zeros(tupleDims, res);
     const DeviceTensor hDot = DeviceTensor::zeros(tupleDims, res);

@@ -308,6 +308,16 @@ refuses to write a sidecar whose state is not the one the derivation describes
   below the HOMO at CAS(4,4), 4 of 8 at CAS(8,8), none inside the gap. Both
   are `nelec_rhf/2 − ncore = 7 − ncore`, as §2.6 requires.
 
+**What reads it.** `nevpt2_sc_pseudodensity --kappa-full` — the full orbital
+source term `Y_xy`, whose core, virtual and mixed blocks are exactly what the
+general-range blocks are for ([`testing.md`](testing.md), "The full orbital
+source term"). It is the only consumer, and the three `gpu` entries that run
+it are the three committed cases with a sidecar: N2 CAS(4,4), N2 CAS(8,8) and
+LiF CAS(4,6). Its first check is the sidecar against itself and the golden —
+every one of §3.3's arrays restricted to a slice the golden already holds, and
+`f`'s core/virtual diagonal against `e_core`/`e_virt`, which is (O2) seen from
+the C++ side.
+
 **Committed, and still to come.** The two small cases are committed:
 
 ```bash

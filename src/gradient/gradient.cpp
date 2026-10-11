@@ -12,6 +12,7 @@ module nevpt2.gradient;
 
 import std;
 import :ci_source;    // Park Eq. 48's sigma assembly
+import :general;      // the promotion table the general-range rotation reads
 import :rdm_adjoint;  // the block -> RDM chain rule the CI source needs
 import :rotation;
 import :sc_classes;
@@ -42,26 +43,32 @@ ScGradientResult assembleClasses(const ActiveIntegralsDevice& ai, IntegralSource
 
   ScGradientResult r;
   // One accumulator per direction per class, so a caller can read the
-  // source term class by class (Sijrs' stay zero: it reads no active index).
+  // source term class by class (Sijrs' integral half stays zero for an
+  // ACTIVE direction: it reads no active index).
   for (ScClassGradient& c : r.classes) {
     c.rotExt.assign(rot.size(), 0.0);
     c.rotAct.assign(rot.size(), 0.0);
     c.rotTangent.assign(rot.size(), 0.0);
+    c.rotEps.assign(rot.size(), 0.0);
   }
-  gradientSr(ai, src, batch, hostEVirt, dm1, dm2, dm3, f3ac, f3ca, norb, rot,
+  gradientSr(ai, src, batch, hostECore, hostEVirt, dm1, dm2, dm3, f3ac, f3ca, norb, rot,
              r.classes[0], adj, dr);
-  gradientSi(ai, src, batch, hostECore, dm1, dm2, dm3, f3ac, f3ca, norb, rot,
+  gradientSi(ai, src, batch, hostECore, hostEVirt, dm1, dm2, dm3, f3ac, f3ca, norb, rot,
              r.classes[1], adj, dr);
-  // Sijrs contracts no RDM and no active index at all, so it has nothing to
-  // sweep and nothing to rotate -- the same class whose tangent is exactly
-  // zero -- and takes neither `rot` nor `adj`.
-  gradientSijrs(src, batch, hostECore, hostEVirt, r.classes[2], dr);
+  // Sijrs contracts no RDM at all, so it has nothing to sweep and takes no
+  // `adj`. It DOES take `rot`: every one of cvcv's four labels is core or
+  // virtual, so an ACTIVE rotation moves nothing it reads while a GENERAL one
+  // moves all of it, and its Delta_t is four orbital energies
+  // (gradient_sc_classes.cppm).
+  gradientSijrs(src, batch, hostECore, hostEVirt, rot, r.classes[2], dr);
   gradientSijr(ai, src, batch, hostECore, hostEVirt, dm1, dm2, rot, r.classes[3], adj, dr);
   gradientSrsi(ai, src, batch, hostECore, hostEVirt, dm1, dm2, rot, r.classes[4], adj, dr);
-  gradientSrs(ai, src, batch, hostEVirt, dm1, dm2, dm3, rot, r.classes[5], adj, dr);
-  gradientSij(ai, src, batch, hostECore, dm1, dm2, dm3, rot, r.classes[6], adj, dr);
-  gradientSir(ai, src, batch, hostECore, hostEVirt, dm1, dm2, dm3, rot,
-              r.classes[7], adj, dr);
+  gradientSrs(ai, src, batch, hostECore, hostEVirt, dm1, dm2, dm3, rot, r.classes[5], adj,
+              dr);
+  gradientSij(ai, src, batch, hostECore, hostEVirt, dm1, dm2, dm3, rot, r.classes[6], adj,
+              dr);
+  gradientSir(ai, src, batch, hostECore, hostEVirt, dm1, dm2, dm3, rot, r.classes[7], adj,
+              dr);
   for (const ScClassGradient& c : r.classes) r.total += c.energy;
   return r;
 }
@@ -193,6 +200,207 @@ Result<Tensor> scActiveRotationMatrix(const NevptIntegralsDevice& ints, const De
     }
   NEVPT2_TRY(flush());
   return y;
+}
+
+// --- the full source term ----------------------------------------------------
+
+// The eight-field integral set and the sidecar beside it, as views: the
+// entry points below all build their own FullBlockSource and ActiveIntegrals
+// view over the caller's `ints`, exactly as the active-block ones do.
+ActiveIntegralsDevice activeViewOf(const NevptIntegralsDevice& ints) {
+  return ActiveIntegralsDevice{ints.h1e.view(),      ints.h2e.view(),      ints.e_core.view(),
+                               ints.e_virt.view(),   ints.h1e_v_Sr.view(), ints.h1e_v_Si.view(),
+                               ints.h1e_v_Sir.view()};
+}
+
+// Every sidecar array's expected shape, against the integrals it sits beside.
+// A sidecar paired with the wrong golden, or one whose header does not match
+// its arrays, is the CALLER's input: an Error naming the first array that is
+// off, before any device work.
+Status checkGeneralShapes(const NevptIntegralsDevice& ints,
+                          const GeneralIntegralsDevice& gen) {
+  const int64_t nmo = gen.nmo(), nc = gen.ncore, na = gen.nact, nv = gen.nvirt;
+  if (na != ints.h1e.dims[0])
+    return err_config(std::format(
+        "the gradient sidecar's active space is {} orbitals, the golden's is {}", na,
+        ints.h1e.dims[0]));
+  if (nc != ints.e_core.dims[0] || nv != ints.e_virt.dims[0])
+    return err_config(std::format(
+        "the gradient sidecar's partition is {} core / {} virtual, the golden's is {} / {}", nc,
+        nv, ints.e_core.dims[0], ints.e_virt.dims[0]));
+  const std::vector<std::pair<const char*, std::vector<int64_t>>> expect{
+      {"h", {nmo, nmo}},
+      {"heff", {nmo, nmo}},
+      {"f", {nmo, nmo}},
+      {"g_xa_aa", {nmo, na, na, na}},
+      {"g_xv_aa", {nmo, nv, na, na}},
+      {"g_xc_aa", {nmo, nc, na, na}},
+      {"g_xa_va", {nmo, na, nv, na}},
+      {"g_xv_va", {nmo, nv, nv, na}},
+      {"g_xc_va", {nmo, nc, nv, na}},
+      {"g_xa_ca", {nmo, na, nc, na}},
+      {"g_xv_ca", {nmo, nv, nc, na}},
+      {"g_xc_ca", {nmo, nc, nc, na}},
+      {"g_xa_cv", {nmo, na, nc, nv}},
+      {"g_xv_cv", {nmo, nv, nc, nv}},
+      {"g_xc_cv", {nmo, nc, nc, nv}},
+      {"g_xa_cc", {nmo, na, nc, nc}},
+      {"g_xv_cc", {nmo, nv, nc, nc}},
+      {"g_xc_cc_j", {nmo, nc, nc}},
+      {"g_xc_cc_k", {nmo, nc, nc}},
+      {"g_xa_vv", {nmo, na, nv}},
+      {"g_xc_vv", {nmo, nc, nv}},
+  };
+  const std::vector<const DeviceTensor*> got{
+      &gen.h,         &gen.heff,      &gen.f,         &gen.g_xa_aa,   &gen.g_xv_aa,
+      &gen.g_xc_aa,   &gen.g_xa_va,   &gen.g_xv_va,   &gen.g_xc_va,   &gen.g_xa_ca,
+      &gen.g_xv_ca,   &gen.g_xc_ca,   &gen.g_xa_cv,   &gen.g_xv_cv,   &gen.g_xc_cv,
+      &gen.g_xa_cc,   &gen.g_xv_cc,   &gen.g_xc_cc_j, &gen.g_xc_cc_k, &gen.g_xa_vv,
+      &gen.g_xc_vv};
+  for (std::size_t k = 0; k < expect.size(); ++k) {
+    if (got[k]->dims == expect[k].second) continue;
+    std::string shape;
+    for (const int64_t d : got[k]->dims) shape += (shape.empty() ? "" : ", ") + std::to_string(d);
+    std::string want;
+    for (const int64_t d : expect[k].second) want += (want.empty() ? "" : ", ") + std::to_string(d);
+    return err_config(std::format(
+        "the gradient sidecar's '{}' has shape [{}], but a {} core / {} active / {} virtual "
+        "partition wants [{}]",
+        expect[k].first, shape, nc, na, nv, want));
+  }
+  return {};
+}
+
+Result<ScFullRotationResult> scFullRotationDevice(const NevptIntegralsDevice& ints,
+                                                  const GeneralIntegralsDevice& gen,
+                                                  const DeviceTensor& dm1,
+                                                  const DeviceTensor& dm2,
+                                                  const DeviceTensor& dm3,
+                                                  const DeviceTensor& f3ac,
+                                                  const DeviceTensor& f3ca,
+                                                  const std::vector<ScRotationRequest>& dirs,
+                                                  const DeviceResources& dr) {
+  NEVPT2_TRY(checkGeneralShapes(ints, gen));
+  FullBlockSource src(ints);
+  const ActiveIntegralsDevice ai = activeViewOf(ints);
+  const ScRotation rot =
+      NEVPT2_TRY(makeGeneralRotation(dirs, ai.h1e, ai.h2e, gen, dm1, dr));
+  ScFullRotationResult out;
+  out.grad = assembleClasses(ai, src, /*batch=*/0, dm1, dm2, dm3, f3ac, f3ca, rot,
+                             /*adj=*/nullptr, dr);
+  out.dirs.assign(dirs.size(), ScFullRotationPairing{});
+  for (std::size_t d = 0; d < dirs.size(); ++d) {
+    ScFullRotationPairing& p = out.dirs[d];
+    for (const ScClassGradient& c : out.grad.classes) {
+      p.ext += c.rotExt[d];
+      p.act += c.rotAct[d];
+      p.eps += c.rotEps[d];
+      p.tangentIntegral += c.rotTangent[d];
+    }
+    p.integral = p.ext + p.act;
+    p.adjoint = p.integral + p.eps;
+    p.tangent = p.tangentIntegral + p.eps;
+    p.hasTangent = dirs[d].tangent;
+  }
+  return out;
+}
+
+Result<Tensor> scFullRotationMatrix(const NevptIntegralsDevice& ints,
+                                    const GeneralIntegralsDevice& gen, const DeviceTensor& dm1,
+                                    const DeviceTensor& dm2, const DeviceTensor& dm3,
+                                    const DeviceTensor& f3ac, const DeviceTensor& f3ca,
+                                    const std::vector<std::pair<int64_t, int64_t>>& pairs,
+                                    int64_t chunk, const DeviceResources& res) {
+  const int64_t n = gen.nmo();
+  if (chunk < 1) return err_config("scFullRotationMatrix: chunk must be at least 1");
+  Tensor y({n, n});
+  std::vector<ScRotationRequest> reqs;
+  std::vector<std::pair<int64_t, int64_t>> which;
+  const auto flush = [&]() -> Status {
+    if (reqs.empty()) return {};
+    const ScFullRotationResult r =
+        NEVPT2_TRY(scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, reqs, res));
+    for (std::size_t k = 0; k < which.size(); ++k) {
+      // <kappa, Y> = sum_pq kappa_pq Y_pq = 2 Y_pq for this direction.
+      const double v = 0.5 * r.dirs[k].adjoint;
+      y(which[k].first, which[k].second) = v;
+      y(which[k].second, which[k].first) = -v;
+    }
+    reqs.clear();
+    which.clear();
+    return {};
+  };
+  for (const auto& [p, q] : pairs) {
+    if (p < 0 || q < 0 || p >= n || q >= n || p == q)
+      return err_config(std::format(
+          "scFullRotationMatrix: ({}, {}) is not a pair of distinct orbitals of {}", p, q, n));
+    Tensor k({n, n});
+    k(p, q) = 1.0;
+    k(q, p) = -1.0;
+    reqs.push_back(ScRotationRequest{std::move(k), /*tangent=*/false});
+    which.emplace_back(p, q);
+    if (std::ssize(reqs) == chunk) NEVPT2_TRY(flush());
+  }
+  NEVPT2_TRY(flush());
+  return y;
+}
+
+Result<ScGeneralCheck> scGeneralIntegralCheck(const NevptIntegralsDevice& ints,
+                                              const GeneralIntegralsDevice& gen,
+                                              const DeviceTensor& dm1,
+                                              const DeviceResources& res) {
+  NEVPT2_TRY(checkGeneralShapes(ints, gen));
+  // Every block the promotion table covers, against the stored array it is a
+  // slice of. h1e and h2e are in the list too: their rules are the active
+  // block's own, and the same restriction pins them.
+  const std::vector<std::pair<RotBlock, const DeviceTensor*>> blocks{
+      {RotBlock::Sr, &ints.h2e_v_Sr},       {RotBlock::Si, &ints.h2e_v_Si},
+      {RotBlock::Sijrs, &ints.cvcv},        {RotBlock::Sijr, &ints.h2e_v_Sijr},
+      {RotBlock::Srsi, &ints.h2e_v_Srsi},   {RotBlock::Srs, &ints.h2e_v_Srs},
+      {RotBlock::Sij, &ints.h2e_v_Sij},     {RotBlock::Sir1, &ints.h2e_v1_Sir},
+      {RotBlock::Sir2, &ints.h2e_v2_Sir},   {RotBlock::H2e, &ints.h2e},
+      {RotBlock::H1e, &ints.h1e},           {RotBlock::H1eSr, &ints.h1e_v_Sr},
+      {RotBlock::H1eSi, &ints.h1e_v_Si},    {RotBlock::H1eSir, &ints.h1e_v_Sir},
+  };
+  ScGeneralCheck out;
+  for (const auto& [kind, stored] : blocks) {
+    std::string where;
+    const bool oneElectron = rotBlockInfo(kind).rank == 2;
+    const double resid = oneElectron ? restrictionResidual2(kind, gen, *stored, res, where)
+                                     : restrictionResidual4(kind, gen, *stored, res, where);
+    if (resid > out.blocks) {
+      out.blocks = resid;
+      out.worstBlock = where;
+    }
+    if (oneElectron) out.heff = std::max(out.heff, heffResidual(kind, gen, res));
+  }
+  out.fock = std::max(fockDiagResidual(/*core=*/true, gen, dm1, res),
+                      fockDiagResidual(/*core=*/false, gen, dm1, res));
+  out.eps = std::max(epsResidual(/*core=*/true, gen, ints.e_core, res),
+                     epsResidual(/*core=*/false, gen, ints.e_virt, res));
+  return out;
+}
+
+bool printScFullRotationTable(const ScFullRotationResult& r, double atol) {
+  std::printf(
+      "\nThe full orbital source term Y_xy (Park Eqs. 26, 28), per direction\n"
+      "  <kappa, Y>   the ADJOINT pairing, integral half + orbital energies\n"
+      "  ext / act    the integral half's two pieces -- Eq. 41's D, Eqs. 42-43's M_G\n"
+      "  eps          sum_t R_t Deltadot_t (Eqs. 38-39): shared by both modes\n"
+      "  Edot         the forward TANGENT, the same classes' product rule + eps\n"
+      "  |delta|      the INTEGRAL halves against each other: one derivative, two modes\n");
+  std::printf("%-5s %22s %22s %22s %22s %22s %11s\n", "dir", "<kappa, Y>", "ext", "act", "eps",
+              "Edot", "|delta|");
+  bool ok = true;
+  for (std::size_t d = 0; d < r.dirs.size(); ++d) {
+    const ScFullRotationPairing& p = r.dirs[d];
+    const double delta = std::fabs(p.integral - p.tangentIntegral);
+    if (p.hasTangent) ok = ok && delta < atol;
+    std::printf("%-5zu %22.14e %22.14e %22.14e %22.14e %22s %11s\n", d, p.adjoint, p.ext, p.act,
+                p.eps, p.hasTangent ? std::format("{:.14e}", p.tangent).c_str() : "-",
+                p.hasTangent ? std::format("{:.2e}", delta).c_str() : "-");
+  }
+  return ok;
 }
 
 bool printScRotationTable(const ScRotationResult& r, double atol) {

@@ -5,7 +5,7 @@
 # for the dependency scan rather than in plain sources.
 add_executable(nevpt2_sc_pseudodensity)
 target_sources(nevpt2_sc_pseudodensity PRIVATE FILE_SET CXX_MODULES
-               FILES main.cppm kappa_check.cppm)
+               FILES main.cppm kappa_check.cppm kappa_full_check.cppm)
 set_target_properties(nevpt2_sc_pseudodensity PROPERTIES CXX_MODULE_STD ON)
 target_compile_features(nevpt2_sc_pseudodensity PRIVATE cxx_std_23)
 target_compile_options(nevpt2_sc_pseudodensity PRIVATE -Wall)
@@ -14,8 +14,9 @@ set_target_properties(nevpt2_sc_pseudodensity
                       PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${NEVPT2_SRC_BINARY_DIR}")
 target_link_libraries(nevpt2_sc_pseudodensity PRIVATE
   nevpt2::gradient
-  # --kappa-act's host side: expKappa and the finite rotation of every stored
-  # block, which the finite difference reruns the energy at.
+  # --kappa-act's and --kappa-full's host side: expKappa and the finite
+  # rotation of every stored block, which their finite differences rerun the
+  # energy at.
   nevpt2::kappa_rotation
   nevpt2::golden
   nevpt2::link_tables
