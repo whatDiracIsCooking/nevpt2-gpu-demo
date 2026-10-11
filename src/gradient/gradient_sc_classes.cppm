@@ -32,10 +32,21 @@
 // product rule, the per-direction bookkeeping -- is generic
 // (gradient_terms.cppm, gradient_rotation.cppm). An RDM-only metric has no
 // tangent and is simply absent from the `gdot` list.
+//
+// AND EACH TAKES AN OPTIONAL `adj`: non-null, the class also sweeps its
+// Eqs. 42-43 accumulators one chain rule further in, down to the five RDM
+// coefficient tensors Park Eq. 48 needs (nevpt2.gradient:rdm_adjoint, which
+// has the derivation). That has to happen HERE, inside the class, because the
+// accumulators are keyed by the block tensor each is conjugate to and those
+// blocks are built and freed per class -- the sweep is a few lines at the end
+// of each walk, in reverse-topological order where a class has nested blocks
+// (Sij's a9 -> hdm3 -> hdm2, Srs's a7 -> rm3 -> rm2, Sijr's a3 -> hdm1).
+// Null, nothing below the Eqs. 42-43 accumulators runs at all.
 module nevpt2.gradient:sc_classes;
 
 import std;
 import nevpt2.gradient;
+import :rdm_adjoint;  // ScRdmAdjoint and the per-block adjoint sweeps
 import :rotation;
 import :terms;
 
@@ -46,7 +57,7 @@ namespace nevpt2 {
 void gradientSr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                 const Tensor& hostEVirt, const DeviceTensor& dm1, const DeviceTensor& dm2,
                 const DeviceTensor& dm3, const DeviceTensor& f3ac, const DeviceTensor& f3ca,
-                int64_t norb, const ScRotation& rot, ScClassGradient& acc,
+                int64_t norb, const ScRotation& rot, ScClassGradient& acc, ScRdmAdjoint* adj,
                 const DeviceResources& dr) {
   const DeviceTensor& h1e = ai.h1e;
   const DeviceTensor& h2e = ai.h2e;
@@ -93,6 +104,24 @@ void gradientSr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
+
+  // The RDM sweep: dm1/dm2/dm3 are contracted RAW on the norm side, so their
+  // accumulators ARE their Eq. 48 contributions; a16/a17/a19 are one chain
+  // rule away, and a16 is one of the only two blocks in the eight classes
+  // that read the f3 digests at all.
+  if (adj != nullptr) {
+    const wwrStream_t s = dr.stream();
+    adjointAddRaw(dActive, &dm1, adj->dm1, s);
+    adjointAddRaw(dActive, &dm2, adj->dm2, s);
+    adjointAddRaw(dActive, &dm3, adj->dm3, s);
+    const DeviceTensor delta = deviceEye(norb, dr);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &a16); m != nullptr)
+      adjointA16(*m, h1e, h2e, delta, *adj, dr);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &a17); m != nullptr)
+      adjointA17(*m, h1e, h2e, *adj, dr);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &a19); m != nullptr)
+      adjointA19(*m, h1e, h2e, *adj, dr);
+  }
 }
 
 // --- Si: one core index (the hole-side metrics, and -e_core as Delta) -------
@@ -100,7 +129,7 @@ void gradientSr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
 void gradientSi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                 const Tensor& hostECore, const DeviceTensor& dm1, const DeviceTensor& dm2,
                 const DeviceTensor& dm3, const DeviceTensor& f3ac, const DeviceTensor& f3ca,
-                int64_t norb, const ScRotation& rot, ScClassGradient& acc,
+                int64_t norb, const ScRotation& rot, ScClassGradient& acc, ScRdmAdjoint* adj,
                 const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const DeviceTensor& h1e = ai.h1e;
@@ -155,6 +184,23 @@ void gradientSi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
+
+  // The RDM sweep: six blocks, none of which reads another, so no ordering
+  // question. a22 is the second (and last) block that reads the f3 digests.
+  if (adj != nullptr) {
+    if (const DeviceTensor* m = activeAccumOf(dActive, &a22); m != nullptr)
+      adjointA22(*m, h1e, h2e, eye, *adj, dr);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &a23); m != nullptr)
+      adjointA23(*m, h1e, h2e, *adj, s);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &a25); m != nullptr)
+      adjointA25(*m, h1e, h2e, *adj, s);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &dm3_h); m != nullptr)
+      adjointDm3H(*m, eye, *adj, s);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &dm2_h); m != nullptr)
+      adjointDm2H(*m, eye, *adj, s);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &dm1_h); m != nullptr)
+      adjointHoleDm1(*m, *adj, s);
+  }
 }
 
 // --- Sijrs: no active space -------------------------------------------------
@@ -260,6 +306,7 @@ ScSlabMultipliers sijrMultipliers(const Tensor& normT, const Tensor& hT, int64_t
 void gradientSijr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                   const Tensor& hostECore, const Tensor& hostEVirt, const DeviceTensor& dm1,
                   const DeviceTensor& dm2, const ScRotation& rot, ScClassGradient& acc,
+                  ScRdmAdjoint* adj,
                   const DeviceResources& dr) {
   const int64_t ncore = hostECore.size();
   if (ncore == 0) return;
@@ -298,6 +345,21 @@ void gradientSijr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
+
+  // The RDM sweep: hdm1 is both this class's own metric and an operand of a3,
+  // so its accumulator is seeded from the walk and then added to by a3's
+  // sweep, before hdm1 itself is swept down to dm1.
+  if (adj != nullptr) {
+    const wwrStream_t s = dr.stream();
+    const int64_t norb = dm1.dims[0];
+    const DeviceTensor delta = deviceEye(norb, dr);
+    const DeviceTensor mHdm1 = DeviceTensor::zeros(hdm1.dims, dr);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &hdm1); m != nullptr)
+      addInto(*m, mHdm1, s);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &a3); m != nullptr)
+      adjointA3(*m, ai.h1e, ai.h2e, delta, mHdm1, *adj, s);
+    adjointHoleDm1(mHdm1, *adj, s);
+  }
 }
 
 // --- Srsi: a symmetrized virtual pair and a core index ----------------------
@@ -355,6 +417,7 @@ std::vector<ScTerm> srsiTerms(const ScOperand& ga, const ScOperand& gb, const De
 void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                   const Tensor& hostECore, const Tensor& hostEVirt, const DeviceTensor& dm1,
                   const DeviceTensor& dm2, const ScRotation& rot, ScClassGradient& acc,
+                  ScRdmAdjoint* adj,
                   const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const int64_t nvirt = hostEVirt.size(), ncore = hostECore.size();
@@ -455,6 +518,13 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
   acc.extContraction += 0.5 * ext;
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
+
+  // The RDM sweep: dm1 raw on the norm side, k27 one chain rule away.
+  if (adj != nullptr) {
+    adjointAddRaw(dActive, &dm1, adj->dm1, s);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &k27); m != nullptr)
+      adjointK27(*m, ai.h1e, ai.h2e, *adj, s);
+  }
 }
 
 // --- Srs: a virtual pair (Park's own worked example, Eqs. 41-47) ------------
@@ -468,6 +538,7 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
 void gradientSrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                  const Tensor& hostEVirt, const DeviceTensor& dm1, const DeviceTensor& dm2,
                  const DeviceTensor& dm3, const ScRotation& rot, ScClassGradient& acc,
+                 ScRdmAdjoint* adj,
                  const DeviceResources& dr) {
   const int64_t nvirt = hostEVirt.size();
   if (nvirt == 0) return;
@@ -544,6 +615,24 @@ void gradientSrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
     acc.intContraction = dotTensors(ai.h1e, dInts[0], dr) + dotTensors(ai.h2e, dInts[1], dr);
     acc.rdmContraction = activeContraction(dRdm, dr);
   }
+
+  // The RDM sweep, reverse-topologically: a7 reads rm2 and rm3, rm3 reads rm2
+  // as well, so a7, then rm3, then rm2 -- and rm2's accumulator is seeded
+  // from the walk, where it is this class's own metric.
+  if (adj != nullptr) {
+    const wwrStream_t s = dr.stream();
+    const int64_t norb = dm1.dims[0];
+    const DeviceTensor delta = deviceEye(norb, dr);
+    const DeviceTensor mRm2 = DeviceTensor::zeros(rm2.dims, dr);
+    const DeviceTensor mRm3 =
+        DeviceTensor::zeros({norb, norb, norb, norb, norb, norb}, dr);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &rm2); m != nullptr)
+      addInto(*m, mRm2, s);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &a7); m != nullptr)
+      adjointA7(*m, ai.h1e, ai.h2e, mRm2, mRm3, s);
+    adjointRm3(mRm3, delta, mRm2, *adj, s);
+    adjointRm2(mRm2, delta, *adj, s);
+  }
 }
 
 // --- Sij: a core pair -------------------------------------------------------
@@ -551,6 +640,7 @@ void gradientSrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
 void gradientSij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                  const Tensor& hostECore, const DeviceTensor& dm1, const DeviceTensor& dm2,
                  const DeviceTensor& dm3, const ScRotation& rot, ScClassGradient& acc,
+                 ScRdmAdjoint* adj,
                  const DeviceResources& dr) {
   const int64_t ncore = hostECore.size();
   if (ncore == 0) return;
@@ -591,6 +681,25 @@ void gradientSij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
+
+  // The RDM sweep, reverse-topologically: a9 reads hdm2 and hdm3, hdm3 reads
+  // hdm2 as well, so a9, then hdm3, then hdm2 -- whose accumulator is seeded
+  // from the walk, where it is this class's own metric. (hdm1 is passed to
+  // make_hdm3 and make_a9 and read by neither, so no term contracts it and it
+  // gets no accumulator.)
+  if (adj != nullptr) {
+    const wwrStream_t s = dr.stream();
+    const int64_t norb = dm1.dims[0];
+    const DeviceTensor delta = deviceEye(norb, dr);
+    const DeviceTensor mHdm2 = DeviceTensor::zeros(hdm2.dims, dr);
+    const DeviceTensor mHdm3 = DeviceTensor::zeros(hdm3.dims, dr);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &hdm2); m != nullptr)
+      addInto(*m, mHdm2, s);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &a9); m != nullptr)
+      adjointA9(*m, ai.h1e, ai.h2e, mHdm2, mHdm3, s);
+    adjointHdm3(mHdm3, delta, mHdm2, *adj, s);
+    adjointHdm2(mHdm2, delta, *adj, dr);
+  }
 }
 
 // --- Sir: a core and a virtual index ----------------------------------------
@@ -608,7 +717,8 @@ void gradientSij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
 void gradientSir(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                  const Tensor& hostECore, const Tensor& hostEVirt, const DeviceTensor& dm1,
                  const DeviceTensor& dm2, const DeviceTensor& dm3, const ScRotation& rot,
-                 ScClassGradient& acc, const DeviceResources& dr) {
+                 ScClassGradient& acc, ScRdmAdjoint* adj,
+                 const DeviceResources& dr) {
   const int64_t ncore = hostECore.size();
   if (ncore == 0) return;
   const DeviceTensor a12 = make_a12(ai.h1e, ai.h2e, dm1, dm2, dm3, dr);
@@ -668,6 +778,21 @@ void gradientSir(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
+
+  // The RDM sweep: dm1 and dm2 raw on the norm side, a12 and a13 one chain
+  // rule away. The hoisted v2tr block is an INTEGRAL trace, not an RDM, so
+  // nothing of it reaches here.
+  if (adj != nullptr) {
+    const wwrStream_t s = dr.stream();
+    const int64_t norb = dm1.dims[0];
+    const DeviceTensor delta = deviceEye(norb, dr);
+    adjointAddRaw(dActive, &dm1, adj->dm1, s);
+    adjointAddRaw(dActive, &dm2, adj->dm2, s);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &a12); m != nullptr)
+      adjointA12(*m, ai.h1e, ai.h2e, *adj, s);
+    if (const DeviceTensor* m = activeAccumOf(dActive, &a13); m != nullptr)
+      adjointA13(*m, ai.h1e, ai.h2e, delta, *adj, s);
+  }
 }
 
 }  // namespace nevpt2

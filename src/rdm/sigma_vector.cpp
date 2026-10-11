@@ -158,6 +158,104 @@ std::vector<double> stageTwoCoefficients(const int order, const Tensor& d6,
   return c;
 }
 
+// Not exported: the DAGGER's stage 1, which is the one that carries d6 -- the
+// two stages' roles are exchanged, for the reason the interface gives. The
+// dagger of E_wv E_ut E_{sx|xs} E_qp is E_pq E_{xs|sx} E_tu E_vw, whose INNER
+// pair (applied first, to `ci`) is E_tu E_vw: its index pairs are (t, u) and
+// (v, w), all four of them d6's, so what is left of d6 is the batch (a, s) --
+// the same batch the forward pass uses, and the same for both orders:
+//
+//   c1[(a, s), t, u, v, w] = d6[w, v, u, t, s, a]   (order 0, ca)
+//                            d6[w, v, u, t, a, s]   (order 1, ac)
+//
+// A pure repacking, n^6 values and no zeros -- the mirror image of
+// stageTwoCoefficients, whose index pairs are the OUTER ones.
+std::vector<double> daggerStageOneCoefficients(const int order, const Tensor& d6,
+                                               const SigmaShape& sh) {
+  const int64_t n = sh.norb;
+  std::vector<double> c(narrowTo<std::size_t>(sh.n6), 0.0);
+  double* const out = c.data();
+  for (int64_t a = 0; a < n; ++a)
+    for (int64_t s = 0; s < n; ++s) {
+      const int64_t base = (a * n + s) * sh.n4;
+      for (int64_t w = 0; w < n; ++w)
+        for (int64_t v = 0; v < n; ++v)
+          for (int64_t u = 0; u < n; ++u)
+            for (int64_t t = 0; t < n; ++t)
+              out[base + (t * n + u) * sh.n2 + v * n + w] =
+                  order == 0 ? d6(w, v, u, t, s, a) : d6(w, v, u, t, a, s);
+    }
+  return c;
+}
+
+// Not exported: the DAGGER's stage 2, which carries the ERI. The outer pair
+// of E_pq E_{xs|sx} E_tu E_vw is (E_pq, E_{xs|sx}), so the first index pair
+// is (p, q) and the second is (x, s) for ca or (s, x) for ac -- and that `s`
+// is the batch's own, so the coefficient is nonzero only on that slice:
+//
+//   c2[(a, s), p, q, R, S] = eri[a, x, q, p],  (R, S) = (x, s) | (s, x)
+//
+// and zero elsewhere. n^6 doubles and mostly zero, exactly as
+// stageOneCoefficients is, and for the same reason it costs nothing: the
+// kernel enumerates index pairs and reads the coefficient at each.
+std::vector<double> daggerStageTwoCoefficients(const int order, const Tensor& eri,
+                                               const SigmaShape& sh) {
+  const int64_t n = sh.norb;
+  std::vector<double> c(narrowTo<std::size_t>(sh.n6), 0.0);
+  double* const out = c.data();
+  for (int64_t a = 0; a < n; ++a)
+    for (int64_t s = 0; s < n; ++s) {
+      const int64_t base = (a * n + s) * sh.n4;
+      for (int64_t x = 0; x < n; ++x) {
+        const int64_t second = order == 0 ? x * n + s : s * n + x;
+        for (int64_t q = 0; q < n; ++q)
+          for (int64_t p = 0; p < n; ++p)
+            out[base + (p * n + q) * sh.n2 + second] = eri(a, x, q, p);
+      }
+    }
+  return c;
+}
+
+// Not exported: the two kernel passes both 4-body sigmas run, given their two
+// already-repacked (n^2, n^4) coefficient blocks. The forward and the dagger
+// differ ONLY in what those two blocks hold.
+Tensor sigmaVector4Run(const SigmaShape& sh, const Tensor& ci, const int64_t nelecA,
+                       const int64_t nelecB, const std::vector<double>& c1,
+                       const std::vector<double>& c2, const DeviceResources& res) {
+  const wwrStream_t stream = res.stream();
+  const auto [ra, rb] = reverseTables(sh, nelecA, nelecB);
+
+  DeviceBuffer<int> dRa = uploadSigmaInput(ra, res);
+  DeviceBuffer<int> dRb = uploadSigmaInput(rb, res);
+  DeviceTensor dCi = uploadTensor(ci, res);
+  // The two n^6 coefficient blocks, repacked on the host so each kernel reads
+  // one contiguous (n^2, n^4) array. Pageable host memory, which the runtime
+  // stages before the upload returns, so the temporaries may go right away.
+  DeviceBuffer<double> dC1 = uploadSigmaInput(c1, res);
+  DeviceBuffer<double> dC2 = uploadSigmaInput(c2, res);
+  // The one temporary: stage 1's n^2 intermediate vectors, each spanning the
+  // WHOLE determinant axis (stage 2 gathers from anywhere in it, so it cannot
+  // be a per-tile block). Overwritten element by element, like dSigma.
+  DeviceTensor dMid = DeviceTensor::zeros({sh.n2, sh.ndet}, res);
+  DeviceTensor dSigma = DeviceTensor::zeros({sh.na, sh.nb}, res);
+
+  for (const auto [k0, width] : sh.tiles) {
+    gpuCheck(device::sigmaVector2Batched(stream, dCi.data(), dRa.data(), dRb.data(), dC1.data(),
+                                         dMid.data(), sh.norbK, sh.nbK, sh.nlaK, sh.nlbK, sh.ndetK,
+                                         k0, width));
+  }
+  // Stage 2 reads dMid at determinants anywhere in the space, so it must not
+  // start before stage 1 has covered ALL of them. The one stream is what
+  // guarantees that: kernels queued on it execute in issue order, so no event
+  // and no synchronization is needed between the two sweeps.
+  for (const auto [k0, width] : sh.tiles) {
+    gpuCheck(device::sigmaVector2Reduce(stream, dMid.data(), dRa.data(), dRb.data(), dC2.data(),
+                                        dSigma.data(), sh.norbK, sh.nbK, sh.nlaK, sh.nlbK,
+                                        sh.ndetK, k0, width));
+  }
+  return downloadTensor(dSigma, stream);
+}
+
 Tensor sigmaVector3Device(const SigmaVectorOptions& opt, const Tensor& ci, const int64_t norb,
                           const int64_t nelecA, const int64_t nelecB, const Tensor& d3,
                           const DeviceResources& res) {
@@ -185,46 +283,35 @@ Tensor sigmaVector3Device(const SigmaVectorOptions& opt, const Tensor& ci, const
   return downloadTensor(dSigma, stream);
 }
 
-Tensor sigmaVector4Device(const SigmaVectorOptions& opt, const int order, const Tensor& ci,
-                          const int64_t norb, const int64_t nelecA, const int64_t nelecB,
-                          const Tensor& d6, const Tensor& eriF3, const DeviceResources& res) {
-  const wwrStream_t stream = res.stream();
+// Not exported: the shape checks both 4-body entry points make, which are
+// the same ones.
+SigmaShape sigmaShape4(const SigmaVectorOptions& opt, const int order, const Tensor& ci,
+                       const int64_t norb, const int64_t nelecA, const int64_t nelecB,
+                       const Tensor& d6, const Tensor& eriF3) {
   check(order == 0 || order == 1, "sigma vector: `order` is the f3 order, 0 = ca or 1 = ac");
   const SigmaShape sh = sigmaShape(norb, nelecA, nelecB, opt.nTiles);
   checkSigmaShapes(ci, sh, d6, "d6");
   check(eriF3.rank() == 4 && eriF3.size() == sh.n4,
         std::format("sigma vector: eriF3 must be an (norb,)*4 = ({},)*4 tensor", norb));
-  const auto [ra, rb] = reverseTables(sh, nelecA, nelecB);
+  return sh;
+}
 
-  DeviceBuffer<int> dRa = uploadSigmaInput(ra, res);
-  DeviceBuffer<int> dRb = uploadSigmaInput(rb, res);
-  DeviceTensor dCi = uploadTensor(ci, res);
-  // The two n^6 coefficient blocks, repacked on the host so each kernel reads
-  // one contiguous (n^2, n^4) array. Pageable host memory, which the runtime
-  // stages before the upload returns, so the temporaries may go right away.
-  DeviceBuffer<double> dC1 = uploadSigmaInput(stageOneCoefficients(order, eriF3, sh), res);
-  DeviceBuffer<double> dC2 = uploadSigmaInput(stageTwoCoefficients(order, d6, sh), res);
-  // The one temporary: stage 1's n^2 intermediate vectors, each spanning the
-  // WHOLE determinant axis (stage 2 gathers from anywhere in it, so it cannot
-  // be a per-tile block). Overwritten element by element, like dSigma.
-  DeviceTensor dMid = DeviceTensor::zeros({sh.n2, sh.ndet}, res);
-  DeviceTensor dSigma = DeviceTensor::zeros({sh.na, sh.nb}, res);
+Tensor sigmaVector4Device(const SigmaVectorOptions& opt, const int order, const Tensor& ci,
+                          const int64_t norb, const int64_t nelecA, const int64_t nelecB,
+                          const Tensor& d6, const Tensor& eriF3, const DeviceResources& res) {
+  const SigmaShape sh = sigmaShape4(opt, order, ci, norb, nelecA, nelecB, d6, eriF3);
+  return sigmaVector4Run(sh, ci, nelecA, nelecB, stageOneCoefficients(order, eriF3, sh),
+                         stageTwoCoefficients(order, d6, sh), res);
+}
 
-  for (const auto [k0, width] : sh.tiles) {
-    gpuCheck(device::sigmaVector2Batched(stream, dCi.data(), dRa.data(), dRb.data(), dC1.data(),
-                                         dMid.data(), sh.norbK, sh.nbK, sh.nlaK, sh.nlbK, sh.ndetK,
-                                         k0, width));
-  }
-  // Stage 2 reads dMid at determinants anywhere in the space, so it must not
-  // start before stage 1 has covered ALL of them. The one stream is what
-  // guarantees that: kernels queued on it execute in issue order, so no event
-  // and no synchronization is needed between the two sweeps.
-  for (const auto [k0, width] : sh.tiles) {
-    gpuCheck(device::sigmaVector2Reduce(stream, dMid.data(), dRa.data(), dRb.data(), dC2.data(),
-                                        dSigma.data(), sh.norbK, sh.nbK, sh.nlaK, sh.nlbK,
-                                        sh.ndetK, k0, width));
-  }
-  return downloadTensor(dSigma, stream);
+Tensor sigmaVector4DaggerDevice(const SigmaVectorOptions& opt, const int order, const Tensor& ci,
+                                const int64_t norb, const int64_t nelecA, const int64_t nelecB,
+                                const Tensor& d6, const Tensor& eriF3,
+                                const DeviceResources& res) {
+  const SigmaShape sh = sigmaShape4(opt, order, ci, norb, nelecA, nelecB, d6, eriF3);
+  // The two blocks the other way round: d6 first, the ERI second.
+  return sigmaVector4Run(sh, ci, nelecA, nelecB, daggerStageOneCoefficients(order, d6, sh),
+                         daggerStageTwoCoefficients(order, eriF3, sh), res);
 }
 
 }  // namespace nevpt2

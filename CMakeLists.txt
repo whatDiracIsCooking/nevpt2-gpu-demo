@@ -269,6 +269,44 @@ if(NEVPT2_BUILD_TESTING)
     unset(_kappa_gold)
   endforeach()
 
+  # --- the SC gradient's CI source term: forward against reverse ----------------
+  #
+  # nevpt2_demo --gradient-source: nevpt2.gradient's scCiSourceDevice assembles
+  # y_I = dE/dc_I (Park Eq. 48) by sweeping those same pseudodensities one chain
+  # rule further in -- down to the five RDM coefficient tensors -- and
+  # contracting them with nevpt2.sigma_vector's kernels, then checks it against
+  # nevpt2.energy's FORWARD tangent by duality: <u, y> = Edot(u), for four
+  # seeded directions and for the state itself, plus the FULL Jacobian column by
+  # column where ndet allows it (CAS(4,4): all 36).
+  #
+  # Two computations of one number with no step size anywhere, so the tolerance
+  # is 1e-7 like every other numerical gate here and nothing is differenced --
+  # the finite-difference cross-check that licenses this is the tangent's own,
+  # one-time (--sc-tangent; docs/testing.md, "The SC tangent's
+  # finite-difference cross-check"). What is measured: docs/testing.md, "The CI
+  # source term's forward-reverse duality".
+  #
+  # --tiles is the tangent RDM build's memory lever here, exactly as elsewhere
+  # (docs/performance.md, "Tile floors" and "--tiles on the CI source term"):
+  # 3 at CAS(10,10) is the shipped count and what this is measured with. Its
+  # PASS line is worded unlike either demo's and unlike the pseudodensity one,
+  # so no entry can pass on another's output. CAS(4,4) and CAS(8,8) are `small`,
+  # so the sanitizer tier covers the sweep and the sigma launches.
+  foreach(_case cas44 cas88 cas1010)
+    set(_ci_src_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.nevpt2gold")
+    _add_golden_test_with(nevpt2_demo nevpt2_gradient_source_${_case}
+                          "${_ci_src_gold}" --tiles 3 --gradient-source)
+    if(TEST nevpt2_gradient_source_${_case})
+      set_tests_properties(nevpt2_gradient_source_${_case} PROPERTIES
+        PASS_REGULAR_EXPRESSION
+          "PASS: the CI source term and the forward tangent agree")
+      if(NOT _case STREQUAL "cas1010")
+        set_tests_properties(nevpt2_gradient_source_${_case} PROPERTIES LABELS "gpu;small")
+      endif()
+    endif()
+    unset(_ci_src_gold)
+  endforeach()
+
   # --- *_pc: PC-NEVPT2 ----------------------------------------------
   #
   # The same RDM build as the SC entry at the same --tiles; the PC stage runs

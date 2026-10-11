@@ -305,6 +305,77 @@ per-tuple arithmetic is `test/energy_finish/` (`pcCoefficients`,
 `pcQuadForm`, `tangentSingle`) and the gate itself `test/pc_tangent/`, which
 locks in that a refused class fails rather than reading as a zero
 derivative.
+## The CI source term's forward-reverse duality
+
+`nevpt2_gradient_source_cas44`, `_cas88` and `_cas1010` (all `gpu`; the first
+two `small`) run `nevpt2_demo --golden <case> --tiles 3 --gradient-source` and
+match `PASS: the CI source term and the forward tangent agree`. They
+**difference nothing**: this is the exact check the one-time finite difference
+above was run to license.
+
+`nevpt2.gradient`'s `scCiSourceDevice` assembles the CI source term
+`y_I = dE/dc_I` — Park Eq. 48's `<I|(O_D + O_D^dagger)|Psi>` — in reverse
+mode: the pseudodensity walk of the section above leaves one accumulator
+`M_G = dE/dG` per metric / Dyall-Hamiltonian block, a sweep through each
+block's own einsum chain turns those into the five RDM coefficient tensors
+(`dE/d(dm1)`, `dE/d(dm2)`, `dE/d(dm3)`, `dE/d(f3ac)`, `dE/d(f3ca)`), and
+`nevpt2.sigma_vector`'s kernels contract those with the RDMs' own CI
+derivatives. `energiesTangentDevice` computes the same derivative in
+**forward** mode. Two independent computations of one number, so for every
+direction `u`
+
+```
+  <u, y> == Edot(u)
+```
+
+with no step size in it — the only difference is that the two paths
+reassociate their sums differently. The entry checks that for four seeded
+directions (`|u| = 1`, `<c|u> = 0`), for the state itself (Euler, the one
+direction the projected random ones never reach), and — where `ndet` allows —
+for every column of the Jacobian.
+
+Measured on an RTX 3080 (CUDA, Release, `--tiles 3`):
+
+| case | n_det | norm of `y` | worst seeded `<u,y>` residual | the state itself | worst overall | relative |
+|---|---:|---:|---:|---:|---:|---:|
+| CAS(4,4) | 36 | 0.5803 | 4.7e-15 | 4.0e-13 | 1.5e-12 | 2.8e-12 |
+| CAS(8,8) | 4900 | 0.9448 | 1.7e-16 | 8.7e-15 | 8.7e-15 | 9.2e-15 |
+| CAS(10,10) | 63504 | 0.4023 | 6.8e-17 | 1.3e-14 | 1.3e-14 | 3.6e-14 |
+
+The seeded directions' residuals are smaller in absolute terms simply because
+their dot products are (1e-3 against the state direction's O(1)); the
+relative column is the one to read, and it is round-off at every size. The
+CAS(4,4) figure is the largest of the three and **moves between runs** —
+1.4e-12, 1.5e-12 and 2.7e-12 on three runs of the same binary, and the
+CAS(10,10) worst likewise wanders between 8e-15 and 1.5e-14 — which is the
+RDM build's `atomicAdd` reassociation reaching the answer through two
+different paths, not a step size. The 1e-7 gate is therefore five decades of
+headroom.
+
+**The full Jacobian, at CAS(4,4).** `ndet = 36`, so every column is
+affordable: `y_I` against `Edot(e_I)` for all 36 determinants, one forward
+tangent each. Worst column `|y_I - Edot(e_I)| = 1.5e-12` at `I = 0`, where
+`max |y_I| = 0.5426`. This is not a stricter dot product — it is a
+*localising* one: a single `<u, y>` detects a wrong sweep but says nothing
+about which half of it is wrong, while a column-by-column comparison names the
+determinant. The check is skipped above `ndet = 256` (CAS(8,8) is 4900), where
+one tangent per determinant stops being seconds.
+
+The walk `y` rides on is the pseudodensity walk unchanged, which the entry
+also confirms the cheap way: the class energies it computes on the way are
+still `nevpt2.energy`'s own, to 2.8e-16 / 9.7e-16 / 1.2e-15 at the three
+sizes. Building `y` itself takes 0.01s / 0.50s / 5.68s — five sigma calls (one
+3-body, and a forward and a dagger for each of the two `f3` orders) on top of
+the walk — and ctest clocks the three entries at 0.46s / 1.91s / 23.3s,
+including the five tangent builds and, at CAS(4,4), the Jacobian's 36.
+
+The sigma kernels' own halves are pinned card-side in `test/sigma_vector/`:
+`SigmaVector3GammaTests` and `SigmaVector4GammaTests` check each sigma, and the
+forward-plus-dagger sum that an RDM derivative actually is, against an exact
+central difference of the host contraction (exact because that contraction is
+quadratic in the CI vector), with negative controls — forward + forward
+instead of forward + dagger, and a `d6` with its last two axes swapped — that
+both miss by more than three decades.
 
 ## Sanitizers
 
@@ -597,6 +668,8 @@ memcheck with the leak check. "plain" is the same entry unsanitized
 | `nevpt2_sc_pseudodensity_kappa_cas44` | 0.88 | 0.67 | 1.42 | 1.17 | — | — | — | — | 0.38 | — |
 | `nevpt2_pc_tangent_cas44` | 0.72 | 0.51 | 1.72 | 1.32 | — | — | — | — | 0.44 | — |
 | `nevpt2_pc_tangent_cas88` | 3.07 | 3.05 | 45.22 | 19.25 | — | — | — | — | 2.27 | — |
+| `nevpt2_gradient_source_cas44` | 0.95 | 0.69 | 3.47 | 2.72 | — | — | — | — | 0.46 | — |
+| `nevpt2_gradient_source_cas88` | 2.52 | 2.51 | 59.25 | 37.07 | — | — | — | — | 1.91 | — |
 | each canary | 0.36 | 0.35 | 0.75–0.86 | 0.49 | 0.53 | 0.77 | 0.37 | 0.36 | — | — |
 
 The `nevpt2_cas88_profile` row was measured with the RDM-build-only profiler
@@ -605,18 +678,27 @@ that `--profile` has since absorbed. `nevpt2_df_cas88_profile` and the two
 pair has been run clean under memcheck (with the leak check), racecheck,
 initcheck, synccheck, `asan` and `ubsan`, but not yet `hip-asan` /
 `hip-ubsan`. racecheck and synccheck have not been run on the `--pc` entries,
-nor on `nevpt2_sc_pseudodensity_kappa_cas44` or the two
-`nevpt2_pc_tangent_*` entries, all of which have been run clean under `asan`,
-`ubsan`, memcheck (with the leak check) and initcheck on CUDA, and none of
-which has been run on HIP.
+nor on `nevpt2_sc_pseudodensity_kappa_cas44`, the two `nevpt2_pc_tangent_*`
+entries or the two `nevpt2_gradient_source_*` ones. The first three have been
+run clean under `asan`, `ubsan`, memcheck (with the leak check) and initcheck
+on CUDA, as have the last two; none of the five has been run on HIP, and
+their `—` columns above mean "not measured", not "clean".
 
-Everything except racecheck finishes in well under a minute, so CAS(8,8) is
-affordable under every tool — `nevpt2_pc_tangent_cas88` is the dearest of the
-non-racecheck entries at 45s under memcheck, since it runs ten RDM builds and
-ten PC stages. racecheck costs ~100s per CAS(8,8) entry on the
-emitted digest's 16×16 shared-memory tiles (the BLAS paths are cheaper
-because cuBLAS is excluded), ~7 minutes for the whole preset. memcheck takes
-~8× the plain run at CAS(8,8), and initcheck ~3.5×. On HIP the sanitizer
+Everything except racecheck and `nevpt2_gradient_source_cas88` finishes in
+well under a minute, so CAS(8,8) is affordable under every tool. racecheck
+costs ~100s per CAS(8,8) entry on the emitted digest's 16×16 shared-memory
+tiles (the BLAS paths are cheaper because cuBLAS is excluded), ~7 minutes for
+the whole preset. memcheck takes ~8× the plain run at CAS(8,8), and initcheck
+~3.5× — with two exceptions, both of which earn their time by what they
+check. `nevpt2_pc_tangent_cas88` is 45s under memcheck because it runs ten
+RDM builds and ten PC stages. `nevpt2_gradient_source_cas88` is 59s under
+memcheck and 37s under initcheck (~31× and ~19× its plain run): it is the
+only `small` entry that runs the SIGMA kernels, whose reverse-table walks are
+many short launches over the whole determinant axis (five of them per `y`,
+plus one tangent RDM build per direction), and that per-launch cost is what
+the sanitizers multiply. 59s makes it the second-slowest entry in the tier
+after racecheck's; it stays `small` because the duality it checks is this
+milestone's headline claim. On HIP the sanitizer
 builds are Debug, so their device code is `-O0` too, which is why
 `nevpt2_cas88_digest_emitted` is ~3.5× the plain run there while host ASan on
 CUDA costs almost nothing.

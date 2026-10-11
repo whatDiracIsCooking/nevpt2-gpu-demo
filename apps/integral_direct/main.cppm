@@ -43,9 +43,10 @@ module;
 export module nevpt2.app.integral_direct;
 
 import std;
-// This demo's own helper, in an interface partition that exports nothing (see
-// its header): `export import` only because [module.unit] requires a primary
-// interface to re-export its interface partitions.
+// This demo's own helpers, in interface partitions that export nothing (see
+// their headers): `export import` only because [module.unit] requires a
+// primary interface to re-export its interface partitions.
+export import :gradient_source_check;
 export import :tangent_check;
 
 // nevpt2.cli: the flags both demos take, and the checks that span them
@@ -53,13 +54,14 @@ export import :tangent_check;
 import nevpt2.cli;
 import nevpt2.energy;  // re-exports nevpt2.einsum, .device_tensor, .wwr, .tensor
 import nevpt2.golden;
+import nevpt2.gradient;  // --gradient-source: scCiSourceDevice
 import nevpt2.link_tables;
 import nevpt2.profile;
 import nevpt2.rdm_build;
 
 int main(int argc, char** argv) {
   constexpr std::string_view kGoldenHint = "path.nevpt2gold";
-  constexpr std::string_view kExtraFlags = "[--sc-tangent]";
+  constexpr std::string_view kExtraFlags = "[--sc-tangent] [--gradient-source]";
   // --sc-tangent's one direction, fixed so the check is reproducible run to
   // run (the several directions of the dot-product test are later work).
   constexpr std::uint64_t kTangentSeed = 0x5eed'0032u;
@@ -71,6 +73,12 @@ int main(int argc, char** argv) {
   // This demo's own flag, not nevpt2.cli's: the density-fitted demo has no
   // tangent path.
   bool scTangentArg = false;
+  // --gradient-source: instead of the golden comparison, assemble the CI
+  // source term y_I = dE/dc_I and check it against the forward tangent by
+  // duality (:gradient_source_check). This demo's own flag, like
+  // --sc-tangent and for the same reason: the density-fitted demo has no
+  // tangent path.
+  bool gradientSourceArg = false;
 
   // The common flags first (nevpt2.cli), then this demo's own; anything else
   // is a usage error. A bad value, or a bad combination, is a config Error
@@ -84,6 +92,8 @@ int main(int argc, char** argv) {
     if (*used) continue;
     if (args[i] == "--sc-tangent") {
       scTangentArg = true;
+    } else if (args[i] == "--gradient-source") {
+      gradientSourceArg = true;
     } else {
       std::fputs(nevpt2::cli::usage(argv[0], kGoldenHint, kExtraFlags).c_str(), stderr);
       return 1;
@@ -93,18 +103,28 @@ int main(int argc, char** argv) {
     nevpt2::report(st.error());
     return 1;
   }
-  // The tangent RDM build is the emitted or the native-fp64 BLAS digest only
-  // -- the same rule finalize() applies to --rdm-tangent, which it cannot
-  // apply here because --sc-tangent is this demo's flag.
-  if (scTangentArg && (opt.rdm.cublas || opt.rdm.ozaki || opt.rdm.fusedDigest)) {
+  if (scTangentArg && gradientSourceArg) {
     nevpt2::report(nevpt2::Error::config(
-        "--sc-tangent runs the tangent RDM build, which is the emitted digest or "
-        "--blas-digest; not --cublas, --ozaki or --fused-digest"));
+        "--sc-tangent and --gradient-source are two different checks of the same "
+        "derivative; run one at a time"));
     return 1;
   }
-  if (scTangentArg && opt.pc) {
-    nevpt2::report(nevpt2::Error::config(
-        "--sc-tangent differentiates the strongly-contracted energy; it has no --pc path"));
+  // Both differentiation checks run the tangent RDM build, which is the
+  // emitted or the native-fp64 BLAS digest only -- the same rule finalize()
+  // applies to --rdm-tangent, which it cannot apply here because these are
+  // this demo's flags.
+  const bool differentiates = scTangentArg || gradientSourceArg;
+  const char* const whichFlag = scTangentArg ? "--sc-tangent" : "--gradient-source";
+  if (differentiates && (opt.rdm.cublas || opt.rdm.ozaki || opt.rdm.fusedDigest)) {
+    nevpt2::report(nevpt2::Error::config(std::format(
+        "{} runs the tangent RDM build, which is the emitted digest or "
+        "--blas-digest; not --cublas, --ozaki or --fused-digest",
+        whichFlag)));
+    return 1;
+  }
+  if (differentiates && opt.pc) {
+    nevpt2::report(nevpt2::Error::config(std::format(
+        "{} differentiates the strongly-contracted energy; it has no --pc path", whichFlag)));
     return 1;
   }
 
@@ -224,6 +244,28 @@ int main(int argc, char** argv) {
   if (scTangentArg) {
     const nevpt2::Result<bool> ok =
         checkScTangent(g, opt.rdm, dInts, rdm, kTangentSeed, *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
+
+  // --gradient-source: the CI source term y_I = dE/dc_I (nevpt2.gradient's
+  // scCiSourceDevice) against the forward tangent, by the duality
+  // <u, y> = Edot(u) -- exact for every direction, so this is a 1e-7 gate and
+  // not a difference quotient (:gradient_source_check, and docs/testing.md,
+  // "The CI source term's forward-reverse duality"). It rebuilds dm1/dm2 on
+  // the host from `ci` so both sides read one state's arrays, and its own
+  // PASS line is the gate: the golden comparison below does not run. The
+  // class energies it is handed are nevpt2.energy's own answer for the same
+  // state, which is the cheapest check that the pseudodensity walk y rides on
+  // is undisturbed.
+  if (gradientSourceArg) {
+    const nevpt2::EnergyResult base =
+        nevpt2::energiesDevice(dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, *res);
+    const nevpt2::Result<bool> ok = checkCiSource(g, opt.rdm, dInts, rdm, base, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

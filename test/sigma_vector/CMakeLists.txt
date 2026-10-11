@@ -3,9 +3,11 @@
 # seeded random coefficient tensors at CAS(4,4) and CAS(6,6): the full vector
 # against an explicit host construction by repeated FORWARD application of
 # E_pq (the device walks the reverse tables), the CI derivative of the host
-# dm3 contraction by an exact central difference, the two contraction
-# identities against the device build's own dm3/f3ca/f3ac, and tiling
-# invariance. Logic, not an energy: no golden file is read.
+# dm3 and f3 contractions by an exact central difference (the f3 one against
+# the forward sigma PLUS the dagger one, which is the two-sided object Park
+# Eq. 48 needs), the two contraction identities against the device build's own
+# dm3/f3ca/f3ac, and tiling invariance. Logic, not an energy: no golden file
+# is read.
 #
 # No .cu here: the binary imports nevpt2.sigma_vector, which links the device
 # library itself, as rdm_dm3_tests does with nevpt2.rdm_build. nevpt2::rdm_build
@@ -23,4 +25,5 @@ add_gtest_executable(
 add_gtest_suite_tests(
   TARGET sigma_vector_tests
   SUITES SigmaVector3Tests SigmaVector3GammaTests SigmaVector4Tests
+         SigmaVector4GammaTests
   REQUIRES_GPU)
