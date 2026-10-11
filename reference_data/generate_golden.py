@@ -1245,6 +1245,67 @@ def _pc_cut_gap(a: np.ndarray) -> tuple[float, float, float]:
     return float(gap.min()), float(max_dropped.max()), float(min_kept.min())
 
 
+def _block2_icmr(mc, kernel: str, *, dm4_cache: dict, gaps: list | None = None,
+                 df_eris=None, rdm4_threads: int = 1, log=None) -> dict:
+    """One ``pyblock2.icmr`` kernel on ``mc``'s **current** ``mo_coeff``,
+    ``ci`` and ``mo_energy``, per class: ``kernel="sc"`` is
+    ``scnevpt2.WickSCNEVPT2``, ``kernel="pc"`` is
+    ``icnevpt2_full.WickICNEVPT2``. ``canonicalized = True``, so block2 takes
+    the orbital energies it is handed rather than re-canonicalising -- which
+    is what makes this a pure function of what ``mc`` holds.
+
+    Both kernels build the dense ``n^8`` 4-RDM themselves; ``dm4_cache`` is
+    where it lands, so a caller that holds the CI vector fixed across many
+    calls (an orbital sweep) builds it once (``kernel(pdms=...)`` raises in
+    0.5.4, hence the ``fci.rdm.make_dm1234`` patch). **The cache is keyed on
+    nothing**: a caller that moves the CI vector must hand in a fresh dict,
+    or block2 would contract new integrals against the old state's 4-RDM.
+    ``rdm4_threads`` applies to that build alone -- the state is already
+    single-threaded.
+
+    ``gaps``, when a list is given, receives one entry per per-external-tuple
+    linear solve (:data:`PC_SOLVE_ORDER` order, PC only) for
+    :func:`_check_pc_conditioning`; it costs an SVD per block, so a sweep
+    leaves it ``None``. ``df_eris`` replaces block2's own integral transform
+    (:func:`_block2_df_eris`)."""
+    from pyblock2.icmr import eri_helper, icnevpt2_full, scnevpt2
+    from pyscf import lib
+    from pyscf.fci import rdm as fci_rdm
+
+    cls = {"sc": scnevpt2.WickSCNEVPT2, "pc": icnevpt2_full.WickICNEVPT2}[kernel]
+    make_dm1234, init_eris = fci_rdm.make_dm1234, eri_helper.init_eris
+    linear_solve = icnevpt2_full._linear_solve
+
+    def cached_dm1234(*a, **k):
+        if "dms" not in dm4_cache:
+            t = time.perf_counter()
+            with lib.with_omp_threads(rdm4_threads):
+                dm4_cache["dms"] = make_dm1234(*a, **k)
+            if log is not None:
+                log(f"  block2 4-RDM: {time.perf_counter() - t:.1f}s "
+                    f"({rdm4_threads} thread(s))")
+        return dm4_cache["dms"]
+
+    def recording_solve(a, b):
+        gaps.append((PC_SOLVE_ORDER[len(gaps)], a.shape[-1], *_pc_cut_gap(a)))
+        return linear_solve(a, b)
+
+    fci_rdm.make_dm1234 = cached_dm1234
+    if gaps is not None:
+        icnevpt2_full._linear_solve = recording_solve
+    if df_eris is not None:
+        eri_helper.init_eris = lambda *a, **k: df_eris
+    try:
+        ic = cls(mc)
+        ic.verbose = 0
+        ic.canonicalized = True
+        ic.kernel()
+        return {B2_TO_CLASS[k]: float(v) for k, v in ic.sub_eners.items()}
+    finally:
+        fci_rdm.make_dm1234, eri_helper.init_eris = make_dm1234, init_eris
+        icnevpt2_full._linear_solve = linear_solve
+
+
 def _block2_pc(mc, pt, with_df, sc_ref: dict, rdm4_threads: int) -> dict:
     """block2's partially-contracted NEVPT2 (``WickICNEVPT2``) on the golden's
     own state -- its canonical orbitals and CI vector, ``canonicalized =
@@ -1256,52 +1317,16 @@ def _block2_pc(mc, pt, with_df, sc_ref: dict, rdm4_threads: int) -> dict:
     class, PC Sijrs must equal SC Sijrs, and every PC block must pass
     :func:`_check_pc_conditioning`.
 
-    Both block2 kernels build the dense ``n^8`` 4-RDM themselves; it is built
-    once here and handed to both (``kernel(pdms=...)`` raises in 0.5.4, so
-    by patching ``fci.rdm.make_dm1234`` for the duration). ``rdm4_threads``
-    applies to that build only -- the state is already single-threaded."""
-    from pyblock2.icmr import eri_helper, icnevpt2_full, scnevpt2
-    from pyscf import lib
-    from pyscf.fci import rdm as fci_rdm
-
+    Both kernels run through :func:`_block2_icmr`, sharing one 4-RDM (the CI
+    vector does not move between them)."""
     mc.mo_coeff, mc.ci, mc.mo_energy = pt.mo_coeff, pt.ci, pt.mo_energy
-
-    make_dm1234, init_eris = fci_rdm.make_dm1234, eri_helper.init_eris
-    linear_solve = icnevpt2_full._linear_solve
+    df_eris = _block2_df_eris(pt, with_df) if with_df is not None else None
     cache: dict = {}
     gaps: list = []
-
-    def cached_dm1234(*a, **k):
-        if "dms" not in cache:
-            t = time.perf_counter()
-            with lib.with_omp_threads(rdm4_threads):
-                cache["dms"] = make_dm1234(*a, **k)
-            print(f"  block2 4-RDM: {time.perf_counter() - t:.1f}s "
-                  f"({rdm4_threads} thread(s))")
-        return cache["dms"]
-
-    def recording_solve(a, b):
-        gaps.append((PC_SOLVE_ORDER[len(gaps)], a.shape[-1], *_pc_cut_gap(a)))
-        return linear_solve(a, b)
-
-    def run(cls) -> dict:
-        ic = cls(mc)
-        ic.verbose = 0
-        ic.canonicalized = True
-        ic.kernel()
-        return {B2_TO_CLASS[k]: float(v) for k, v in ic.sub_eners.items()}
-
-    fci_rdm.make_dm1234 = cached_dm1234
-    icnevpt2_full._linear_solve = recording_solve
-    if with_df is not None:
-        df_eris = _block2_df_eris(pt, with_df)
-        eri_helper.init_eris = lambda *a, **k: df_eris
-    try:
-        sc = run(scnevpt2.WickSCNEVPT2)
-        pc = run(icnevpt2_full.WickICNEVPT2)
-    finally:
-        fci_rdm.make_dm1234, eri_helper.init_eris = make_dm1234, init_eris
-        icnevpt2_full._linear_solve = linear_solve
+    common = dict(dm4_cache=cache, df_eris=df_eris, rdm4_threads=rdm4_threads,
+                  log=print)
+    sc = _block2_icmr(mc, "sc", **common)
+    pc = _block2_icmr(mc, "pc", gaps=gaps, **common)
 
     for c in CLASSES:
         d = sc[c] - sc_ref[c]

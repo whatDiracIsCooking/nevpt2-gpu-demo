@@ -34,7 +34,7 @@ respect to a nuclear coordinate.
 | the CI Z-vector equation, the selection-boundary multipliers, the CPHF solve | **not in tree** — **offline Python only**, `reference_data/nevpt2_grad.py`, a `pyscf.grad.lagrange.Gradients` subclass ([`reference-data.md`](reference-data.md), "The analytic gradient"). Deliberately offline: this repo's shape is "offline Python generates the reference, the C++ GPU demo reproduces it", and a PySCF solve inside the runtime would invert that. Derived in [`gradient-theory.md`](gradient-theory.md), §2; nothing in `src/` implements them |
 | derivative MO integrals — the one- and two-electron skeleton derivatives — and the nuclear-repulsion derivative | **not in tree**, and not in the reference data either |
 | a nuclear gradient, a geometry optimisation, or any derivative w.r.t. a coordinate | **not in tree** |
-| a *numerical* nuclear gradient | **offline Python only** — `reference_data/nevpt2_numgrad.py` writes it into the `*.gradgold` sidecar ([`reference-data.md`](reference-data.md), "The numerical gradient"). No binary in `src/` or `apps/` reads it; it is what `nevpt2_grad.py`'s analytic answer is compared against |
+| a *numerical* nuclear gradient | **offline Python only** — `reference_data/nevpt2_numgrad.py` writes it into the `*.gradgold` sidecar ([`reference-data.md`](reference-data.md), "The numerical gradient"). No binary in `src/` or `apps/` reads it; it is what `nevpt2_grad.py`'s analytic answer is gated against, SC and PC, at a tolerance that cannot be this repo's 1e-7 because both sides are finite differences ([`testing.md`](testing.md), "The analytic gradient against the numerical one") |
 
 **One** dependence is still held fixed by the functional the orbital source
 term differentiates: the `f3ac`/`f3ca` digests. It is not an approximation to
@@ -549,6 +549,18 @@ as well. The measurements behind those three — direction, path, step bound —
 are in [`pc-nevpt2.md`](pc-nevpt2.md), "What the check can and cannot
 displace". None of them is a limitation of the analytic tangent: all three
 are constraints on how a *finite difference* of it may be taken.
+
+The **offline** PC gradient meets the same upper bound on the step, in the
+same place and for the same reason: `reference_data/nevpt2_grad.py --pc`
+takes `y_I = dE_corr/dc_I` by differencing the PC energy along determinant
+directions, so a step large enough to lift a dropped mode past the cut puts a
+*first-order* error into the source term — one that no step ladder converges
+away and that no residual in the Z-vector solve can see. Its step is
+therefore its own constant rather than the SC one's, and the rank condition
+above is re-checked at every displaced CI vector
+([`testing.md`](testing.md), "The analytic gradient against the numerical
+one", has the ladder, the gap collapse and what it cost before it was
+caught).
 
 **The active-space selection is not a stationarity condition.** A selection is
 a discrete function of geometry: locally constant, and at the points where it
