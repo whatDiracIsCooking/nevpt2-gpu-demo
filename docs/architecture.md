@@ -143,7 +143,7 @@ One directory per component under `src/`, each a STATIC module library
 (`add_cxx_module_library`, dotted name `nevpt2.<x>`, linked by its
 `nevpt2::<x>` alias) and/or a device library. Every directory is something
 **both** methods run, except `df_integrals`, which only the density-fitted
-demo links. In dependency order:
+demo links, and `gradient`, which neither demo links. In dependency order:
 
 ```
   error_handling ... nevpt2.error_handling  Error / Result / Status, check,
@@ -181,6 +181,15 @@ demo links. In dependency order:
                                             nevpt2.energy_finish
   df_integrals ..... nevpt2.df_integrals    DF IntegralSource: slabs from B
                                             by wwrblasDgemm      (energy, wwr.blas)
+  gradient ......... nevpt2.sc_amplitudes   the SC amplitude T, the gradient
+                                            multipliers P/Q/R, and the einsum
+                                            subscript rewriting that
+                                            differentiates a class term
+                                                        (energy_finish; no GPU)
+                     nevpt2.gradient        the SC pseudodensities, assembled
+                                            over the class energies' own slab
+                                            walk; re-exports both. A LEAF:
+                                            nothing in src/ imports it (energy)
   cli .............. nevpt2.cli             the flags both demos share  (no GPU)
 ```
 
@@ -194,6 +203,7 @@ is attached to the global module by clang:
 |---|---|
 | `nevpt2_demo` | `apps/integral_direct` — full MO-integral blocks, read from the golden file |
 | `nevpt2_df_demo` | `apps/density_fit` + `src/df_integrals` (`nevpt2.df_integrals`) — external slabs built from three-index `B_*` tensors |
+| `nevpt2_sc_pseudodensity` | `apps/sc_pseudodensity` + `src/gradient` (`nevpt2.gradient`) — the SC gradient's pseudodensities, and the exact identities that check them. The only binary that links `nevpt2::gradient` |
 | `nevpt2_sanitizer_canary` | `apps/sanitizer_canary` — deliberately buggy runs, the sanitizer tier's canaries |
 
 `rdm/` **is** shared between the two demos, and that is not a coincidence: the
@@ -237,6 +247,8 @@ Python tools are in [`reference-data.md`](reference-data.md), "The files in
 | `src/profile/profile.*` | `nevpt2.profile`: the one `--profile` recorder — labelled event pairs on the caller's stream, `profile::time(label, stream, fn)`, grouped by `profile::Section` into one table per stage (RDM build, DF integrals, energy). Replaced einsum's registry and the RDM build's `PhaseTimer` (`--profile-rdm`) |
 | `src/energy/` | `nevpt2.energy`: the eight class energies, GPU version — both demos' only energy path, a direct transcription of a NumPy reference (see "Porting the class energies" in docs/implementation.md); also the home of `CLASSES`/`EnergyResult` since `energy.hpp` was removed (`NUMERICAL_ZERO` is `nevpt2.energy_finish`'s, re-exported). `src/energy/energy_finish.cppm` is `nevpt2.energy_finish`, the pure host arithmetic the classes share — the slab walk `forBatches`, SC's `normToEnergy`, PC's `finishSingle`/`checkDenominator` and the `PcClassResult` types they fill — no GPU, tested card-free by `test/energy_finish/`. Each class takes its external two-electron block from an `IntegralSource`, one slab of its external index at a time: `FullBlockSource` (views into uploaded full blocks, one slab — the integral-direct path) or `DfIntegralSource` |
 | `src/energy/energy_pc*` | the PC-NEVPT2 half of `nevpt2.energy` (`pcEnergiesDevice`, `--pc` in both demos; its own module, `nevpt2.energy_pc`, until it was folded in): `energy_pc.cpp` (`pcEnergiesDevice` and the report) over two internal partitions, `:pc_solve` (`energy_pc_solve.cppm`, the per-class GEMM and eigensolve) and `:pc_classes` (`energy_pc_classes.cppm`, seven of the classes; SC's seven are `:sc_classes` the same way). Same inputs as the SC classes and built from their intermediates — one `wwrsolverDnDsyevd` pair per class on `DeviceResources`' solver handle, every slab GEMM'd into the eigenbasis, S's gap printed and checked against `PC_MIN_GAP`. All eight classes are computed (Sijrs = SC's), and the `PASS: PC-NEVPT2 ...` line needs all eight and `e_pc_total` to 1e-7 with none refused; the `*_pc` ctest entries check it. See "PC-NEVPT2 on the device: the design" in [`pc-nevpt2.md`](pc-nevpt2.md) |
+| `src/gradient/` | the SC-NEVPT2 gradient's first half, a **leaf**: nothing in `src/` imports it and neither demo links it. `sc_amplitudes.cppm` is `nevpt2.sc_amplitudes` — the amplitude `T` already implicit in `normToEnergy`'s division, the multipliers `P`/`Q`/`R` that are its derivatives with respect to `N`, `H` and `Delta`, and `derivativeSubscripts`, which rewrites one of `nevpt2.energy`'s class einsums into the derivative of that term with respect to one operand. No GPU, so `test/gradient/` tests it card-free. `gradient.cppm` + `gradient.cpp` are `nevpt2.gradient`, the device assembly over the class energies' own `IntegralSource` slab walk (so the density-fitted path needs no change), with two internal partitions: `:terms` (`gradient_terms.cppm` — `ScTerm`, evaluating a term list, differentiating it per operand, contracting a pseudodensity back) and `:sc_classes` (`gradient_sc_classes.cppm` — the eight classes, each written as the term list its `energy_<class>` evaluates). It builds its metric and Dyall-Hamiltonian blocks with `nevpt2.energy`'s own exported `make_*`, which is why those are exported rather than hidden in `:shared`. The equation numbers throughout are Park's (see [`references.md`](references.md), "Analytical gradients"); what the assembly is checked against is in "The SC pseudodensity identities" in [`testing.md`](testing.md) |
+| `apps/sc_pseudodensity/main.cppm` | `nevpt2_sc_pseudodensity`: the same golden file, RDM build and integrals as `nevpt2_demo`, then `nevpt2.gradient`'s assembly and the identity report its three ctest entries match. No finite difference anywhere |
 | `src/cli/` | `nevpt2.cli`: the command-line flags both demos take (`--golden`, `--tiles`, the digest family, `--pc`, `--profile`, `--pool-threshold`) — `parseCommonFlag` consumes them one at a time and leaves an app's own flags (`--batch`, `--check-blocks`) to its `main.cppm`; `finalize` applies the checks that span flags (`--tiles >= 1`, `--ozaki-pairs` in 0..14, `--mantissa-bits` in 1..53 and only with `--cublas`, one digest at most, `--cublas` only where it is built, `--rdm-tangent` only with a digest the tangent build has); every bad argument is a returned `Error`. Host-only suite in `test/cli/` |
 | `apps/integral_direct/main.cppm` | `nevpt2_demo`: reads every integral block from the golden file, runs `nevpt2.rdm_build` and the device energy contraction, prints the report |
 | `src/df_integrals/` | `nevpt2.df_integrals`: `DfIntegralSource`, the external integral slabs built on the device from the golden file's `B_aa`/`B_ca`/`B_va`/`B_cv` — one `wwrblasDgemm` (cuBLAS or hipBLAS through WarpWraps' `wwr.blas`) plus one permutation per slab — and the active `h2e` from `B_aa` |

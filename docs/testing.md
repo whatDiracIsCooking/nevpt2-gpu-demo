@@ -9,9 +9,11 @@ figure names its card.
 
 - **The golden tier** is the numerical one. Each demo checks itself against
   a committed golden file (every class energy and the total to 1e-7) and
-  prints `PASS:`; the ctest entry matches that line. Every golden entry is
-  labelled `gpu`, because there is no CPU path. `ctest --preset fast` runs
-  every entry not labelled `slow`.
+  prints `PASS:`; the ctest entry matches that line. The one non-demo binary
+  in it, `nevpt2_sc_pseudodensity`, checks the gradient pseudodensities'
+  exact identities the same way ("The SC pseudodensity identities", below).
+  Every golden entry is labelled `gpu`, because there is no CPU path.
+  `ctest --preset fast` runs every entry not labelled `slow`.
 - **The unit tier** (`test/`, GoogleTest) checks host logic one component at
   a time — `test/<x>/` tests `nevpt2.<x>` — and is labelled `unit`
   (`ctest --preset unit`). A host-only suite has no `gpu` label and runs with
@@ -47,6 +49,43 @@ devtools/throw-lint.sh              # no `throw` in src/, apps/ or test/; likewi
 right: a numerical claim needs that backend's card. The `compile-cuda` /
 `compile-hip` presets are compile-and-link-only configurations (testing
 off).
+
+## The SC pseudodensity identities
+
+The golden tier's third kind of entry, beside the SC and PC energy checks:
+`nevpt2_sc_pseudodensity_cas44`, `_cas88` and `_cas1010`, all `gpu`, run
+`nevpt2_sc_pseudodensity` (`apps/sc_pseudodensity/`) and match
+`PASS: SC pseudodensity identities hold`. What they assert is **exact**, not a
+finite difference.
+
+`src/gradient/` assembles the SC-NEVPT2 gradient's pseudodensities (Park's
+Eqs. 41-47 — [`references.md`](references.md), "Analytical gradients"). A
+class's norm and Dyall-Hamiltonian expectation value are quadratic forms in
+that class's external integrals and linear in the active-space blocks they are
+contracted against, so contracting the assembled pseudodensities back against
+their own operands must reproduce the class energy — Park Eq. 40 — as an
+algebraic identity. Each entry therefore checks, for all eight classes:
+
+| check | against | tolerance |
+|---|---|---|
+| `(1/2) sum_blocks <x, D>` (Eq. 41's `D`) | the class energy from the amplitudes, `sum_t T_t N_t` | 1e-10 |
+| `sum_G <G, M_G>` (Eqs. 42-43's `M` / `E`) | the same, less the one Sir term with no active block | 1e-10 |
+| Srs' active integrals and hole RDMs contracted back (Eqs. 44-47) | `<K, E>` | 1e-10 |
+| the amplitude energy, per class | `nevpt2.energy`'s own answer for the same state | 1e-10 |
+| the amplitude energy, per class | the golden PySCF per-class energy | 1e-7 |
+
+On an RTX 3080 (CUDA, Release, `--tiles 3`) **every** residual at CAS(4,4),
+CAS(8,8) and CAS(10,10) is at or below 1.1e-14 — the largest are Sr's, the
+class with the n^6 contractions — so the 1e-10 tolerance is four decades of
+headroom, and a single mis-transcribed index does not fit inside it. The
+assembly itself takes 0.00s / 0.10s / 0.45s at the three sizes, on top of the
+RDM build and the class energies the entry also runs.
+
+CAS(4,4) and CAS(8,8) are labelled `small` as well, so the sanitizer tier
+covers the new device work; CAS(10,10) is not, for the reason the small cases
+exist (below). The host half — the amplitude and multiplier formulas, and the
+subscript rewriting that differentiates a class term — is `test/gradient/`,
+card-free.
 
 ## Sanitizers
 
@@ -213,6 +252,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_df_cas44`, `nevpt2_df_cas88` | density fitting with `--check-blocks`; the default `--batch 8` leaves a ragged last slab on both (19 virtuals = 8 + 8 + 3, 17 = 8 + 8 + 1) |
 | `nevpt2_cas44_pc`, `nevpt2_cas88_pc`, `nevpt2_df_cas44_pc`, `nevpt2_df_cas88_pc` | `--pc`: the solver handle's eigensolves, the `d x d` BLAS GEMMs and the PC slab einsums, on both demos |
 | `nevpt2_cas88_rdm_tangent` | `--rdm-tangent`: the tangent RDM build beside the plain one, checked against twice it (the derivative itself is checked against a finite difference in the unit tier, `test/rdm/rdm_tangent_tests.cpp`) |
+| `nevpt2_sc_pseudodensity_cas44`, `nevpt2_sc_pseudodensity_cas88` | the SC gradient's pseudodensity assembly and its identities ("The SC pseudodensity identities", above) |
 
 They are ordinary golden checks too, so `ctest --preset fast` and
 `ctest --preset hip` run them on every backend.

@@ -176,6 +176,34 @@ if(NEVPT2_BUILD_TESTING)
     add_golden_test(nevpt2_cas1010_cublas "${_gold_1010}" --tiles 3 --cublas)
   endif()
 
+  # --- the SC gradient's pseudodensity identities --------------------------------
+  #
+  # nevpt2_sc_pseudodensity (apps/sc_pseudodensity/, the only binary that links
+  # nevpt2::gradient): the same RDM build and the same integrals as the entries
+  # above, then nevpt2.gradient's assembly of Park Eqs. 41-47 and the EXACT
+  # consistency identity of his Eq. 40 -- contracting each class's assembled
+  # pseudodensities back against their own operands reproduces that class's
+  # energy. Algebraic, so the tolerance is noise (1e-10) and no finite
+  # difference is involved; the class energies are also held to 1e-10 against
+  # nevpt2.energy's own answer and to 1e-7 against the golden. Its PASS line is
+  # worded differently from both demos', so no entry can pass on another's
+  # output. CAS(4,4) and CAS(8,8) are `small` too, so the sanitizer tier covers
+  # the new device work; CAS(10,10) is not (compute-sanitizer multiplies a
+  # run's time -- see "small active spaces" below).
+  foreach(_case cas44 cas88 cas1010)
+    set(_sc_pd_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.nevpt2gold")
+    _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_${_case}
+                          "${_sc_pd_gold}" --tiles 3)
+    if(TEST nevpt2_sc_pseudodensity_${_case})
+      set_tests_properties(nevpt2_sc_pseudodensity_${_case} PROPERTIES
+        PASS_REGULAR_EXPRESSION "PASS: SC pseudodensity identities hold")
+      if(NOT _case STREQUAL "cas1010")
+        set_tests_properties(nevpt2_sc_pseudodensity_${_case} PROPERTIES LABELS "gpu;small")
+      endif()
+    endif()
+    unset(_sc_pd_gold)
+  endforeach()
+
   # --- *_pc: PC-NEVPT2 ----------------------------------------------
   #
   # The same RDM build as the SC entry at the same --tiles; the PC stage runs

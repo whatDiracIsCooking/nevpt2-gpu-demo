@@ -40,13 +40,14 @@ const std::array<std::string, 8> CLASSES = {
     "Sr", "Si", "Sijrs", "Sijr", "Srsi", "Srs", "Sij", "Sir",
 };
 
-// --- shared with PC (declared in energy_shared.cppm) ---------------------------
+// --- the class metrics and Dyall Hamiltonians ---------------------------------
 //
 // make_a16, make_a22, make_dm3_h/make_dm2_h, make_hdm1/2/3, make_a3, make_k27,
-// make_a7, make_a9, make_a12, make_a13 and energy_Sijrs are declared in the
-// nevpt2.energy:shared partition (not exported): energy_pc.cpp builds its PC
-// metrics and Hamiltonians from the same intermediates,
-// and its Sijrs IS this class's.
+// make_a7, make_a9, make_a12 and make_a13 are declared -- and exported -- in
+// energy.cppm: energy_pc.cpp builds its PC metrics and Hamiltonians from these
+// same intermediates, and so does nevpt2.gradient's pseudodensity assembly.
+// energy_Sijrs, which PC reuses whole, stays in the nevpt2.energy:shared
+// partition (not exported).
 
 DeviceTensor make_a16(const DeviceTensor& h1e,
                        const DeviceTensor& h2e, const DeviceTensor& dm3,
@@ -191,6 +192,18 @@ DeviceTensor make_k27(const DeviceTensor& h1e,
   return k27;
 }
 
+DeviceTensor make_rm3(const DeviceTensor& dm2, const DeviceTensor& dm3,
+                      const DeviceTensor& rm2, const DeviceResources& dr) {
+  const wwrStream_t s = dr.stream();
+  int64_t n = dm2.dims[0];
+  DeviceTensor delta = deviceEye(n, dr);
+  DeviceTensor rm3 = deviceEinsumNew("injmkl->ijklmn", {&dm3}, 1.0, dr);
+  deviceEinsumAccum("jn,imkl->ijklmn", {&delta, &dm2}, rm3, -1.0, s);
+  deviceEinsumAccum("km,ijln->ijklmn", {&delta, &rm2}, rm3, -1.0, s);
+  deviceEinsumAccum("kn,ijml->ijklmn", {&delta, &rm2}, rm3, -1.0, s);
+  return rm3;
+}
+
 std::pair<DeviceTensor, DeviceTensor> make_a7(const DeviceTensor& h1e,
                                                const DeviceTensor& h2e,
                                                const DeviceTensor& dm1,
@@ -202,10 +215,10 @@ std::pair<DeviceTensor, DeviceTensor> make_a7(const DeviceTensor& h1e,
   DeviceTensor rm2 = deviceEinsumNew("iljk->ijkl", {&dm2}, 1.0, dr);
   deviceEinsumAccum("ik,jl->ijkl", {&dm1, &delta}, rm2, -1.0, s);
 
-  DeviceTensor rm3 = deviceEinsumNew("injmkl->ijklmn", {&dm3}, 1.0, dr);
-  deviceEinsumAccum("jn,imkl->ijklmn", {&delta, &dm2}, rm3, -1.0, s);
-  deviceEinsumAccum("km,ijln->ijklmn", {&delta, &rm2}, rm3, -1.0, s);
-  deviceEinsumAccum("kn,ijml->ijklmn", {&delta, &rm2}, rm3, -1.0, s);
+  // rm3 is a16's hole-side partner for the virtual pair; it is its own
+  // function because nevpt2.gradient needs it to differentiate a7 (Park Eqs.
+  // 44-47) and a7 does not hand it back.
+  DeviceTensor rm3 = make_rm3(dm2, dm3, rm2, dr);
 
   DeviceTensor a7 = deviceEinsumNew("bi,pqia->pqab", {&h1e, &rm2}, -1.0, dr);
   deviceEinsumAccum("ai,pqbi->pqab", {&h1e, &rm2}, a7, -1.0, s);

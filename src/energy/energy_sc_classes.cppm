@@ -15,9 +15,11 @@ namespace nevpt2 {
 
 // --- make_a* intermediates, device-resident ----------------------------------
 
-// SC-only: make_a17/make_a19 are Sr's (with the shared make_a16), make_a23/
-// make_a25 Si's (with the shared make_a22). The shared ones are declared in
-// nevpt2.energy:shared and defined in energy.cpp.
+// make_a17/make_a19 are Sr's (with make_a16), make_a23/make_a25 Si's (with
+// make_a22). All four are DECLARED in energy.cppm ("the class metrics and
+// Dyall Hamiltonians") and so exported, like the ones energy.cpp defines: the
+// SC gradient (nevpt2.gradient) differentiates the same class einsums and
+// needs the same blocks.
 
 DeviceTensor make_a17(const DeviceTensor& h1e_in,
                        const DeviceTensor& h2e, const DeviceTensor& dm2,
