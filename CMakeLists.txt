@@ -191,6 +191,17 @@ if(NEVPT2_BUILD_TESTING)
   # as for the N2 CAS(8,8) entries); it is the count every other entry here uses.
   # Not `small`: the sanitizer tier stays on N2. Both goldens are committed
   # (0.20 MB and 7.1 MB); only acrolein's 57 MB gradient sidecar is gitignored.
+  #
+  # These three entries check the two molecules' ENERGIES. The end-to-end
+  # gradient check -- the assembled analytic gradient against a finite-
+  # difference one, SC and PC, on these two plus N2 CAS(4,4) -- registers NO
+  # entry here, deliberately: both sides of it are offline Python
+  # (reference_data/nevpt2_grad.py and nevpt2_numgrad.py), so an entry would
+  # put PySCF and block2 in the test path, it needs no card while the golden
+  # tier is 100% gpu-labelled, and acrolein's PC pair runs for hours. It is a
+  # manual gate instead, like the sanitizer tier: the commands, what they
+  # print and why there is no entry are in docs/testing.md, "The analytic
+  # gradient against the numerical one".
   set(_gold_lif46 "${CMAKE_CURRENT_SOURCE_DIR}/golden/lif_def2svp_cas46.nevpt2gold")
   set(_gold_acr65 "${CMAKE_CURRENT_SOURCE_DIR}/golden/acrolein_def2svp_cas65.nevpt2gold")
   add_golden_test(nevpt2_lif_cas46 "${_gold_lif46}" --tiles 3)

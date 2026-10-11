@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-r"""Numerical nuclear gradient of the SC-NEVPT2 energy, by displaced CASCI runs.
+r"""Numerical nuclear gradient of the SC- (and with ``--pc``, PC-) NEVPT2
+energy, by displaced CASCI runs.
 
 Writes ``grad_num`` into the **gradient sidecar** (``<case>.gradgold``) beside
 a golden file, with the step size it was taken at and a Richardson residual
@@ -14,9 +15,26 @@ the same 1e-12 Davidson tolerance, the same auto-detected point group and the
 same irrep-selected active space the committed golden does. The energy
 differentiated is ``E_CASCI + E_corr(SC-NEVPT2)``, PySCF's own per-class sum
 (``generate_golden._pyscf_per_class``) -- the golden's SC answer, at a
-displaced geometry. Nothing here is partially contracted: PC is block2's
-answer and LiF has none (docs/reference-data.md, "LiF and acrolein, the
-gradient-validation pair").
+displaced geometry.
+
+**``--pc`` differences the partially-contracted energy too**, in the same
+sweep: block2's ``WickICNEVPT2`` on each displaced state
+(``generate_golden._block2_icmr``), gated per state by
+``generate_golden._check_pc_conditioning`` exactly as the golden's own PC
+fields are -- a displaced state whose PC metric is ungapped is refused, not
+differenced. PySCF has no PC-NEVPT2, so block2 is the only reference
+(docs/pc-nevpt2.md, "The block2 reference"), and **LiF has no PC answer at
+all**: its metric is refused as a continuum, so ``--pc`` on it stops at the
+reference state (docs/reference-data.md, "LiF and acrolein, the
+gradient-validation pair"). One PC evaluation costs far more than the SC
+sweep around it, so ``--pc`` is opt-in and it reports both gradients from the
+one set of displaced states rather than being a separate run.
+
+``--pc`` writes **no sidecar**: the sidecar's contract is the 24 arrays
+``--gradgold`` writes plus the four SC ``grad_num*`` ones, and the committed
+files hold exactly that. ``--npz PATH`` is how a PC (or SC) numerical
+gradient leaves this script for ``nevpt2_grad.py --grad-num PATH`` to compare
+against, without a committed byte moving.
 
 **Why a numerical gradient is possible for this reference at all: it is a
 CASCI, not a CASSCF.** RHF followed by a CASCI diagonalisation is
@@ -72,6 +90,8 @@ differentiate::
         --components 1x,1y --no-write        # two components, nothing written
     uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65 \
         --components all                     # refused: 0z breaks Cs
+    uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65 \
+        --pc --npz /tmp/acrolein.numgrad.npz # SC and PC, nothing written in golden/
 """
 
 from __future__ import annotations
@@ -125,7 +145,18 @@ REF_STATE_TOL = 1e-10
 #: These MUST stay the ``--gradgold`` invocations in docs/reference-data.md,
 #: "Regenerating the golden file": the gradient is of the state the sidecar
 #: beside it describes, so a drifted geometry, basis or active space here
-#: would produce a number for a state no file holds.
+#: would produce a number for a state no file holds. ``n2.xyz`` carries
+#: exactly that file's ``--atom "N 0 0 0; N 0 0 1.1"``, and the check against
+#: the golden's two energies (:data:`REF_STATE_TOL`, measured at 0.0) is what
+#: says so.
+#:
+#: **N2 is the deliberately symmetric case** (docs/testing.md, "The analytic
+#: gradient against the numerical one"): D2h, six exactly degenerate inactive
+#: pairs, and the molecule stays linear under every displacement, so every
+#: component survives the point-group check. Its sidecar is committed and
+#: holds **no** ``grad_num`` -- it stays the 24 arrays ``--gradgold`` writes --
+#: so ``sidecar_grad_num`` is False for it and the in-place write is refused
+#: rather than moving a committed file's bytes; ``--npz`` is the route.
 CASES = {
     "lif_def2svp_cas46": dict(
         geometry="reference_data/geometries/lif.xyz",
@@ -134,6 +165,7 @@ CASES = {
         nelecas=4,
         cas_irreps={"B1": 3, "B2": 3},
         core_irreps=None,
+        sidecar_grad_num=True,
     ),
     "acrolein_def2svp_cas65": dict(
         geometry="reference_data/geometries/acrolein.xyz",
@@ -142,6 +174,16 @@ CASES = {
         nelecas=6,
         cas_irreps={"A'": 1, 'A"': 4},
         core_irreps=None,
+        sidecar_grad_num=True,
+    ),
+    "n2_ccpvdz_cas44": dict(
+        geometry="reference_data/geometries/n2.xyz",
+        basis="cc-pvdz",
+        ncas=4,
+        nelecas=4,
+        cas_irreps=None,
+        core_irreps=None,
+        sidecar_grad_num=False,
     ),
 }
 
@@ -186,9 +228,16 @@ def read_golden_header(path: Path) -> dict:
             (code,) = struct.unpack("<i", f.read(4))
             assert code in gg.REFERENCE_KINDS, f"{path}: unknown reference_kind {code}"
             kind = gg.REFERENCE_KINDS[code]
+        # Where the array table begins, i.e. how long the header turned out to
+        # be -- which depends on the magic, since NEVPT2G2 carries the
+        # reference_kind field NEVPT2G1 does not. Reported rather than
+        # recomputed, so :func:`_read_golden_arrays` cannot drift from the
+        # layout read just above it.
+        arrays_at = f.tell()
     return dict(
         ncas=ncas, nelec_a=nelec_a, nelec_b=nelec_b, ncore=ncore, ndet=ndet,
         e_casci=e_casci, e_corr=e_corr, reference_kind=kind,
+        arrays_at=arrays_at,
     )
 
 
@@ -216,6 +265,59 @@ def _check_reference_kind(kind: str, path: Path) -> None:
             "(docs/gradient-theory.md, §1.1 and §4.4). Refused rather than "
             "differenced."
         )
+
+
+def read_golden_pc_total(path: Path) -> float | None:
+    """The golden's ``e_pc_total`` -- block2's PC correlation energy on that
+    state -- or ``None`` when the file carries no PC fields (``--no-pc``, e.g.
+    LiF, whose PC metric is refused as a continuum). Scanned out of the array
+    table rather than the header, where only the SC pair lives.
+
+    Both golden layouts work: the array table starts wherever
+    :func:`read_golden_header` says it does (``arrays_at``), so a NEVPT2G2
+    file's extra ``reference_kind`` field is skipped without this function
+    knowing the layout."""
+    _h, arrays = _read_golden_arrays(path, {"e_pc_total"})
+    a = arrays.get("e_pc_total")
+    return None if a is None else float(a.ravel()[0])
+
+
+def _read_golden_arrays(path: Path, want: set[str]) -> tuple[dict, dict]:
+    """``(header, arrays)`` from a ``.nevpt2gold``, keeping only the named
+    arrays (the files run to tens of MB and this script needs one scalar)."""
+    header = read_golden_header(path)
+    arrays: dict[str, np.ndarray] = {}
+    with open(path, "rb") as f:
+        f.seek(header["arrays_at"])
+        (n_arrays,) = struct.unpack("<i", f.read(4))
+        for _ in range(n_arrays):
+            (name_len,) = struct.unpack("<i", f.read(4))
+            name = f.read(name_len).decode()
+            (ndim,) = struct.unpack("<i", f.read(4))
+            shape = struct.unpack(f"<{ndim}q", f.read(8 * ndim))
+            count = int(np.prod(shape, dtype=np.int64))
+            if name in want:
+                arrays[name] = np.frombuffer(f.read(8 * count), "<f8").reshape(shape)
+            else:
+                f.seek(8 * count, 1)
+    return header, arrays
+
+
+def pc_energy(mc, pt, *, check: bool = True) -> float:
+    """block2's PC correlation energy on the state ``pt`` holds, as one
+    number.
+
+    ``check`` runs ``generate_golden._check_pc_conditioning`` on this state's
+    own lstsq cuts -- the guard the golden's PC fields pass before they are
+    written -- so a displaced state whose PC metric has gone ungapped is
+    refused rather than differenced. It costs an SVD per PC block, which is
+    nothing beside the solve itself, so it is on for every displaced state."""
+    mc.mo_coeff, mc.ci, mc.mo_energy = pt.mo_coeff, pt.ci, pt.mo_energy
+    gaps: list | None = [] if check else None
+    pc = gg._block2_icmr(mc, "pc", dm4_cache={}, gaps=gaps)
+    if gaps is not None:
+        gg._check_pc_conditioning(gaps)
+    return float(sum(pc.values()))
 
 
 def read_gradgold(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
@@ -401,10 +503,12 @@ def richardson(diffs: dict[float, float], steps) -> tuple[float, float]:
     return fine, abs(fine - coarse)
 
 
-def energy(geom, case: dict) -> tuple[float, float, tuple]:
-    """One displaced point: ``(E_CASCI, E_corr(SC-NEVPT2), selection
-    signature)``, from ``generate_golden``'s own state builder and PySCF's own
-    per-class energies -- the golden's answer, at a displaced geometry."""
+def energy(geom, case: dict, *, pc: bool = False) -> tuple[float, float, float | None, tuple]:
+    """One displaced point: ``(E_CASCI, E_corr(SC), E_corr(PC) or None,
+    selection signature)``, from ``generate_golden``'s own state builder and
+    PySCF's own per-class energies -- the golden's answer, at a displaced
+    geometry. With ``pc`` the same state is handed to block2 as well
+    (:func:`pc_energy`), so both gradients come out of one sweep."""
     mc, pt = gg._build_state(
         geom,
         case["basis"],
@@ -416,38 +520,49 @@ def energy(geom, case: dict) -> tuple[float, float, tuple]:
     _dm1, _dm2, dms, eris = gg._pyscf_dms(pt)
     per_class = gg._pyscf_per_class(pt, dms, eris)
     e_corr = float(sum(per_class[c][1] for c in gg.CLASSES))
-    return float(mc.e_tot), e_corr, selection_labels(pt)
+    e_pc = pc_energy(mc, pt) if pc else None
+    return float(mc.e_tot), e_corr, e_pc, selection_labels(pt)
 
 
-def numgrad(geom, case: dict, probed, step_bohr: float, ref_labels) -> dict:
+def numgrad(geom, case: dict, probed, step_bohr: float, ref_labels, *,
+            pc: bool = False) -> dict:
     """Every probed component's gradient, by the six-point stencil. Returns
     the two ``(natm, 3)`` arrays the sidecar carries plus the CASCI-only
     gradient, which is not stored but is printed: it localises a later
-    disagreement to the reference or to the perturbation."""
+    disagreement to the reference or to the perturbation. With ``pc``, the PC
+    gradient and its own Richardson bar come out of the same displaced
+    energies."""
     natm = len(geom)
     steps = stencil(step_bohr)
     grad = np.zeros((natm, 3))
     grad_casci = np.zeros((natm, 3))
+    grad_pc = np.zeros((natm, 3))
     residual = np.zeros((natm, 3))
+    residual_pc = np.zeros((natm, 3))
     probed_mask = np.zeros((natm, 3))
     for iatom, comp in probed:
         tot: dict[float, float] = {}
         cas: dict[float, float] = {}
+        tot_pc: dict[float, float] = {}
         for h in steps:
             e = {}
             for sign in (+1, -1):
                 moved = displace(geom, iatom, comp, sign * h)
-                e_casci, e_corr, labels = energy(moved, case)
+                e_casci, e_corr, e_pc, labels = energy(moved, case, pc=pc)
                 _check_selection(
                     ref_labels, labels,
                     f"atom {iatom} ({geom[iatom][0]}) {AXES[comp]}, step "
                     f"{sign * h:+g} bohr",
                 )
-                e[sign] = (e_casci, e_corr)
+                e[sign] = (e_casci, e_corr, e_pc)
             tot[h] = ((e[1][0] + e[1][1]) - (e[-1][0] + e[-1][1])) / (2 * h)
             cas[h] = (e[1][0] - e[-1][0]) / (2 * h)
+            if pc:
+                tot_pc[h] = ((e[1][0] + e[1][2]) - (e[-1][0] + e[-1][2])) / (2 * h)
         grad[iatom, comp], residual[iatom, comp] = richardson(tot, steps)
         grad_casci[iatom, comp], _ = richardson(cas, steps)
+        if pc:
+            grad_pc[iatom, comp], residual_pc[iatom, comp] = richardson(tot_pc, steps)
         probed_mask[iatom, comp] = 1.0
         print(
             f"  {iatom} {geom[iatom][0]:<2} {AXES[comp]}  "
@@ -456,11 +571,17 @@ def numgrad(geom, case: dict, probed, step_bohr: float, ref_labels) -> dict:
             f"{grad_casci[iatom, comp]:+.10f}; raw "
             + " ".join(f"{tot[h]:+.8f}" for h in steps)
             + ")"
+            + (f"\n       PC   grad {grad_pc[iatom, comp]:+.10f}  residual "
+               f"{residual_pc[iatom, comp]:.1e}" if pc else "")
         )
-    return dict(
+    out = dict(
         grad_num=grad, grad_num_residual=residual, grad_num_probed=probed_mask,
         grad_num_step=np.array([step_bohr]), grad_casci=grad_casci,
     )
+    if pc:
+        out["grad_num_pc"] = grad_pc
+        out["grad_num_pc_residual"] = residual_pc
+    return out
 
 
 def run(args) -> dict:
@@ -496,11 +617,32 @@ def run(args) -> dict:
 
     t0 = time.perf_counter()
     ref_group = point_group(geom, case["basis"])
-    e_casci, e_corr, ref_labels = energy(geom, case)
-    rec.update(group=ref_group, e_casci=e_casci, e_corr=e_corr, labels=ref_labels)
+    e_casci, e_corr, e_pc, ref_labels = energy(geom, case, pc=args.pc)
+    rec.update(group=ref_group, e_casci=e_casci, e_corr=e_corr, e_pc=e_pc,
+               labels=ref_labels, pc=args.pc)
 
     rec["d_e_casci"] = e_casci - gold["e_casci"]
     rec["d_e_corr"] = e_corr - gold["e_corr"]
+    if args.pc:
+        # The golden's own PC answer, from the same block2 kernel on the same
+        # state: a wiring check, like the SC pair below, and the one place a
+        # PC reference exists at all.
+        gold_pc = read_golden_pc_total(args.golden)
+        if gold_pc is None:
+            raise SystemExit(
+                f"--pc: {args.golden} carries no e_pc_total. That golden was "
+                "generated --no-pc because its PC metric is refused as a "
+                "continuum (generate_golden._check_pc_conditioning), so there "
+                "is no PC reference for this state and no PC gradient to check "
+                "against one (docs/reference-data.md, \"LiF and acrolein, the "
+                "gradient-validation pair\")."
+            )
+        rec["d_e_pc"] = e_pc - gold_pc
+        if abs(rec["d_e_pc"]) > REF_STATE_TOL:
+            raise SystemExit(
+                f"the rebuilt reference state's PC energy is {rec['d_e_pc']:.3e} "
+                f"from {args.golden}'s e_pc_total (tolerance {REF_STATE_TOL:g})"
+            )
     # The state differentiated must be the state the golden holds, or the
     # gradient is of a different function. Measured at exactly 0.0 on both
     # committed cases -- the same builder, the same settings, the same
@@ -521,8 +663,9 @@ def run(args) -> dict:
     rec["zero_by_symmetry"] = skipped
     print(f"[{args.case}] {len(probed)} components to difference, "
           f"{len(skipped)} zero by symmetry, "
-          f"{6 * len(probed)} displaced CASCI+NEVPT2 runs:")
-    rec.update(numgrad(geom, case, probed, args.step, ref_labels))
+          f"{6 * len(probed)} displaced CASCI+NEVPT2"
+          f"{'+block2 PC' if args.pc else ''} runs:")
+    rec.update(numgrad(geom, case, probed, args.step, ref_labels, pc=args.pc))
     rec["wall"] = time.perf_counter() - t0
     return rec
 
@@ -533,7 +676,9 @@ def report(rec: dict) -> None:
     print(f"reference: group {rec['group'][0]} (used {rec['group'][1]}), core "
           f"{rec['labels'][0]} active {rec['labels'][1]}, "
           f"E_CASCI={rec['e_casci']:.10f} ({rec['d_e_casci']:+.1e} vs golden) "
-          f"E_corr={rec['e_corr']:.10f} ({rec['d_e_corr']:+.1e})")
+          f"E_corr={rec['e_corr']:.10f} ({rec['d_e_corr']:+.1e})"
+          + (f" E_corr(PC)={rec['e_pc']:.10f} ({rec['d_e_pc']:+.1e})"
+             if rec.get("pc") else ""))
     print(f"step {rec['step']:g} bohr, stencil "
           + "/".join(f"{h:g}" for h in stencil(rec['step']))
           + f", {rec['wall']:.1f}s")
@@ -557,6 +702,24 @@ def report(rec: dict) -> None:
         sums = ", ".join(f"d/d{AXES[c]} {grad[:, c].sum():+.2e}"
                          for c in range(3) if full[c])
         print(f"sum over atoms (0 by translational invariance): {sums}")
+    if rec.get("pc"):
+        gpc, rpc = rec["grad_num_pc"], rec["grad_num_pc_residual"]
+        print("PC (block2) on the same displaced states:")
+        for i in range(rec["natm"]):
+            cells = "".join(
+                f" {gpc[i, c]:+16.10f}" if probed[i, c] else f" {'0 (sym)':>16}"
+                for c in range(3)
+            )
+            bars = "  ".join(f"{rpc[i, c]:.1e}" if probed[i, c] else "      ."
+                             for c in range(3))
+            print(f"{i:>4}{cells}   {bars}")
+        print(f"max |residual| over the probed components: "
+              f"{rpc[probed > 0].max():.2e}; max |PC - SC| component "
+              f"{np.abs(gpc - grad)[probed > 0].max():.2e}")
+        if full.any():
+            sums = ", ".join(f"d/d{AXES[c]} {gpc[:, c].sum():+.2e}"
+                             for c in range(3) if full[c])
+            print(f"sum over atoms (0 by translational invariance): {sums}")
 
 
 def main() -> None:
@@ -595,6 +758,19 @@ def main() -> None:
                     help="write the updated sidecar here instead of in place")
     ap.add_argument("--no-write", action="store_true",
                     help="compute and print only; touch no file")
+    ap.add_argument("--pc", action="store_true",
+                    help="difference block2's PARTIALLY-contracted energy too, "
+                         "on the same displaced states, and check each one's PC "
+                         "conditioning. Writes no sidecar (use --npz); far "
+                         "slower than the SC sweep it rides along with, and "
+                         "refused on a golden with no PC fields (LiF)")
+    ap.add_argument("--npz", type=Path, default=None,
+                    help="write the gradient arrays here as a plain .npz "
+                         "(grad_num, its residual, the probed mask, the step, "
+                         "grad_casci, and with --pc the two grad_num_pc "
+                         "arrays). This is what nevpt2_grad.py --grad-num "
+                         "reads, and the only way a PC numerical gradient "
+                         "leaves this script: no committed byte moves")
     args = ap.parse_args()
     if args.golden is None:
         args.golden = REPO / "golden" / f"{args.case}.nevpt2gold"
@@ -603,9 +779,35 @@ def main() -> None:
 
     rec = run(args)
     report(rec)
+    if args.npz is not None:
+        names = ["grad_num", "grad_num_residual", "grad_num_probed",
+                 "grad_num_step", "grad_casci"]
+        if args.pc:
+            names += ["grad_num_pc", "grad_num_pc_residual"]
+        np.savez(args.npz, case=np.array(rec["case"]), pc=np.array(args.pc),
+                 **{n: rec[n] for n in names})
+        print(f"wrote {args.npz} ({len(names) + 2} arrays)")
+    if args.pc:
+        # The sidecar holds the 24 arrays --gradgold writes plus the four SC
+        # grad_num* ones, and the committed files hold exactly that; a PC
+        # gradient has no home there (see the module docstring).
+        print("--pc: the sidecar is unchanged")
+        return
     if args.no_write:
         print("--no-write: the sidecar is unchanged")
         return
+    if not CASES.get(args.case, {}).get("sidecar_grad_num", True):
+        # Some sidecars are committed holding only the 24 arrays --gradgold
+        # writes (N2 CAS(4,4)). Adding grad_num* to one of those would move a
+        # committed golden's bytes, which is never what a run of this script
+        # should do silently.
+        raise SystemExit(
+            f"golden/{args.case}.gradgold is committed as the 24 arrays "
+            "generate_golden.py --gradgold writes, with no grad_num in it, so "
+            "writing one there would move a committed file's bytes. Pass "
+            "--npz PATH (which is what nevpt2_grad.py --grad-num reads), "
+            "--out PATH, or --no-write."
+        )
 
     header, arrays = read_gradgold(args.sidecar)
     # Replace rather than append on a re-run, so the file is a function of the

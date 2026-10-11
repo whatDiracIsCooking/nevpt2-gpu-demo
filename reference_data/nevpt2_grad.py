@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-r"""Analytic nuclear gradient of the SC-NEVPT2 energy: the Z-vector solve and
-the AO contraction, for a CASCI-on-RHF reference.
+r"""Analytic nuclear gradient of the SC- (and with ``--pc``, PC-) NEVPT2
+energy: the Z-vector solve and the AO contraction, for a CASCI-on-RHF
+reference.
 
 This is the **offline Python** half of the analytic gradient
 (docs/gradient-theory.md), and it is offline on purpose. This repo's shape is
@@ -140,6 +141,53 @@ stated limitation and not a hidden one:
   own error is measurable, and it is measured: the Richardson bar is on by
   default and printed with the gradient (``--no-richardson`` turns it off).
 
+SC OR PC: ONE LAGRANGIAN, TWO CORRELATION ENERGIES
+--------------------------------------------------
+
+``--pc`` differentiates block2's **partially-contracted** energy
+(``generate_golden._block2_icmr``) instead of PySCF's strongly-contracted one,
+and **nothing else about the gradient changes**. The Lagrangian above is a
+statement about the *reference* -- a CASCI diagonalisation on converged RHF
+orbitals, canonicalised -- so (O1), (O2), (C1), the constraint Jacobian, the
+frozen path and the solve order are identical; what the contraction scheme
+changes is one scalar, ``E_corr``, and with it the two source terms
+``Y_xy = dE_corr/dkappa_xy`` and ``y_I = dE_corr/dc_I``. Both are difference
+quotients of that scalar either way, which is why one flag is the whole
+implementation.
+
+Four things ``--pc`` does need:
+
+* **the orbital energies, rebuilt at every point.** block2 runs
+  ``canonicalized = True`` and uses the ``mo_energy`` it is handed, so it gets
+  the generalized Fock's diagonal at that ``(C, c)``, exactly as the SC side
+  sets ``pt.mo_energy`` (see :func:`pyscf_ci_source` on why holding them fixed
+  differentiates a different functional);
+* **the 4-RDM, rebuilt when the CI vector moves.** Both block2 kernels build
+  the dense ``n^8`` 4-RDM themselves; it is cached across the orbital sweep,
+  where ``c`` is fixed, and keyed on the CI vector's bytes so the ``y_I``
+  sweep cannot contract new integrals against the old state's RDM
+  (:meth:`Functional.pc_energy`);
+* **a PC answer to exist at all.** ``generate_golden._check_pc_conditioning``
+  refuses a state whose per-tuple lstsq cut falls in a continuum of singular
+  values, and LiF's does -- so ``--pc`` on LiF stops at the reference state
+  rather than producing a gradient of a number that is not well defined
+  (docs/reference-data.md, "LiF and acrolein, the gradient-validation pair");
+* **a CI step three decades smaller, and that same guard run at every
+  displaced CI vector.** This is the one trap in the whole PC path and it is
+  silent: a determinant-axis displacement of the CI vector is not a spin
+  eigenfunction, so it lifts the PC metric's structurally null modes, and a
+  lifted mode past the lstsq cut is kept and divided by -- a *first-order*
+  error in ``y_I`` that no step ladder converges away and that every residual
+  in the solve reads as round-off. :data:`CI_STEP_PC` has the argument; the
+  measured ladder (a 2.5e-4 plateau at the SC step, 1.5e-8 three decades
+  below it) is in docs/testing.md, "The analytic gradient against the
+  numerical one".
+
+It is far slower than the SC run, and the whole cost is in the ``kappa``
+sweep: one block2 PC solve per non-gauge rotation, each one orders of
+magnitude above PySCF's per-class sum. The measured walls are in
+docs/testing.md, "The analytic gradient against the numerical one".
+
 WHAT VALIDATES IT
 -----------------
 
@@ -211,6 +259,20 @@ an antisymmetric ``kappa`` and a normalised ``c`` define: ``Y_xy - Y_yx``, and
     the **exact** derivative, where the device's ``Y`` holds the
     ``f3ac``/``f3ca`` digests fixed (docs/gradients.md, section 6).
 
+THE GATE, AND WHY ITS TOLERANCE IS NOT 1e-7
+-------------------------------------------
+
+The run ends by comparing its gradient against ``grad_num`` -- the sidecar's
+numerical gradient, or an ``.npz`` from ``nevpt2_numgrad.py --npz`` named with
+``--grad-num`` -- and prints ``PASS:`` or ``FAIL:``, exiting 1 on a failure.
+The tolerance is :data:`GRAD_NUM_TOL`, 1e-6, and it is **not** the 1e-7 every
+other comparison in this repo uses, because the oracle here is not an exact
+reference: it is a finite difference of re-converged energies, with an error
+bar of its own, and so is the analytic side's frozen-path quotient. The
+rationale is written once, in docs/testing.md, "The analytic gradient against
+the numerical one", with the two bars it is built from; nothing else restates
+it.
+
 Usage::
 
     uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46
@@ -219,7 +281,15 @@ Usage::
     uv run python reference_data/nevpt2_grad.py --case acrolein_def2svp_cas65 \
         --energy-ordered --casci-only     # the one run pyscf.grad.casci oracles
     uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
-        --out /tmp/lif.grad.npz           # the record, for issue #41
+        --out /tmp/lif.grad.npz           # the record
+    # PC, against the matching numerical gradient (two commands, one scheme):
+    uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65 \
+        --pc --npz /tmp/acrolein.numgrad.npz
+    uv run python reference_data/nevpt2_grad.py --case acrolein_def2svp_cas65 \
+        --pc --grad-num /tmp/acrolein.numgrad.npz
+    # and the CASCI validation gated the same way, against the npz's grad_casci:
+    uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 \
+        --casci-only --grad-num /tmp/n2_cas44.numgrad.npz
 
 ``--out`` writes the gradient and every residual as an ``.npz``; nothing is
 written by default, and **no committed file is ever touched** (the
@@ -236,6 +306,7 @@ import nevpt2_numgrad as ngrad
 
 # isort: split
 import argparse
+import hashlib
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -265,6 +336,35 @@ KAPPA_STEP = 1e-4
 #: exactly quadratic in the CI vector, so ``E_corr`` is a smooth rational
 #: function of it and the same reasoning applies.
 CI_STEP = 1e-4
+
+#: The same step for ``--pc``, and it is **three decades smaller, for a
+#: reason that is not truncation error**.
+#:
+#: PC-NEVPT2 solves one linear system per external tuple, and the internally
+#: contracted basis is linearly dependent: part of each block's spectrum is
+#: null, and ``numpy.linalg.lstsq(rcond=None)`` drops it. Those modes are
+#: null **structurally** -- dependencies among the class's active-space
+#: operator strings, for any state of the reference's symmetry
+#: (docs/gradients.md, §7). But ``y_I`` is wanted per *determinant*, so the
+#: quotient displaces the CI vector along a bare determinant axis, which
+#: :func:`allowed_determinants` keeps inside the state's spatial irrep but
+#: which is **not a spin eigenfunction**. The displaced vector then carries
+#: components the reference's symmetry forbids, the forbidden modes stop being
+#: null, and once a lifted mode clears the cut it is kept and **divided by** --
+#: a term of order ``h/h = 1`` in the quotient. A first-order error: no
+#: step-size ladder converges it away and no residual in the solve can see it.
+#: It is §7's condition on the PC tangent's *direction*, met here in the
+#: offline source term, and §7's own cure (build the direction from spin-free
+#: generators) is not open to a per-determinant derivative.
+#:
+#: So the step is chosen to keep the lifted modes **below** the cut, and
+#: ``generate_golden._check_pc_conditioning`` -- the guard that gates the
+#: golden's own PC fields -- is what says whether they are: it is run at
+#: every displaced CI vector (:meth:`Functional.corr_at_ci`), so a step too
+#: large is refused rather than quietly returning a number. The measured
+#: ladder, the gap collapse and the gradient error that tracks it are in
+#: docs/testing.md, "The analytic gradient against the numerical one".
+CI_STEP_PC = 1e-7
 
 #: The nuclear step for ``dPhi/dx``, in bohr. Deliberately the step
 #: ``nevpt2_numgrad.py`` differences the *energy* at, so the two gradients are
@@ -297,6 +397,18 @@ PC_ZERO_TOL = 1e-8
 #: before the solve, so what is left should be well conditioned and the
 #: reported condition number says whether it was.
 JACOBIAN_RCOND = 1e-12
+
+#: What ``|g - grad_num|`` has to be under, per component, for the comparison
+#: against the numerical gradient to pass. **This is not the 1e-7 the rest of
+#: this repo compares to, and it cannot be**: the oracle is a finite
+#: difference of re-converged energies, not an exact reference, so the
+#: tolerance is set by the two sides' own error bars rather than by machine
+#: precision. The rationale, the measured bars it is built from and the
+#: results are in docs/testing.md, "The analytic gradient against the
+#: numerical one"; Park's Table 3 (docs/references.md) puts PC within 5.0e-6
+#: of two-point numerical gradients, so 1e-6 is a tighter gate than the
+#: published one, not a looser one.
+GRAD_NUM_TOL = 1e-6
 
 #: Component names, in the order they index a coordinate.
 AXES = ngrad.AXES
@@ -341,6 +453,11 @@ class State:
     e_casci: float
     e_corr: float
     invariants: dict = field(default_factory=dict)
+    #: block2's PC correlation energy on this state, and the smallest lstsq
+    #: gap seen building it -- only with ``--pc``, and only where a PC answer
+    #: exists at all (``generate_golden._check_pc_conditioning``).
+    e_corr_pc: float | None = None
+    pc_gap: float | None = None
 
     @property
     def nocc(self) -> int:
@@ -397,11 +514,15 @@ class State:
         return p
 
 
-def build_state(case: str, spec: dict) -> State:
+def build_state(case: str, spec: dict, *, pc: bool = False) -> State:
     """``generate_golden._build_state``'s own state -- same single-threading,
     same Davidson tolerance, same auto-detected point group, same
     irrep-selected active space -- plus the generalized and RHF Fock matrices
-    and the act_O/act_V split."""
+    and the act_O/act_V split.
+
+    With ``pc``, block2's PC energy on the rotated state as well, gated by
+    ``generate_golden._check_pc_conditioning`` -- the same guard the golden's
+    own PC fields pass, and the one that refuses LiF."""
     geom_path = Path(spec["geometry"])
     if not geom_path.is_absolute():
         geom_path = REPO / geom_path
@@ -456,7 +577,7 @@ def build_state(case: str, spec: dict) -> State:
     assert np.abs(fock_rhf[a, a] - np.diag(eps)).max() < 1e-9, (
         "F's active block is not diagonal in the basis that diagonalises it"
     )
-    return State(
+    st = State(
         case=case, geom=geom, basis=spec["basis"], mc=mc, pt=pt,
         mo_coeff=mo, ci=np.asarray(ci),
         ncore=ncore, nact=nact, nvirt=nmo - ncore - nact, nmo=nmo,
@@ -464,6 +585,13 @@ def build_state(case: str, spec: dict) -> State:
         f=f, fock_rhf=fock_rhf, n_act_occ=n_act_occ,
         act_eps=eps, e_casci=float(mc.e_tot), e_corr=e_corr, invariants=invariants,
     )
+    if pc:
+        gaps: list = []
+        st.e_corr_pc = Functional(st, pc=True).pc_energy(
+            mo, st.ci, np.diag(f).copy(), gaps=gaps)
+        gg._check_pc_conditioning(gaps)
+        st.pc_gap = min(g[2] for g in gaps)
+    return st
 
 
 # --------------------------------------------------------------------------
@@ -479,7 +607,7 @@ class Functional:
     objects are built once and only ``C`` and ``c`` are swapped, which is what
     makes an ``O(n_mo^2)`` sweep of ``kappa`` directions affordable."""
 
-    def __init__(self, state: State, geom=None):
+    def __init__(self, state: State, geom=None, *, pc: bool = False):
         mol = gg._build_mol(geom if geom is not None else state.geom, state.basis)
         mol.incore_anyway = True  # force pn._ERIS's incore transform
         mf = scf.RHF(mol)
@@ -507,6 +635,15 @@ class Functional:
         self.e_nuc = float(mol.energy_nuc())
         self._occ_proj = state.occ_projector()
         self.nevals = 0
+        #: which correlation functional is differentiated: PySCF's
+        #: strongly-contracted energy, or block2's partially-contracted one.
+        self.pc = pc
+        #: block2's dense n^8 4-RDM, kept while the CI vector does not move --
+        #: which is the whole orbital sweep -- and rebuilt when it does. Keyed
+        #: on the CI vector's own bytes, because handing block2 new integrals
+        #: against the previous state's 4-RDM would be silently wrong.
+        self._pc_key: bytes | None = None
+        self._pc_dm4: dict = {}
 
     # -- the pieces -------------------------------------------------------
 
@@ -569,6 +706,73 @@ class Functional:
         g = np.asarray(eris["ppaa"]).reshape(nmo, nmo, st.nact, st.nact)[a, a]
         return fci.direct_spin1.absorb_h1e(h1, g, st.nact, st.nelecas, 0.5)
 
+    def pc_energy(self, C: np.ndarray, ci: np.ndarray, eps: np.ndarray,
+                  *, gaps: list | None = None) -> float:
+        """block2's partially-contracted correlation energy at these
+        orbitals, this CI vector and these orbital energies.
+
+        ``eps`` is the **generalized** Fock's diagonal, rebuilt at this point
+        like PySCF's ``pt.mo_energy`` is on the SC side: block2 runs
+        ``canonicalized = True``, so it uses the numbers it is handed, and
+        holding them fixed would differentiate a different functional
+        (:func:`pyscf_ci_source`, on the same omission).
+
+        ``gaps`` passes the per-tuple lstsq cuts back out for
+        ``generate_golden._check_pc_conditioning``, and it costs an SVD per PC
+        block, so it is asked for exactly where the rank can move: the
+        reference state (:func:`build_state`) and **every displaced CI
+        vector** (:meth:`corr_at_ci`). The orbital and nuclear sweeps leave it
+        ``None`` -- the rank that can move is the metric's, the metric is
+        built from the active-space RDMs, and those are a function of the CI
+        vector alone, so a rotation at fixed ``c`` cannot move it."""
+        mc = self.mc
+        mc.mo_coeff, mc.ci, mc.mo_energy = C, ci, eps
+        key = hashlib.blake2b(np.ascontiguousarray(ci, dtype=float).tobytes(),
+                              digest_size=16).digest()
+        if key != self._pc_key:
+            self._pc_key, self._pc_dm4 = key, {}
+        self.nevals += 1
+        pc = gg._block2_icmr(mc, "pc", dm4_cache=self._pc_dm4, gaps=gaps)
+        return float(sum(pc.values()))
+
+    def corr_at_ci(self, eris: dict, C: np.ndarray, ci: np.ndarray,
+                   *, check_pc: bool = False) -> float:
+        """``E_corr`` at fixed orbitals and a moved CI vector, with the
+        orbital energies rebuilt from it -- the quotient
+        :func:`pyscf_ci_source` differences, in whichever mode is active.
+
+        ``check_pc`` gates the displaced CI vector's **own** PC conditioning,
+        which is the one place this pipeline can silently differentiate the
+        wrong function: a determinant-axis displacement is not a spin
+        eigenfunction, so it lifts the PC metric's structurally null modes,
+        and past the lstsq cut they are kept and divided by (see
+        :data:`CI_STEP_PC`). The guard is the golden's own, so the refusal
+        reads the same way."""
+        self.pt.ci = ci
+        self.mc.ci = ci
+        dm1, _dm2, dms, _ = _dms_from(self.pt, eris, self.state)
+        eps = np.diag(self.generalized_fock(eris, dm1)).copy()
+        self.pt.mo_energy = eps
+        if self.pc:
+            gaps: list | None = [] if check_pc else None
+            e = self.pc_energy(C, ci, eps, gaps=gaps)
+            if gaps is not None:
+                try:
+                    gg._check_pc_conditioning(gaps)
+                except SystemExit as exc:
+                    raise SystemExit(
+                        f"at a DISPLACED CI vector: {exc}\n"
+                        "That is this quotient's step lifting the PC metric's "
+                        "null modes past the lstsq cut, not a property of the "
+                        "state -- the reference state passed the same guard. "
+                        "Use a smaller --ci-step (the default for --pc is "
+                        f"{CI_STEP_PC:g}; see CI_STEP_PC and docs/testing.md, "
+                        "\"The analytic gradient against the numerical one\")."
+                    ) from None
+            return e
+        per_class = gg._pyscf_per_class(self.pt, dms, eris)
+        return float(sum(per_class[c][1] for c in gg.CLASSES))
+
     # -- the whole bundle -------------------------------------------------
 
     def evaluate(self, C: np.ndarray, ci: np.ndarray, *, with_corr: bool = True,
@@ -605,9 +809,13 @@ class Functional:
         out["e_casci"] = float(ci_flat @ hvec)
 
         if with_corr:
-            self.pt.mo_energy = np.diag(f).copy()
-            per_class = gg._pyscf_per_class(self.pt, dms, eris)
-            out["e_corr"] = float(sum(per_class[c][1] for c in gg.CLASSES))
+            eps = np.diag(f).copy()
+            self.pt.mo_energy = eps
+            if self.pc:
+                out["e_corr"] = self.pc_energy(C, ci, eps)
+            else:
+                per_class = gg._pyscf_per_class(self.pt, dms, eris)
+                out["e_corr"] = float(sum(per_class[c][1] for c in gg.CLASSES))
         else:
             out["e_corr"] = 0.0
         return out
@@ -871,7 +1079,8 @@ def allowed_determinants(st: State) -> np.ndarray:
     return mask
 
 
-def pyscf_ci_source(fn: Functional, st: State, step: float = CI_STEP) -> np.ndarray:
+def pyscf_ci_source(fn: Functional, st: State,
+                    step: float | None = None) -> np.ndarray:
     """``y_I = dE_corr/dc_I``, by central differences at fixed orbitals.
 
     Each quotient is taken along ``P e_I``, **orthogonal to the state**, and
@@ -911,15 +1120,15 @@ def pyscf_ci_source(fn: Functional, st: State, step: float = CI_STEP) -> np.ndar
     ``dE/dkappa`` before the sidecar existed) -- so it is **not** the
     derivative this gradient needs. Rebuilt per displaced CI vector here; a
     dump that holds them fixed will be visibly wrong against ``grad_num``."""
+    # Three decades smaller in PC mode, and :data:`CI_STEP_PC` says why: it is
+    # not a truncation-error choice, it is the step at which the PC metric's
+    # null modes stay below the lstsq cut.
+    if step is None:
+        step = CI_STEP_PC if fn.pc else CI_STEP
     eris = fn.eris(st.mo_coeff)
 
     def e_corr_at(ci: np.ndarray) -> float:
-        fn.pt.ci = ci
-        fn.mc.ci = ci
-        dm1, _dm2, dms, _ = _dms_from(fn.pt, eris, st)
-        fn.pt.mo_energy = np.diag(fn.generalized_fock(eris, dm1)).copy()
-        per_class = gg._pyscf_per_class(fn.pt, dms, eris)
-        return float(sum(per_class[c][1] for c in gg.CLASSES))
+        return fn.corr_at_ci(eris, st.mo_coeff, ci, check_pc=fn.pc)
 
     y = np.zeros(st.ci.size)
     c = st.ci.ravel().copy()
@@ -998,10 +1207,12 @@ class Gradients(lagrange.Gradients):
     one residual norm; :attr:`residuals` carries each block's own."""
 
     def __init__(self, st: State, src: SourceTerms, *, with_corr: bool = True,
-                 step: float = NUC_STEP, richardson: bool = True):
+                 step: float = NUC_STEP, richardson: bool = True,
+                 pc: bool = False):
         self.st = st
         self.src = src
         self.with_corr = with_corr
+        self.pc = pc
         self.step = step
         self.richardson = richardson
         self.pairs = kappa_pairs(st)
@@ -1012,7 +1223,7 @@ class Gradients(lagrange.Gradients):
         #: indexed by :attr:`cons`).
         self.z = np.zeros(st.ci.shape)
         self.lam = np.zeros(self.n_constraint)
-        self.fn = Functional(st)
+        self.fn = Functional(st, pc=pc)
         #: the determinants the CI derivative is defined on
         #: (:func:`allowed_determinants`).
         self.allowed = allowed_determinants(st)
@@ -1196,7 +1407,7 @@ class Gradients(lagrange.Gradients):
         key = tuple(round(v, 12) for _s, xyz in geom for v in xyz)
         cached = self._fn_cache.get(key)
         if cached is None:
-            cached = Functional(self.st, geom)
+            cached = Functional(self.st, geom, pc=self.pc)
             self._fn_cache[key] = cached
         return cached
 
@@ -1515,6 +1726,41 @@ class Gradients(lagrange.Gradients):
         return self.de
 
 
+def load_grad_num(path: Path, case: str, *, pc: bool,
+                  casci_only: bool = False) -> dict:
+    """The numerical gradient to gate against, from a
+    ``nevpt2_numgrad.py --npz`` file: the gradient itself, its Richardson
+    error bar and the probed mask, **for the functional this run
+    differentiates** -- SC, PC, or (with ``--casci-only``) the plain CASCI one
+    that script prints beside them.
+
+    Checked against the case it names, because the two gradients must be of
+    one state; and the PC arrays are only there if that run was given
+    ``--pc``, so asking for them without is the refusal rather than a silent
+    comparison against the SC answer. ``grad_casci`` carries no Richardson
+    residual of its own, so its bar is reported as zero."""
+    key = "grad_casci" if casci_only else ("grad_num_pc" if pc else "grad_num")
+    with np.load(path) as z:
+        if "case" in z and str(z["case"]) != case:
+            raise SystemExit(
+                f"{path} is the numerical gradient of case {str(z['case'])!r}, "
+                f"not {case!r}: the two gradients would be of different states"
+            )
+        if key not in z:
+            raise SystemExit(
+                f"{path} holds no '{key}' array"
+                + (" -- rerun nevpt2_numgrad.py with --pc" if pc else "")
+            )
+        bar = f"{key}_residual"
+        return dict(
+            grad_num=np.asarray(z[key]),
+            grad_num_residual=(np.asarray(z[bar]) if bar in z
+                               else np.zeros_like(np.asarray(z[key]))),
+            grad_num_probed=np.asarray(z["grad_num_probed"]),
+            grad_num_origin=f"{path} [{key}]",
+        )
+
+
 # --------------------------------------------------------------------------
 # Driver and report
 # --------------------------------------------------------------------------
@@ -1538,9 +1784,27 @@ def run(args) -> dict:
         )
     spec.setdefault("cas_irreps", None)
     spec.setdefault("core_irreps", None)
+    if args.pc and args.casci_only:
+        raise SystemExit(
+            "--pc and --casci-only are exclusive: --casci-only drops the "
+            "correlation energy altogether, so there is no contraction left to "
+            "choose"
+        )
+    # Read (and check) the numerical gradient BEFORE the expensive part, so a
+    # mismatched or missing file costs nothing.
+    grad_num_source = (load_grad_num(args.grad_num, args.case, pc=args.pc,
+                                     casci_only=args.casci_only)
+                       if args.grad_num is not None else None)
+    if args.pc and grad_num_source is None:
+        raise SystemExit(
+            "--pc needs --grad-num PATH: a PC numerical gradient has no home "
+            "in the gradient sidecar (whose contract is the 24 --gradgold "
+            "arrays plus the four SC grad_num* ones), so it is written as a "
+            "plain .npz by `nevpt2_numgrad.py --pc --npz PATH`"
+        )
     t0 = time.perf_counter()
     print(f"[{args.case}] building the golden's own CASCI-on-RHF state")
-    st = build_state(args.case, spec)
+    st = build_state(args.case, spec, pc=args.pc)
     print(f"  n_mo = {st.nmo} = {st.ncore} core + {st.nact} active + {st.nvirt} virtual; "
           f"ndet = {st.ci.size}; n_elec(RHF) = {st.nelec_rhf}")
     print(f"  act_O = {st.n_act_occ}, act_V = {st.nact - st.n_act_occ} "
@@ -1548,14 +1812,20 @@ def run(args) -> dict:
           + " ".join(f"{e:+.4f}" for e in st.act_eps) + ")")
     print(f"  section 3.6 invariants: (O1) {st.invariants['o1']:.1e}, "
           f"(O2) {st.invariants['o2']:.1e}, (O3) act_occ = {st.invariants['act_occ']}")
-    print(f"  E_CASCI = {st.e_casci:.10f}  E_corr(SC) = {st.e_corr:.10f}")
+    print(f"  E_CASCI = {st.e_casci:.10f}  E_corr(SC) = {st.e_corr:.10f}"
+          + (f"  E_corr(PC) = {st.e_corr_pc:.10f} (smallest lstsq gap "
+             f"{st.pc_gap:.1e}, need {gg.PC_MIN_GAP:g})" if args.pc else ""))
 
     rec = dict(case=args.case, basis=spec["basis"], ncas=spec["ncas"],
                nelecas=spec["nelecas"], nmo=st.nmo, ncore=st.ncore, nact=st.nact,
                nvirt=st.nvirt, ndet=int(st.ci.size), natm=len(st.geom),
                e_casci=st.e_casci, e_corr=st.e_corr, casci_only=args.casci_only,
-               step=args.step, invariants={k: v for k, v in st.invariants.items()
-                                           if k != "o1_each"})
+               pc=args.pc, step=args.step,
+               invariants={k: v for k, v in st.invariants.items()
+                           if k != "o1_each"})
+    if args.pc:
+        rec["e_corr_pc"] = st.e_corr_pc
+        rec["pc_gap"] = st.pc_gap
 
     # The state differentiated must be the state the golden holds -- when
     # there is one. An overridden selection (--energy-ordered, --cas-irreps)
@@ -1576,14 +1846,32 @@ def run(args) -> dict:
                 f"E_CASCI differs by {rec['d_e_casci']:.3e}, E_corr by "
                 f"{rec['d_e_corr']:.3e}"
             )
+        if args.pc:
+            gold_pc = ngrad.read_golden_pc_total(
+                REPO / "golden" / f"{args.case}.nevpt2gold")
+            if gold_pc is None:
+                raise SystemExit(
+                    f"--pc: golden/{args.case}.nevpt2gold carries no "
+                    "e_pc_total -- it was generated --no-pc because its PC "
+                    "metric is refused as a continuum, so there is no PC "
+                    "reference for this state (docs/reference-data.md, \"LiF "
+                    "and acrolein, the gradient-validation pair\")"
+                )
+            rec["d_e_corr_pc"] = st.e_corr_pc - gold_pc
+            if abs(rec["d_e_corr_pc"]) > REF_STATE_TOL:
+                raise SystemExit(
+                    f"the rebuilt state's PC energy is {rec['d_e_corr_pc']:.3e} "
+                    f"from golden/{args.case}.nevpt2gold's e_pc_total"
+                )
         print(f"  against the golden: dE_CASCI = {rec['d_e_casci']:+.1e}, "
-              f"dE_corr = {rec['d_e_corr']:+.1e}")
+              f"dE_corr = {rec['d_e_corr']:+.1e}"
+              + (f", dE_corr(PC) = {rec['d_e_corr_pc']:+.1e}" if args.pc else ""))
     else:
         print("  no golden for this selection: the active space was overridden, so "
               "this is deliberately a different state")
 
     with_corr = not args.casci_only
-    fn = Functional(st)
+    fn = Functional(st, pc=args.pc)
     if args.casci_only:
         print("\n--casci-only: E_corr dropped from the source terms and from Phi. The "
               "reference is then a plain CASCI, whose analytic gradient PySCF has.")
@@ -1601,7 +1889,7 @@ def run(args) -> dict:
                           ci=np.zeros(st.ci.shape), origin="pyscf (CASCI only)")
         print("  y_I = 0 exactly: a CASCI is variational in the CI vector")
     else:
-        y = pyscf_ci_source(fn, st)
+        y = pyscf_ci_source(fn, st, step=args.ci_step)
         src = SourceTerms(kappa=np.zeros((st.nmo, st.nmo)), ci=y, origin="pyscf")
         print(f"  y_I = dE_corr/dc_I over {y.size} determinants by central "
               f"differences, {time.perf_counter() - t_src:.0f}s: "
@@ -1609,7 +1897,8 @@ def run(args) -> dict:
     src.seconds = time.perf_counter() - t_src
     rec["source_origin"] = src.origin
 
-    g = Gradients(st, src, with_corr=with_corr, step=args.step, richardson=args.richardson)
+    g = Gradients(st, src, with_corr=with_corr, step=args.step,
+                  richardson=args.richardson, pc=args.pc)
     print("\nthe frozen orthonormal path, and one kappa sweep")
     g.prepare()
     print("\nthe multipliers")
@@ -1627,9 +1916,9 @@ def run(args) -> dict:
     rec["wall"] = time.perf_counter() - t0
     rec["kappa_evals"] = fn.nevals + g.fn.nevals
 
-    # Reference numbers, where they exist. Neither is a gate here: the
-    # analytic-versus-numerical comparison is issue #41's, with its own
-    # tolerance rationale.
+    # Reference numbers, where they exist. The pyscf.grad.casci comparison is
+    # reported, never gated (it is an oracle only for an energy-ordered active
+    # space, below); the grad_num one below it IS the gate.
     if args.casci_only:
         # mo_coeff and ci must be passed: pyscf.grad.casci defaults to
         # mc._scf.mo_coeff, the UNSORTED RHF orbitals, while mc.ci belongs to
@@ -1638,19 +1927,44 @@ def run(args) -> dict:
             st.mc.Gradients().kernel(mo_coeff=st.mc.mo_coeff, ci=st.mc.ci)
         )
         rec["pyscf_casci_valid"] = spec["cas_irreps"] is None
-    sidecar = REPO / "golden" / f"{args.case}.gradgold"
-    if committed and sidecar.exists():
-        _h, arrays = ngrad.read_gradgold(sidecar)
-        if "grad_num" in arrays:
-            rec["grad_num"] = np.asarray(arrays["grad_num"])
-            rec["grad_num_probed"] = np.asarray(arrays["grad_num_probed"])
-            rec["grad_num_residual"] = np.asarray(arrays["grad_num_residual"])
+    # The numerical gradient this is gated against: an .npz written by
+    # `nevpt2_numgrad.py --npz` when one is named (the only route for a PC
+    # one, and for a case whose committed sidecar holds no grad_num), else the
+    # sidecar beside the golden.
+    if args.grad_num is not None:
+        rec.update(grad_num_source)
+    elif args.casci_only:
+        # The sidecar's grad_num is the NEVPT2 gradient; this run's is a plain
+        # CASCI's, so there is nothing there to gate against. The numerical
+        # CASCI gradient is in an --npz (`grad_casci`), and `pyscf.grad.casci`
+        # is reported above where it is an oracle at all.
+        pass
+    else:
+        sidecar = REPO / "golden" / f"{args.case}.gradgold"
+        if committed and sidecar.exists():
+            _h, arrays = ngrad.read_gradgold(sidecar)
+            if "grad_num" in arrays:
+                rec["grad_num"] = np.asarray(arrays["grad_num"])
+                rec["grad_num_probed"] = np.asarray(arrays["grad_num_probed"])
+                rec["grad_num_residual"] = np.asarray(arrays["grad_num_residual"])
+                rec["grad_num_origin"] = str(sidecar)
+    if "grad_num" in rec:
+        probed = rec["grad_num_probed"] > 0
+        rec["grad_num_max_delta"] = float(np.abs(rec["grad"] - rec["grad_num"])[probed].max())
+        rec["grad_num_tol"] = args.tol
+        rec["grad_num_pass"] = rec["grad_num_max_delta"] <= args.tol
     return rec
 
 
 def report(rec: dict) -> None:
+    # The functional this run differentiated, named the same way in the header,
+    # in the grad_num comparison and in the PASS/FAIL line -- so no line can be
+    # read as a verdict on a different one.
+    scheme = "CASCI" if rec["casci_only"] else ("PC" if rec["pc"] else "SC")
+    which = {"CASCI": "CASCI only", "PC": "PC-NEVPT2 (block2)",
+             "SC": "SC-NEVPT2"}[scheme]
     print(f"\n== {rec['case']}  {rec['basis']}  CAS({rec['nelecas']},{rec['ncas']})  "
-          f"{'CASCI only' if rec['casci_only'] else 'SC-NEVPT2'}")
+          f"{which}")
     print(f"source terms: {rec['source_origin']}")
     r = rec["residuals"]
     print(f"Z-vector residuals -- CI |P(H-E)Pz + Py| = {r['ci_cg']:.3e} "
@@ -1695,11 +2009,25 @@ def report(rec: dict) -> None:
     if "grad_num" in rec:
         ref, probed = rec["grad_num"], rec["grad_num_probed"] > 0
         d = np.abs(grad - ref)
-        print("\nagainst grad_num (the sidecar's numerical gradient; issue #41 owns this "
-              "comparison and its tolerance):")
+        print(f"\nagainst grad_num ({rec['grad_num_origin']}), the numerical "
+              f"{scheme} gradient:")
         print(f"  max |delta| over the {int(probed.sum())} differenced components = "
               f"{d[probed].max():.3e}, with grad_num's own error bar "
               f"{rec['grad_num_residual'][probed].max():.1e}")
+        worst = np.unravel_index(int(np.argmax(np.where(probed, d, -1.0))), d.shape)
+        print(f"  worst component: atom {worst[0]} {AXES[worst[1]]}, analytic "
+              f"{grad[worst]:+.10f} vs numerical {ref[worst]:+.10f}")
+        # The gate. The tolerance is NOT this repo's usual 1e-7 and cannot be:
+        # the oracle is a finite difference. Rationale, the error bars it is
+        # built from and the measured results: docs/testing.md, "The analytic
+        # gradient against the numerical one".
+        verdict = "PASS" if rec["grad_num_pass"] else "FAIL"
+        relation = "<=" if rec["grad_num_pass"] else ">"
+        print(f"{verdict}: {rec['case']} {scheme} analytic "
+              f"vs numerical gradient, max |delta| = "
+              f"{rec['grad_num_max_delta']:.3e} {relation} "
+              f"{rec['grad_num_tol']:g} (docs/testing.md, \"The analytic "
+              "gradient against the numerical one\")")
     if rec["residuals"].get("ham_response_richardson") is not None:
         print(f"\nRichardson error bars on the frozen-path quotients (the error on "
               f"the gradient above): {rec['residuals']['ham_response_richardson']:.1e} "
@@ -1753,6 +2081,36 @@ def main() -> None:
                     help="write the gradient and every residual here as an .npz. "
                          "Nothing is written by default, and no committed file is "
                          "ever touched")
+    ap.add_argument("--pc", action="store_true",
+                    help="differentiate block2's PARTIALLY-contracted energy "
+                         "instead of PySCF's strongly-contracted one. The "
+                         "Lagrangian, the constraints and the Z-vector "
+                         "equations are the reference's and do not change; only "
+                         "E_corr does. Needs --grad-num (a PC numerical "
+                         "gradient is not a sidecar array), and is refused on a "
+                         "state with no PC answer -- LiF's metric is a "
+                         "continuum. Far slower: one block2 PC solve per "
+                         "kappa direction")
+    ap.add_argument("--grad-num", type=Path, default=None,
+                    help="the numerical gradient to gate against, as written by "
+                         "`nevpt2_numgrad.py --npz PATH`: its grad_num, "
+                         "grad_num_pc or grad_casci array, whichever this run "
+                         "differentiates. Default: the grad_num arrays in "
+                         "golden/<case>.gradgold, where there are any (SC "
+                         "only; with --casci-only nothing there applies, since "
+                         "that grad_num is the NEVPT2 gradient)")
+    ap.add_argument("--ci-step", type=float, default=None,
+                    help="the step for the y_I = dE_corr/dc_I quotients "
+                         f"(default {CI_STEP:g}, or {CI_STEP_PC:g} with --pc, "
+                         "which is three decades smaller for a reason that is "
+                         "not truncation -- see CI_STEP_PC). Only here so the "
+                         "measured ladder in docs/testing.md can be rerun")
+    ap.add_argument("--tol", type=float, default=GRAD_NUM_TOL,
+                    help="what max |g - grad_num| has to be under, per "
+                         f"component, to PASS (default {GRAD_NUM_TOL:g}). NOT "
+                         "this repo's 1e-7: the oracle is a finite difference "
+                         "(docs/testing.md, \"The analytic gradient against the "
+                         "numerical one\")")
     args = ap.parse_args()
     if args.source == "dump" and args.source_path is None:
         raise SystemExit("--source dump needs --source-path PATH")
@@ -1772,6 +2130,15 @@ def main() -> None:
             payload[f"residual_{k}"] = np.array(0.0 if v is None else v)
         np.savez(args.out, **payload)
         print(f"wrote {args.out} ({len(payload)} arrays)")
+    # The comparison against the numerical gradient is a GATE, and the exit
+    # status is how it is read from a script: 1 on a FAIL, as the demos'
+    # `PASS:` lines are read from ctest. A run with no numerical gradient in
+    # reach checked nothing and says so.
+    if "grad_num" not in rec:
+        print("no numerical gradient in reach: nothing was gated (pass "
+              "--grad-num PATH, or run nevpt2_numgrad.py for this case first)")
+    elif not rec["grad_num_pass"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

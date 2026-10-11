@@ -606,6 +606,311 @@ quadratic in the CI vector), with negative controls — forward + forward
 instead of forward + dagger, and a `d6` with its last two axes swapped — that
 both miss by more than three decades.
 
+## The analytic gradient against the numerical one
+
+The end-to-end check of the gradient work: the **assembled analytic nuclear
+gradient** against a **finite-difference** one, SC and PC. Both sides are
+offline Python — `reference_data/nevpt2_grad.py` and
+`reference_data/nevpt2_numgrad.py` ([`reference-data.md`](reference-data.md),
+"The analytic gradient" and "The numerical gradient") — so this needs no card
+and is not a ctest entry; "Why there is no ctest entry for it" at the end of
+this section says why not. Everything below was run single-threaded on the
+CUDA devcontainer's CPU (the RTX 3080 box; `OMP_NUM_THREADS=1`, forced by
+`generate_golden`'s import), with PySCF 2.14.0 and block2 0.5.4.
+
+### The tolerance, and why it is not 1e-7
+
+**Every other comparison in this tree is against 1e-7 because it has an exact
+oracle: a committed number.** This one does not. The oracle is
+`grad_num`, a difference quotient of re-converged RHF+CASCI+NEVPT2 energies,
+and the analytic side is itself the difference quotient of one scalar along a
+frozen orthonormal path. Two finite differences, each with an error bar, and
+the agreement cannot be tighter than they are.
+
+Both bars are already measured where each belongs: `grad_num`'s own
+Richardson residual in [`reference-data.md`](reference-data.md), "The
+numerical gradient" — it is what fixes the 0.0025 bohr step there — and the
+analytic side's frozen-path bars in the same file's "The analytic gradient".
+What that file does not cover — the third case, and the two PC runs — is
+here: N2 CAS(4,4) is **1.1e-9** (`grad_num`) against **8.3e-6** SC /
+**1.6e-6** PC (skeleton) and 5.9e-9 / 4.0e-9 (multipliers); acrolein PC is
+**1.7e-9** against **4.9e-7** and 1.1e-8.
+
+The analytic side's skeleton bar is the loose one everywhere, and it is an
+**upper** bound rather than an estimate: it is `|R(h/2) - g(h/2)|`, the size
+of the `h^2` correction Richardson then *removes*, so it says how wrong the
+raw central difference was, not how wrong the stored extrapolant is. N2's
+8.3e-6 against a measured agreement of 2.5e-7 is that gap.
+
+So the gate is **1e-6 per component** (`nevpt2_grad.py`'s `GRAD_NUM_TOL`,
+overridable with `--tol`): one decade above the worst agreement measured
+below, and still tighter than the published figure it is answerable to —
+Park's Table 3 ([`references.md`](references.md)) reports PC-NEVPT2 analytic
+gradients within **5.0e-6** of two-point numerical ones. Tightening it to
+1e-7 would be gating on the frozen path's step size, not on the gradient.
+**This paragraph is the only statement of that rationale**; the code constant,
+`nevpt2_grad.py`'s docstring and
+[`reference-data.md`](reference-data.md) cite this section by name instead of
+restating it.
+
+### What is run, and what it comes out at
+
+Two commands per case — the numerical gradient, then the analytic one gated
+against it. The SC pair for LiF and acrolein reads `grad_num` straight out of
+the `*.gradgold` sidecar; the PC pair, and N2 (whose committed sidecar
+deliberately carries no `grad_num`, and whose in-place write is refused for
+that reason), pass it through an `--npz`:
+
+```bash
+uv run python reference_data/nevpt2_numgrad.py --case n2_ccpvdz_cas44 \
+    --pc --npz /tmp/n2_cas44.numgrad.npz          # SC and PC, one set of states
+uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 \
+    --grad-num /tmp/n2_cas44.numgrad.npz          # SC
+uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 \
+    --pc --grad-num /tmp/n2_cas44.numgrad.npz     # PC
+```
+
+Each analytic run prints one `PASS:` or `FAIL:` line and exits 1 on a
+failure, the way a demo's does. **This is the single home of the verdict**;
+[`reference-data.md`](reference-data.md)'s two gradient sections keep each
+run's own diagnostics (residuals, condition numbers, bars, the
+zero-by-symmetry and translational-invariance checks for LiF and acrolein) and
+cite this table for the comparison. All five `PASS`:
+
+| | LiF CAS(4,6) SC | acrolein CAS(6,5) SC | acrolein PC | N2 CAS(4,4) SC | N2 CAS(4,4) PC |
+|---|---|---|---|---|---|
+| components compared | 6 | 16 (in-plane) | 16 | 6 | 6 |
+| **max \|g − grad_num\|** | **5.3e-9** | **7.6e-8** | **8.3e-8** | **2.5e-7** | **1.5e-8** |
+| largest component (Eh/bohr) | −0.0072358476 (Li z) | +0.0266017127 (C2 y) | +0.0265842789 (C2 y) | +0.0448803372 (N z) | +0.0452520933 (N z) |
+
+N2's own free checks, the two this file owns: `|g|` on the two
+zero-by-symmetry axes is 9.7e-13 (SC and PC alike) and the gradient summed
+over the two atoms is ≤6.2e-11 per column.
+
+**The PC runs' multipliers are as healthy as the SC ones**, which is worth
+saying because only the source terms changed: at N2 CAS(4,4) the CI Z-vector
+residual `|P(H−E)Pz + Py|` is 1.5e-15 and the orbital one `|Mλ + B|` is
+8.7e-16 direct / 1.7e-12 GMRES at condition number 7.6e3, `z·c` after
+projection is 1.7e-18, and the CI/(O2) fixed point closes in 5 iterations;
+at acrolein, the CI residual is 1.2e-11, the orbital one 5.9e-15 direct /
+8.5e-12 GMRES at condition number 1.2e4, `z·c` is 6.1e-19 and the fixed point
+again closes in 6. (The SC runs' are
+[`reference-data.md`](reference-data.md), "The analytic gradient"'s.)
+
+**The out-of-plane acrolein components are the free check**, and all eight
+come out at ≤5.2e-11 in the PC run (the SC figure and acrolein's column sums
+are [`reference-data.md`](reference-data.md), "The analytic gradient"'s). The numerical side
+cannot probe them — displacing out of plane breaks the σ_h, which
+`nevpt2_numgrad.py` refuses rather than differences — while the analytic side
+differences every component, because the frozen path re-solves nothing and so
+has no selection to break. They come out as the zeros symmetry says they are,
+and the same holds for LiF's and N2's two non-axial axes.
+
+**PC costs what the `kappa` sweep costs**, and that is the one wall worth
+quoting: one block2 PC solve per non-gauge rotation against PySCF's per-class
+sum for SC, so the analytic run takes **150 s against 9.3 s** at N2 CAS(4,4)
+(`n_mo` = 28, 376 rotations) and **22277 s** at acrolein (`n_mo` = 76,
+2846 rotations), against the SC wall of the same sweep in
+[`reference-data.md`](reference-data.md), "The analytic gradient", which keeps
+the two SC walls. Nothing is wrong with that — it is
+the price of a self-contained source term, and the one thing a GPU dump would
+replace ([`reference-data.md`](reference-data.md), "The analytic gradient").
+The numerical side is far cheaper and does both schemes in one pass: 494 s for
+acrolein's 96 displaced states and 35.9 s for N2's 36, SC and PC together.
+
+### The PC CI source term's step is a first-order trap
+
+**The one place this pipeline can silently differentiate the wrong function**,
+and the reason `--pc` carries its own step constant (`CI_STEP_PC`, 1e-7,
+against `CI_STEP`'s 1e-4 for SC).
+
+PC-NEVPT2 solves one linear system per external tuple in a **linearly
+dependent** internally contracted basis: part of each block's spectrum is
+null, and `numpy.linalg.lstsq(rcond=None)` drops it. Those modes are null
+**structurally** — dependencies among the class's active-space operator
+strings, for any state of the reference's symmetry
+([`gradients.md`](gradients.md), §7). But `y_I = dE_corr/dc_I` is wanted *per
+determinant*, so the quotient displaces the CI vector along a bare
+determinant axis, and a bare determinant is spatially allowed (the sweep masks
+to the state's own irrep) and still **not a spin eigenfunction**. The
+displaced vector therefore has components the reference's symmetry forbids,
+the forbidden modes stop being null, and once a lifted mode clears the cut it
+is **kept and divided by** — a term of order `h/h` in the quotient. That is a
+*first-order* error: no step ladder converges it away, every residual in the
+Z-vector solve still reads round-off, and the gradient is simply wrong. It is
+§7's condition on the PC tangent's *direction*, met here in the offline source
+term; §7's own cure (build the direction from spin-free generators) is not
+available to a per-determinant derivative, so the cure here is the step, plus
+the guard below.
+
+Measured on the committed N2 CAS(4,4) case — `nevpt2_grad.py --case
+n2_ccpvdz_cas44 --pc --grad-num … --ci-step h`, against one fixed
+`grad_num_pc`:
+
+| `--ci-step` h | 1e-3 | 1e-4 | 1e-5 | 1e-6 | 3e-7 | **1e-7** | 1e-8 |
+|---|---|---|---|---|---|---|---|
+| max \|g − grad_num\| | 2.5e-4 | 2.5e-4 | refused | refused | refused | **1.5e-8** | 1.6e-8 |
+| the run | FAIL | FAIL | guard, gap 3.6e2 | guard, gap 1.2 | guard, gap 1.9 | PASS | PASS |
+
+**Read the plateau.** 2.481e-4 at 1e-3 and 2.488e-4 at 1e-4 — a factor of ten
+in the step and three digits of the error unchanged, which is what a
+first-order error looks like and what no amount of ladder-walking would have
+fixed. Three decades below the SC step the same comparison lands at 1.5e-8.
+
+The three middle rungs are the guard: `_check_pc_conditioning`, the function
+that decides whether a golden may carry PC fields at all
+([`reference-data.md`](reference-data.md), "PC fields"), is run at **every
+displaced CI vector**, and there it sees the lifted mode sitting astride the
+cut (largest dropped 3.8e-16 against smallest kept 1.4e-13 at 1e-5, and
+1.2e-14 against 1.5e-14 at 1e-6) and refuses, naming the step. **The guard is
+necessary and not sufficient:** at 1e-4 and above the lifted modes clear the
+cut outright, the gap looks healthy, and only the comparison shows the error.
+So `CI_STEP_PC` is a measured constant and not "whatever the guard accepts" —
+1e-7 is where the quotient has converged, and 1e-8 buys nothing (1.6e-8).
+
+**SC's ladder is the ordinary one**, which is the contrast: 5.3e-5 at 1e-3
+(a FAIL, on plain truncation), 2.5e-7 at 1e-4, 7.7e-7 at 1e-5 — truncation
+falling as `h^2`, round-off rising as `1/h`, a minimum at the shipped
+`CI_STEP` of 1e-4, and no refusal at any rung. A smooth rational function of
+the CI vector behaves that way; the PC plateau above does not, and that
+difference is the whole reason for a second constant.
+
+The orbital (`kappa`) sweep is **not** gated, and does not need to be: the
+rank that can move is the metric's, the metric is built from the active-space
+RDMs, and the RDMs are a function of the CI vector alone — an orbital rotation
+at fixed CI cannot move it. Gating it anyway would cost an SVD per PC block
+per rotation, 2846 rotations deep at acrolein, for a hazard that is not there.
+
+### The deliberately symmetric case, and the SC finding that did not appear
+
+Park's result for SC-NEVPT2 is that its analytic gradients **disagree** with
+numerical ones when inactive orbitals are degenerate, and that this is the
+correct behaviour of a functional that is not invariant to rotations inside
+the inactive space, not a bug. **The premise is not in doubt and is not new
+here** — this tree already measured the non-invariance, for the energy and
+before any gradient work: `Srs` is summed over *pairs* of virtuals and moves
+by up to 3.0e-6 Eh as a degenerate pair is rotated, which is
+[`reference-data.md`](reference-data.md), "Point-group symmetry", and the
+whole reason every state is built in its detected group.
+
+N2/cc-pVDZ CAS(4,4) is this tree's deliberately symmetric case, chosen to
+provoke the gradient consequence: D2h, and **six exactly degenerate inactive
+pairs** — the orbital-energy gaps the run prints are 1.6e-15, 2.2e-16, 0.0,
+6.7e-16, 2.2e-15 and 0.0 Eh.
+
+**It did not appear.** SC agrees to 2.5e-7 and PC to 1.5e-8, both inside the
+gate. The reason is visible in the same line of output: every one of those six
+pairs has an (O2) source term of **exactly 0.0e+00**, so its undetermined
+pseudocanonical multiplier is a genuine `0/0` for which zero is the right
+representative, and the gradient does not depend on the choice
+([`gradient-theory.md`](gradient-theory.md), §2.3). Two guard rails put it
+there, and both are properties of this tree rather than of the physics:
+
+- **every state is built in its detected point group**
+  ([`reference-data.md`](reference-data.md), "Point-group symmetry":
+  `_build_mol`, never a hard-coded group, and the linear groups mapped to an
+  abelian subgroup, Dooh → D2h). An abelian subgroup splits each degenerate
+  set across two of its irreps, so N2's degenerate partners land in
+  *different* irreps: θ is **pinned by symmetry** rather than by the
+  diagonaliser's arbitrary choice — which is the point that section makes
+  about the energy, carried into the gradient. The energy's derivative along a
+  rotation that mixes two irreps then vanishes identically, and that is what
+  the 0.0e+00 above is.
+- **the remaining case is refused, not computed.** Two inactive orbitals
+  degenerate *within* one irrep is where symmetry cannot pin θ — an abelian
+  subgroup does not split every degenerate set (Td's E becomes A + A in D2) —
+  and `generate_golden._check_degeneracy` refuses such a state outright when
+  the golden is generated, so no committed case can hold one
+  ([`reference-data.md`](reference-data.md), "The degeneracy refusal", which
+  has the threshold and the CH4 case it rejects).
+
+So what is recorded here is a **negative result**: the SC-degeneracy
+disagreement is not reproducible anywhere in this tree. Not because the
+non-invariance is absent — it is measured, above — but because a gradient
+taken at a **fixed** convention never sees it: symmetry picks θ and holds it
+at the reference geometry and at every displaced one, so the energy is a
+smooth function of the coordinate and its analytic and numerical derivatives
+agree. The disagreement needs θ to be chosen by noise, which is exactly what
+the two guard rails above prevent, and no committed
+gradient case has an inactive degeneracy that a symmetry-preserving
+displacement could lift: LiF and N2 are diatomics — linear under *every*
+displacement, so their π degeneracies can never be broken — and acrolein is
+`Cs`, every irrep of which is one-dimensional, so it carries no
+symmetry-required degeneracy to break.
+
+**What N2's 2.5e-7 does and does not establish.** It is the largest SC
+disagreement of the three cases, and it is *not* evidence of a degeneracy
+effect. Its size is the frozen-path quotient's own floor here: the skeleton
+bar above it is 8.3e-6, the CI-step ladder's minimum sits exactly there
+(5.3e-5 at 1e-3, 2.5e-7 at 1e-4, 7.7e-7 at 1e-5), and the PC run on the
+*same* state, the same six degenerate pairs and the same constraint set lands
+at 1.5e-8 with a skeleton bar five times smaller. What the case does
+establish is that the machinery handles *exact, symmetry-pinned* inactive
+degeneracy correctly, six undetermined (O2) multipliers included — it has to
+recognise each as a `0/0` and leave it at zero rather than divide through.
+
+**It is not the test benzene is**, and that should be said rather than left
+implied. Park's disagreement needs θ to be **unpinned** — degenerate partners
+that the working abelian subgroup does not separate, or no symmetry at all —
+so that the diagonaliser chooses θ, and chooses differently at each displaced
+geometry. N2's partners are separated by construction, so its degeneracy is
+exact but benign. N2 is the most severe symmetric case this tree can build; it
+is **not** a stand-in for the unpinned-θ regime, and nothing measured here is
+evidence about that regime either way.
+
+Benzene, Park's documented SC failure case, is not in this tree and was
+**not** added for this: it would need its own golden, its own sidecar and its
+own PC conditioning, for one negative data point.
+This is in the tradition of [`performance.md`](performance.md), "What did not
+help" — the measurement was made, the expected effect was absent, and the
+absence is the result.
+
+### LiF has no PC gradient, and that is the answer
+
+`--pc` on LiF stops before any gradient code runs:
+
+```
+$ uv run python reference_data/nevpt2_numgrad.py --case lif_def2svp_cas46 --pc
+PC block iabcpqg*: lstsq's cut has only a 1.7e+00 gap (largest dropped
+singular value 3.5e-14, smallest kept 4.9e-14, relative; need 1000): the
+spectrum is a continuum through the cut, so PC-NEVPT2 is not well-defined on
+this state ... Pass --no-pc, or pick an active space that keeps
+near-doubly-occupied orbitals in the core.
+$ echo $?
+1
+```
+
+That is the same `_check_pc_conditioning` refusal the LiF golden's own
+generation gets, and the reason that golden carries SC fields only
+([`reference-data.md`](reference-data.md), "LiF and acrolein, the
+gradient-validation pair"): four of its six active orbitals are essentially
+empty, which flattens the PC metric. **There is no PC reference for LiF, so
+there can be no PC gradient check on it** — the second PC molecule is N2
+CAS(4,4) instead, and weakening the guard to manufacture one would make the
+"reference" an implementation's choice of pseudo-inverse cut rather than a
+number.
+
+### Why there is no ctest entry for it
+
+Three reasons, each sufficient on its own:
+
+- **it would put PySCF and block2 in the test path.** `reference_data/` is
+  offline by design — "offline Python generates the reference, the C++ GPU
+  demo reproduces it" — and nothing in the build or the test tier runs any of
+  it. A ctest entry that shells out to `nevpt2_grad.py` inverts that and makes
+  the Python environment part of the product.
+- **it needs no card, and the golden tier is 100% `gpu`.** This comparison is
+  between two offline gradients; no `src/` or `apps/` binary participates
+  (there is no dump path yet — [`gradients.md`](gradients.md), §1).
+- **the walls are minutes to hours.** Acrolein's PC pair is 6.3 h end to
+  end. Even labelled `slow` that is not an entry anyone would run, and
+  `ctest --preset fast` would become unusable if it were not.
+
+So this is a **manual gate**, like the sanitizer tier and the cross-backend
+check: the commands are above, they print `PASS:`/`FAIL:` and set an exit
+status, and the protocol is the same one "No CI, and the local gate" states —
+run them and say what they printed.
+
 ## Sanitizers
 
 Some bugs show up only some of the time — a call left on the legacy stream

@@ -1,0 +1,4 @@
+2
+dinitrogen at 1.1 A, exactly generate_golden.py's default --atom "N 0 0 0; N 0 0 1.1" (every committed n2_* golden), on the z axis so PySCF detects Dooh (mapped to D2h by LINEAR_SUBGROUP)
+N      0.0000     0.0000     0.0000
+N      0.0000     0.0000     1.1000
