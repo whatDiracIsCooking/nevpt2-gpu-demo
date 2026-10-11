@@ -194,6 +194,18 @@ int main(int argc, char** argv) {
       nevpt2::buildRdmsDevice(opt.rdm, g.get("ci"), norb, g.nelecA, g.nelecB, h2eHost, *res);
   double rdmSeconds = rdm.seconds;
 
+  // --rdm-tangent: the tangent of that build, on the same DF-rebuilt active
+  // h2e, checked against twice the build (Euler; see the integral-direct
+  // demo and docs/performance.md, "Tile floors").
+  if (opt.rdmTangent) {
+    if (const nevpt2::Status st = nevpt2::checkRdmTangentsDevice(
+            opt.rdm, rdm, g.get("ci"), norb, g.nelecA, g.nelecB, h2eHost, *res);
+        !st) {
+      nevpt2::report(st.error());
+      return 1;
+    }
+  }
+
   // Every device tensor from here on (and the RDM build's results) is owning,
   // and is freed on res's stream when main returns.
   nevpt2::ActiveIntegralsDevice active;

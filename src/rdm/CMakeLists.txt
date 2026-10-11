@@ -43,10 +43,13 @@ add_cxx_module_library(
 # change it). The --cublas digest lives in ../cublas and is linked privately:
 # real on CUDA, refusing stubs on HIP. wwr::blas (cuBLAS / hipBLAS) is the
 # backend-neutral consume GEMM (the default; --consume-emitted for the A/B).
+# rdm_build_tangent.cppm is the :tangent partition: the same pipeline run with
+# one copy of the CI vector replaced by a direction (buildRdmTangentsDevice,
+# and the --rdm-tangent self-check), which needs no kernel of its own.
 add_cxx_module_library(
   NAME nevpt2.rdm_build
   PRIMARY_INTERFACE rdm_build.cppm
-  PARTITIONS rdm_build_staging.cppm rdm_build_blas.cppm
+  PARTITIONS rdm_build_staging.cppm rdm_build_blas.cppm rdm_build_tangent.cppm
   IMPLEMENTATION rdm_build.cpp
   # device_tensor (re-exports nevpt2.tensor and nevpt2.device_resources): the result
   # is DeviceTensors.

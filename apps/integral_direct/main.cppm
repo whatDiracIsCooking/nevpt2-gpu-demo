@@ -138,6 +138,20 @@ int main(int argc, char** argv) {
                                                        g.nelecB, g.get("h2e"), *res);
   double rdmSeconds = rdm.seconds;
 
+  // --rdm-tangent: the tangent of that build (buildRdmTangentsDevice), run
+  // along the state itself and checked against twice the build -- Euler's
+  // identity for a form quadratic in the CI vector. Diagnostic, and what the
+  // tangent build's tile floors were measured with (docs/performance.md,
+  // "Tile floors"); a drift past 1e-7 is reported here and exits nonzero.
+  if (opt.rdmTangent) {
+    if (const nevpt2::Status st = nevpt2::checkRdmTangentsDevice(
+            opt.rdm, rdm, g.get("ci"), norb, g.nelecA, g.nelecB, g.get("h2e"), *res);
+        !st) {
+      nevpt2::report(st.error());
+      return 1;
+    }
+  }
+
   // --- assemble the eight class energies, GPU-resident end to end: the RDM
   // build's own output DeviceTensors go straight in (no host round trip for
   // dm3/f3ac/f3ca at all), the golden MO integrals are uploaded once, and

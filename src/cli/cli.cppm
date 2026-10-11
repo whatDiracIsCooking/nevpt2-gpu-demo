@@ -23,6 +23,14 @@ struct CommonOptions {
   RdmBuildOptions rdm;
   bool profile = false;
   bool pc = false;
+  // --rdm-tangent: after the RDM build, run the TANGENT build
+  // (buildRdmTangentsDevice) along the state itself and check it against twice
+  // the build -- Euler's identity for a form that is quadratic in the CI
+  // vector (checkRdmTangentsDevice). It holds about twice the per-tile
+  // intermediates, so it has tile floors of its own, and it is what they were
+  // measured with (docs/performance.md, "Tile floors"). finalize() refuses it
+  // with the digests it has no tangent path for.
+  bool rdmTangent = false;
   std::uint64_t poolThreshold = kDefaultPoolReleaseThreshold;
   // --mantissa-bits was given: finalize() refuses it without --cublas, the
   // only digest that reads it (rdm.mantissaBits alone cannot tell an
@@ -53,10 +61,11 @@ Result<bool> parseCommonFlag(std::span<const std::string_view> args, std::size_t
 
 // The checks that span flags, once every argument is in: --golden given,
 // --tiles >= 1, --ozaki-pairs in 0..14, --mantissa-bits in 1..53 and only
-// with --cublas, --cublas only where the emulated digest is built, and at most
-// one of --cublas / --blas-digest / --ozaki. Also makes --ozaki take
-// precedence over blasDigest's HIP default. `goldenHint` names the file in
-// the missing-golden message ("path.nevpt2gold").
+// with --cublas, --cublas only where the emulated digest is built, at most
+// one of --cublas / --blas-digest / --ozaki, and --rdm-tangent only with a
+// digest the tangent build has (the emitted one or --blas-digest). Also makes
+// --ozaki take precedence over blasDigest's HIP default. `goldenHint` names
+// the file in the missing-golden message ("path.nevpt2gold").
 Status finalize(CommonOptions& opt, std::string_view goldenHint);
 
 // The usage line: the program, its golden file, `extraFlags` (the app's own,

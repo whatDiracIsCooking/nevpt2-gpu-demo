@@ -46,3 +46,29 @@ add_gtest_suite_tests(
   SUITES Dm3HermiticityTests Dm3PairSymmetryTests Dm3PartialTraceTests
     Dm3TilingInvarianceTests
   REQUIRES_GPU)
+
+# The TANGENT build (nevpt2.rdm_build's :tangent partition,
+# src/rdm/rdm_build_tangent.cppm): buildRdmTangentsDevice against a central
+# finite difference of buildRdmsDevice itself, on a seeded random state and a
+# seeded random direction at CAS(4,4) and CAS(8,8) -- along the straight line
+# (exact, the forms are quadratic) and Richardson-verified along the
+# normalized path. Logic, not energies: no golden file is read and the h2e is
+# seeded random.
+#
+# Its own binary, like rdm_dm3_tests: it imports nevpt2.rdm_build, which links
+# every RDM device library itself. REQUIRES_GPU -- every case builds on the
+# card.
+add_gtest_executable(
+  NAME rdm_tangent_tests
+  SOURCES rdm_tangent_tests.cpp
+  LINK nevpt2::rdm_build nevpt2::link_tables nevpt2::test::shared_resources)
+
+# The CAS(8,8) entries build 9 times each (the tangent plus 4 central
+# differences), so the Richardson suite is the heaviest here: ~1 s in the
+# Release build and well inside 120 s x the sanitizer multiplier in a Debug
+# one under compute-sanitizer.
+add_gtest_suite_tests(
+  TARGET rdm_tangent_tests
+  SUITES RdmTangentDifferenceTests RdmTangentRichardsonTests RdmTangentEulerTests
+    RdmTangentPathTests
+  REQUIRES_GPU)

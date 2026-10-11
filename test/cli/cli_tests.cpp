@@ -71,6 +71,7 @@ TEST(CliFlagTests, DefaultsAreRdmBuildOptionsDefaults) {
   EXPECT_EQ(r->rdm.blasDigest, defaults.blasDigest);
   EXPECT_FALSE(r->pc);
   EXPECT_FALSE(r->profile);
+  EXPECT_FALSE(r->rdmTangent);
   EXPECT_FALSE(r->mantissaBitsGiven);
   EXPECT_EQ(r->poolThreshold, kDefaultPoolReleaseThreshold);
 }
@@ -79,7 +80,7 @@ TEST(CliFlagTests, EveryCommonFlagSetsItsField) {
   const Result<CommonOptions> r = parseAll(
       {"--golden", "g.nevpt2gold", "--tiles", "40", "--pc", "--profile", "--consume-emitted",
        "--blas-digest", "--ozaki", "--ozaki-pairs", "5", "--ozaki-check", "--mantissa-bits",
-       "40", "--pool-threshold", "1024", "--fused-digest"});
+       "40", "--pool-threshold", "1024", "--fused-digest", "--rdm-tangent"});
   ASSERT_TRUE(r.has_value()) << r.error().message;
   EXPECT_EQ(r->goldenPath, "g.nevpt2gold");
   EXPECT_EQ(r->rdm.nTiles, 40);
@@ -91,6 +92,7 @@ TEST(CliFlagTests, EveryCommonFlagSetsItsField) {
   EXPECT_EQ(r->rdm.ozakiMaxPairSum, 5);
   EXPECT_TRUE(r->rdm.ozakiCheck);
   EXPECT_TRUE(r->rdm.fusedDigest);
+  EXPECT_TRUE(r->rdmTangent);
   EXPECT_EQ(r->rdm.mantissaBits, 40);
   EXPECT_TRUE(r->mantissaBitsGiven);
   EXPECT_EQ(r->poolThreshold, 1024u);
@@ -264,6 +266,40 @@ TEST(CliFinalizeTests, FusedDigestNeedsAGemmDigest) {
   opt.rdm.blasDigest = false;
   opt.rdm.ozaki = true;
   EXPECT_TRUE(finalize(opt, "path.nevpt2gold").has_value());
+}
+
+TEST(CliFinalizeTests, RdmTangentRefusesTheDigestsItHasNoTangentFor) {
+  // The tangent build runs the emitted digest or the native-fp64 BLAS one;
+  // --cublas, --ozaki and --fused-digest have no tangent path, so each is a
+  // config Error rather than a silently ignored flag.
+  constexpr std::string_view kMessage =
+      "--rdm-tangent runs the emitted digest or --blas-digest; not --cublas, --ozaki or "
+      "--fused-digest";
+  {
+    CommonOptions opt = withGolden();
+    opt.rdmTangent = true;
+    opt.rdm.ozaki = true;
+    const Status st = finalize(opt, "path.nevpt2gold");
+    ASSERT_FALSE(st.has_value());
+    EXPECT_EQ(st.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(st.error().message, kMessage);
+  }
+  {
+    CommonOptions opt = withGolden();
+    opt.rdmTangent = true;
+    opt.rdm.blasDigest = true;
+    opt.rdm.fusedDigest = true;
+    const Status st = finalize(opt, "path.nevpt2gold");
+    ASSERT_FALSE(st.has_value());
+    EXPECT_EQ(st.error().message, kMessage);
+  }
+  // Both digests it does have are accepted.
+  for (const bool blasDigest : {false, true}) {
+    CommonOptions opt = withGolden();
+    opt.rdmTangent = true;
+    opt.rdm.blasDigest = blasDigest;
+    EXPECT_TRUE(finalize(opt, "path.nevpt2gold").has_value());
+  }
 }
 
 // --- CliUsageTests ------------------------------------------------------------
