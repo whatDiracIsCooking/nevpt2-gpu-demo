@@ -53,6 +53,7 @@ set(CMAKE_CXX_EXTENSIONS ON)  # must match libc++'s std module, as in src/
 add_subdirectory(utils)
 
 add_subdirectory(error_handling)
+add_subdirectory(pc_tangent)
 add_subdirectory(link_tables)
 add_subdirectory(rdm_plan)
 add_subdirectory(rdm_host_dm)

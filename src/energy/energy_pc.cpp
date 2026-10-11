@@ -1,6 +1,9 @@
-// The PC-NEVPT2 class energies on the GPU -- see energy.cppm for the method
-// and docs/pc-nevpt2.md, "PC-NEVPT2 on the device: the design" for the
-// derivation and the measured cut/gap figures.
+// The PC-NEVPT2 class energies on the GPU, and their tangent with respect to
+// the CI vector (pcTangentsDevice, whose per-class work is the :pc_tangent
+// partition) -- see energy.cppm for the method, why differentiating the solve
+// rather than the eigendecomposition is legitimate, and
+// docs/pc-nevpt2.md, "PC-NEVPT2 on the device: the design" for the derivation
+// and the measured cut/gap figures.
 module;
 
 #include <cstdio>  // stdout: a macro, which `import std` does not carry
@@ -13,6 +16,7 @@ import std;
 import :shared;
 import :pc_solve;
 import :pc_classes;
+import :pc_tangent;
 import nevpt2.profile;
 // The wwrsolverStatus_t error specializations, which make gpuCheck accept a
 // solver status (the calling unit imports them; nevpt2.wwr does not re-export them).
@@ -56,6 +60,67 @@ Result<PcEnergyResult> pcEnergiesDevice(const NevptIntegralsDevice& ints, const 
                            ints.e_virt.view(),   ints.h1e_v_Sr.view(), ints.h1e_v_Si.view(),
                            ints.h1e_v_Sir.view()};
   return pcEnergiesDevice(ai, src, /*batch=*/0, dm1, dm2, dm3, f3ac, f3ca, res);
+}
+
+Result<PcTangentResult> pcTangentsDevice(const ActiveIntegralsDevice& ai, IntegralSource& src,
+                                         int64_t batch, const DeviceTensor& dm1,
+                                         const DeviceTensor& dm2, const DeviceTensor& dm3,
+                                         const DeviceTensor& f3ac, const DeviceTensor& f3ca,
+                                         const DeviceTensor& dm1Dot, const DeviceTensor& dm2Dot,
+                                         const DeviceTensor& dm3Dot, const DeviceTensor& f3acDot,
+                                         const DeviceTensor& f3caDot, const DeviceResources& dr) {
+  const wwrStream_t s = dr.stream();
+  // --profile: the tangent's einsums land in the energy table beside the
+  // energy stage's, as the SC and PC stages' do.
+  const profile::Section profileSection(profile::kEnergy);
+  Tensor ec = downloadTensor(ai.e_core, s);
+  Tensor ev = downloadTensor(ai.e_virt, s);
+
+  // The two bundles every class is built from: the RDMs themselves, and the
+  // RDMs plus their tangents. Each class's matrix tangent is then ONE
+  // subtraction of the two builds, which is exact because the matrices are
+  // affine in the RDMs (energy_pc_tangent.cppm, `tangentMatrices`). Five
+  // extra n^2..n^6 tensors, freed when this returns.
+  const DeviceTensor dm1Sum = sumTensors(dm1, dm1Dot, dr);
+  const DeviceTensor dm2Sum = sumTensors(dm2, dm2Dot, dr);
+  const DeviceTensor dm3Sum = sumTensors(dm3, dm3Dot, dr);
+  const DeviceTensor f3acSum = sumTensors(f3ac, f3acDot, dr);
+  const DeviceTensor f3caSum = sumTensors(f3ca, f3caDot, dr);
+  const PcRdms rdm{&dm1, &dm2, &dm3, &f3ac, &f3ca};
+  const PcRdms sum{&dm1Sum, &dm2Sum, &dm3Sum, &f3acSum, &f3caSum};
+
+  PcTangentResult r;
+  r.classes[0] = NEVPT2_TRY(pcDotSr(ai, src, batch, ev, rdm, sum, dr));
+  r.classes[1] = NEVPT2_TRY(pcDotSi(ai, src, batch, ec, rdm, sum, dr));
+  // Sijrs contracts no RDM (no active index at all), so its energy is the SC
+  // one -- the same function, not a copy -- and its tangent is EXACTLY zero,
+  // not a number too small to see.
+  r.classes[2].result.status = PcStatus::Done;
+  r.classes[2].result.energy = energy_Sijrs(ai, src, batch, dr).second;
+  r.classes[2].edot = 0.0;
+  r.classes[3] = NEVPT2_TRY(pcDotSijr(ai, src, batch, ec, ev, rdm, sum, dr));
+  r.classes[4] = NEVPT2_TRY(pcDotSrsi(ai, src, batch, ec, ev, rdm, sum, dr));
+  r.classes[5] = NEVPT2_TRY(pcDotSrs(ai, src, batch, ev, rdm, sum, dr));
+  r.classes[6] = NEVPT2_TRY(pcDotSij(ai, src, batch, ec, rdm, sum, dr));
+  r.classes[7] = NEVPT2_TRY(pcDotSir(ai, src, batch, ec, ev, rdm, sum, dr));
+  return r;
+}
+
+Result<PcTangentResult> pcTangentsDevice(const NevptIntegralsDevice& ints,
+                                         const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                         const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                         const DeviceTensor& f3ca, const DeviceTensor& dm1Dot,
+                                         const DeviceTensor& dm2Dot, const DeviceTensor& dm3Dot,
+                                         const DeviceTensor& f3acDot,
+                                         const DeviceTensor& f3caDot,
+                                         const DeviceResources& res) {
+  FullBlockSource src(ints);
+  // Views: `ints` keeps owning everything.
+  ActiveIntegralsDevice ai{ints.h1e.view(),      ints.h2e.view(),      ints.e_core.view(),
+                           ints.e_virt.view(),   ints.h1e_v_Sr.view(), ints.h1e_v_Si.view(),
+                           ints.h1e_v_Sir.view()};
+  return pcTangentsDevice(ai, src, /*batch=*/0, dm1, dm2, dm3, f3ac, f3ca, dm1Dot, dm2Dot,
+                          dm3Dot, f3acDot, f3caDot, res);
 }
 
 bool printPcReport(const PcEnergyResult& r, const Tensor& ref, double refTotal, double atol) {

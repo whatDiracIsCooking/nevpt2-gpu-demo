@@ -19,12 +19,13 @@
 # kernels, device library), linked by its `::` alias. Every directory here is
 # something both methods run -- the RDM build, the class energies, and the
 # layers under them -- except df_integrals, the density-fitted demo's alone,
-# and gradient, which only apps/sc_pseudodensity/ drives. The host binaries are in ../apps/, a sibling of src/ but
+# and gradient, which only apps/sc_pseudodensity/ and apps/pc_tangent/ drive. The host binaries are in ../apps/, a sibling of src/ but
 # built from here so the standalone `cmake -S src` path keeps them:
 #
 #   ../apps/integral_direct/  SC- and PC-NEVPT2 from the full MO-integral blocks (nevpt2_demo)
 #   ../apps/density_fit/      SC- and PC-NEVPT2 from three-index (L|pq) tensors (nevpt2_df_demo)
 #   ../apps/sc_pseudodensity/ the SC gradient's pseudodensity identities (nevpt2_sc_pseudodensity)
+#   ../apps/pc_tangent/       the PC CI-tangent check, Euler + finite difference (nevpt2_pc_tangent)
 #   ../apps/sanitizer_canary/ deliberately buggy runs for the sanitizer tier
 #
 # Dependency order:
@@ -76,10 +77,19 @@
 #                                back against their integrals. A LEAF:
 #                                nothing in src/ imports it and neither demo
 #                                links it                 (energy, einsum)
+#            nevpt2.pc_tangent   the finite-difference check of PC's CI
+#                                tangent: pcTangentsDevice at one state
+#                                against pcEnergiesDevice at the displaced
+#                                ones. A LEAF, and the one module that links
+#                                the RDM build and the energy stage both --
+#                                a displaced state needs its own RDMs
+#                       (energy, rdm_build, rdm_host_dm)
 #   ../apps/integral_direct      nevpt2_demo     main.cppm
 #   ../apps/density_fit          nevpt2_df_demo  main.cppm
 #   ../apps/sc_pseudodensity     nevpt2_sc_pseudodensity  the SC pseudodensity
 #                                identity checks (nevpt2.gradient's only caller)
+#   ../apps/pc_tangent           nevpt2_pc_tangent  the PC CI-tangent check
+#                                (nevpt2.pc_tangent's only caller)
 #   ../apps/sanitizer_canary     nevpt2_sanitizer_canary  deliberately buggy runs
 #                                for the sanitizer tier's canaries (+ device library)
 #
@@ -191,4 +201,5 @@ set(_nevpt2_apps "${CMAKE_CURRENT_SOURCE_DIR}/../apps")
 add_subdirectory(${_nevpt2_apps}/integral_direct  apps/integral_direct)
 add_subdirectory(${_nevpt2_apps}/density_fit      apps/density_fit)
 add_subdirectory(${_nevpt2_apps}/sc_pseudodensity apps/sc_pseudodensity)
+add_subdirectory(${_nevpt2_apps}/pc_tangent       apps/pc_tangent)
 add_subdirectory(${_nevpt2_apps}/sanitizer_canary apps/sanitizer_canary)

@@ -1,7 +1,7 @@
-# The SC-NEVPT2 gradient's first half: the amplitudes and multipliers, and the
-# pseudodensities assembled from them over the class energies' own slab walk.
-# A LEAF -- nothing else in src/ imports either module and neither demo links
-# them; apps/sc_pseudodensity/ is what drives it.
+# The gradient work: the SC half's amplitudes, multipliers and
+# pseudodensities, and the PC half's tangent check. ALL LEAVES -- nothing else
+# in src/ imports any of these modules and neither demo links them;
+# apps/sc_pseudodensity/ and apps/pc_tangent/ are what drive them.
 
 # nevpt2.sc_amplitudes -- the amplitude T, the multipliers P/Q/R (Park Eqs.
 # 12, 36-38) and the einsum-subscript rewriting that turns a class term into
@@ -47,4 +47,19 @@ add_cxx_module_library(
   PARTITIONS gradient_rotation.cppm gradient_terms.cppm gradient_sc_classes.cppm
   IMPLEMENTATION gradient.cpp
   LINK_PUBLIC nevpt2::energy nevpt2::sc_amplitudes
+)
+
+# nevpt2.pc_tangent -- the finite-difference check of PC-NEVPT2's CI-vector
+# tangent: it drives nevpt2.energy's pcTangentsDevice at one state and its
+# pcEnergiesDevice at the displaced states c +- h u. The only module in src/
+# that links the RDM build AND the energy stage, because that is what a
+# displaced state costs: nevpt2::rdm_host_dm rebuilds its dm1/dm2 on the host
+# (the golden file's arrays are only the state's own) and nevpt2::rdm_build
+# its dm3/f3ac/f3ca on the device. apps/pc_tangent/ is the only binary that
+# links it.
+add_cxx_module_library(
+  NAME nevpt2.pc_tangent
+  PRIMARY_INTERFACE pc_tangent.cppm
+  IMPLEMENTATION pc_tangent.cpp
+  LINK_PUBLIC nevpt2::energy nevpt2::rdm_build nevpt2::rdm_host_dm
 )
