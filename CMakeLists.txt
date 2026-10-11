@@ -412,6 +412,38 @@ if(NEVPT2_BUILD_TESTING)
     set_tests_properties(nevpt2_cas88_rdm_tangent PROPERTIES LABELS "gpu;small")
   endif()
 
+  # --- --sc-tangent, small -------------------------------------------------------
+  #
+  # The SC class energies' forward tangent with respect to the RDMs
+  # (nevpt2.energy's :sc_tangent partition, energiesTangentDevice), checked
+  # three ways by apps/integral_direct/tangent_check.cppm: the class norms'
+  # exact affine increment (every class), Euler's identity for the three
+  # classes whose blocks are purely linear in the RDMs, and a central finite
+  # difference of energiesDevice along a seeded CI direction, Richardson
+  # verified. THE ONLY FINITE DIFFERENCE IN THIS TIER, and a one-time one: it
+  # licenses the exact dot-product tests the adjoint will be held to
+  # (docs/testing.md, "The SC tangent's finite-difference cross-check", has
+  # the measured plateau and the h where round-off takes over). Its PASS line
+  # is its own, so neither entry can pass on the golden comparison's -- which
+  # --sc-tangent does not run.
+  #
+  # The sweep reruns the whole RDM build and energy stage at 28 displaced CI
+  # vectors, which is still seconds at these sizes (CAS(8,8): ~4 s on an RTX
+  # 3080). CAS(4,4) is `small` as well, so the tangent's own einsums run under
+  # the sanitizer tier; CAS(8,8) is not, to keep that tier's 28 extra builds
+  # down to the smallest case.
+  set(_nevpt2_sc_tangent_pass "PASS: the SC tangent matches Euler")
+  add_golden_test(nevpt2_cas44_sc_tangent "${_gold_44}" --tiles 3 --sc-tangent)
+  add_golden_test(nevpt2_cas88_sc_tangent "${_gold_88}" --tiles 3 --sc-tangent)
+  if(TEST nevpt2_cas44_sc_tangent)
+    set_tests_properties(nevpt2_cas44_sc_tangent PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_sc_tangent_pass}" LABELS "gpu;small")
+  endif()
+  if(TEST nevpt2_cas88_sc_tangent)
+    set_tests_properties(nevpt2_cas88_sc_tangent PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_sc_tangent_pass}" LABELS "gpu")
+  endif()
+
   # --- *_pc, small ----------------------------------------------------
   #
   # --pc at CAS(4,4)/CAS(8,8), both demos, labelled `small` so the sanitizer

@@ -1,12 +1,16 @@
 # nevpt2.energy_finish -- the class energies' pure host arithmetic: the slab
-# walk (forBatches), the SC finish (normToEnergy), the PC finish and
-# denominator check (finishSingle, checkDenominator) and the PC result types
-# they fill. No GPU, so the unit tier tests it card-free
-# (test/energy_finish/); nevpt2.energy re-exports it.
+# walk (forBatches), the SC finish (normToEnergy) and its derivative
+# (normToEnergyDerivative, normToEnergyTangent -- the forward tangent's only
+# calculus), the PC finish and denominator check (finishSingle,
+# checkDenominator) and the PC result types they fill. No GPU, so the unit
+# tier tests it card-free (test/energy_finish/); nevpt2.energy re-exports it.
 add_cxx_module_library(
   NAME nevpt2.energy_finish
   PRIMARY_INTERFACE energy_finish.cppm
   LINK_PUBLIC nevpt2::tensor
+  # error_handling: check(), which normToEnergyTangent (inline, in the
+  # interface) calls on its five vector lengths -- the abort tier.
+  LINK_PRIVATE nevpt2::error_handling
 )
 
 # nevpt2.energy -- the eight NEVPT2 class energies on the GPU, strongly
@@ -21,12 +25,16 @@ add_cxx_module_library(
 # wwr.extension.solver supplies the wwrsolverStatus_t error specializations
 # gpuCheck needs. energy_shared.cppm is the internal partition
 # nevpt2.energy:shared -- the Sijrs class both units use, which no importer
-# sees. (The metric / Dyall-Hamiltonian intermediates ARE exported, from
+# sees. energy_sc_tangent.cppm is nevpt2.energy:sc_tangent, the SC classes'
+# forward tangent with respect to the RDMs (energiesTangentDevice): it reruns
+# :sc_classes' own per-slab chains with the tangent RDMs substituted, so it
+# needs no kernel and no subscript of its own. (The metric / Dyall-Hamiltonian intermediates ARE exported, from
 # energy.cppm: nevpt2.gradient differentiates the same class einsums.)
 add_cxx_module_library(
   NAME nevpt2.energy
   PRIMARY_INTERFACE energy.cppm
   PARTITIONS energy_shared.cppm energy_sc_finish.cppm energy_sc_classes.cppm
+             energy_sc_tangent.cppm
              energy_pc_solve.cppm energy_pc_classes.cppm
   IMPLEMENTATION energy.cpp energy_pc.cpp
   LINK_PUBLIC nevpt2::einsum nevpt2::energy_finish

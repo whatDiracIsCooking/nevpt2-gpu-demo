@@ -1,7 +1,9 @@
 // nevpt2.energy_finish -- the class energies' pure host arithmetic: the slab
 // walk every class runs (forBatches), the strongly-contracted finish
-// (normToEnergy, PySCF's _norm_to_energy) and the partially-contracted one
-// (finishSingle, checkDenominator), with the PC result types they fill. No
+// (normToEnergy, PySCF's _norm_to_energy) and ITS DERIVATIVE
+// (normToEnergyDerivative, normToEnergyTangent -- the only calculus the
+// forward tangent of an SC class energy needs) and the partially-contracted
+// finish (finishSingle, checkDenominator), with the PC result types they fill. No
 // device, no BLAS, no solver: nevpt2.energy re-exports this module, and its
 // partitions (:sc_finish, :pc_solve, the class files) do the device work and
 // call these. Exported so the unit tier can check them (test/energy_finish/).
@@ -13,6 +15,7 @@ import std;
 // Re-exported: finishSingle reads a host Tensor, and every extent here is an
 // int64_t (nevpt2.tensor re-exports nevpt2.common).
 export import nevpt2.tensor;
+import nevpt2.error_handling;  // check(): normToEnergyTangent's five lengths
 
 export namespace nevpt2 {
 
@@ -46,6 +49,69 @@ std::pair<double, double> normToEnergy(const std::vector<double>& norm,
     if (std::fabs(norm[k]) > NUMERICAL_ZERO) {
       enerT -= norm[k] / (diff[k] + h[k] / norm[k]);
     }
+  }
+  return {normT, enerT};
+}
+
+// --- SC: the finish's derivative -----------------------------------------------
+//
+// The CLASS CONTRACTIONS ARE LINEAR IN THE RDMs at fixed integrals, so the
+// tangent of every N_k and H_k is the same einsum chain run with the tangent
+// RDMs substituted (nevpt2.energy's energiesTangentDevice, whose
+// :sc_tangent partition does exactly that). The only part of the forward
+// derivative that is actual calculus is the scalar finish above, and it is
+// here: no device, no tensor, one perturber at a time.
+
+// The derivative of normToEnergy's per-perturber energy with respect to its
+// two RDM-dependent inputs: {dE_k/dN_k, dE_k/dH_k}. Delta_k is NOT one of
+// them -- it is a sum of orbital energies, fixed as the RDMs move.
+//
+// With the amplitude T_k = -1 / (Delta_k + H_k / N_k), so that E_k = T_k N_k,
+// eliminating H_k / N_k = -1/T_k - Delta_k gives
+//
+//   dE/dN = 2 T + Delta T^2,      dE/dH = T^2
+//
+// -- Park, JCTC 2019 (arXiv:1907.10180), Eqs. 36-37 (his P_k and Q_k).
+// nevpt2.sc_amplitudes' scMultipliers reads the same two numbers out of the
+// same division for the ADJOINT; they are defined here because the forward
+// tangent's finish needs them and nevpt2.energy cannot depend on the gradient
+// module. The identity that ties the two sides together, Park Eq. 40, is
+// P_k N_k + Q_k H_k = E_k (the finish is homogeneous of degree 1 in (N, H)).
+//
+// A norm at or below NUMERICAL_ZERO is normToEnergy's empty perturber space:
+// it contributes no energy, so it has no derivative either.
+std::pair<double, double> normToEnergyDerivative(double norm, double h, double diff) {
+  if (!(std::fabs(norm) > NUMERICAL_ZERO)) return {0.0, 0.0};
+  const double t = -1.0 / (diff + h / norm);
+  return {2.0 * t + diff * t * t, t * t};
+}
+
+// The tangent of normToEnergy: one class's perturber vectors and their
+// tangents in, the derivatives of normToEnergy's own pair out --
+//
+//   normT_dot = sum_k Ndot_k           (the plain sum, every perturber)
+//   enerT_dot = sum_k (P_k Ndot_k + Q_k Hdot_k)
+//
+// over the perturbers normToEnergy's guard keeps. All five vectors are one
+// class's, same length and same order; a mismatch is the caller's broken
+// invariant (every caller builds them side by side), so it aborts.
+std::pair<double, double> normToEnergyTangent(
+    const std::vector<double>& norm, const std::vector<double>& h,
+    const std::vector<double>& diff, const std::vector<double>& normDot,
+    const std::vector<double>& hDot,
+    std::source_location loc = std::source_location::current()) {
+  const std::size_t k = norm.size();
+  if (h.size() != k || diff.size() != k || normDot.size() != k || hDot.size() != k)
+    check(false,
+          std::format("normToEnergyTangent: norm/h/diff/normDot/hDot lengths differ ({}, {}, "
+                      "{}, {}, {})",
+                      k, h.size(), diff.size(), normDot.size(), hDot.size()),
+          loc);
+  double normT = 0.0, enerT = 0.0;
+  for (std::size_t i = 0; i < k; ++i) {
+    normT += normDot[i];
+    const auto [p, q] = normToEnergyDerivative(norm[i], h[i], diff[i]);
+    enerT += p * normDot[i] + q * hDot[i];
   }
   return {normT, enerT};
 }
