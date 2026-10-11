@@ -44,13 +44,22 @@ def read_golden(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
 
     magic = buf[:8]
     off = 8
-    if magic != b"NEVPT2G1":
+    # The magics are spelled out rather than imported from generate_golden,
+    # which would force its single-threading on this timing script. b"NEVPT2G2"
+    # ends its scalar header with the reference_kind field; the pre-kind
+    # b"NEVPT2G1" (every committed golden) has none and means "casci".
+    if magic not in (b"NEVPT2G2", b"NEVPT2G1"):
         raise ValueError(f"bad magic {magic!r}")
     ncas, nelec_a, nelec_b, ncore, ndet = take("<iiiiq")
     e_casci, e_nevpt2_total = take("<dd")
+    reference_kind = "casci"
+    if magic == b"NEVPT2G2":
+        (code,) = take("<i")
+        reference_kind = {0: "casci", 1: "casscf"}[code]
     (n_arrays,) = take("<i")
     meta = dict(ncas=ncas, nelec_a=nelec_a, nelec_b=nelec_b, ncore=ncore,
-                ndet=ndet, e_casci=e_casci, e_nevpt2_total=e_nevpt2_total)
+                ndet=ndet, e_casci=e_casci, e_nevpt2_total=e_nevpt2_total,
+                reference_kind=reference_kind)
     arrays: dict[str, np.ndarray] = {}
     for _ in range(n_arrays):
         (name_len,) = take("<i")

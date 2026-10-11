@@ -143,10 +143,14 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // `reference=`: which reference built the orbitals, as the golden's header
+  // records it (docs/reference-data.md, "The file format"). Every committed
+  // golden says CASCI.
   std::print(
       "=== SC-NEVPT2, density-fitted ({}/C++): CAS({},{})  ncore={}  n_det={}  "
-      "naux={} ===\n",
-      nevpt2::kGpuBackendName, norb, g.nelecA + g.nelecB, g.ncore, ndet, g.get("B_aa").dim(0));
+      "naux={}  reference={} ===\n",
+      nevpt2::kGpuBackendName, norb, g.nelecA + g.nelecB, g.ncore, ndet, g.get("B_aa").dim(0),
+      nevpt2::referenceKindName(g.reference));
   std::printf("golden reference (PySCF DF-NEVPT2): %s\n", opt.goldenPath.c_str());
   std::printf("golden E_CASCI=%.10f  golden E_corr=%.10f\n", g.eCasci, g.eNevpt2Total);
 

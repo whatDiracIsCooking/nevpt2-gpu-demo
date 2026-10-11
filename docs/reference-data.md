@@ -229,6 +229,22 @@ byte-identical, CAS(12,12) included (generated twice in separate processes,
 ~8 min each, single-threaded). A regenerated file that differs from the
 committed one means something changed.
 
+**One exception, and it is in the header only.** The committed files are
+written in the pre-kind `NEVPT2G1` layout; the generator now writes
+`NEVPT2G2`, which differs by the magic's last byte and the four-byte
+`reference_kind` field at the end of the scalar header ("The file format"
+below). So a regenerated golden is 4 bytes longer than its committed twin,
+and the comparison skips the two headers:
+
+```bash
+cmp -i 48:52 golden/n2_ccpvdz_cas44.nevpt2gold /tmp/n2_ccpvdz_cas44.nevpt2gold
+```
+
+(48 bytes of `G1` header, 52 of `G2`). Everything after it — the array count
+and every array — must still be byte-identical, and that is what the check
+means. Nothing in the tree needs the committed files rewritten: `loadGolden`
+and every reader in `reference_data/` accept both magics.
+
 ### Reproducibility
 
 Two settings that PySCF does not default to make this work, and neither may
@@ -400,6 +416,27 @@ named N-d `f64` arrays. It is not `.npz`, because parsing a zip container
 and `.npy` headers in C++ would need a dependency or a hand-written zip
 reader for no benefit. `write_golden`'s docstring in `generate_golden.py`
 has the exact layout, and `src/golden/golden.cppm`/`.cpp` is the reader.
+
+**`reference_kind`: which reference built the orbitals.** The scalar header
+ends with an `int32` saying what the state is — `0` CASCI, `1` CASSCF
+(`generate_golden.REFERENCE_KINDS`, `ReferenceKind` in
+`src/golden/golden.cppm`). Provenance belongs in the file rather than in a
+file *name*, because a consumer has to be able to refuse what it does not
+support: every derivative in this tree is derived for the CASCI-on-RHF
+Lagrangian, so `nevpt2_demo`'s `--sc-tangent` and `--gradient-source`
+(`GoldenFile::requireCasciReference`, an `err_unsupported`) and
+`reference_data/nevpt2_numgrad.py` (`_check_reference_kind`) all refuse a
+`casscf` golden — see [`gradient-theory.md`](gradient-theory.md), §1.1 and
+§5. Both demos print the kind in their header line.
+
+**Two magics, because the field is newer than the files.** `NEVPT2G2` is the
+layout with the field; `NEVPT2G1` is the layout from before it, which every
+**committed** golden is written in and which means CASCI — the only thing it
+could mean, since a golden has always been a CASCI on RHF orbitals. The
+reader accepts both and loads a `G1` file as CASCI, so adding the field
+rewrote no committed file. An unknown kind code is an IO Error, like a bad
+magic: a file this reader cannot interpret, as distinct from a reference it
+can read and will not differentiate.
 
 ### The gradient sidecar
 
