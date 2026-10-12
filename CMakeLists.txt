@@ -328,7 +328,9 @@ if(NEVPT2_BUILD_TESTING)
   # that have one can run this). Five checks, and the gate is their conjunction:
   # the duality on four seeded full directions (1e-7, exact arithmetic), the
   # sidecar's promotion table against the arrays it reads (1e-10), the active
-  # block unchanged bit for bit when kappa is active-restricted, two
+  # block unchanged bit for bit when kappa is active-restricted (to the
+  # kernels' same-run spread, which must itself stay inside the envelope
+  # docs/testing.md records, "The kernels' same-run self-variation"), two
   # finite differences -- a core-internal and a virtual-internal rotation,
   # which are the only ones the stored blocks can displace -- and Park
   # Eqs. 56-57's pseudocanonical multipliers coming out determined. Its PASS

@@ -12,6 +12,34 @@ target_compile_options(nevpt2_sc_pseudodensity PRIVATE -Wall)
 # Into src/'s binary dir, beside the two demos.
 set_target_properties(nevpt2_sc_pseudodensity
                       PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${NEVPT2_SRC_BINARY_DIR}")
+# The kernels' same-run self-variation envelope (#64). --kappa-full's check 3
+# holds scActiveRotationDevice, run twice on one input, to it, so a kernel
+# change that makes the atomicAdd nondeterminism materially worse FAILS rather
+# than silently widening the tolerance check 3 derives from that same spread.
+# The envelope is chosen from a measurement, so its ONE home is
+# docs/testing.md ("The kernels' same-run self-variation") -- read from that
+# table row here, at configure time, rather than restated in this file or in
+# the source. Editing the row re-runs the configure (CMAKE_CONFIGURE_DEPENDS).
+set(_nevpt2_testing_md "${CMAKE_CURRENT_SOURCE_DIR}/../../docs/testing.md")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_nevpt2_testing_md}")
+file(STRINGS "${_nevpt2_testing_md}" _nevpt2_env_rows
+     REGEX "^\\| \\*\\*the recorded envelope\\*\\*")
+list(LENGTH _nevpt2_env_rows _nevpt2_env_count)
+if(NOT _nevpt2_env_count EQUAL 1)
+  message(FATAL_ERROR "nevpt2_sc_pseudodensity: docs/testing.md must carry exactly one "
+                      "'| **the recorded envelope** ... | **<x>e-<n>** |' row (\"The kernels' "
+                      "same-run self-variation\"); found ${_nevpt2_env_count}")
+endif()
+if(NOT _nevpt2_env_rows MATCHES "\\| \\*\\*([0-9.]+e-[0-9]+)\\*\\* \\|$")
+  message(FATAL_ERROR "nevpt2_sc_pseudodensity: docs/testing.md's recorded-envelope row "
+                      "does not end in '| **<x>e-<n>** |': ${_nevpt2_env_rows}")
+endif()
+target_compile_definitions(nevpt2_sc_pseudodensity
+                           PRIVATE NEVPT2_SELF_VARIATION_ENVELOPE=${CMAKE_MATCH_1})
+unset(_nevpt2_testing_md)
+unset(_nevpt2_env_rows)
+unset(_nevpt2_env_count)
+
 target_link_libraries(nevpt2_sc_pseudodensity PRIVATE
   nevpt2::gradient
   # --kappa-act's and --kappa-full's host side: expKappa and the finite

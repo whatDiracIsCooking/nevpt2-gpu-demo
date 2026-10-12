@@ -635,6 +635,7 @@ those arrays are for — and only the cases that carry one can run that check.
 | you want | read |
 |---|---|
 | the identities' residuals, the finite-difference plateaus and the step at which round-off takes over, per case, with card and flags | [`testing.md`](testing.md), "The SC pseudodensity identities", "The SC tangent's finite-difference cross-check", "The active-rotation source term", "The full orbital source term", "The CI source term's forward-reverse duality" |
+| how far the kernels' `atomicAdd` order moves a result run to run, and the envelope that spread is held to | [`testing.md`](testing.md), "The kernels' same-run self-variation" |
 | which ctest entries check the PC tangent, their gate values and what they cost | [`testing.md`](testing.md), "The PC tangent against a finite difference" |
 | the PC tangent's ratios, residuals, step constraints and crossover | [`pc-nevpt2.md`](pc-nevpt2.md), "The tangent with respect to the CI vector" |
 | what the tangent build costs, and the tile floors it needs | [`performance.md`](performance.md), "The tangent RDM build (`--rdm-tangent`)", "Tile floors", "`--tiles` on the CI source term (`--gradient-source`)" |

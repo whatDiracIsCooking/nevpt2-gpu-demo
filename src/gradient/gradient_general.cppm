@@ -246,26 +246,14 @@ void accumGeneralOneElectron(RotBlock b, const GeneralIntegralsDevice& gen, Kapp
   // every surviving row would be a core one, correctly gets nothing from the
   // dressing at all (which is what the core-internal finite difference in
   // apps/sc_pseudodensity/:kappa_full_check measures).
-  const GeneralPick cou = generalPick(gen, RotSpace::Core, p.space, q.space);
-  std::string couSubs = "zm";
-  couSubs += kAxisLabels[cou.swap ? 1 : 0];
-  couSubs += kAxisLabels[cou.swap ? 0 : 1];
-  couSubs += ",zm->ij";
-  deviceEinsumAccum(couSubs, {cou.g, kappaFor(RotSpace::Core)}, out, 4.0, stream);
-  // (px|jq) = (x p | j q): P = space(p), and (C, S_q) is stored in that order
-  // for every S_q, so this source is never swapped -- its axes are
-  // (x, p, j, q).
-  const GeneralPick exc1 = generalPick(gen, p.space, RotSpace::Core, q.space);
-  check(!exc1.swap, "accumGeneralOneElectron: the first exchange source is not swapped");
-  deviceEinsumAccum("zimj,zm->ij", {exc1.g, kappaFor(RotSpace::Core)}, out, -1.0, stream);
-  // (pj|xq) = (x q | p j): P = space(q), and the second distribution is
-  // (S_p, C), which IS swapped whenever p is not core.
-  const GeneralPick exc2 = generalPick(gen, q.space, p.space, RotSpace::Core);
-  std::string excSubs = "zj";
-  excSubs += exc2.swap ? 'm' : kAxisLabels[0];
-  excSubs += exc2.swap ? kAxisLabels[0] : 'm';
-  excSubs += ",zm->ij";
-  deviceEinsumAccum(excSubs, {exc2.g, kappaFor(RotSpace::Core)}, out, -1.0, stream);
+  //
+  // The three terms -- which array, which subscripts, which coefficient -- are
+  // nevpt2.gradient_plan's heffDressingPlan, so the unit tier can hold the
+  // exchange pair's non-collapse card-free (test/gradient_plan's
+  // HeffDressingTests, #64). Do not "simplify" the pair to twice one term.
+  for (const HeffDressingTerm& t : heffDressingPlan(p.space, q.space))
+    deviceEinsumAccum(t.subscripts, {&generalArray(gen, t.pick.array), kappaFor(RotSpace::Core)},
+                      out, t.coeff, stream);
 
   if (!info.trace) return;
   // (3) h1e_v_Sr is h^eff[v,a] - T with T_rt = sum_b (r b | b t), so every

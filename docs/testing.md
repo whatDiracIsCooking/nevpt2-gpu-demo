@@ -405,7 +405,9 @@ The rest of the tier is what makes check 2 mean something:
   2.2e-15 and 5.2e-15: the same size as the kernels' own spread, which is the
   statement. (CAS(4,4)'s pairing is a symmetry zero of order 1e-16, which is
   why both numbers there are 1e-28; CAS(8,8)'s is 2.1e-2 and LiF's −4.0e-2,
-  where 1e-15 is a relative 7e-14.)
+  where 1e-15 is a relative 7e-14.) The spread itself is held to a recorded
+  envelope, measured over 90 runs — "The kernels' same-run self-variation"
+  below.
 - **Check 4 is the only finite difference the new blocks can have, and it
   covers them.** A rotation *inside* core, or inside virtual, keeps every
   index in its own space, so the displaced integrals are the stored blocks
@@ -457,6 +459,22 @@ and flatlined instead of falling as `h^2`. Nothing else in the tier saw it —
 not the duality (both modes share the tangent), not the restriction identities
 (a derivative-only term has no stored block to be the restriction of).
 
+**So it is pinned, card-free.** The dressing's three terms are
+`nevpt2.gradient_plan`'s `heffDressingPlan`, which the device path launches
+term for term, and `test/gradient_plan`'s `HeffDressingTests` (no `gpu`
+label) evaluates that same plan on the host over the committed CAS(4,4)
+sidecar under a core-internal rotation. Per one-electron block, the
+dressing's response must vanish — the Coulomb term on its own, the exchange
+pair between its two members — while each exchange member alone must clear a
+1e-6 floor and the two must differ by as much. Measured: the residuals are at
+most 3.0e-15 (bound 1e-13), and each exchange member alone is 1.0e-3 on
+`h1e`, 3.5e-2 on `h1e_v_Sr` and 0.33 on `h1e_v_Sir`. `h1e_v_Si`'s exchange
+integrals are `(core act | core core)`, an exact D2h zero at that case (an
+all-σ core against π actives), so that block is held to its symmetry zero
+and the other three carry the non-collapse. A plan that writes the pair as
+twice either member leaves `2 |exchange|` behind, which is what the
+6.7e-04 quotient was.
+
 **Not `small`, but run under every tool anyway.** The two 13-point sweeps and
 the ~180 basis probes are each a full pass over everything, which is what made
 the CAS(8,8) `--kappa-act` entry too slow for the sanitizer tier, and
@@ -480,6 +498,58 @@ the first version of the Fock-diagonal self-check took a view of a
 einsum reading it. The self-check's own number gave it away (2.4e-01 where a
 reassociation residual belongs), but it is exactly the class of bug memcheck
 exists for, and the reason these entries are worth the four extra runs.
+
+### The kernels' same-run self-variation
+
+Check 3 above is held to the larger of a relative 1e-11 and what
+`--kappa-act`'s entry point (`scActiveRotationDevice`) moves by when it is
+simply run twice on the same input in the same process. That spread is
+measured by the run it gates, so on its own it would widen silently if a
+kernel change made the `atomicAdd` nondeterminism worse. So the spread is
+also held to a **recorded envelope**: each `--kappa-full` entry fails if
+either rerun gap — the pairing `<kappa, Y_act>` or the tangent
+`Edot(kappa)`, direction 0, absolute, in Eh — exceeds it, and prints the
+comparison as `same-run self-variation: ... against the recorded envelope`.
+
+Measured on an RTX 3080 (CUDA, Release, `nevpt2_sc_pseudodensity --golden
+<case> --tiles 3 --kappa-full`), **30 runs per case, 90 in all**, one after
+another on one card, every one of them a PASS:
+
+| | CAS(4,4) | CAS(8,8) | LiF CAS(4,6) |
+|---|---|---|---|
+| rerun gap, pairing: min / median / max | 3.5e-30 / 5.2e-28 / 1.4e-27 | 1.4e-17 / 1.3e-15 / 5.6e-15 | 1.6e-16 / 6.2e-15 / 2.2e-14 |
+| rerun gap, tangent: min / median / max | 4.8e-30 / 5.2e-28 / 1.4e-27 | 8.0e-17 / 1.3e-15 / 5.7e-15 | 1.4e-17 / 6.6e-15 / 2.2e-14 |
+| check 3's `full - act`, pairing: max | 1.1e-27 | 5.1e-15 | 1.8e-14 |
+| runs in which a rerun gap was exactly zero | 0 of 30 | 0 of 30 | 0 of 30 |
+
+The one-run figures in the table above (1.3e-28, 5.3e-16, 3.8e-15) are draws
+from these distributions, not their edges.
+
+| | |
+|---|---|
+| **the recorded envelope** (absolute, Eh; pairing and tangent alike; all three cases) | **5e-13** |
+
+**How it was chosen.** The largest gap in all 90 runs is LiF's 2.2e-14; its
+max-to-median ratio is 3.6, CAS(8,8)'s 4.2 and CAS(4,4)'s 2.7, so the tail is
+light. 5e-13 is **22x** above that largest gap and about 80x above LiF's
+median — enough that a draw from the distribution measured here does not
+fail the entry — and it is the size of check 3's own relative floor at LiF
+(1e-11 of a 4.0e-2 pairing), so the measured spread can no longer push
+check 3's tolerance much past the floor it already has. What it is there to
+catch is a change of kind, not of luck: a reduction that drops to single
+precision, or a race, lands decades above it. CAS(4,4)'s symmetry-zero
+pairing sits fourteen decades under the envelope, so it is CAS(8,8) and LiF
+that give the gate its teeth.
+
+**Where the number lives.** This table row and nowhere else:
+`apps/sc_pseudodensity/CMakeLists.txt` reads it at configure time (exactly
+one `| **the recorded envelope** ... | **<x>e-<n>** |` row, or the configure
+fails) and hands it to `kappa_full_check.cppm` as a compile definition, so
+editing the row re-runs the configure and changes the gate. With the row
+set to 1e-18 in a scratch build — below every CAS(8,8) and LiF gap above —
+the CAS(8,8) and LiF entries fail on that line (`FAILED -- the kernels'
+nondeterminism has grown`) and CAS(4,4)'s, whose gaps are 1e-27, still
+passes: the gate fires, and on the cases that give it its teeth.
 
 ## The PC tangent against a finite difference
 

@@ -4,7 +4,9 @@
 # promotion table (which sidecar array each slot of each block promotes into,
 # over what span), the eight classes' Delta vectors and the two symmetrized
 # classes' slab multipliers, termHasActive, and the CI source term's host
-# folding -- and longestFourfoldRun, the step-ladder rule every finite-difference
+# folding, h^eff's core-dressing terms (heffDressingPlan: the exchange pair
+# that must not collapse, #64, checked over the CAS(4,4) gradient sidecar) --
+# and longestFourfoldRun, the step-ladder rule every finite-difference
 # check of the gradient path gates on.
 #
 # The CI source fold (#63) is checked here against an UNFOLDED host reference:
@@ -40,10 +42,20 @@ foreach(_case cas44 cas88)
   unset(_upper)
 endforeach()
 
+# The CAS(4,4) gradient SIDECAR, which HeffDressingTests (#64) evaluates the
+# core dressing's terms over on the host -- read only, still no device.
+set(_gg_path "${PROJECT_SOURCE_DIR}/golden/n2_ccpvdz_cas44.gradgold")
+if(NOT EXISTS "${_gg_path}")
+  message(FATAL_ERROR "test/gradient_plan: committed gradient sidecar missing: ${_gg_path}")
+endif()
+target_compile_definitions(gradient_plan_tests
+                           PRIVATE NEVPT2_TEST_GRADGOLD_CAS44="${_gg_path}")
+unset(_gg_path)
+
 add_gtest_suite_tests(
   TARGET gradient_plan_tests
-  SUITES RotBlockTableTests GeneralPickTests PromotionPlanTests TermClassificationTests
-         DeltaTests SlabMultiplierTests CiSourceHostTests CiSourceFoldTests
+  SUITES RotBlockTableTests GeneralPickTests PromotionPlanTests HeffDressingTests
+         TermClassificationTests DeltaTests SlabMultiplierTests CiSourceHostTests CiSourceFoldTests
          CiSourceFoldNegativeControlTests FourfoldRunTests)
 
 # ciSourceVector launches the sigma kernels on the process's one

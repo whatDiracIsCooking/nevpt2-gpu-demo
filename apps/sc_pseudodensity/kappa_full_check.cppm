@@ -41,7 +41,8 @@
 //      has (and the convention in CLAUDE.md says as much). So the active
 //      entry point is ALSO run twice against itself, and the comparison is
 //      held to that same-run reproducibility: the construction adds no error
-//      above the noise the kernels already have.
+//      above the noise the kernels already have. That noise is itself held
+//      to a recorded envelope (#64), so it cannot grow unnoticed.
 //   4  TWO FINITE DIFFERENCES, and they are the only ones available for the
 //      new blocks. A rotation INSIDE the core space, or inside the virtual
 //      space, keeps every index in its own space, so the displaced integrals
@@ -112,6 +113,18 @@ constexpr double kFullEnergyTol = 1e-10;
 // gap alone would be a coin flip between two draws of the same noise, and
 // anything a wrong construction could do is many decades above either.
 constexpr double kBitFloorRel = 1e-11;
+// And that same-run spread is itself held to a RECORDED envelope (#64): the
+// floor above follows whatever spread the run measures, so on its own it
+// would widen silently if a kernel change made the nondeterminism worse. The
+// envelope -- absolute, Eh, on both the pairing and the tangent -- is chosen
+// from a measurement, so it lives in docs/testing.md alone ("The kernels'
+// same-run self-variation" has the number, the card, the flags, the run
+// count and how it was chosen); this binary's CMakeLists.txt reads it from
+// that section's table at configure time.
+#ifndef NEVPT2_SELF_VARIATION_ENVELOPE
+#error "NEVPT2_SELF_VARIATION_ENVELOPE must be defined by apps/sc_pseudodensity/CMakeLists.txt"
+#endif
+constexpr double kSelfVariationEnvelope = NEVPT2_SELF_VARIATION_ENVELOPE;
 
 // The finite-difference sweep, as :kappa_check's: h = 2^-k, halving, powers
 // of two so h is exact and the ratio across a halving is the Richardson
@@ -463,6 +476,16 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
   std::printf("    (and the orbital energies' response the active block holds fixed, which "
               "this adds: %.6e)\n",
               viaFull.dirs[0].eps);
+  // The floor those two comparisons used follows the spread this run
+  // measured; the spread itself must stay inside its recorded envelope.
+  const bool withinEnvelope = rerunAdjointGap <= kSelfVariationEnvelope &&
+                              rerunTangentGap <= kSelfVariationEnvelope;
+  ok = ok && withinEnvelope;
+  std::printf("    same-run self-variation: rerun - act = %.2e (pairing), %.2e (tangent),\n"
+              "    against the recorded envelope %.1e (docs/testing.md, \"The kernels' "
+              "same-run self-variation\"): %s\n",
+              rerunAdjointGap, rerunTangentGap, kSelfVariationEnvelope,
+              withinEnvelope ? "ok" : "FAILED -- the kernels' nondeterminism has grown");
 
   // --- 4. the two intra-space finite differences ----------------------------
   for (int which = 0; which < 2; ++which) {
@@ -546,7 +569,8 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
 
   std::printf("\n%s: the full orbital source term's adjoint and tangent agree to %.0e on every "
               "direction, the sidecar's promotion table holds to %.0e, the active block is "
-              "unchanged to the kernels' own reproducibility, the two intra-space finite "
+              "unchanged to the kernels' own reproducibility (itself inside its recorded "
+              "envelope), the two intra-space finite "
               "differences converge, and Park Eqs. 56-57 are determined\n",
               ok ? "PASS" : "FAIL", kFullRotTol, kSelfCheckTol);
   return ok;
