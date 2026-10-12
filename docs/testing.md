@@ -86,7 +86,12 @@ gradient comparison does not ("Why there is no ctest entry for it", below):
 it imports the offline scripts it checks, so an entry would put the PySCF
 environment in the test path, and it touches no card or binary while the
 golden tier is all `gpu`. Unlike that comparison it is cheap, so run it after
-any change to `reference_data/` that reads or writes these formats.
+any change to `reference_data/` that reads or writes these formats, **and**
+after any change that adds file reading to `src/` or `apps/`: its scan covers
+those too, and #73's `.gradsrc` reader went in without it and turned it red on
+`main`. A C++ file that reads a format other than the three golden layouts is
+named, with its reason, in the check's `CPP_NON_GOLDEN_READERS`; it may open a
+file but still fails the scan on a seek or a golden magic.
 
 Measured (no card; the 15 committed goldens — 12 `G1`, 3 `G2` — 3 gradient
 sidecars and 3 MO sidecars): 1.1 s wall, `PASS:`. A scratch field added to

@@ -13,7 +13,9 @@ different times, the last by luck (issue #71). Since then there is one parser,
    ``golden_format.py`` (and this file) may unpack bytes, seek, or spell a
    format magic; no file in ``src/`` or ``apps/`` outside ``src/golden/`` may
    open, read or seek a file, or spell a magic. A fourth reader written later
-   is caught by its text, before it is ever run.
+   is caught by its text, before it is ever run. A C++ file that reads a
+   non-golden format is named, with why, in ``CPP_NON_GOLDEN_READERS``; it may
+   open a file but still fails on a seek or a magic.
 2. **Every committed file, every reader.** Each ``golden/*.nevpt2gold`` --
    ``G1`` (the CASCI goldens) and ``G2`` (the ``*_casscf*`` ones); both layouts
    must be present -- is read by :func:`golden_format.read_golden`, re-packed
@@ -73,6 +75,17 @@ PY_PARSER = re.compile(
 #: What only src/golden/ may do in the C++ tree: open, read or seek a file, or
 #: spell a magic.
 CPP_PARSER = re.compile(r"\bfopen\b|\bfread\b|\bfseek\b|\bseekg\b|\bifstream\b|NEVPT2[GDM]\d")
+#: C++ files outside src/golden/ that read a file which is NOT one of the three
+#: golden layouts, each with why. They may open a file; they are still held to
+#: CPP_GOLDEN_SIGNS, so one that grows a seek or a golden magic fails as before.
+CPP_NON_GOLDEN_READERS = {
+    # The .gradsrc dump is a NumPy .npz (#73), parsed by its own zip/npy reader
+    # for the round-trip test; it shares no header with .nevpt2gold/.gradgold/
+    # .mogold, so no golden header change can make it misread.
+    "apps/sc_pseudodensity/gradsrc.cpp": ".gradsrc (.npz) reader",
+}
+#: What even a CPP_NON_GOLDEN_READERS file may not do: seek, or spell a magic.
+CPP_GOLDEN_SIGNS = re.compile(r"\bfseek\b|\bseekg\b|NEVPT2[GDM]\d")
 
 
 class Failures:
@@ -113,9 +126,11 @@ def stray_parsers(fail: Failures) -> None:
                 continue
             if (REPO / "src" / "golden") in f.parents:
                 continue
+            rel = f.relative_to(REPO).as_posix()
+            pattern = CPP_GOLDEN_SIGNS if rel in CPP_NON_GOLDEN_READERS else CPP_PARSER
             for n, line in enumerate(f.read_text().splitlines(), 1):
                 code = line.split("//", 1)[0]
-                if CPP_PARSER.search(code):
+                if pattern.search(code):
                     fail.add(f"stray C++ reader: {f.relative_to(REPO)}:{n}: {line.strip()}")
 
 
