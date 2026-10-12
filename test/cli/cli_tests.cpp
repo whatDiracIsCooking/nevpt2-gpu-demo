@@ -19,7 +19,8 @@
 //                        combination a registered ctest entry passes accepted
 //   CliDemoFlagTests     nevpt2_demo's --sc-tangent / --gradient-source
 //   CliDfDemoFlagTests   nevpt2_df_demo's --batch / --check-blocks
-//   CliScPseudodensityFlagTests  --kappa-act / --kappa-full / --gradgold
+//   CliScPseudodensityFlagTests  --kappa-act / --kappa-full / --gradgold /
+//                                --dump-source-terms
 //   CliPcTangentFlagTests        --fd-steps / --fd-start-pow
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
@@ -397,7 +398,8 @@ constexpr std::array kExpectedMatrix{
     MatrixRow{"--gradient-source", "D"},    MatrixRow{"--batch", "F"},
     MatrixRow{"--check-blocks", "F"},       MatrixRow{"--kappa-act", "S"},
     MatrixRow{"--kappa-full", "S"},         MatrixRow{"--gradgold", "S"},
-    MatrixRow{"--fd-steps", "P"},           MatrixRow{"--fd-start-pow", "P"},
+    MatrixRow{"--dump-source-terms", "S"},  MatrixRow{"--fd-steps", "P"},
+    MatrixRow{"--fd-start-pow", "P"},
 };
 
 char letterOf(const Binary b) {
@@ -617,6 +619,7 @@ TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
       {Binary::ScPseudodensity, {"--tiles", "3"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--kappa-act"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--kappa-full"}},
+      {Binary::ScPseudodensity, {"--tiles", "3", "--dump-source-terms", "x.gradsrc"}},
       {Binary::PcTangent, {"--tiles", "3"}},
       {Binary::PcTangent, {"--tiles", "40", "--fd-steps", "3"}},
   };
@@ -744,7 +747,52 @@ TEST(CliScPseudodensityFlagTests, GradgoldNeedsKappaFull) {
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
     EXPECT_EQ(r.error().message,
-              "--gradgold is the sidecar --kappa-full reads; it does nothing on its own");
+              "--gradgold is the sidecar --kappa-full and --dump-source-terms read; it does "
+              "nothing on its own");
+  }
+}
+
+TEST(CliScPseudodensityFlagTests, DumpSourceTermsSetsItsPath) {
+  const Result<Options> r = parse(Binary::ScPseudodensity, {"--dump-source-terms", "x.gradsrc"});
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(r->dumpSourceTermsPath, "x.gradsrc");
+  EXPECT_FALSE(r->kappaAct);
+  EXPECT_FALSE(r->kappaFull);
+  // It reads the sidecar too, so --gradgold is accepted beside it.
+  const Result<Options> g = parse(Binary::ScPseudodensity,
+                                  {"--dump-source-terms", "x.gradsrc", "--gradgold", "s.gradgold"});
+  ASSERT_TRUE(g.has_value()) << g.error().message;
+  EXPECT_EQ(g->gradgoldPath, "s.gradgold");
+}
+
+TEST(CliScPseudodensityFlagTests, DumpSourceTermsRefusesTheChecks) {
+  for (const std::string_view check : {"--kappa-act", "--kappa-full"}) {
+    const Result<Options> r =
+        parse(Binary::ScPseudodensity, {"--dump-source-terms", "x.gradsrc", check});
+    ASSERT_FALSE(r.has_value()) << check;
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(r.error().message,
+              "--dump-source-terms writes the source terms --kappa-act and --kappa-full check; "
+              "run one at a time");
+  }
+}
+
+TEST(CliScPseudodensityFlagTests, DumpSourceTermsNeedsAPath) {
+  const Result<Options> r = parse(Binary::ScPseudodensity, {"--dump-source-terms"});
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+}
+
+TEST(CliScPseudodensityFlagTests, OtherBinariesRefuseDumpSourceTerms) {
+  // nevpt2_demo computes y_I as well (--gradient-source), but not Y_xy, which
+  // needs the sidecar only nevpt2_sc_pseudodensity reads: half a dump is
+  // refused rather than written.
+  for (const Binary b : {Binary::Demo, Binary::DfDemo, Binary::PcTangent}) {
+    const Result<Options> r = parse(b, {"--dump-source-terms", "x.gradsrc"});
+    ASSERT_FALSE(r.has_value()) << binaryName(b);
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << binaryName(b);
+    EXPECT_NE(r.error().message.find("only nevpt2_sc_pseudodensity"), std::string::npos)
+        << r.error().message;
   }
 }
 
