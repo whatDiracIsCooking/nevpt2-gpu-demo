@@ -2,6 +2,7 @@ module nevpt2.cli;
 
 import std;
 import nevpt2.cublas_emul;  // requireCublasEmul: a refusing stub on HIP
+import :binary_flags;       // the binary/flag matrix, each binary's own flags
 
 namespace nevpt2::cli {
 
@@ -46,6 +47,7 @@ Result<bool> parseCommonFlag(const std::span<const std::string_view> args, std::
     const Result<int> pairs = parseInteger<int>(a, args[++i]);
     if (!pairs) return std::unexpected(pairs.error());
     opt.rdm.ozakiMaxPairSum = *pairs;
+    opt.ozakiPairsGiven = true;
   } else if (a == "--mantissa-bits") {
     const Result<int> bits = parseInteger<int>(a, args[++i]);
     if (!bits) return std::unexpected(bits.error());
@@ -67,6 +69,12 @@ Status finalize(CommonOptions& opt, const std::string_view goldenHint) {
   // side, so 0..14 (14 = all 64 pairs).
   if (opt.rdm.ozakiMaxPairSum < 0 || opt.rdm.ozakiMaxPairSum > 14)
     return err_config("--ozaki-pairs must be in 0..14");
+  // Only the --ozaki digest reads either; anywhere else they would be
+  // silently ignored.
+  if (opt.ozakiPairsGiven && !opt.rdm.ozaki)
+    return err_config("--ozaki-pairs sets the --ozaki digest's truncation; it needs --ozaki");
+  if (opt.rdm.ozakiCheck && !opt.rdm.ozaki)
+    return err_config("--ozaki-check checks the --ozaki digest's GEMMs; it needs --ozaki");
   // The fp64 significand is 53 bits (the default, bit-identical to native
   // fp64); below 1 there is nothing left to emulate.
   if (opt.rdm.mantissaBits < 1 || opt.rdm.mantissaBits > 53)
@@ -104,16 +112,63 @@ Status finalize(CommonOptions& opt, const std::string_view goldenHint) {
   return {};
 }
 
-std::string usage(const std::string_view prog, const std::string_view goldenHint,
-                  const std::string_view extraFlags) {
-  return std::format(
-      "usage: {} --golden <{}> {}{}"
-      "[--tiles N] [--pc] [--profile] [--rdm-tangent] "
-      "[--consume-emitted] [--blas-digest | --digest-emitted] [--fused-digest] "
-      "[--cublas] [--mantissa-bits N] [--ozaki [--ozaki-pairs P] [--ozaki-check]] "
-      "[--pool-threshold BYTES|max] "
-      "(the --cublas family is CUDA-only)\n",
-      prog, goldenHint, extraFlags, extraFlags.empty() ? "" : " ");
+std::string_view binaryName(const Binary b) {
+  switch (b) {
+    case Binary::Demo:
+      return "nevpt2_demo";
+    case Binary::DfDemo:
+      return "nevpt2_df_demo";
+    case Binary::ScPseudodensity:
+      return "nevpt2_sc_pseudodensity";
+    case Binary::PcTangent:
+      return "nevpt2_pc_tangent";
+  }
+  check(false, "binaryName: not a Binary");
+  return {};
+}
+
+std::string_view goldenHint(const Binary b) {
+  return b == Binary::DfDemo ? "path_df.nevpt2gold" : "path.nevpt2gold";
+}
+
+std::span<const FlagSpec> flagTable() { return kFlagTable; }
+
+const FlagSpec* findFlag(const std::string_view name) {
+  const auto* it = std::ranges::find(kFlagTable, name, &FlagSpec::name);
+  return it == kFlagTable.end() ? nullptr : it;
+}
+
+bool implements(const Binary b, const std::string_view flag) {
+  const FlagSpec* spec = findFlag(flag);
+  return spec != nullptr && (spec->binaries & bitOf(b)) != 0;
+}
+
+std::string usage(const Binary b) { return usageLine(b) + '\n'; }
+
+Result<Options> parseArgs(const Binary b, const std::span<const std::string_view> args) {
+  Options opt;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::string_view a = args[i];
+    const FlagSpec* spec = findFlag(a);
+    // Not a flag of any binary: a usage error.
+    if (spec == nullptr)
+      return err_config(std::format("unrecognized argument \"{}\"; {}", a, usageLine(b)));
+    // Another binary's flag: refused, never parsed and ignored.
+    if ((spec->binaries & bitOf(b)) == 0)
+      return err_unsupported(
+          std::format("{} does not implement {} (only {}); a flag a binary would not act on "
+                      "is refused, not ignored",
+                      binaryName(b), a, implementersOf(*spec)));
+    if (!spec->valueName.empty() && i + 1 >= args.size())
+      return err_config(std::format("{} takes a value ({}); {}", a, spec->valueName, usageLine(b)));
+    const Result<bool> used = parseCommonFlag(args, i, opt.common);
+    if (!used) return std::unexpected(used.error());
+    if (*used) continue;
+    if (Status st = parseOwnFlag(args, i, opt); !st) return std::unexpected(st.error());
+  }
+  if (Status st = finalize(opt.common, goldenHint(b)); !st) return std::unexpected(st.error());
+  if (Status st = checkOwnFlags(b, opt); !st) return std::unexpected(st.error());
+  return opt;
 }
 
 }  // namespace nevpt2::cli
