@@ -303,19 +303,43 @@ if(NEVPT2_BUILD_TESTING)
   # PASS line is worded unlike either demo's and unlike the pseudodensity one,
   # so no entry can pass on another's output. CAS(4,4) and CAS(8,8) are `small`,
   # so the sanitizer tier covers the sweep and the sigma launches.
+  #
+  # WHICH FUNCTIONAL (#87). CAS(4,4) and CAS(8,8) have a committed gradient
+  # sidecar, so they pass --gradgold and both sides carry the orbital energies'
+  # response to the active density -- the COMPLETE functional, and the regex
+  # requires the run to say so. CAS(10,10) has no sidecar (none is committed
+  # at that size), so it differentiates the functional with e_core / e_virt
+  # held at the golden's, and says that instead; the duality is exact on
+  # either. What checks the response itself -- which no duality can, since
+  # both modes share it -- is docs/testing.md, "The GPU as the source-term
+  # provider".
   foreach(_case cas44 cas88 cas1010)
     set(_ci_src_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.nevpt2gold")
+    set(_ci_src_side "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.gradgold")
+    if(_case STREQUAL "cas1010")
+      set(_ci_src_args)
+      set(_ci_src_functional "the orbital energies held fixed")
+    else()
+      if(NOT EXISTS "${_ci_src_side}")
+        message(FATAL_ERROR "nevpt2: committed gradient sidecar missing: ${_ci_src_side}")
+      endif()
+      set(_ci_src_args --gradgold "${_ci_src_side}")
+      set(_ci_src_functional "the orbital energies moving with the active density")
+    endif()
     _add_golden_test_with(nevpt2_demo nevpt2_gradient_source_${_case}
-                          "${_ci_src_gold}" --tiles 3 --gradient-source)
+                          "${_ci_src_gold}" --tiles 3 --gradient-source ${_ci_src_args})
     if(TEST nevpt2_gradient_source_${_case})
       set_tests_properties(nevpt2_gradient_source_${_case} PROPERTIES
         PASS_REGULAR_EXPRESSION
-          "PASS: the CI source term and the forward tangent agree")
+          "PASS: the CI source term and the forward tangent agree .*, ${_ci_src_functional}")
       if(NOT _case STREQUAL "cas1010")
         set_tests_properties(nevpt2_gradient_source_${_case} PROPERTIES LABELS "gpu;small")
       endif()
     endif()
     unset(_ci_src_gold)
+    unset(_ci_src_side)
+    unset(_ci_src_args)
+    unset(_ci_src_functional)
   endforeach()
 
   # --- the FULL orbital source term, --kappa-full ---------------------------------

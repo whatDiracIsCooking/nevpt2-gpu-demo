@@ -654,9 +654,19 @@ rows added for "Residual-independent checks of the gradient path" below.
 
 `nevpt2_gradient_source_cas44`, `_cas88` and `_cas1010` (all `gpu`; the first
 two `small`) run `nevpt2_demo --golden <case> --tiles 3 --gradient-source` and
-match `PASS: the CI source term and the forward tangent agree`. They
-**difference nothing**: this is the exact check the one-time finite difference
-above was run to license.
+match `PASS: the CI source term and the forward tangent agree … , <functional>`.
+They **difference nothing**: this is the exact check the one-time finite
+difference above was run to license.
+
+**Which functional (#87).** CAS(4,4) and CAS(8,8) also pass
+`--gradgold golden/n2_ccpvdz_<case>.gradgold`, so both modes carry the
+orbital energies' response to the active density
+([`gradients.md`](gradients.md), §5.5) and the regex requires `the orbital
+energies moving with the active density`; CAS(10,10) has no committed sidecar
+and requires `the orbital energies held fixed`. The duality is exact on either
+functional — and therefore says nothing about whether that response is right,
+since both modes read the same one: "The orbital energies' CI response" below
+and "The GPU as the source-term provider" are what check it.
 
 `nevpt2.gradient`'s `scCiSourceDevice` assembles the CI source term
 `y_I = dE/dc_I` — Park Eq. 48's `<I|(O_D + O_D^dagger)|Psi>` — in reverse
@@ -679,28 +689,38 @@ directions (`|u| = 1`, `<c|u> = 0`), for the state itself (Euler, the one
 direction the projected random ones never reach), and — where `ndet` allows —
 for every column of the Jacobian.
 
-Measured on an RTX 3080 (CUDA, Release, `--tiles 3`):
+Measured on an RTX 3080 (CUDA, Release, `--tiles 3`), in the `default`
+preset's ctest run of #87:
 
-| case | n_det | norm of `y` | worst seeded `<u,y>` residual | the state itself | worst overall | relative |
-|---|---:|---:|---:|---:|---:|---:|
-| CAS(4,4) | 36 | 0.5803 | 4.7e-15 | 4.0e-13 | 1.5e-12 | 2.8e-12 |
-| CAS(8,8) | 4900 | 0.9448 | 1.7e-16 | 8.7e-15 | 8.7e-15 | 9.2e-15 |
-| CAS(10,10) | 63504 | 0.4023 | 6.8e-17 | 1.3e-14 | 1.3e-14 | 3.6e-14 |
+| case | functional | n_det | norm of `y` | worst seeded `<u,y>` residual | the state itself | worst overall | relative |
+|---|---|---:|---:|---:|---:|---:|---:|
+| CAS(4,4) | orbital energies moving | 36 | 0.6581 | 6.4e-15 | 1.1e-12 | 2.2e-12 | 3.4e-12 |
+| CAS(8,8) | orbital energies moving | 4900 | 1.3760 | 3.8e-16 | 6.7e-14 | 6.7e-14 | 4.9e-14 |
+| CAS(10,10) | orbital energies fixed | 63504 | 0.4023 | 5.1e-17 | 2.0e-14 | 2.0e-14 | 5.4e-14 |
 
-The seeded directions' residuals are smaller in absolute terms simply because
-their dot products are (1e-3 against the state direction's O(1)); the
-relative column is the one to read, and it is round-off at every size. The
-CAS(4,4) figure is the largest of the three and **moves between runs** —
-1.4e-12, 1.5e-12 and 2.7e-12 on three runs of the same binary, and the
-CAS(10,10) worst likewise wanders between 8e-15 and 1.5e-14 — which is the
-RDM build's `atomicAdd` reassociation reaching the answer through two
-different paths, not a step size. The 1e-7 gate is therefore five decades of
-headroom.
+`relative` is the worst overall residual over `|Edot(c)|`, the state
+direction's own dot product. The seeded directions' residuals are smaller in
+absolute terms simply because their dot products are (1e-3 against the state
+direction's O(1)); the relative column is the one to read, and it is round-off
+at every size. The CAS(4,4) figure is the largest of the three and **moves
+between runs** — 1.4e-12, 1.5e-12 and 2.7e-12 on three runs of the same
+binary before #87, 4.0e-13 and 2.2e-12 on two after it — and the CAS(10,10)
+worst likewise wanders between 8e-15 and 2e-14: the RDM build's `atomicAdd`
+reassociation reaching the answer through two different paths, not a step
+size. The 1e-7 gate is therefore five decades of headroom.
+
+*Superseded, on record:* before #87 the two sidecar cases ran the
+fixed-orbital-energy functional too, and measured `|y|` = 0.5803 / 0.9448 with
+worst overall residuals 1.5e-12 / 8.7e-15 (relative 2.8e-12 / 9.2e-15). The
+norm of `y` moved by the term the omission left out; the residual did not,
+because both modes left it out alike — which is the whole point of the next
+two sections.
 
 **The full Jacobian, at CAS(4,4).** `ndet = 36`, so every column is
 affordable: `y_I` against `Edot(e_I)` for all 36 determinants, one forward
-tangent each. Worst column `|y_I - Edot(e_I)| = 1.5e-12` at `I = 0`, where
-`max |y_I| = 0.5426`. This is not a stricter dot product — it is a
+tangent each. Worst column `|y_I - Edot(e_I)| = 2.2e-12` at `I = 0`, where
+`max |y_I| = 0.6192` (the complete functional; 1.5e-12 and 0.5426 before
+#87). This is not a stricter dot product — it is a
 *localising* one: a single `<u, y>` detects a wrong sweep but says nothing
 about which half of it is wrong, while a column-by-column comparison names the
 determinant. The check is skipped above `ndet = 256` (CAS(8,8) is 4900), where
@@ -708,11 +728,13 @@ one tangent per determinant stops being seconds.
 
 The walk `y` rides on is the pseudodensity walk unchanged, which the entry
 also confirms the cheap way: the class energies it computes on the way are
-still `nevpt2.energy`'s own, to 2.8e-16 / 9.7e-16 / 1.2e-15 at the three
-sizes. Building `y` itself takes 0.01s / 0.50s / 5.68s — five sigma calls (one
+still `nevpt2.energy`'s own, to 2.5e-16 / 1.4e-15 / 4.9e-15 at the three
+sizes. Building `y` itself takes 0.01s / 0.52s / 5.87s — five sigma calls (one
 3-body, and a forward and a dagger for each of the two `f3` orders) on top of
-the walk — and ctest clocks the three entries at 0.46s / 1.91s / 23.3s,
-including the five tangent builds and, at CAS(4,4), the Jacobian's 36.
+the walk; the orbital energies' scatter and fold are host arithmetic over
+`(n_core + n_virt) n^2` and add nothing visible — and ctest clocks the three
+entries at 0.50s / 1.99s / 24.6s, including the five tangent builds and, at
+CAS(4,4), the Jacobian's 36.
 
 The sigma kernels' own halves are pinned card-side in `test/sigma_vector/`:
 `SigmaVector3GammaTests` and `SigmaVector4GammaTests` check each sigma, and the
@@ -751,6 +773,55 @@ reordered `dm2` (1.3e-5 to 1.6e-2), and `dm2` on the crossed diagonal
 CAS(4,4): its `y` agrees elementwise with the unfolded host derivative to
 1.1e-15 relative (bound 1e-10, `test/sigma_vector/`'s), and with the sum of
 its per-tensor parts to 1.4e-16.
+
+### The orbital energies' CI response
+
+#87 added the orbital energies' dependence on the active density to both
+modes ([`gradients.md`](gradients.md), §5.5) — and the duality above cannot
+check it, because both modes read the same `W_p = (pp|ut) - (1/2)(pu|tp)` and
+the same class `Delta` constructions. Three things do.
+
+**Card-free, `test/gradient_plan/`** (host-only, no `gpu` label):
+
+- `OrbitalEnergyResponseTests` rebuild the golden's `e_core` / `e_virt` as
+  `h^eff_pp + <dm1, W_p>` from the committed N2 CAS(4,4), N2 CAS(8,8) and LiF
+  sidecars, to 1e-11 absolute; measured (the same arithmetic in NumPy) 1.8e-13
+  / 5.8e-13 / 4.6e-14. The **negative controls** feed the same rebuild the
+  picks a transcription would most plausibly get wrong, and assert each misses
+  by more than 1e-6: the exchange at full weight misses by 0.20 / 0.32 / 0.32
+  Eh, Coulomb and exchange swapped by 4.0 / 8.0 / 6.7, `x` read without its
+  `n_core` offset by 2.7 / 5.4 / 4.5. A hand sidecar with every element
+  distinct pins the picks elementwise, and forward and reverse are checked to
+  be transposes of one map (to 1e-14 relative).
+- `DeltaAdjointTests` hold `deltaAdjointInto` — each class's `Delta`
+  transposed onto `dE/de` — to the identity `<R, Delta(e)> = <dE/de, e>` for
+  all eight classes, exactly (integer inputs), and to a hand count on Sijrs.
+- `test/energy_finish/`'s `NormToEnergyDeltaTests` hold the forward side's
+  `R = N T^2` to a fourfold Richardson table in `Delta` and to the finish's
+  degree −1 homogeneity, `Q H + R Delta = -E`.
+
+**On a card**, every reader of the sidecar first rebuilds the orbital energies
+from it and refuses one that does not belong to the golden (relative 1e-10):
+`--gradient-source` and the dump measure 8.5e-15 / 2.5e-14 (N2 CAS(4,4) /
+CAS(8,8)), and the dump 2.0e-15 on LiF and 4.7e-14 on acrolein.
+
+**End to end, against PySCF** — "The GPU as the source-term provider" below:
+the dump's `P y` against PySCF's exact derivative, which is the check the
+omission failed.
+
+**The negative control, run once (#87; scratch patch, not committed).** The
+new term dropped from **both** modes — `scCiSourceDevice` skipping the `dm1`
+fold, `normToEnergyDeltaTangent` returning zero — and everything else as
+shipped, on the RTX 3080:
+
+| | N2 CAS(4,4) | N2 CAS(8,8) | LiF CAS(4,6) |
+|---|---|---|---|
+| `--gradient-source --gradgold` duality, worst `\|<u,y> - Edot(u)\|` | 2.3e-12 — **PASS** | 2.6e-14 — **PASS** | — |
+| dump's `P y` against PySCF's exact (2^-17), max over determinants | **3.2e-4** | — | **3.3e-3** |
+
+The duality passes and the independent provider fails by exactly what #73
+measured for the omission — a shared omission cancels between the two modes,
+and only a provider outside the pair sees it.
 
 ## The analytic gradient against the numerical one
 
@@ -1106,15 +1177,20 @@ SC only: the GPU has no PC source terms (#74). The gate is the same 1e-6 per
 component, for the reason "The tolerance, and why it is not 1e-7" gives.
 
 **The GPU-sourced gradient fails, on every case, by four to six decades —
-and the failure is entirely the two dependences the device's functional is
-documented to hold fixed** ([`gradients.md`](gradients.md), §1, §5.5, §6):
-the `f3ac`/`f3ca` digests in `Y`, and `e_core`/`e_virt` in `y`. With those two
-put back into PySCF's functional, the two providers agree to PySCF's own
-finite-difference truncation. No other disagreement is left to find.
+and the failure is entirely the one dependence the device's functional is
+documented to hold fixed** ([`gradients.md`](gradients.md), §1, §6): the
+`f3ac`/`f3ca` digests in `Y`. #73 measured it beside a second one, the
+orbital energies held fixed in `y`; #87 put their response into both modes
+(§5.5), and **the GPU's `y` is now PySCF's exact one** to PySCF's own
+finite-difference truncation, on all four cases. With the digests put back
+into PySCF's functional too, the two providers agree on `Y` to that
+truncation as well. No other disagreement is left to find.
 
-The dumps were taken on the RX 9060 XT (gfx1200; preset `hip`, `--tiles 3`,
-the default digest); everything after them is single-threaded Python on the
-same box's Ryzen 9 5900X, PySCF 2.14.0:
+#73's dumps were taken on the RX 9060 XT (gfx1200; preset `hip`, `--tiles 3`,
+the default digest), #87's on the RTX 3080 (preset `default`, `--tiles 3`,
+the default digest — acrolein with its sidecar regenerated out of tree, whose
+arrays are the committed golden's exactly); everything after them is
+single-threaded Python, PySCF 2.14.0 (#73: the RX box's Ryzen 9 5900X):
 
 ```bash
 build-hip/src/nevpt2_sc_pseudodensity --golden golden/lif_def2svp_cas46.nevpt2gold \
@@ -1123,6 +1199,8 @@ uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
     --source both --source-path /tmp/lif.gradsrc            # gated on grad_num
 uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
     --source both --source-path /tmp/lif.gradsrc --sources-only --localise
+# (#73's localisation; since #87 the y comparison that matters is WITHOUT
+#  --localise, whose y half freezes the orbital energies the dump now moves)
 # acrolein's sidecar is gitignored: regenerate it (generate_golden.py --gradgold
 # --out elsewhere; the arrays match the committed golden's exactly) and pass it
 # with --gradgold; its grad_num comes from nevpt2_numgrad.py --npz, --grad-num
@@ -1130,25 +1208,33 @@ uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
 
 ### The verdict, and which term costs what
 
+#87's runs, `--source both` with no `--localise` (N2 CAS(4,4)'s `grad_num`
+from `nevpt2_numgrad.py --npz`, as acrolein's):
+
 | | LiF CAS(4,6) | acrolein CAS(6,5) | N2 CAS(4,4) |
 |---|---|---|---|
 | components compared | 6 | 16 (in-plane) | 6 |
-| **GPU-sourced**: max \|g − grad_num\| | **7.47e-3 — FAIL** | **6.33e-1 — FAIL** | **9.76e-2 — FAIL** |
+| **GPU-sourced**: max \|g − grad_num\| | **7.55e-3 — FAIL** | **6.34e-1 — FAIL** | **9.78e-2 — FAIL** |
 | PySCF-sourced, same sweep: max \|g − grad_num\| | 8.3e-9 — PASS | 6.5e-8 — PASS | 4.4e-8 — PASS |
-| max \|GPU-sourced − PySCF-sourced\| | 7.47e-3 | 6.33e-1 | 9.77e-2 |
+| max \|GPU-sourced − PySCF-sourced\| | 7.55e-3 | 6.34e-1 | 9.78e-2 |
 | … the GPU's `Y` alone (with PySCF's `y`) | 7.55e-3 | 6.34e-1 | 9.78e-2 |
-| … the GPU's `y` alone (with PySCF's `Y`) | 7.9e-5 | 8.4e-4 | 1.6e-4 |
+| … **the GPU's `y` alone** (with PySCF's `Y`) | **1.3e-11** | **5.9e-11** | **3.1e-9** |
+| … the GPU's `y` alone, #73 (orbital energies held fixed) | 7.9e-5 | 8.4e-4 | 1.6e-4 |
 
 The PySCF-sourced row reproduces "What is run, and what it comes out at"
 exactly (8.3e-9, 6.5e-8, 4.4e-8), so the shared sweep and the second
-solve change nothing. The largest components show what the GPU-sourced number
-*is*: LiF's Li z comes out at −0.0147047919 against `grad_num`'s
-−0.0072358529, N2's at +0.1425259048 against +0.0448800876, and acrolein's
-worst, C2 x, at +0.6525725264 against +0.0194046166 — wrong by factors of two
-to thirty, not by a tolerance. Both attribution rows are
-first-order exact (the gradient is linear in the source terms), and the
-digests in `Y` are the whole story to within a percent; the orbital energies
-in `y` are two to three decades smaller and still two decades over the gate.
+solve change nothing. **The GPU's `y` alone is now inside the 1e-6 gate on
+all three, by two and a half to five decades** — #73 measured it two decades
+over (the last row, kept as the record it was): the gradient-level cost of
+the orbital-energy omission was the whole of it. What is left is the digests
+in `Y`, which are the GPU-sourced gradient's entire error to the digit. The
+largest components show what that number *is*: LiF's Li z comes out at
+−0.0147840167 against `grad_num`'s −0.0072358529, N2's at +0.1426859347
+against +0.0448800876, and acrolein's worst, C2 x, at +0.6534118644 against
++0.0194046166 — wrong by factors of two to thirty, not by a tolerance (#73's
+dumps, with the second omission in, gave −0.0147047919, +0.1425259048 and
++0.6525725264). Both attribution rows are first-order exact (the gradient is
+linear in the source terms).
 
 ### The source terms, componentwise
 
@@ -1158,7 +1244,9 @@ determinant on the state's irrep. `--localise` repeats the comparison against
 PySCF's functional **with the device's two omissions put back** — the
 digests frozen at the state's along every rotation, the orbital energies
 frozen at the golden's along every CI direction. Max \|dump − PySCF\| per
-block, against the exact derivatives and then against the localised ones:
+block, against the exact derivatives and then against the localised ones —
+#73's dumps, with both omissions in (the `Y` blocks are unchanged by #87;
+its `P y` is the next table):
 
 | block | N2 CAS(4,4) | N2 CAS(8,8) | LiF CAS(4,6) | acrolein CAS(6,5) |
 |---|---|---|---|---|
@@ -1169,9 +1257,38 @@ block, against the exact derivatives and then against the localised ones:
 | act_O–virt | **2.9e-1** / 4.1e-5 | **6.9e-1** / 3.5e-7 | **5.5e-1** / 1.8e-7 | **5.6e-1** / 2.2e-3 |
 | act_V–virt | **1.1e-2** / 6.3e-10 | **3.8e-2** / 4.8e-10 | **5.9e-2** / 2.2e-10 | **2.8e-2** / 5.6e-7 |
 | virt–virt | 4.7e-11 / 4.7e-11 | 2.6e-10 / 2.6e-10 | 2.5e-10 / 2.5e-10 | 1.8e-10 / 1.8e-10 |
-| `P y` | **3.2e-4** / 9.0e-9 | **5.4e-3** / 7.2e-10 | **3.3e-3** / 5.8e-10 | **3.7e-3** / 9.5e-10 |
+| `P y`, #73 | **3.2e-4** / 9.0e-9 | **5.4e-3** / 7.2e-10 | **3.3e-3** / 5.8e-10 | **3.7e-3** / 9.5e-10 |
 
-Read it three ways:
+**`P y` since #87, against PySCF's EXACT derivative** — no `--localise`, whose
+`y` half now freezes something the dump moves — max over the state's irrep:
+
+| | N2 CAS(4,4) | N2 CAS(8,8) | LiF CAS(4,6) | acrolein CAS(6,5) |
+|---|---|---|---|---|
+| determinants compared | 12 | 4900 | 225 | 52 |
+| max \|dump `P y` − PySCF's\| at `CI_STEP` = 2^-17 | **9.0e-9** | **7.2e-10** | **5.8e-10** | **9.6e-10** |
+| … #73, orbital energies held fixed | 3.2e-4 | 5.4e-3 | 3.3e-3 | 3.7e-3 |
+
+What is left is PySCF's own truncation, and the ladder says so: the dump
+against PySCF's quotient at the worst three determinants of each case as
+PySCF's step shrinks (`reference_data/nevpt2_grad.py`'s own state, reader and
+projected quotient, restricted to those determinants; max over the three):
+
+| PySCF's step h | 2^-13 | 2^-15 | 2^-17 | 2^-19 | 2^-21 |
+|---|---|---|---|---|---|
+| N2 CAS(4,4) | 2.3e-6 | 1.4e-7 | 9.0e-9 | 5.7e-10 | 8.2e-10 |
+| acrolein CAS(6,5) | 2.4e-7 | 1.5e-8 | 9.6e-10 | 2.8e-10 | 1.9e-9 |
+| LiF CAS(4,6) | 8.2e-11 | 1.5e-10 | 5.8e-10 | 2.5e-10 | 4.8e-9 |
+| N2 CAS(8,8) (its worst determinant) | 4.2e-11 | 2.0e-11 | 7.2e-10 | 1.5e-10 | 3.5e-9 |
+
+Sixteen-fold per two halvings — `h²` — down to the quotient's round-off
+floor, which `E/2h` reaches at 2^-19 and climbs off at 2^-21: the leftover at
+the committed step is PySCF's truncation, converging onto the dump. LiF's and
+N2 CAS(8,8)'s components are small enough that every rung is already at that
+floor. N2 CAS(8,8)'s 2^-17 pass differences all 4900 determinants and took
+6481 s (`--sources-only`, kappa sweep included), so its ladder is run at that
+pass's worst determinant alone rather than the worst three.
+
+Read the block table three ways:
 
 - **The conventions are right.** Core–core and virt–virt are blocks where
   neither omission reaches (no active two-electron index, no orbital energy
@@ -1206,21 +1323,26 @@ Read it three ways:
   *exact* functional (no digest moves along it); it is 2e-7 there, a decade
   inside the gate, and N2's PySCF-sourced gradient lands at 4.4e-8 regardless.
 
-**The residual-independent checks see it too, without `grad_num`.** The
-GPU-sourced runs fail six of their eleven ("Residual-independent checks of the
-gradient path"): both `y`-linearity ladders (the dump's `y` against
+**The residual-independent checks see it too, without `grad_num`.** #73's
+GPU-sourced runs failed six of their eleven ("Residual-independent checks of
+the gradient path"): both `y`-linearity ladders (the dump's `y` against
 directional quotients of PySCF's exact functional — #40's fourth error, the
 orbital energies held fixed, is exactly what that check was built to catch),
-and both CI- and both orbital-stationarity ladders of the Lagrangian. The
-nuclear ladders and the projection of `z` pass, as they should: the solve
-and the contraction are right, only their input is not.
+and both CI- and both orbital-stationarity ladders of the Lagrangian. #87's
+fail **two**, on all three cases: both orbital-stationarity ladders, which
+read `Y`. Both `y`-linearity ladders now hold (worst of the two, 1.4e-10 /
+5.4e-11 / 2.0e-11 from their Richardson limits, N2 CAS(4,4) / LiF / acrolein), and so do
+both CI-stationarity ones. The nuclear ladders and the projection of `z` pass,
+as they should: the solve and the contraction are right, only their input is
+not.
 
-**What would close it**, neither in this tree: `Y`'s digest term needs the
-4-RDM contraction's transpose ([`gradients.md`](gradients.md), §6), and `y`'s
-orbital-energy term a `dm1` coefficient folded in before the sigma
-([`gradients.md`](gradients.md), §5.5). The dump and `--source both` are the
-seam either would be checked through: the attribution rows above say which
-term is fixed, and the `--localise` columns would become the exact ones.
+**What would close it**, not in this tree: `Y`'s digest term needs the
+4-RDM contraction's transpose ([`gradients.md`](gradients.md), §6). `y`'s
+orbital-energy term, the other half of this section when #73 wrote it, is
+#87's `dm1` coefficient ([`gradients.md`](gradients.md), §5.5), and the
+attribution row above is what says it closed. The dump and `--source both`
+remain the seam the digest term would be checked through: the `--localise`
+`Y` columns would become the exact ones.
 
 ### What it costs, and what is a ctest entry
 

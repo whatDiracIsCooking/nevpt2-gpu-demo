@@ -269,6 +269,8 @@ void gradientSijrs(IntegralSource& src, int64_t batch, const Tensor& hostECore,
     const ScMultipliers m = scMultipliers(hostNorm.data(), noH, delta);
     acc.norm += m.norm;
     acc.energy += m.energy;
+    // dE/de, as assembleSlab takes it (#87).
+    if (acc.epsAdjoint) deltaAdjointInto(deltaOf, m.r, acc.dEdCore, acc.dEdVirt);
 
     const DeviceTensor p = uploadTensor(Tensor::fromFlat(hostNorm.dims(), m.p), dr);
     const DeviceTensor d = deviceEinsumNew("iajb,iajb->iajb", {&p, &theta}, 1.0, dr);
@@ -442,6 +444,12 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
   const ScSlabMultipliers m = srsiMultipliers(hostNormT, hostHT, hostECore, hostEVirt);
   acc.norm += m.norm;
   acc.energy += m.energy;
+  // dE/de over the SAME triangle srsiDelta packs, as assembleSlab takes it for
+  // the other classes (#87).
+  if (acc.epsAdjoint)
+    deltaAdjointInto(
+        [&](const Tensor& ec, const Tensor& ev) { return srsiDelta(nvirt, ncore, ec, ev); },
+        m.r, acc.dEdCore, acc.dEdVirt);
   // The tangent, finished with the scattered multipliers over the RAW tables
   // -- the same identity that lets actReference be taken over them (a
   // perturber's weight multiplies both of its tuples, and the diagonal's

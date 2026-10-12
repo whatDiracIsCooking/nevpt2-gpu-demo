@@ -320,6 +320,10 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
   const ScSlabMultipliers m = multiplierFn(hostNorm, hostH);
   acc.norm += m.norm;
   acc.energy += m.energy;
+  // dE/de: this slab's R_t scattered onto the orbital energies its Delta_t
+  // reads, through the same `deltaOf` (#87; the CI source term's orbital-energy
+  // response).
+  if (acc.epsAdjoint) deltaAdjointInto(deltaOf, m.r, acc.dEdCore, acc.dEdVirt);
   acc.actReference +=
       dotHost(m.p.data(), hostNormActive.data()) + dotHost(m.q.data(), hostHActive.data());
 

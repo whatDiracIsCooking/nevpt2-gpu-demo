@@ -36,6 +36,9 @@
 //   DeltaTests                each class's Delta vector, in its tuple order,
 //                             and its linearity and homogeneity in the orbital
 //                             energies (what makes Deltadot the same formula)
+//   DeltaAdjointTests         deltaAdjointInto, each class's Delta transposed
+//                             onto dE/de (#87): the adjoint identity for all
+//                             eight, accumulation, and Sijrs by hand
 //   SlabMultiplierTests       plainMultipliers; sijrMultipliers and
 //                             srsiMultipliers on hand triangles, their
 //                             symmetric scatter and perturber-order R; the
@@ -53,6 +56,15 @@
 //                             NEGATIVE CONTROLS: the same comparison FAILS for
 //                             a fold without dm1, at N - 1 electrons, and with
 //                             dm2 on a crossed diagonal
+//   OrbitalEnergyResponseTests
+//                             the orbital energies' CI response (#87): W's
+//                             tied picks on a hand sidecar; e_core / e_virt
+//                             rebuilt as h^eff_pp + <dm1, W_p> from the
+//                             committed N2 CAS(4,4), CAS(8,8) and LiF
+//                             sidecars; forward and reverse as transposes;
+//                             and NEGATIVE CONTROLS (exchange at full weight,
+//                             Coulomb/exchange swapped, x without its ncore
+//                             offset) that miss the rebuild by decades
 //   CiSourceVectorTests       (REQUIRES_GPU) ciSourceVector's shape, its pure
 //                             accumulation over the five tensors, and y_I
 //                             against the unfolded host derivative, CAS(4,4)
@@ -60,8 +72,9 @@
 //                             of halvings inside the open window, broken by a
 //                             wild row or a zero, the longest (then coarsest)
 //                             reported (#70)
-//   GradientPlanDeathTest     a promotion of a non-two-electron slot, and a
-//                             shape mismatch in ciSourceAddInto, abort
+//   GradientPlanDeathTest     a promotion of a non-two-electron slot, a
+//                             shape mismatch in ciSourceAddInto, and the
+//                             orbital-energy response's shape checks, abort
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
 // textual std #include before any import.
@@ -82,6 +95,15 @@ import nevpt2.test.shared_resources;
 #endif
 #ifndef NEVPT2_TEST_GRADGOLD_CAS44
 #error "NEVPT2_TEST_GRADGOLD_CAS44 must be defined by test/gradient_plan/CMakeLists.txt"
+#endif
+#ifndef NEVPT2_TEST_GRADGOLD_CAS88
+#error "NEVPT2_TEST_GRADGOLD_CAS88 must be defined by test/gradient_plan/CMakeLists.txt"
+#endif
+#ifndef NEVPT2_TEST_GOLDEN_LIF
+#error "NEVPT2_TEST_GOLDEN_LIF must be defined by test/gradient_plan/CMakeLists.txt"
+#endif
+#ifndef NEVPT2_TEST_GRADGOLD_LIF
+#error "NEVPT2_TEST_GRADGOLD_LIF must be defined by test/gradient_plan/CMakeLists.txt"
 #endif
 
 // Not a module unit (gtest is a textual header), so no partition: the
@@ -1510,6 +1532,276 @@ TEST(HeffDressingTests, ACoreInternalRotationGetsNothingFromTheDressing) {
     EXPECT_GT(maxAbsDiff(term[1], term[2]), kExchangeFloor)
         << "(px|jq) and (pj|xq) read as the same matrix";
   }
+}
+
+// ---------------------------------------------------------------------------
+// DeltaAdjointTests -- dE/de, Park Eq. 38's R scattered onto the orbital
+// energies each Delta reads (#87). deltaAdjointInto reads the transpose of a
+// class's Delta construction off by probing it with unit vectors; these hold
+// it to the defining identity
+//
+//   sum_t r_t Delta_t(ec, ev) == <dEdCore, ec> + <dEdVirt, ev>
+//
+// for every class, at integer inputs (so both sides are exact), and to a hand
+// count on Sijrs.
+// ---------------------------------------------------------------------------
+
+using DeltaFn = std::function<std::vector<double>(const Tensor&, const Tensor&)>;
+
+std::vector<std::pair<const char*, DeltaFn>> everyClassDelta(const int64_t nc,
+                                                             const int64_t nv) {
+  return {
+      {"Sr", [](const Tensor&, const Tensor& ev) { return srDelta(1, 3, ev); }},
+      {"Si", [](const Tensor& ec, const Tensor&) { return siDelta(0, 2, ec); }},
+      {"Sijrs",
+       [=](const Tensor& ec, const Tensor& ev) { return sijrsDelta(1, 3, nc, nv, ec, ev); }},
+      {"Sijr", [=](const Tensor& ec, const Tensor& ev) { return sijrDelta(2, nc, 1, ec, ev); }},
+      {"Srsi", [=](const Tensor& ec, const Tensor& ev) { return srsiDelta(nv, nc, ec, ev); }},
+      {"Srs", [=](const Tensor&, const Tensor& ev) { return srsDelta(1, 4, nv, ev); }},
+      {"Sij", [=](const Tensor& ec, const Tensor&) { return sijDelta(1, 3, nc, ec); }},
+      {"Sir", [=](const Tensor& ec, const Tensor& ev) { return sirDelta(0, 3, nc, ec, ev); }},
+  };
+}
+
+TEST(DeltaAdjointTests, EveryClassSatisfiesTheAdjointIdentity) {
+  const int64_t nc = 3, nv = 4;
+  const Tensor ec = vec({-3, -5, -7}), ev = vec({2, 4, 8, 16});
+  for (const auto& [name, f] : everyClassDelta(nc, nv)) {
+    SCOPED_TRACE(name);
+    const std::size_t n = f(ec, ev).size();
+    ASSERT_GT(n, 0u);
+    std::vector<double> r(n);
+    for (std::size_t k = 0; k < n; ++k) r[k] = static_cast<double>((7 * k + 3) % 11) - 5.0;
+    std::vector<double> aC(nc, 0.0), aV(nv, 0.0);
+    deltaAdjointInto(f, r, aC, aV);
+    double lhs = 0.0, rhs = 0.0;
+    const std::vector<double> d = f(ec, ev);
+    for (std::size_t k = 0; k < n; ++k) lhs += r[k] * d[k];
+    for (int64_t i = 0; i < nc; ++i) rhs += aC[static_cast<std::size_t>(i)] * ec(i);
+    for (int64_t v = 0; v < nv; ++v) rhs += aV[static_cast<std::size_t>(v)] * ev(v);
+    EXPECT_EQ(lhs, rhs);
+  }
+}
+
+TEST(DeltaAdjointTests, AccumulatesIntoWhatIsThere) {
+  std::vector<double> aC{1.0}, aV{2.0, 3.0};
+  deltaAdjointInto([](const Tensor&, const Tensor& ev) { return srDelta(0, 2, ev); },
+                   std::vector<double>{10.0, 20.0}, aC, aV);
+  EXPECT_EQ(aC, (std::vector<double>{1.0}));
+  EXPECT_EQ(aV, (std::vector<double>{12.0, 23.0}));
+}
+
+TEST(DeltaAdjointTests, SijrsByHand) {
+  // ncore = 1, nvirt = 2, one slab i = 0: tuples (a, j, b) over a, b in {0, 1},
+  // Delta = e_a + e_b - 2 e_0. With R = (1, 2, 3, 4) in (a, b) row order:
+  // dE/de_0 = -2 * 10, dE/de_v0 = 2*1 + 2 + 3 = 7, dE/de_v1 = 2 + 3 + 2*4 = 13.
+  std::vector<double> aC(1, 0.0), aV(2, 0.0);
+  deltaAdjointInto(
+      [](const Tensor& ec, const Tensor& ev) { return sijrsDelta(0, 1, 1, 2, ec, ev); },
+      std::vector<double>{1, 2, 3, 4}, aC, aV);
+  EXPECT_EQ(aC, (std::vector<double>{-20.0}));
+  EXPECT_EQ(aV, (std::vector<double>{7.0, 13.0}));
+}
+
+// ---------------------------------------------------------------------------
+// OrbitalEnergyResponseTests -- the orbital energies' dependence on the active
+// 1-RDM (#87): W_p[u, t] = (pp|ut) - (1/2)(pu|tp), read off the gradient
+// sidecar's four tied arrays, and its two uses -- the forward tangent
+// e_dot = <gamma_dot, W> and the reverse dm1 coefficient sum_p (dE/de_p) W_p.
+//
+// The index picks are pinned two ways: on a hand-built sidecar whose every
+// element is distinct, and on the committed N2 CAS(4,4), N2 CAS(8,8) and LiF
+// sidecars, where h^eff_pp + <dm1, W_p> must come back out as the golden's
+// e_core / e_virt -- which no wrong pick does (the negative controls below
+// show by how much). Card-free.
+// ---------------------------------------------------------------------------
+
+constexpr std::string_view kGradGoldCas88 = NEVPT2_TEST_GRADGOLD_CAS88;
+constexpr std::string_view kGoldenLif = NEVPT2_TEST_GOLDEN_LIF;
+constexpr std::string_view kGradGoldLif = NEVPT2_TEST_GRADGOLD_LIF;
+
+// A golden and its sidecar, loaded once per pair (read only).
+struct EpsCase {
+  GoldenFile golden;
+  GradGoldFile sidecar;
+};
+
+const EpsCase* loadEpsCase(std::string_view golden, std::string_view sidecar) {
+  static std::map<std::string, std::optional<EpsCase>, std::less<>> cache;
+  const std::string key = std::string(golden) + "|" + std::string(sidecar);
+  if (const auto it = cache.find(key); it != cache.end())
+    return it->second ? &*it->second : nullptr;
+  std::optional<EpsCase>& slot = cache[key];
+  Result<GoldenFile> g = loadGolden(std::string(golden));
+  if (!g.has_value()) {
+    ADD_FAILURE() << "loadGolden(" << golden << "): " << g.error().message;
+    return nullptr;
+  }
+  Result<GradGoldFile> gg = loadGradGold(std::string(sidecar));
+  if (!gg.has_value()) {
+    ADD_FAILURE() << "loadGradGold(" << sidecar << "): " << gg.error().message;
+    return nullptr;
+  }
+  if (const Status s = gg->checkAgainst(*g); !s.has_value()) {
+    ADD_FAILURE() << sidecar << ": " << s.error().message;
+    return nullptr;
+  }
+  slot = EpsCase{*std::move(g), *std::move(gg)};
+  return &*slot;
+}
+
+OrbitalEnergyResponse responseOf(const GradGoldFile& gg) {
+  return orbitalEnergyResponse(gg.ncore, gg.nact, gg.nvirt, gg.get("g_xa_cc"),
+                               gg.get("g_xc_ca"), gg.get("g_xa_vv"), gg.get("g_xv_va"));
+}
+
+// max |a - b| over the core and virtual halves, against the golden's vectors.
+double epsGap(const OrbitalEnergyDot& a, const GoldenFile& g) {
+  double d = 0.0;
+  const Tensor& ec = g.get("e_core");
+  const Tensor& ev = g.get("e_virt");
+  for (int64_t i = 0; i < ec.size(); ++i) d = std::max(d, std::fabs(a.core.flat(i) - ec.flat(i)));
+  for (int64_t r = 0; r < ev.size(); ++r) d = std::max(d, std::fabs(a.virt.flat(r) - ev.flat(r)));
+  return d;
+}
+
+// The rebuild's tolerance, absolute: the sidecar's integrals and the golden's
+// e are separate PySCF outputs, so this is their round-off, not an identity of
+// ours (measured: docs/testing.md, "The orbital energies' CI response").
+constexpr double kEpsRebuildAbs = 1e-11;
+
+void expectRebuildsTheGoldensOrbitalEnergies(std::string_view golden, std::string_view sidecar) {
+  const EpsCase* c = loadEpsCase(golden, sidecar);
+  ASSERT_NE(c, nullptr);
+  const OrbitalEnergyResponse w = responseOf(c->sidecar);
+  const OrbitalEnergyDot e = orbitalEnergiesFrom(w, c->sidecar.get("heff"), c->golden.get("dm1"));
+  ASSERT_EQ(e.core.size(), c->golden.get("e_core").size());
+  ASSERT_EQ(e.virt.size(), c->golden.get("e_virt").size());
+  EXPECT_LT(epsGap(e, c->golden), kEpsRebuildAbs);
+  // ... and the active density's share is not negligible, so that rebuild
+  // actually tests W: h^eff's diagonal alone misses by decades more.
+  const OrbitalEnergyDot dm1Part = orbitalEnergyDot(w, c->golden.get("dm1"));
+  double share = 0.0;
+  for (int64_t i = 0; i < dm1Part.core.size(); ++i) share = std::max(share, std::fabs(dm1Part.core.flat(i)));
+  for (int64_t r = 0; r < dm1Part.virt.size(); ++r) share = std::max(share, std::fabs(dm1Part.virt.flat(r)));
+  EXPECT_GT(share, 1e-2);
+}
+
+TEST(OrbitalEnergyResponseTests, RebuildsTheGoldensOrbitalEnergiesCas44) {
+  expectRebuildsTheGoldensOrbitalEnergies(kGoldenCas44, kGradGoldCas44);
+}
+TEST(OrbitalEnergyResponseTests, RebuildsTheGoldensOrbitalEnergiesCas88) {
+  expectRebuildsTheGoldensOrbitalEnergies(kGoldenCas88, kGradGoldCas88);
+}
+TEST(OrbitalEnergyResponseTests, RebuildsTheGoldensOrbitalEnergiesLif) {
+  expectRebuildsTheGoldensOrbitalEnergies(kGoldenLif, kGradGoldLif);
+}
+
+// A hand sidecar, ncore = 1, nact = 2, nvirt = 1 (nmo = 4): every element of
+// the four arrays a distinct value 1000 a + 100 x + 10 i + j, so each W entry
+// names the elements it read.
+TEST(OrbitalEnergyResponseTests, PicksTheTiedElementsByHand) {
+  const int64_t nc = 1, na = 2, nv = 1, nmo = 4;
+  const auto fill = [](std::vector<int64_t> dims, double tag) {
+    Tensor t(std::move(dims));
+    for (int64_t k = 0; k < t.size(); ++k) t.flatRef(k) = 1000.0 * tag + static_cast<double>(k);
+    return t;
+  };
+  const Tensor aCc = fill({nmo, na, nc, nc}, 1), cCa = fill({nmo, nc, nc, na}, 2);
+  const Tensor aVv = fill({nmo, na, nv}, 3), vVa = fill({nmo, nv, nv, na}, 4);
+  const OrbitalEnergyResponse w = orbitalEnergyResponse(nc, na, nv, aCc, cCa, aVv, vVa);
+  ASSERT_EQ(w.core.dims(), (std::vector<int64_t>{2, 2, 1}));
+  ASSERT_EQ(w.virt.dims(), (std::vector<int64_t>{2, 2, 1}));
+  for (int64_t u = 0; u < na; ++u)
+    for (int64_t t = 0; t < na; ++t) {
+      SCOPED_TRACE(std::format("u={} t={}", u, t));
+      // core i = 0: (ii|ut) = g_xa_cc[1 + u, t, 0, 0], (ui|it) = g_xc_ca[1 + u, 0, 0, t]
+      EXPECT_EQ(w.core(u, t, 0), aCc(nc + u, t, 0, 0) - 0.5 * cCa(nc + u, 0, 0, t));
+      // virtual r = 0: (rr|ut) = g_xa_vv[1 + u, t, 0], (ur|rt) = g_xv_va[1 + u, 0, 0, t]
+      EXPECT_EQ(w.virt(u, t, 0), aVv(nc + u, t, 0) - 0.5 * vVa(nc + u, 0, 0, t));
+    }
+  // The x index is the GENERAL one: u = 0 is MO 1, not MO 0.
+  EXPECT_NE(w.core(0, 0, 0), aCc(0, 0, 0, 0) - 0.5 * cCa(0, 0, 0, 0));
+}
+
+// Forward and reverse are transposes of one linear map:
+// <orbitalEnergyDm1Coefficient(a, b), gammaDot> == <a, eDot.core> + <b, eDot.virt>.
+// Over the committed CAS(4,4) sidecar, at seeded a, b and gammaDot.
+TEST(OrbitalEnergyResponseTests, TheTwoModesAreTransposes) {
+  const EpsCase* c = loadEpsCase(kGoldenCas44, kGradGoldCas44);
+  ASSERT_NE(c, nullptr);
+  const OrbitalEnergyResponse w = responseOf(c->sidecar);
+  const int64_t na = c->sidecar.nact, nc = c->sidecar.ncore, nv = c->sidecar.nvirt;
+  std::mt19937_64 gen(0x5eed'0087u);
+  std::uniform_real_distribution<double> dist(-1.0, 1.0);
+  Tensor gammaDot({na, na});
+  for (int64_t k = 0; k < gammaDot.size(); ++k) gammaDot.flatRef(k) = dist(gen);
+  std::vector<double> a(static_cast<std::size_t>(nc)), b(static_cast<std::size_t>(nv));
+  for (double& x : a) x = dist(gen);
+  for (double& x : b) x = dist(gen);
+  const Tensor g1 = orbitalEnergyDm1Coefficient(w, a, b);
+  const OrbitalEnergyDot eDot = orbitalEnergyDot(w, gammaDot);
+  double lhs = 0.0, rhs = 0.0, scale = 0.0;
+  for (int64_t k = 0; k < g1.size(); ++k) {
+    lhs += g1.flat(k) * gammaDot.flat(k);
+    scale += std::fabs(g1.flat(k) * gammaDot.flat(k));
+  }
+  for (int64_t i = 0; i < nc; ++i) rhs += a[static_cast<std::size_t>(i)] * eDot.core(i);
+  for (int64_t r = 0; r < nv; ++r) rhs += b[static_cast<std::size_t>(r)] * eDot.virt(r);
+  EXPECT_NEAR(lhs, rhs, 1e-14 * std::max(1.0, scale));
+  EXPECT_GT(std::fabs(lhs), 1e-3);
+}
+
+// NEGATIVE CONTROLS: the same rebuild FAILS for the picks a transcription
+// would most plausibly get wrong -- the exchange at full weight, Coulomb and
+// exchange swapped, and the x index read without its ncore offset. Each misses
+// the golden's orbital energies by decades more than kEpsRebuildAbs.
+TEST(OrbitalEnergyResponseTests, WrongPicksAreCaught) {
+  const EpsCase* c = loadEpsCase(kGoldenCas44, kGradGoldCas44);
+  ASSERT_NE(c, nullptr);
+  const GradGoldFile& gg = c->sidecar;
+  const int64_t nc = gg.ncore, na = gg.nact, nv = gg.nvirt;
+  const Tensor& aCc = gg.get("g_xa_cc");
+  const Tensor& cCa = gg.get("g_xc_ca");
+  const Tensor& aVv = gg.get("g_xa_vv");
+  const Tensor& vVa = gg.get("g_xv_va");
+  const auto build = [&](double kx, bool swap, int64_t xoff) {
+    OrbitalEnergyResponse w{Tensor({na, na, nc}), Tensor({na, na, nv})};
+    for (int64_t u = 0; u < na; ++u)
+      for (int64_t t = 0; t < na; ++t) {
+        for (int64_t i = 0; i < nc; ++i) {
+          const double cou = aCc(xoff + u, t, i, i), exc = cCa(xoff + u, i, i, t);
+          w.core(u, t, i) = swap ? exc - kx * cou : cou - kx * exc;
+        }
+        for (int64_t r = 0; r < nv; ++r) {
+          const double cou = aVv(xoff + u, t, r), exc = vVa(xoff + u, r, r, t);
+          w.virt(u, t, r) = swap ? exc - kx * cou : cou - kx * exc;
+        }
+      }
+    return w;
+  };
+  const auto gap = [&](const OrbitalEnergyResponse& w) {
+    return epsGap(orbitalEnergiesFrom(w, gg.get("heff"), c->golden.get("dm1")), c->golden);
+  };
+  // The right one, through the same hand loop, so the controls differ only in the pick.
+  EXPECT_LT(gap(build(0.5, false, nc)), kEpsRebuildAbs);
+  EXPECT_GT(gap(build(1.0, false, nc)), 1e-6) << "exchange at full weight";
+  EXPECT_GT(gap(build(0.5, true, nc)), 1e-6) << "Coulomb and exchange swapped";
+  EXPECT_GT(gap(build(0.5, false, 0)), 1e-6) << "x read without the ncore offset";
+}
+
+TEST(GradientPlanDeathTest, OrbitalEnergyResponseNeedsThePartitionsShapes) {
+  EXPECT_DEATH((void)orbitalEnergyResponse(1, 2, 1, Tensor({4, 2, 1, 1}), Tensor({4, 1, 1, 2}),
+                                           Tensor({4, 2, 2}), Tensor({4, 1, 1, 2})),
+               "a sidecar array's shape is not its partition's");
+  const OrbitalEnergyResponse w{Tensor({2, 2, 1}), Tensor({2, 2, 3})};
+  EXPECT_DEATH((void)orbitalEnergyDot(w, Tensor({3, 3})), "is not \\(nact, nact\\)");
+  EXPECT_DEATH((void)orbitalEnergyDm1Coefficient(w, {1.0}, {1.0}),
+               "dE/de is not \\(ncore\\) \\+ \\(nvirt\\)");
+  std::vector<double> aC(1, 0.0), aV(1, 0.0);
+  EXPECT_DEATH(deltaAdjointInto([](const Tensor&, const Tensor& ev) { return srDelta(0, 1, ev); },
+                                std::vector<double>{1.0, 2.0}, aC, aV),
+               "Delta and R have different lengths");
 }
 
 // ---------------------------------------------------------------------------

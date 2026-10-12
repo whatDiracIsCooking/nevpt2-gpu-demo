@@ -28,6 +28,12 @@
 //                          the energy) and a Richardson table along a line in
 //                          (N, H) space
 //   NormToEnergyTangentDeathTest  five vectors of different lengths abort
+//   NormToEnergyDeltaTests  the finish's derivative in Delta, R = N T^2
+//                          (Park Eq. 38; #87, the orbital energies' response):
+//                          the hand case, the guard, the weighted sum, a
+//                          Richardson table in Delta, and the degree -1
+//                          homogeneity in (H, Delta), Q H + R Delta = -E
+//   NormToEnergyDeltaDeathTest  four vectors of different lengths abort
 //
 // THE TANGENT'S ONLY CALCULUS IS HERE. The class contractions are linear in
 // the RDMs, so their tangents are the same einsum chains with the tangent
@@ -419,6 +425,76 @@ TEST(NormToEnergyTangentTests, EmptyIsZero) {
   const auto [nDot, eDot] = normToEnergyTangent({}, {}, {}, {}, {});
   EXPECT_EQ(nDot, 0.0);
   EXPECT_EQ(eDot, 0.0);
+}
+
+// --- NormToEnergyDeltaTests ----------------------------------------------------
+//
+// The finish's derivative in its THIRD input, Delta (#87): the orbital
+// energies move with the active density, so the complete tangent carries
+// R_k Deltadot_k too, with R_k = dE_k/dDelta_k = N_k T_k^2 (Park Eq. 38).
+
+// normToEnergy's energy with Delta displaced by t deltaDot.
+double energyAlongDelta(const std::vector<double>& norm, const std::vector<double>& h,
+                        const std::vector<double>& diff, const std::vector<double>& diffDot,
+                        double t) {
+  std::vector<double> d = diff;
+  for (std::size_t k = 0; k < d.size(); ++k) d[k] += t * diffDot[k];
+  return normToEnergy(norm, h, d).second;
+}
+
+TEST(NormToEnergyDeltaTests, MatchesTheHandCase) {
+  // R = N T^2 = N Q on the hand case: 0.5 / 9 and 2 / 4.
+  EXPECT_DOUBLE_EQ(normToEnergyDeltaDerivative(kHandNorm[0], kHandH[0], kHandDiff[0]),
+                   kHandNorm[0] * kQ0);
+  EXPECT_DOUBLE_EQ(normToEnergyDeltaDerivative(kHandNorm[1], kHandH[1], kHandDiff[1]),
+                   kHandNorm[1] * kQ1);
+}
+
+TEST(NormToEnergyDeltaTests, AVanishingNormHasNoDerivative) {
+  for (const double n : {0.0, NUMERICAL_ZERO, -NUMERICAL_ZERO})
+    EXPECT_EQ(normToEnergyDeltaDerivative(n, 5.0, 1.0), 0.0) << "N=" << n;
+}
+
+TEST(NormToEnergyDeltaTests, TheTangentIsTheWeightedSum) {
+  const std::vector<double> diffDot = {0.25, -1.5};
+  EXPECT_DOUBLE_EQ(normToEnergyDeltaTangent(kHandNorm, kHandH, kHandDiff, diffDot),
+                   kHandNorm[0] * kQ0 * 0.25 + kHandNorm[1] * kQ1 * -1.5);
+  EXPECT_EQ(normToEnergyDeltaTangent({}, {}, {}, {}), 0.0);
+}
+
+TEST(NormToEnergyDeltaTests, MatchesACentralDifferenceInDelta) {
+  // Along a line in Delta alone; the error falls fourfold per halving.
+  const std::vector<double> diffDot = {0.25, -1.5};
+  const double r = normToEnergyDeltaTangent(kHandNorm, kHandH, kHandDiff, diffDot);
+  EXPECT_NE(r, 0.0);
+  double prev = 0.0;
+  for (const double step : {0.0625, 0.03125, 0.015625, 0.0078125}) {
+    const double cd = (energyAlongDelta(kHandNorm, kHandH, kHandDiff, diffDot, step) -
+                       energyAlongDelta(kHandNorm, kHandH, kHandDiff, diffDot, -step)) /
+                      (2.0 * step);
+    const double err = std::fabs(cd - r);
+    if (prev > 0.0) EXPECT_NEAR(prev / err, 4.0, 0.4) << "Richardson ratio at step " << step;
+    prev = err;
+  }
+  EXPECT_LT(prev, 1e-4);
+}
+
+TEST(NormToEnergyDeltaTests, TheEnergyIsHomogeneousOfDegreeMinusOneInDeltaAndH) {
+  // E_k(N, sH, sDelta) = E_k(N, H, Delta) / s, so d/ds at s = 1 gives
+  // Q H + R Delta = -E: an identity tying R to the same finish, independent
+  // of the difference quotient above.
+  for (std::size_t k = 0; k < kHandNorm.size(); ++k) {
+    const auto [p, q] = normToEnergyDerivative(kHandNorm[k], kHandH[k], kHandDiff[k]);
+    const double r = normToEnergyDeltaDerivative(kHandNorm[k], kHandH[k], kHandDiff[k]);
+    const double e = normToEnergy({kHandNorm[k]}, {kHandH[k]}, {kHandDiff[k]}).second;
+    EXPECT_NEAR(q * kHandH[k] + r * kHandDiff[k], -e, 1e-15) << "perturber " << k;
+    (void)p;
+  }
+}
+
+TEST(NormToEnergyDeltaDeathTest, MismatchedLengthsAbort) {
+  EXPECT_DEATH((void)normToEnergyDeltaTangent({1.0, 2.0}, {1.0, 1.0}, {1.0, 1.0}, {1.0}),
+               "normToEnergyDeltaTangent: norm/h/diff/diffDot lengths differ");
 }
 
 // --- NormToEnergyTangentDeathTest ----------------------------------------------

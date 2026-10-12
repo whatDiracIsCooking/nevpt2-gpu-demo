@@ -274,7 +274,8 @@ ignores it. `test/cli/` holds this matrix against the table:
 | `--rdm-tangent` | ✓ | ✓ | refused | refused |
 | `--sc-tangent`, `--gradient-source` | ✓ | refused | refused | refused |
 | `--batch`, `--check-blocks` | refused | ✓ | refused | refused |
-| `--kappa-act`, `--kappa-full`, `--gradgold` | refused | refused | ✓ | refused |
+| `--kappa-act`, `--kappa-full` | refused | refused | ✓ | refused |
+| `--gradgold` | ✓ | refused | ✓ | refused |
 | `--dump-source-terms` | refused | refused | ✓ | refused |
 | `--fd-steps`, `--fd-start-pow` | refused | refused | refused | ✓ |
 
@@ -283,12 +284,14 @@ tangent RDM build is the emitted or the native-fp64 BLAS digest only; it is
 also PC throughout, so `--pc` would change nothing. `nevpt2_sc_pseudodensity`
 has no PC pseudodensities. Neither gradient binary prints a profile table or
 runs the `--rdm-tangent` check. `--dump-source-terms` is
-`nevpt2_sc_pseudodensity`'s alone because `Y_xy` needs the gradient sidecar
-only it reads; `nevpt2_demo` computes `y_I` too, but half a dump is refused
-rather than written. Beyond the matrix, a combination one binary
+`nevpt2_sc_pseudodensity`'s alone because `Y_xy` needs the gradient
+sidecar's full-MO-range arrays; `nevpt2_demo` computes `y_I` too, but half a
+dump is refused rather than written. `nevpt2_demo` reads the sidecar for one
+thing, `--gradient-source`'s orbital-energy response. Beyond the matrix, a combination one binary
 cannot run is an *invalid configuration* error (`--sc-tangent` with `--ozaki`,
 `--kappa-act` with `--kappa-full`, `--dump-source-terms` with either,
-`--gradgold` without `--kappa-full` or `--dump-source-terms`), and
+`--gradgold` without `--kappa-full` or `--dump-source-terms`, or in
+`nevpt2_demo` without `--gradient-source`), and
 `--sc-tangent` / `--gradient-source` with `--profile` is refused as
 *unsupported*, since neither prints the tables.
 
@@ -305,7 +308,7 @@ against the other. They read the same reference files, and each prints its own
 |---|---|---|
 | `nevpt2_demo --rdm-tangent` (also `nevpt2_df_demo`) | — | the tangent RDM build beside the plain one, against twice it |
 | `nevpt2_demo --sc-tangent` | — | the SC total's derivative with respect to the CI vector |
-| `nevpt2_demo --gradient-source` | — | the CI source term `y_I = dE/dc_I`, against that tangent by duality |
+| `nevpt2_demo --gradient-source` | `[--gradgold PATH]` | the CI source term `y_I = dE/dc_I`, against that tangent by duality; with the `*.gradgold` sidecar, both carry the orbital energies' response to the active density, without it both hold them fixed |
 | `nevpt2_sc_pseudodensity` | `--kappa-act`, or `--kappa-full [--gradgold PATH]` | the SC pseudodensity identities; with `--kappa-act`, the active–active orbital source term instead; with `--kappa-full`, the whole orbital source term out of the `*.gradgold` sidecar |
 | `nevpt2_sc_pseudodensity --dump-source-terms PATH` | `[--gradgold PATH]` | writes the GPU's own `Y_xy` and `y_I` to a `.gradsrc` (a NumPy `.npz`) for `reference_data/nevpt2_grad.py --source dump` / `both`, and reads it back; what a nuclear gradient built from it comes out at is [`docs/testing.md`](docs/testing.md), "The GPU as the source-term provider" |
 | `nevpt2_pc_tangent` | `--fd-steps N` (3..8, default 4), `--fd-start-pow N` (1..30, default 12: the first step is `2^-N`) | PC's derivative with respect to the CI vector, against a Richardson-verified finite difference |

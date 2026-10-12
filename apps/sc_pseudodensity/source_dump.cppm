@@ -18,11 +18,12 @@
 //         forward-reverse duality").
 //
 // AND WHAT THEY ARE NOT. Both are derivatives of the functional this tree
-// differentiates, which holds two things fixed that the exact energy does not
-// (docs/gradients.md, sections 1 and 6): Y holds the f3ac/f3ca digests fixed,
-// and y holds the orbital energies e_core/e_virt fixed. Writing the file
-// changes neither; what that costs a nuclear gradient is measured, against
-// PySCF's exact source terms, in docs/testing.md, "The GPU as the source-term
+// differentiates, which holds one thing fixed that the exact energy does not
+// (docs/gradients.md, sections 1 and 6): Y holds the f3ac/f3ca digests fixed.
+// y is the complete functional's: the orbital energies e_core/e_virt move
+// with the active density, read from the same sidecar Y is (#87). What the
+// remaining omission costs a nuclear gradient is measured, against PySCF's
+// exact source terms, in docs/testing.md, "The GPU as the source-term
 // provider".
 //
 // WHAT IS CHECKED HERE, since the derivatives themselves are checked
@@ -34,7 +35,9 @@
 //      scFullRotationDevice call -- the same functional summed in a different
 //      order, so reassociation noise;
 //   2  y's walk: its class-energy total against energiesDevice's, the cheapest
-//      check that the sweep ran on the state this binary loaded;
+//      check that the sweep ran on the state this binary loaded -- and the
+//      sidecar's orbital-energy response W, which y now reads, rebuilding
+//      the golden's e_core / e_virt as h^eff_pp + <dm1, W_p>;
 //   3  the file read back (readGradSrc) and compared with what was written,
 //      exactly: the doubles are stored raw, so any difference is a bug.
 //
@@ -65,6 +68,9 @@ constexpr std::int64_t kDumpChunk = 16;
 constexpr double kDumpMatrixTol = 1e-9;
 // Check 2's: the tree's usual 1e-7.
 constexpr double kDumpWalkTol = 1e-7;
+// Check 2's orbital-energy rebuild, relative Frobenius: --kappa-full's own
+// self-check bound, which its `eps` row (the same diagonal) is held to.
+constexpr double kDumpEpsTol = 1e-10;
 // Check 1's direction, distinct from every seed --kappa-full and --kappa-act use.
 constexpr std::uint64_t kDumpSeed = 0x5eed'0073u;
 
@@ -142,9 +148,25 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
   const nevpt2::Tensor& ci = g.get("ci");
   nevpt2::SigmaVectorOptions sigmaOpt;
   sigmaOpt.nTiles = sigmaTiles;
+  // The orbital energies' response to the active density, out of the same
+  // sidecar: y is the complete functional's derivative (#87).
+  const nevpt2::OrbitalEnergyResponse eps =
+      nevpt2::orbitalEnergyResponse(gg.ncore, gg.nact, gg.nvirt, gg.get("g_xa_cc"),
+                                    gg.get("g_xc_ca"), gg.get("g_xa_vv"), gg.get("g_xv_va"));
+  const nevpt2::OrbitalEnergyDot rebuilt =
+      nevpt2::orbitalEnergiesFrom(eps, gg.get("heff"), g.get("dm1"));
+  double epsNum = 0.0, epsDen = 0.0;
+  for (const auto& [mine, gold] :
+       {std::pair{&rebuilt.core, &g.get("e_core")}, std::pair{&rebuilt.virt, &g.get("e_virt")}})
+    for (std::int64_t p = 0; p < gold->size(); ++p) {
+      epsNum += (mine->flat(p) - gold->flat(p)) * (mine->flat(p) - gold->flat(p));
+      epsDen += gold->flat(p) * gold->flat(p);
+    }
+  const double epsGap = std::sqrt(epsNum / std::max(epsDen, 1e-300));
+  const bool epsOk = epsGap < kDumpEpsTol;
   const auto tCi = std::chrono::steady_clock::now();
   const nevpt2::ScCiSourceResult ciSrc = nevpt2::scCiSourceDevice(
-      ints, ci, g.nelecA, g.nelecB, dm1, dm2, dm3, f3ac, f3ca, sigmaOpt, res);
+      ints, ci, g.nelecA, g.nelecB, dm1, dm2, dm3, f3ac, f3ca, sigmaOpt, &eps, res);
   double cy = 0.0;
   for (std::int64_t i = 0; i < ci.size(); ++i) cy += ci.flat(i) * ciSrc.y.flat(i);
   std::printf("  y: %lld determinants, %.2fs; |y| = %.10f, <c, y> = %.10f\n",
@@ -159,6 +181,9 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
               "(< %.0e: %s)\n",
               ciSrc.pseudodensities.total, energies.total, walkGap, kDumpWalkTol,
               walkOk ? "ok" : "FAILED");
+  std::printf("     y carries the orbital energies' response: e_core / e_virt rebuilt as "
+              "h^eff_pp + <dm1, W_p> vs the golden's, %.2e relative (< %.0e: %s)\n",
+              epsGap, kDumpEpsTol, epsOk ? "ok" : "FAILED");
 
   // --- the file, and the file read back ----------------------------------------
   nevpt2::GradSrc out;
@@ -181,7 +206,7 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
   std::printf("  3. %s read back: %s\n", path.c_str(),
               roundTrip ? "every member identical, bit for bit" : "DIFFERS from what was written");
 
-  const bool ok = matrixOk && walkOk && roundTrip;
+  const bool ok = matrixOk && walkOk && epsOk && roundTrip;
   std::printf("\n%s: the GPU's source terms Y_xy and y_I were assembled, written to %s and "
               "read back unchanged\n",
               ok ? "PASS" : "FAIL", path.c_str());
