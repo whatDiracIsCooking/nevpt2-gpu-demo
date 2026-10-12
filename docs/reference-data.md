@@ -938,9 +938,11 @@ scalar either way. What `--pc` does need is the generalized Fock's diagonal
 rebuilt at every point (block2 runs `canonicalized = True` and uses the
 `mo_energy` it is handed), the dense 4-RDM rebuilt whenever the CI vector
 moves, a PC answer to exist on the state at all, and its **own** CI step —
-three decades below the SC one, for a reason that is not truncation
+1e-7, chosen for a reason that is not truncation
 ([`testing.md`](testing.md), "The analytic gradient against the numerical
-one"). The cost is one block2 PC solve per non-gauge rotation, so it is the
+one"). Its orbital and nuclear steps are its own constants too since #77,
+held where every PC figure was measured while SC's moved
+([`testing.md`](testing.md), "The step constants, measured"). The cost is one block2 PC solve per non-gauge rotation, so it is the
 `kappa` sweep that pays.
 
 **It is a Lagrangian gradient with differenced skeleton derivatives**, and the
@@ -957,21 +959,31 @@ only the antisymmetric part of the generalized Fock, and the AO contraction
 needs the densities themselves — which `src/gradient/` builds and frees
 unread ([`gradients.md`](gradients.md), §5.2).
 
-**What the two cases come out at**, source terms from PySCF, 0.0025 bohr:
+**What the two cases come out at**, source terms from PySCF, at the SC
+steps (`CI_STEP = KAPPA_STEP = 2^-17`, `NUC_STEP = 2^-13` bohr since #77 —
+[`testing.md`](testing.md), "The step constants, measured", which has why
+and what each moved):
 
 | | LiF CAS(4,6) | acrolein CAS(6,5) |
 |---|---|---|
 | `kappa` directions = constraints | 246 | 2846 |
 | CI Z-vector residual `\|P(H−E)Pz + Py\|` | 1.404e-12 | 2.006e-12 |
-| orbital residual `\|M λ + B\|`, direct / GMRES | 1.0e-15 / 1.5e-12 | 5.9e-15 / 8.7e-12 |
+| orbital residual `\|M λ + B\|`, direct / GMRES | 7.9e-16 / 1.5e-12 | 6.4e-15 / 8.7e-12 |
 | the orbital system's condition number | 8.2e4 | 1.2e4 |
-| CI/(O2) fixed point | 6 iterations, last step 1.9e-15 | 6 iterations, last step 3.7e-15 |
-| `z·c` after projection | 4.0e-19 | −5.7e-19 |
+| CI/(O2) fixed point | 6 iterations, last step 1.1e-16 | 6 iterations, last step 3.4e-15 |
+| `z·c` after projection | 8.3e-20 | 4.7e-18 |
 | gauge identity (§1.3, no multiplier) | 2.0e-6 | 2.7e-4 |
-| Richardson bar, skeleton / multipliers | 2.2e-7 / 1.8e-9 | 5.6e-7 / 1.2e-8 |
-| `\|g\|` on the zero-by-symmetry axes | 1.7e-15 | 3.0e-11 |
-| sum over atoms per column | ≤5.6e-11 | ≤1.0e-8 |
+| Richardson bar, skeleton / multipliers | 5.4e-10 / 4.7e-12 | 1.1e-9 / 2.8e-10 |
+| `\|g\|` on the zero-by-symmetry axes | 6.9e-14 | 2.1e-12 |
+| sum over atoms per column | ≤1.9e-11 | ≤4.7e-9 |
 | wall, single-threaded | 56 s | 1029 s |
+
+The two walls were measured at the steps before #77; the step does not
+change the number of evaluations (688 and 5882), so they were not re-run on
+an idle machine. At those steps the rows that moved read: orbital residual
+direct 1.0e-15 / 5.9e-15, fixed point's last step 1.9e-15 / 3.7e-15, `z·c`
+4.0e-19 / −5.7e-19, Richardson bars 2.2e-7 / 1.8e-9 and 5.6e-7 / 1.2e-8,
+zero-by-symmetry 1.7e-15 / 3.0e-11, column sums ≤5.6e-11 / ≤1.0e-8.
 
 The cost is the `kappa` sweep: one central difference of the SC-NEVPT2 energy
 per non-gauge rotation, `O(n_mo²)` of them — 937 s of acrolein's 1029 s.
@@ -995,8 +1007,13 @@ frozen path, the full constraint Jacobian, the selection-boundary multipliers,
 the CPHF block and the differentiation at once. Against the **numerical
 CASCI** gradient (`nevpt2_numgrad.py`'s own `grad_casci`, which it prints and
 also writes to an `--npz`, where `--casci-only --grad-num` gates against it)
-it lands at **2.0e-8** on LiF, **5.3e-8** on acrolein and **1.5e-8** on N2
-CAS(4,4).
+it lands at **1.8e-8** on LiF, **1.7e-7** on acrolein and **1.3e-8** on N2
+CAS(4,4), at the SC steps since #77. At the steps before it, the same runs
+against the same `grad_casci` give 2.0e-8, 1.5e-7 and 1.5e-8; this section
+recorded acrolein at 5.3e-8 then, which a fresh `nevpt2_numgrad.py --npz`
+does not reproduce at either set of steps — the analytic side's two runs
+agree with each other to 1.7e-8, so the difference is not the steps, and
+its cause was not chased for #77.
 
 **`pyscf.grad.casci` is not an oracle for either committed case** of the
 pair, and the run says so rather than reporting a disagreement as a failure.
@@ -1010,7 +1027,7 @@ configuration PySCF assumes; the two analytic gradients then agree to
 **1.7e-5** on acrolein. N2 CAS(4,4) needs no such flag — its active space is
 energy-ordered to begin with, so it is the one committed case PySCF's own
 analytic gradient oracles directly, and there the two agree to **9.1e-6**
-while this pipeline sits 1.5e-8 from the numerical CASCI gradient: that gap is
+while this pipeline sits 1.3e-8 from the numerical CASCI gradient: that gap is
 the size of PySCF's redundant-block denominators, not of an error here.
 (Calling it at all needs
 `mo_coeff=mc.mo_coeff, ci=mc.ci`: its default is `mc._scf.mo_coeff`, the

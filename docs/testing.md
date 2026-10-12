@@ -666,15 +666,20 @@ Richardson residual in [`reference-data.md`](reference-data.md), "The
 numerical gradient" — it is what fixes the 0.0025 bohr step there — and the
 analytic side's frozen-path bars in the same file's "The analytic gradient".
 What that file does not cover — the third case, and the two PC runs — is
-here: N2 CAS(4,4) is **1.1e-9** (`grad_num`) against **8.3e-6** SC /
-**1.6e-6** PC (skeleton) and 5.9e-9 / 4.0e-9 (multipliers); acrolein PC is
-**1.7e-9** against **4.9e-7** and 1.1e-8.
+here: N2 CAS(4,4) is **1.1e-9** (`grad_num`) against **5.1e-8** SC /
+**1.6e-6** PC (skeleton) and 1.6e-11 / 4.0e-9 (multipliers); acrolein PC is
+**1.7e-9** against **4.9e-7** and 1.1e-8. (The SC bars are at the SC steps
+#77 converged, "The step constants, measured" below; at the steps before it
+N2 SC's were 8.3e-6 / 5.9e-9. PC's steps did not change.)
 
 The analytic side's skeleton bar is the loose one everywhere, and it is an
 **upper** bound rather than an estimate: it is `|R(h/2) - g(h/2)|`, the size
 of the `h^2` correction Richardson then *removes*, so it says how wrong the
-raw central difference was, not how wrong the stored extrapolant is. N2's
-8.3e-6 against a measured agreement of 2.5e-7 is that gap.
+raw central difference was, not how wrong the stored extrapolant is. N2 SC's
+8.3e-6 against a measured agreement of 2.5e-7, before #77, was that gap —
+and, as it turned out, not only that: the 2.5e-7 itself was two unconverged
+quotients partly cancelling ("N2 CAS(4,4) SC fails, and that is the
+finding").
 
 So the gate is **1e-6 per component** (`nevpt2_grad.py`'s `GRAD_NUM_TOL`,
 overridable with `--tol`): one decade above the worst agreement measured
@@ -709,24 +714,34 @@ failure, the way a demo's does. **This is the single home of the verdict**;
 [`reference-data.md`](reference-data.md)'s two gradient sections keep each
 run's own diagnostics (residuals, condition numbers, bars, the
 zero-by-symmetry and translational-invariance checks for LiF and acrolein) and
-cite this table for the comparison. All five `PASS`:
+cite this table for the comparison. All five `PASS`, the SC columns at the
+SC steps #77 converged ("The step constants, measured"); the PC columns'
+steps did not change, and N2 PC re-run for #77 reproduces its figure:
 
 | | LiF CAS(4,6) SC | acrolein CAS(6,5) SC | acrolein PC | N2 CAS(4,4) SC | N2 CAS(4,4) PC |
 |---|---|---|---|---|---|
 | components compared | 6 | 16 (in-plane) | 16 | 6 | 6 |
-| **max \|g − grad_num\|** | **5.3e-9** | **7.6e-8** | **8.3e-8** | **2.5e-7** | **1.5e-8** |
-| largest component (Eh/bohr) | −0.0072358476 (Li z) | +0.0266017127 (C2 y) | +0.0265842789 (C2 y) | +0.0448803372 (N z) | +0.0452520933 (N z) |
+| **max \|g − grad_num\|** | **8.3e-9** | **6.5e-8** | **8.3e-8** | **4.4e-8** | **1.5e-8** |
+| largest component (Eh/bohr) | −0.0072358611 (Li z) | +0.0266017158 (C2 y) | +0.0265842789 (C2 y) | +0.0448800448 (N z) | +0.0452520933 (N z) |
+| superseded: at the SC steps before #77 (1e-4, 1e-4, 0.0025 bohr) | 5.3e-9 | 7.6e-8 | — | 2.5e-7 | — |
+
+The superseded row is kept because N2's figure in it was **wrong for a
+reason**: at those steps its `NUC_STEP` and `CI_STEP` quotients were each
+~1e-6 from converged, and 2.5e-7 was the two errors partly cancelling ("N2
+CAS(4,4) SC fails, and that is the finding"). LiF's and acrolein's moved by
+less than either case's distance from `grad_num`; their `grad_num` is
+unchanged (acrolein's from a fresh `nevpt2_numgrad.py --pc --npz`, which
+reproduces the 7.6e-8 at the old steps exactly).
 
 **That table is the `grad_num` line's verdict; each run now prints a second
-one.** The residual-independent checks (below) pass on LiF, acrolein SC and
-N2 PC, and **fail on N2 SC**: its quotients at the shipped `NUC_STEP` and
-`CI_STEP` are each ~1e-6 from converged, and its 2.5e-7 is two such errors
-partly cancelling — "N2 CAS(4,4) SC fails, and that is the finding" has the
-numbers.
+one.** The residual-independent checks (below) pass on all four cases they
+were run on — LiF, acrolein SC, N2 SC and N2 PC; N2 SC failed them until #77
+changed its steps.
 
 N2's own free checks, the two this file owns: `|g|` on the two
-zero-by-symmetry axes is 9.7e-13 (SC and PC alike) and the gradient summed
-over the two atoms is ≤6.2e-11 per column.
+zero-by-symmetry axes is 8.0e-14 SC / 9.7e-13 PC, and the gradient summed
+over the two atoms is ≤1.8e-9 per column SC (the round-off of a 16-fold
+smaller nuclear step; 6.2e-11 at the old one) and ≤6.1e-11 PC.
 
 **The PC runs' multipliers are as healthy as the SC ones**, which is worth
 saying because only the source terms changed: at N2 CAS(4,4) the CI Z-vector
@@ -763,7 +778,8 @@ acrolein's 96 displaced states and 35.9 s for N2's 36, SC and PC together.
 
 **The one place this pipeline can silently differentiate the wrong function**,
 and the reason `--pc` carries its own step constant (`CI_STEP_PC`, 1e-7,
-against `CI_STEP`'s 1e-4 for SC).
+against `CI_STEP`'s 1e-4 for SC when this was measured; SC's is `2^-17` since
+#77, for its own truncation reasons, and `CI_STEP_PC` did not move).
 
 PC-NEVPT2 solves one linear system per external tuple in a **linearly
 dependent** internally contracted basis: part of each block's spectrum is
@@ -813,11 +829,15 @@ state's, and that does see the 1e-4 plateau — "Residual-independent checks of
 the gradient path", error 5.)
 
 **SC's ladder is the ordinary one**, which is the contrast: 5.3e-5 at 1e-3
-(a FAIL, on plain truncation), 2.5e-7 at 1e-4, 7.7e-7 at 1e-5 — truncation
-falling as `h^2`, round-off rising as `1/h`, a minimum at the shipped
-`CI_STEP` of 1e-4, and no refusal at any rung. A smooth rational function of
-the CI vector behaves that way; the PC plateau above does not, and that
-difference is the whole reason for a second constant.
+(a FAIL, on plain truncation), 2.5e-7 at 1e-4, 7.7e-7 at 1e-5, and no
+refusal at any rung. A rational function of the CI vector behaves that way;
+the PC plateau above does not, and that difference is the whole reason for a
+second constant. (This SC ladder was read, at the time, as a minimum at 1e-4
+with round-off rising below it. It was not: it was taken at the pre-#77
+nuclear and orbital steps, whose own ~1e-6 errors the CI quotient's partly
+cancelled at 1e-4. With those converged the SC CI ladder falls as `h²`,
+ratio 4.00 per halving, from `2^-12` to `2^-18` — "The step constants,
+measured".)
 
 The orbital (`kappa`) sweep is **not** gated, and does not need to be: the
 rank that can move is the metric's, the metric is built from the active-space
@@ -842,8 +862,8 @@ provoke the gradient consequence: D2h, and **six exactly degenerate inactive
 pairs** — the orbital-energy gaps the run prints are 1.6e-15, 2.2e-16, 0.0,
 6.7e-16, 2.2e-15 and 0.0 Eh.
 
-**It did not appear.** SC agrees to 2.5e-7 and PC to 1.5e-8, both inside the
-gate. The reason is visible in the same line of output: every one of those six
+**It did not appear.** SC agrees to 4.4e-8 (2.5e-7 at the steps before #77)
+and PC to 1.5e-8, both inside the gate. The reason is visible in the same line of output: every one of those six
 pairs has an (O2) source term of **exactly 0.0e+00**, so its undetermined
 pseudocanonical multiplier is a genuine `0/0` for which zero is the right
 representative, and the gradient does not depend on the choice
@@ -882,16 +902,19 @@ displacement, so their π degeneracies can never be broken — and acrolein is
 `Cs`, every irrep of which is one-dimensional, so it carries no
 symmetry-required degeneracy to break.
 
-**What N2's 2.5e-7 does and does not establish.** It is the largest SC
-disagreement of the three cases, and it is *not* evidence of a degeneracy
-effect. Its size is the frozen-path quotient's own floor here: the skeleton
-bar above it is 8.3e-6, the CI-step ladder's minimum sits exactly there
-(5.3e-5 at 1e-3, 2.5e-7 at 1e-4, 7.7e-7 at 1e-5), and the PC run on the
-*same* state, the same six degenerate pairs and the same constraint set lands
-at 1.5e-8 with a skeleton bar five times smaller. What the case does
-establish is that the machinery handles *exact, symmetry-pinned* inactive
-degeneracy correctly, six undetermined (O2) multipliers included — it has to
-recognise each as a `0/0` and leave it at zero rather than divide through.
+**What N2's 2.5e-7 did and did not establish.** It was the largest SC
+disagreement of the three cases, and it was *not* evidence of a degeneracy
+effect. This section first read its size as the frozen-path quotient's own
+floor — the skeleton bar above it was 8.3e-6, and the CI-step ladder seemed
+to have its minimum there (5.3e-5 at 1e-3, 2.5e-7 at 1e-4, 7.7e-7 at 1e-5).
+#70's ladders showed that reading was wrong: the 2.5e-7 was two ~1e-6 step
+errors partly cancelling, and at the steps #77 converged the same case lands
+at **4.4e-8**, next to PC's 1.5e-8 on the *same* state, the same six
+degenerate pairs and the same constraint set ("N2 CAS(4,4) SC fails, and
+that is the finding"). Either way, what the case does establish is that the
+machinery handles *exact, symmetry-pinned* inactive degeneracy correctly, six
+undetermined (O2) multipliers included — it has to recognise each as a `0/0`
+and leave it at zero rather than divide through.
 
 **It is not the test benzene is**, and that should be said rather than left
 implied. Park's disagreement needs θ to be **unpinned** — degenerate partners
@@ -1022,25 +1045,53 @@ displaced CI vectors, everything else intact — leaves the gradient right
 ### What the committed cases come out at
 
 Same machine and versions. Worst `|Richardson − ref|` over each pair of
-seeds, against the 1e-6 gate:
+seeds, against the 1e-6 gate. The SC columns are at the SC steps #77
+converged ("The step constants, measured", below); the last column is N2 SC
+at the steps before it, kept because it is the finding the next section
+records:
 
-| | LiF CAS(4,6) SC | acrolein CAS(6,5) SC | N2 CAS(4,4) PC | N2 CAS(4,4) SC |
-|---|---|---|---|---|
-| projection of `y` / of `z` | 4.4e-11 / 4.0e-19 | 1.9e-10 / 5.7e-19 | 1.0e-10 / 5.4e-19 | **1.1e-6** / 5.4e-19 |
-| `y` linearity | 1.2e-9 | 6.6e-9 | 2.2e-10 | **1.2e-6** (8.0e-7) |
-| CI stationarity | 1.2e-9 | 6.6e-9 | 2.3e-10 | **1.2e-6** (8.0e-7) |
-| orbital stationarity | 7.1e-8 | 2.2e-7 | 9.6e-9 | 5.8e-7 |
-| nuclear ladder | 1.4e-9 | 1.0e-8 | 1.0e-9 | **2.5e-6** |
-| PC guard | — | — | 88 of 88 guarded, 116 rungs sampled, rank unchanged, smallest gap 3.9e9 | — |
-| verdict | PASS, 11 of 11 | PASS, 11 of 11 | PASS, 11 of 11 | **FAIL, 6 of 11** |
-| the checks' own wall | 15 s | 52 s | 36 s | 3 s |
+| | LiF CAS(4,6) SC | acrolein CAS(6,5) SC | N2 CAS(4,4) PC | N2 CAS(4,4) SC | N2 SC, before #77 |
+|---|---|---|---|---|---|
+| projection of `y` / of `z` | 3.8e-11 / 8.3e-20 | 3.5e-11 / 4.7e-18 | 1.0e-10 / 5.4e-19 | 6.3e-9 / 1.2e-18 | **1.1e-6** / 5.4e-19 |
+| `y` linearity | 3.7e-10 | 6.9e-11 | 2.2e-10 | 7.1e-9 | **1.2e-6** (8.0e-7) |
+| CI stationarity | 3.5e-10 | 7.8e-11 | 2.3e-10 | 7.2e-9 | **1.2e-6** (8.0e-7) |
+| orbital stationarity | 1.5e-7 | 3.9e-7 | 9.6e-9 | 8.2e-7 | 5.8e-7 |
+| nuclear ladder | 1.2e-9 | 2.2e-9 | 1.0e-9 | 9.2e-9 | **2.5e-6** |
+| PC guard | — | — | 88 of 88 guarded, 116 rungs sampled, rank unchanged, smallest gap 3.9e9 | — | — |
+| verdict | PASS, 11 of 11 | PASS, 11 of 11 | PASS, 11 of 11 | PASS, 11 of 11 | **FAIL, 6 of 11** |
+| the checks' own wall | 14 s | 50 s | 34 s | 3 s | 3 s |
 
-Acrolein SC was run without `--grad-num` (its sidecar is gitignored), so only its checks were gated. Acrolein PC was not re-run for this: it is the 6.3 h pair above.
+At the pre-#77 steps LiF and acrolein SC also passed 11 of 11 (worst
+orbital stationarity 7.1e-8 and 2.2e-7; every other row at or below 1.0e-8);
+N2 PC's steps did not change, and its re-run reproduces every figure in its
+column. Acrolein SC is gated against a fresh `nevpt2_numgrad.py --pc --npz`
+(its sidecar is gitignored). Acrolein PC's checks have **never been run**:
+its steps did not change either, so it was not re-run for #77, and it was not
+re-run for #70 — it is the 6.3 h pair above.
+
+**Two of these pass with little margin, and both are the ladders' own
+limits on N2, not the steps':**
+
+- **orbital stationarity on N2 SC, 8.2e-7.** N2's orbital ladder is not
+  cleanly fourfold below `2^-11`, at the old steps or the new ones (5.8e-7
+  before #77), so its Richardson value carries a few 1e-7 of its own.
+- **the nuclear ladder on N2 SC, a run of exactly 3** (ratios 3.21, 3.70,
+  3.30 to `2^-16`, seed 70) — the slow convergence of N2's frozen path the
+  next section describes. Below `2^-16` the ladder is at round-off (changes
+  of 1.9e-9, 3.7e-9, 1.3e-8 at `2^-17`, `2^-18`, `2^-19`, measured in a
+  scratch copy with the ladder extended), so it cannot be lengthened by
+  extending it. Its Richardson value is 9.2e-9 from the gradient, but the
+  run length is at the rule's edge: in the step scans below, seed 70's last
+  ratio drops to 3.19 at two neighbouring CI steps (`2^-15`, `2^-20`) and
+  one nuclear step (`2^-16`), and the check fails there on run length alone.
 
 ### N2 CAS(4,4) SC fails, and that is the finding
 
-N2 SC is the run "What is run" above records at **2.5e-7** from `grad_num`.
-Its ladders say that number is not converged on the steps it was taken at:
+**Resolved by #77** — the SC steps changed, PC's did not; the record below
+is kept as it was found.
+
+N2 SC is the run "What is run" above recorded at **2.5e-7** from `grad_num`.
+Its ladders said that number was not converged on the steps it was taken at:
 
 - **`NUC_STEP` (0.0025 bohr).** Along the symmetric stretch the frozen path's
   `Phi` converges only slowly — ratios 2.9, 3.2, 3.7, 4.2 down to `2^-16`
@@ -1057,17 +1108,129 @@ Its ladders say that number is not converged on the steps it was taken at:
   enough inside it.
 
 Rerunning the same case with the steps the ladders converge at (scratch
-copies again, not committed) makes the point: `NUC_STEP = 2^-13` alone moves
+copies again, not committed) made the point: `NUC_STEP = 2^-13` alone moves
 the gradient to **1.5e-6** from `grad_num` (a FAIL), `CI_STEP = 2^-17` alone
 to 7.8e-7, and both plus `KAPPA_STEP = 2^-17` to **4.4e-8** — with all
 eleven checks passing (the orbital ladder closest to its gate, at 8.2e-7: on
 N2 it is not cleanly fourfold below `2^-11` either). So the shipped 2.5e-7 was
 two step errors of ~1e-6 partly cancelling, and the converged answer agrees
-with `grad_num` better than the shipped one does. **The steps are not changed here**: that
-moves every recorded gradient in this section, acrolein PC's 6.3 h run
-included, and is its own piece of work. Until then `nevpt2_grad.py --case
-n2_ccpvdz_cas44` exits 1 on these checks while its `grad_num` line reads
-`PASS` — which is the residual-independent checks doing what they are for.
+with `grad_num` better than the shipped one does. #70 did not change the
+steps — that moves every recorded gradient in this section — and until #77
+`nevpt2_grad.py --case n2_ccpvdz_cas44` exited 1 on these checks while its
+`grad_num` line read `PASS`: the residual-independent checks doing what they
+are for.
+
+**What resolved it** (#77): the SC steps are now those three — `CI_STEP =
+KAPPA_STEP = 2^-17`, `NUC_STEP = 2^-13` bohr — each read off a ladder of the
+gradient itself in "The step constants, measured", below. The case passes
+all eleven checks and lands **4.4e-8** from `grad_num`. Re-measured with
+the committed constants (no step flags), the CI-side checks move by more
+than a factor of 100 — projection of `y` 1.1e-6 → 6.3e-9, `y` linearity and
+CI stationarity 1.2e-6 → 7.1e-9 / 7.2e-9 — and the nuclear ladder 2.5e-6 →
+9.2e-9. The `KAPPA_STEP` change was not in #70's diagnosis
+and is load-bearing: with `CI_STEP` and `NUC_STEP` converged but `KAPPA_STEP`
+left at 1e-4 the gradient is 9.8e-7 from `grad_num`, inside the gate by 2%.
+`nevpt2_numgrad.py`'s own step (and so every `grad_num`, the committed
+sidecars' bytes included) is unchanged: #70 measured it moving `grad_num` by
+1.7e-8 at a 20× smaller step, and nothing here contradicts that.
+
+### The step constants, measured
+
+**Every step constant is read off a ladder of the gradient itself**: the
+whole `nevpt2_grad.py` run repeated with one step walked through `h = 2^-k`
+and the other two held at their chosen values, recording the gradient's
+change between neighbouring rungs (the ratio column is the previous change
+over this one: 4 is `h²` truncation, below 1 is round-off) and its distance
+from `grad_num`. Run with `--ci-step`, `--kappa-step` and `--step`, so any
+rung can be repeated; same machine and versions as above.
+
+**N2 CAS(4,4) SC**, the case that needed it (others held at `CI_STEP =
+KAPPA_STEP = 2^-17`, `NUC_STEP = 2^-13`):
+
+| k | `CI_STEP = 2^-k`: change, ratio | max \|g − grad_num\| | `KAPPA_STEP = 2^-k`: change, ratio | max \|g − grad_num\| |
+|---|---|---|---|---|
+| 9 | — | 1.2e-3 | — | 2.3e-6 |
+| 10 | 1.3e-3 | 5.1e-5 | 7.3e-6 | 5.1e-6 |
+| 11 | 3.8e-5 | 1.3e-5 | 4.6e-6, 1.6 | 4.8e-7 |
+| 12 | 9.5e-6, 4.05 | 3.2e-6 | 1.9e-6, 2.4 | 1.4e-6 |
+| 13 | 2.4e-6, 4.01 | 8.3e-7 | 2.9e-7, 6.7 | 1.2e-6 |
+| 14 | 5.9e-7, 4.00 | 2.4e-7 | 5.2e-7, 0.55 | 6.3e-7 |
+| 15 | 1.5e-7, 4.00 | 9.0e-8 | 3.3e-7, 1.6 | 3.0e-7 |
+| 16 | 3.7e-8, 4.00 | 5.3e-8 | 1.9e-7, 1.8 | 1.1e-7 |
+| **17** | 9.3e-9, 3.99 | **4.4e-8** | 7.1e-8, 2.7 | **4.4e-8** |
+| 18 | 2.3e-9, 4.01 | 4.2e-8 | 2.0e-8, 3.5 | 2.4e-8 |
+| 19 | 6.0e-10, 3.84 | 4.1e-8 | 1.6e-9 | 2.5e-8 |
+| 20 | 7.3e-11 | 4.1e-8 | 1.4e-8, 0.12 | 1.2e-8 |
+| 21 | 4.4e-10, 0.17 | 4.0e-8 | 3.1e-8, 0.44 | 2.0e-8 |
+
+| k | `NUC_STEP = 2^-k` bohr: change, ratio | max \|g − grad_num\| |
+|---|---|---|
+| 7 | — | 3.2e-5 |
+| 8 | 3.2e-5 | 5.4e-7 |
+| 9 | 2.3e-6, 13.9 | 1.8e-6 |
+| 10 | 9.7e-7, 2.4 | 7.8e-7 |
+| 11 | 6.2e-7, 1.6 | 1.6e-7 |
+| 12 | 1.8e-7, 3.6 | 1.6e-8 |
+| **13** | 2.9e-8, 6.1 | **4.4e-8** |
+| 14 | 4.0e-9, 7.1 | 4.7e-8 |
+| 15 | 1.1e-9, 3.5 | 4.6e-8 |
+| 16 | 6.8e-9, 0.17 | 5.2e-8 |
+| 17 | 2.0e-8, 0.34 | 6.2e-8 |
+
+What each says:
+
+- **`CI_STEP = 2^-17`.** A clean `h²` ladder — ratio 4.00 from `2^-12` to
+  `2^-18` — that has converged to 9e-9 at `2^-17`, one rung above where
+  round-off takes over. The old 1e-4 (between `2^-13` and `2^-14`) sat
+  ~1e-6 up it. The near-pole at `h ~ 2^-7` is visible as the 1.2e-3 at
+  `2^-9`.
+- **`KAPPA_STEP = 2^-17`.** **Not** an `h²` ladder anywhere on N2: the
+  changes fall erratically and far slower than fourfold (ratios 1.6, 2.4,
+  6.7, 0.55, 1.6, 1.8, 2.7, 3.5) from 7.3e-6 down to 2.0e-8 at `2^-17 →
+  2^-18`, and are round-off below that. `2^-17` is the last step at which
+  the change is still falling; past it the gradient moves by up to 3e-8 from
+  rung to rung, all of it noise, 30× inside the gate. The old 1e-4 was ~1e-6 off. Why the
+  orbital quotient converges so much more slowly than `h²` on N2 is not
+  established here — this case's six exactly degenerate inactive pairs
+  ("The deliberately symmetric case") are the obvious suspect — and the
+  orbital-stationarity ladder sees the same thing (above).
+- **`NUC_STEP = 2^-13` bohr.** Erratic above `2^-11` (the near-singularity
+  within ~1e-4 bohr), settled from `2^-12` down: 4.0e-9 to the next rung at
+  `2^-13`, 1.1e-9 at `2^-14 → 2^-15`, round-off below. Any of `2^-13` to
+  `2^-15` gives 4.4e-8 to 4.7e-8; `2^-13` is the largest of them, the one
+  least exposed to round-off on a bigger molecule. The old 0.0025 bohr is
+  about `2^-8.6`.
+
+**LiF and acrolein SC at the new steps**, the same runs with no step flags
+against the old steps' results: the gradient moves by at most 1.4e-8 (LiF)
+and 1.2e-7 (acrolein) per component, each lands about as close to
+`grad_num` as before (8.3e-9 against 5.3e-9; 6.5e-8 against 7.6e-8), all eleven
+checks pass on both (the table above), and both skeleton bars collapse —
+LiF 2.2e-7 → 5.4e-10, acrolein 5.6e-7 → 1.1e-9 — because a converged
+quotient's Richardson correction is small. Neither case had a convergence
+problem at the old steps; the new ones are not worse for them.
+
+**PC keeps its steps** (`CI_STEP_PC` 1e-7, `KAPPA_STEP_PC` 1e-4,
+`NUC_STEP_PC` 0.0025 bohr), and that is a measured choice, not an omission.
+On N2 CAS(4,4) PC, against one `grad_num_pc`:
+
+| `KAPPA_STEP_PC` / `NUC_STEP_PC` | 1e-4 / 0.0025 (kept) | `2^-17` / 0.0025 | 1e-4 / `2^-13` | `2^-15` / `2^-13` | `2^-17` / `2^-13` | `2^-19` / `2^-13` | `2^-17` / `2^-11` | `2^-17` / `2^-15` |
+|---|---|---|---|---|---|---|---|---|
+| max \|g − grad_num_pc\| | **1.5e-8** | 1.6e-8 | 1.6e-8 | 1.8e-8 | 1.7e-8 | 2.4e-8 | 1.7e-8 | 1.6e-8 |
+| checks | **11 of 11** | 10 of 11 | 11 of 11 | 11 of 11 | 10 of 11 | 11 of 11 | 10 of 11 | 10 of 11 |
+
+Every PC gradient sits within 1e-8 of every other, at `grad_num_pc`'s own
+level — PC's frozen path and orbital quotients carry no step error the gate
+can see, so there is nothing for a change to gain. And at `KAPPA_STEP_PC =
+2^-17` specifically, the SC choice, one PC check fails: CI stationarity,
+seed 2026, whose slope is 8e-11 — round-off, as stationarity should be —
+and whose ladder hits that floor at `2^-15` (a change of 5.0e-12, ratio
+5.2) one halving earlier than at the kept steps (6.4e-12, ratio 4.07), so
+its fourfold run is 2 long rather than 3. That is the ladder rule reading
+round-off, not a wrong gradient, but it is a check the kept steps pass and
+the SC ones do not. So the PC steps stay where every PC figure in this file
+was measured, and **acrolein PC's 6.3 h pair is not re-run**: none of its
+steps changed.
 
 ### A ladder can converge, cleanly, to the wrong branch
 
