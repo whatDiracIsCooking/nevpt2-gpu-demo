@@ -59,6 +59,43 @@ right: a numerical claim needs that backend's card. The `compile-cuda` /
 `compile-hip` presets are compile-and-link-only configurations (testing
 off).
 
+## The golden layout contract
+
+Every reader of the three binary formats in `golden/` must read **both**
+golden header layouts — `NEVPT2G1` (the committed CASCI goldens) and
+`NEVPT2G2` (the `*_casscf*` ones) — because one header change once broke three
+readers, the last caught by luck. The readers, the one parser per language
+behind them, and how a header change is made are in
+[`reference-data.md`](reference-data.md), "The file format". The contract is
+checked in two halves:
+
+- **C++**: `test/golden`'s `GoldenLayoutContractTests` (unit tier,
+  host-only, no card) loads every `golden/*.nevpt2gold` and
+  `golden/*.gradgold` present at configure time with `loadGolden` /
+  `loadGradGold`, requires both layouts to be among them, and requires every
+  file of one layout to have its array table at the same derived offset
+  (`GoldenFile::arraysAt`) and the two layouts' to differ.
+- **Python**: `uv run python reference_data/golden_layout_check.py` — every
+  committed golden, gradient sidecar and MO sidecar through every reader entry
+  point in `reference_data/` and back through its writer, byte for byte; a
+  golden from the current writer read back; and no parser outside
+  `golden_format.py`. Ends `PASS:` or `FAIL:` with an exit status.
+
+The Python half registers **no ctest entry**, for the same reasons the
+gradient comparison does not ("Why there is no ctest entry for it", below):
+it imports the offline scripts it checks, so an entry would put the PySCF
+environment in the test path, and it touches no card or binary while the
+golden tier is all `gpu`. Unlike that comparison it is cheap, so run it after
+any change to `reference_data/` that reads or writes these formats.
+
+Measured (no card; the 15 committed goldens — 12 `G1`, 3 `G2` — 3 gradient
+sidecars and 3 MO sidecars): 1.1 s wall, `PASS:`. A scratch field added to
+the `G2` header table fails it on all three `G2` goldens (their array tables
+misread: a non-ASCII array name) and on the "both layouts present" check; a
+field added to `write_golden` alone fails the three `G2` byte round trips and
+both freshly written goldens; a hand-rolled `f.seek(52)` added to a script
+fails the stray-parser scan.
+
 ## The CASSCF-orbital entries
 
 Six golden entries read a reference whose orbitals came from a converged

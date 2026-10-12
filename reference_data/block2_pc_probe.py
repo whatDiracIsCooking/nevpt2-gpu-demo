@@ -42,10 +42,10 @@ import generate_golden as gg
 import argparse
 import json
 import resource
-import struct
 import time
 from pathlib import Path
 
+import golden_format as gf
 import numpy as np
 
 #: block2's class keys (``ic.sub_eners``) -> generate_golden.CLASSES.
@@ -63,35 +63,13 @@ RCONDS = (1e-12, 1e-10, 1e-8, 1e-6)
 
 def read_golden(path: Path) -> dict:
     """The scalars and the arrays this probe needs out of a .nevpt2gold file
-    (layout: ``generate_golden.write_golden``)."""
-    want = {"ci", "class_energies", "class_norms"}
-    out = {}
-    with open(path, "rb") as f:
-        # Either magic: a pre-kind NEVPT2G1 file (the committed CASCI goldens)
-        # has no reference_kind field, a NEVPT2G2 one (the committed
-        # CASSCF-orbital goldens) carries it right before the array count.
-        # This probe reads a state, not a provenance, so it only needs to step
-        # over the field.
-        magic = f.read(8)
-        assert magic in gg.GOLDEN_MAGICS, f"{path} is not a golden file"
-        out["ncas"], _, _, out["ncore"], _ = struct.unpack("<iiiiq", f.read(24))
-        out["e_casci"], out["e_corr"] = struct.unpack("<dd", f.read(16))
-        if magic == gg.GOLDEN_MAGIC:
-            (code,) = struct.unpack("<i", f.read(4))
-            out["reference_kind"] = gg.REFERENCE_KINDS[code]
-        else:
-            out["reference_kind"] = "casci"
-        (n,) = struct.unpack("<i", f.read(4))
-        for _ in range(n):
-            (ln,) = struct.unpack("<i", f.read(4))
-            name = f.read(ln).decode()
-            (nd,) = struct.unpack("<i", f.read(4))
-            shape = struct.unpack(f"<{nd}q", f.read(8 * nd))
-            nbytes = 8 * int(np.prod(shape))
-            if name in want:
-                out[name] = np.frombuffer(f.read(nbytes), "<f8").reshape(shape)
-            else:
-                f.seek(nbytes, 1)
+    (layout: ``generate_golden.write_golden``), parsed by
+    :func:`golden_format.read_golden` -- either layout, since this probe reads
+    a state, not a provenance."""
+    header, arrays = gf.read_golden(path, {"ci", "class_energies", "class_norms"})
+    out = {k: header[k] for k in ("ncas", "ncore", "e_casci", "reference_kind")}
+    out["e_corr"] = header["e_nevpt2_total"]
+    out.update(arrays)
     return out
 
 

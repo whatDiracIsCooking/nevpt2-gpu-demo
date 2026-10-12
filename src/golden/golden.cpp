@@ -102,6 +102,9 @@ Result<GoldenFile> loadGolden(const std::string& path) {
     g.reference = static_cast<ReferenceKind>(kind);
   }
 
+  // Wherever the header read above stopped -- derived, so a layout change is
+  // made in the reads above and nowhere else.
+  g.arraysAt = r.position();
   NEVPT2_TRY(readArraySection(r, g.arrays));
   // The header's determinant count is the CI vector's length.
   if (const auto ci = g.arrays.find("ci"); ci != g.arrays.end() && ci->second.size() != g.ndet)

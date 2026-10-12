@@ -6,8 +6,9 @@ consumes -- no CASCI re-solve, so it is deterministic and directly comparable),
 and times PySCF's `make_dm123` (dm1/2/3) + `_contract4pdm` x2 (f3ca/f3ac) -- the
 `NEVPTcontract` step, PySCF's analog of the demo's GPU RDM build.
 
-Only PySCF (a `dev` dependency) is imported; the golden reader is a ~15-line
-struct parser for the format `generate_golden.write_golden` documents. Not a
+Only PySCF (a `dev` dependency) is imported; the golden reader is
+`golden_format.read_golden`, the one parser of the format
+`generate_golden.write_golden` documents. Not a
 pytest test (wall-clock is environment-sensitive); run directly:
 
     uv run python reference_data/pyscf_contract_time.py \
@@ -22,57 +23,19 @@ NEVPT2 contract at CAS(12,12).
 from __future__ import annotations
 
 import argparse
-import struct
 import time
 from pathlib import Path
 
+import golden_format as gf
 import numpy as np
 
 
 def read_golden(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
-    """Parse the little-endian `.nevpt2gold` format (see generate_golden.py)."""
-    with open(path, "rb") as f:
-        buf = f.read()
-    off = 0
-
-    def take(fmt: str):
-        nonlocal off
-        sz = struct.calcsize(fmt)
-        vals = struct.unpack_from(fmt, buf, off)
-        off += sz
-        return vals
-
-    magic = buf[:8]
-    off = 8
-    # The magics are spelled out rather than imported from generate_golden,
-    # which would force its single-threading on this timing script. b"NEVPT2G2"
-    # ends its scalar header with the reference_kind field (the committed
-    # CASSCF-orbital goldens); the pre-kind b"NEVPT2G1" (the committed CASCI
-    # ones) has none and means "casci".
-    if magic not in (b"NEVPT2G2", b"NEVPT2G1"):
-        raise ValueError(f"bad magic {magic!r}")
-    ncas, nelec_a, nelec_b, ncore, ndet = take("<iiiiq")
-    e_casci, e_nevpt2_total = take("<dd")
-    reference_kind = "casci"
-    if magic == b"NEVPT2G2":
-        (code,) = take("<i")
-        reference_kind = {0: "casci", 1: "casscf"}[code]
-    (n_arrays,) = take("<i")
-    meta = dict(ncas=ncas, nelec_a=nelec_a, nelec_b=nelec_b, ncore=ncore,
-                ndet=ndet, e_casci=e_casci, e_nevpt2_total=e_nevpt2_total,
-                reference_kind=reference_kind)
-    arrays: dict[str, np.ndarray] = {}
-    for _ in range(n_arrays):
-        (name_len,) = take("<i")
-        name = buf[off:off + name_len].decode("ascii")
-        off += name_len
-        (ndim,) = take("<i")
-        shape = take(f"<{ndim}q")
-        n = int(np.prod(shape)) if shape else 1
-        data = np.frombuffer(buf, dtype="<f8", count=n, offset=off).reshape(shape)
-        off += n * 8
-        arrays[name] = data.copy()
-    return meta, arrays
+    """A golden's ``(meta, arrays)``, parsed by
+    :func:`golden_format.read_golden` -- either layout. That module, not
+    ``generate_golden``, because importing the generator would force its
+    single-threading on this timing script; ``golden_format`` sets nothing."""
+    return gf.read_golden(path)
 
 
 def main() -> None:

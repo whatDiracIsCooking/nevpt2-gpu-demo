@@ -350,16 +350,19 @@ file (CUDA devcontainer, PySCF 2.14.0, single-threaded):
 writes `NEVPT2G2`, which differs by the magic's last byte and the four-byte
 `reference_kind` field at the end of the scalar header ("The file format"
 below). So a regenerated CASCI golden is 4 bytes longer than its committed
-twin, and the comparison skips the two headers:
+twin, and the comparison skips the two headers, each file's header length
+read off that file rather than written out:
 
 ```bash
-cmp -i 48:52 golden/n2_ccpvdz_cas44.nevpt2gold /tmp/n2_ccpvdz_cas44.nevpt2gold
+at() { uv run python reference_data/golden_format.py arrays-at "$1"; }
+cmp -i "$(at golden/n2_ccpvdz_cas44.nevpt2gold):$(at /tmp/n2_ccpvdz_cas44.nevpt2gold)" \
+    golden/n2_ccpvdz_cas44.nevpt2gold /tmp/n2_ccpvdz_cas44.nevpt2gold
 ```
 
-(48 bytes of `G1` header, 52 of `G2`). Everything after it — the array count
-and every array — must still be byte-identical, and that is what the check
-means. Nothing in the tree needs the committed files rewritten: `loadGolden`
-and every reader in `reference_data/` accept both magics.
+Everything after the header — the array count and every array — must still be
+byte-identical, and that is what the check means. Nothing in the tree needs
+the committed files rewritten: `loadGolden` and every reader in
+`reference_data/` accept both magics ("The file format" below lists them).
 
 ### Reproducibility
 
@@ -534,6 +537,51 @@ named N-d `f64` arrays. It is not `.npz`, because parsing a zip container
 and `.npy` headers in C++ would need a dependency or a hand-written zip
 reader for no benefit. `write_golden`'s docstring in `generate_golden.py`
 has the exact layout, and `src/golden/golden.cppm`/`.cpp` is the reader.
+
+**One reader per language, and the list of readers.** A header change is
+made here, so this is where the readers are written down. One header change
+(`G1` → `G2`, a single 4-byte field) once broke three separate readers, found
+at three different times, the last only because a rebase happened to precede
+a merge — so there is now exactly one parse per language, and every reader
+derives where the array table begins from where its header read stopped,
+never from a length it knows:
+
+| format | parser (the only one) | reached through |
+|---|---|---|
+| `.nevpt2gold` | C++: `loadGolden` (`src/golden/golden.cpp`, over the `nevpt2.golden:reader` cursor); `GoldenFile::arraysAt` is the derived offset | every demo's `main` (`apps/integral_direct`, `apps/density_fit`, `apps/pc_tangent`, `apps/sc_pseudodensity`) |
+| `.nevpt2gold` | Python: `golden_format.read_golden` / `read_golden_header` (`reference_data/golden_format.py`); `arrays_at` is the derived offset | `nevpt2_numgrad.py` (`read_golden_header`, `read_golden_pc_total`), `nevpt2_grad.py` (the same two), `block2_pc_probe.read_golden`, `pyscf_contract_time.read_golden` |
+| `.gradgold` | C++: `loadGradGold` (`src/golden/gradgold.cpp`) | `apps/sc_pseudodensity` (`--kappa-full`) |
+| `.gradgold` | Python: `golden_format.read_gradgold` | `nevpt2_numgrad.py` (rewrites the sidecar with `grad_num`), `nevpt2_grad.py` (reads `grad_num`) |
+| `.mogold` | Python: `golden_format.read_mo_sidecar` | `generate_golden.read_mo_sidecar` (`--mo-from`, which adds its own checks); no C++ reader — it is generator input |
+
+`.gradsrc` (`nevpt2_grad.py --source dump`) is a NumPy `.npz`, not this
+format, and is read by `np.load`. The writers are in `generate_golden.py`
+(`write_golden`, `write_gradgold`, `write_mo_sidecar`) and pack their scalar
+headers from the same tables `golden_format.py` reads them by
+(`GOLDEN_HEADERS`, `GRADGOLD_HEADERS`, `MO_SIDECAR_HEADERS`, keyed by magic).
+
+**Changing a header**, then, is: a new magic and a new entry in
+`golden_format.GOLDEN_HEADERS` (never an edit to an existing entry — that
+misreads every committed file of that layout), the matching reads in
+`loadGolden`, and both halves of the layout contract green:
+
+```bash
+uv run python reference_data/golden_layout_check.py   # ends PASS:
+ctest --preset unit -R GoldenLayoutContractTests        # loadGolden / loadGradGold
+```
+
+`golden_layout_check.py` reads every committed `.nevpt2gold` — both layouts
+must be present, and are: `G1` for the CASCI goldens, `G2` for the
+`*_casscf*` ones — and every `.gradgold` and `.mogold`, re-packs each from its
+own magic's header table and requires the original bytes back, runs each
+through every reader entry point in the table above and requires one answer,
+reads back a golden from the writer as it is now, and refuses any parser
+outside `golden_format.py` (any byte unpacking, seeking or format magic in
+`reference_data/`; any file reading or magic in `src/` or `apps/` outside
+`src/golden/`). `test/golden`'s `GoldenLayoutContractTests` loads every
+`.nevpt2gold` and `.gradgold` in `golden/` with the C++ readers. Why the
+Python half is a manual gate and not a ctest entry is in
+[`testing.md`](testing.md), "The golden layout contract".
 
 **`reference_kind`: which reference built the orbitals.** The scalar header
 ends with an `int32` saying what the state is — `0` CASCI, `1` CASSCF
@@ -1389,6 +1437,8 @@ not used.
 | `reference_data/nevpt2_numgrad.py` | the **numerical** nuclear gradient: displaced RHF → CASCI → SC-NEVPT2 runs (states built by `generate_golden._build_state`, imported) differenced and Richardson-extrapolated into a sidecar's `grad_num` / `grad_num_residual` / `grad_num_probed` / `grad_num_step`. Refuses a displacement whose detected point group — or whose core/active irrep selection — differs from the reference geometry's, rather than produce a number from a different active space, and refuses a golden whose `reference_kind` is not `casci`. `--pc` differences block2's partially-contracted energy on the same displaced states (and writes no sidecar); `--npz PATH` writes the gradient arrays alone, which is how a PC one, or any case whose committed sidecar holds no `grad_num`, reaches `nevpt2_grad.py --grad-num`. Writes no golden and no new sidecar; only the two gradient-validation cases carry its arrays in their sidecars (see "The numerical gradient" above) |
 | `reference_data/nevpt2_grad.py` | the **analytic** nuclear gradient: a `pyscf.grad.lagrange.Gradients` subclass that solves the CI and orbital Z-vector equations of [`gradient-theory.md`](gradient-theory.md), §2 and contracts them into a gradient, differentiating one scalar along a frozen orthonormal path. SC by default, block2's PC with `--pc` (the same Lagrangian: only `E_corr` changes). Source terms from PySCF by default, or from a `.gradsrc` dump (`--source dump`) when the GPU side grows one. Ends by gating itself against `grad_num` and printing `PASS:`/`FAIL:` ([`testing.md`](testing.md), "The analytic gradient against the numerical one"). Writes **nothing** unless `--out` is given, and never a committed file; `--casci-only` is its own validation (see "The analytic gradient" above) |
 | `reference_data/casscf_repro_probe.py` | the **CASSCF reproducibility** measurement: ≥5 back-to-back RHF → symmetry-adapted `mcscf.CASSCF` → orbital-gradient → fresh `mcscf.CASCI` → SC-NEVPT2 runs under `generate_golden`'s own settings (imported, so single-threaded with the same Davidson tolerance), reporting the spread of E_CASSCF / E_corr / ‖g_orb‖ and whether any run changed stationary point. `--perturb EPS` starts the optimiser from a random same-irrep rotation instead. Writes no golden; its output is what "A fresh CASSCF reproduces, measured" above quotes, and where the `--mo-from` gate thresholds come from |
+| `reference_data/golden_format.py` | the **one Python parser** of the three formats in `golden/`: the header tables (keyed by magic) the writers pack from and the readers read by, `read_golden` / `read_golden_header` / `read_gradgold` / `read_mo_sidecar`, and `arrays-at FILE` for the regeneration check's `cmp -i`. `struct` and NumPy only, and no thread settings, so the timing script can use it (see "The file format" above) |
+| `reference_data/golden_layout_check.py` | the Python half of the **layout contract**: every committed file of both golden layouts, and every sidecar, through every reader and back through its writer byte for byte, plus a scan for any parser outside `golden_format.py`. Ends `PASS:`/`FAIL:`; a manual gate, no ctest entry ([`testing.md`](testing.md), "The golden layout contract") |
 | `reference_data/pyscf_contract_time.py` | the CPU side of the head-to-head: reads a golden file and times PySCF's `NEVPTcontract` (`make_dm123` + `_contract4pdm` ×2) on the *same frozen CI vector* the demo reads, with no CASCI re-solve (see [`performance.md`](performance.md), "Head-to-head vs PySCF") |
 | `golden/n2_ccpvdz_cas1010.nevpt2gold` | the **default case**: CAS(10,10) on N2/cc-pVDZ |
 | `golden/n2_ccpvdz_cas1212.nevpt2gold` | CAS(12,12) on the same molecule, the scaling case (see [`performance.md`](performance.md), "Scaling with active-space size"). `slow`-labelled; run with `--tiles 40`. Carries **no** PC fields: its PC metric is ungapped (see "PC fields" above) |

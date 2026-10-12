@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+r"""The one Python reader (and the byte-level writer) of the three binary
+formats in ``golden/``: the ``*.nevpt2gold`` golden, the ``*.gradgold``
+gradient sidecar and the ``*.mogold`` MO sidecar.
+
+Every reader in ``reference_data/`` goes through this module; none parses a
+header, or seeks to an offset, of its own. The scalar header of each format is
+written down **once**, as a field table keyed by magic (:data:`GOLDEN_HEADERS`,
+:data:`GRADGOLD_HEADERS`, :data:`MO_SIDECAR_HEADERS`), and both directions are
+driven by that table: :func:`pack_header` writes it, :func:`_read_header`
+reads it, and where the array table begins is wherever the header read stopped
+(``f.tell()``) -- derived, never known. A header change is therefore an edit to
+one table here (plus a new magic, so the committed files stay readable), and
+``src/golden/golden.cpp``'s ``loadGolden`` / ``gradgold.cpp``'s
+``loadGradGold`` on the C++ side. The full inventory of readers, and the check
+that holds them to both layouts, is docs/reference-data.md, "The file format".
+
+Deliberately light: ``struct`` and ``numpy`` only, and no thread-pool
+settings. ``generate_golden.py`` forces single-threading at import, and
+``pyscf_contract_time.py`` must not inherit that, so the format lives here and
+not there. ``generate_golden.py`` re-exports the magics under their old names.
+
+Readers raise :class:`FormatError` (a ``ValueError``) on a file they cannot
+interpret: a wrong magic, an unknown ``reference_kind``, a truncated header or
+array, a malformed array header, or bytes after the last array -- the same
+refusals ``loadGolden`` makes.
+
+Run as a script it prints where a golden's array table begins, which is what
+the regeneration check in docs/reference-data.md hands to ``cmp -i`` instead
+of a header length written out by hand::
+
+    uv run python reference_data/golden_format.py arrays-at golden/n2_ccpvdz_cas44.nevpt2gold
+"""
+
+from __future__ import annotations
+
+import os
+import struct
+import sys
+from pathlib import Path
+
+import numpy as np
+
+#: Magic bytes identifying a golden-reference file. ``G2`` is the current
+#: layout: it ends its scalar header with the ``reference_kind`` field
+#: (:data:`REFERENCE_KINDS`). ``generate_golden.write_golden``'s docstring has
+#: the full layout.
+GOLDEN_MAGIC = b"NEVPT2G2"
+
+#: The layout before ``reference_kind``, which every committed **CASCI**
+#: golden is written in. It stays readable and means ``"casci"`` -- the only
+#: thing it could mean (docs/reference-data.md, "The file format").
+GOLDEN_MAGIC_V1 = b"NEVPT2G1"
+
+#: Every magic a golden file may carry, newest first.
+GOLDEN_MAGICS = (GOLDEN_MAGIC, GOLDEN_MAGIC_V1)
+
+#: The ``reference_kind`` codes a ``G2`` scalar header may hold
+#: (``src/golden/golden.cppm``'s ``ReferenceKind`` is the same two codes).
+REFERENCE_KINDS = {0: "casci", 1: "casscf"}
+
+#: ``REFERENCE_KINDS`` inverted: the name a writer takes.
+REFERENCE_KIND_CODES = {name: code for code, name in REFERENCE_KINDS.items()}
+
+#: Magic bytes identifying a gradient sidecar (``*.gradgold``).
+GRADGOLD_MAGIC = b"NEVPT2D1"
+
+#: Magic bytes identifying an MO sidecar (``*.mogold``).
+MO_SIDECAR_MAGIC = b"NEVPT2M1"
+
+#: A golden's state fields, common to both layouts: ``struct`` codes, all
+#: little-endian with no padding.
+_GOLDEN_STATE = (
+    ("ncas", "i"), ("nelec_a", "i"), ("nelec_b", "i"), ("ncore", "i"), ("ndet", "q"),
+    ("e_casci", "d"), ("e_nevpt2_total", "d"),
+)
+
+#: THE golden scalar header, per magic, in file order. Adding a field means a
+#: new magic and a new entry here -- never an edit to an existing entry, which
+#: would misread every committed file written in that layout (and which
+#: ``golden_layout_check.py`` exists to catch).
+GOLDEN_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
+    GOLDEN_MAGIC: _GOLDEN_STATE + (("reference_kind", "i"),),
+    GOLDEN_MAGIC_V1: _GOLDEN_STATE,
+}
+
+#: THE gradient sidecar's scalar header: the orbital-space partition.
+GRADGOLD_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
+    GRADGOLD_MAGIC: tuple(
+        (n, "i") for n in ("nao", "nmo", "ncore", "nact", "nvirt", "nelec_rhf")
+    ),
+}
+
+#: THE MO sidecar's scalar header. Its text section and array table follow.
+MO_SIDECAR_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
+    MO_SIDECAR_MAGIC: tuple(
+        (n, "i") for n in ("nao", "nmo", "ncore", "ncas", "nelec_a", "nelec_b")
+    ) + (("e_casscf", "d"),),
+}
+
+#: No array the generator writes has more than a handful of axes; a rank past
+#: this is a misread header (``loadGolden``'s ``kMaxRank``).
+MAX_RANK = 16
+
+
+class FormatError(ValueError):
+    """A file this module cannot interpret as the format it was asked for."""
+
+
+def _struct_format(fields) -> str:
+    return "<" + "".join(code for _name, code in fields)
+
+
+def pack_header(layouts: dict, magic: bytes, values: dict) -> bytes:
+    """``magic`` followed by the scalar header ``layouts[magic]`` describes,
+    each field taken from ``values`` by name -- the one place a header is
+    packed, so a writer and :func:`_read_header` cannot disagree on order or
+    width."""
+    fields = layouts[magic]
+    return magic + struct.pack(
+        _struct_format(fields), *(values[name] for name, _code in fields)
+    )
+
+
+def write_arrays(f, arrays: dict[str, np.ndarray]) -> None:
+    """The named-array section every format here ends with: an int32 count,
+    then per array a name, a rank, int64 extents and C-order f64 data."""
+    f.write(struct.pack("<i", len(arrays)))
+    for name, arr in arrays.items():
+        arr = np.ascontiguousarray(arr, dtype=np.float64)
+        name_b = name.encode("ascii")
+        f.write(struct.pack("<i", len(name_b)))
+        f.write(name_b)
+        f.write(struct.pack("<i", arr.ndim))
+        f.write(struct.pack(f"<{arr.ndim}q", *arr.shape))
+        f.write(arr.tobytes(order="C"))
+
+
+def write_fields(f, fields: dict[str, str]) -> None:
+    """The MO sidecar's text section: an int32 count, then per field a UTF-8
+    key and a UTF-8 value, each length-prefixed."""
+    f.write(struct.pack("<i", len(fields)))
+    for key, val in fields.items():
+        for text in (key, val):
+            b = text.encode("utf-8")
+            f.write(struct.pack("<i", len(b)))
+            f.write(b)
+
+
+def _read_exact(f, n: int, path, what: str) -> bytes:
+    b = f.read(n)
+    if len(b) != n:
+        raise FormatError(f"{path}: unexpected EOF reading {what}")
+    return b
+
+
+def _unpack(f, fmt: str, path, what: str) -> tuple:
+    return struct.unpack(fmt, _read_exact(f, struct.calcsize(fmt), path, what))
+
+
+def _read_header(f, path, layouts: dict, label: str) -> dict:
+    """The magic and the scalar header ``layouts`` gives for it, as a dict
+    holding ``magic`` plus every field by name. Leaves ``f`` at the first byte
+    after the header."""
+    magic = _read_exact(f, 8, path, "the magic")
+    fields = layouts.get(magic)
+    if fields is None:
+        raise FormatError(
+            f"{path} is not a {label}: magic {magic!r}, expected one of "
+            f"{sorted(layouts)}"
+        )
+    values = _unpack(f, _struct_format(fields), path, "the scalar header")
+    header = dict(zip((name for name, _code in fields), values, strict=True))
+    header["magic"] = magic
+    return header
+
+
+def _read_text_fields(f, path) -> dict[str, str]:
+    (n,) = _unpack(f, "<i", path, "the field count")
+    if n < 0:
+        raise FormatError(f"{path}: negative field count {n}")
+    fields: dict[str, str] = {}
+    for _ in range(n):
+        pair = []
+        for _ in range(2):
+            (ln,) = _unpack(f, "<i", path, "a field length")
+            if ln < 0:
+                raise FormatError(f"{path}: negative field length {ln}")
+            pair.append(_read_exact(f, ln, path, "a field").decode("utf-8"))
+        fields[pair[0]] = pair[1]
+    return fields
+
+
+def _read_arrays(f, path, want: set[str] | None) -> dict[str, np.ndarray]:
+    """The array section from ``f``'s current position to the end of the
+    file, keeping the arrays named in ``want`` (every array when ``None``).
+    Every array header is validated before it sizes anything, and the section
+    must end exactly at the end of the file: a header misread by even one
+    field fails here rather than handing back shifted data."""
+    size = os.fstat(f.fileno()).st_size
+    (n_arrays,) = _unpack(f, "<i", path, "the array count")
+    if n_arrays < 0:
+        raise FormatError(f"{path}: negative array count {n_arrays}")
+    arrays: dict[str, np.ndarray] = {}
+    for _ in range(n_arrays):
+        (name_len,) = _unpack(f, "<i", path, "an array name length")
+        if name_len < 0 or name_len > size - f.tell():
+            raise FormatError(f"{path}: bad array name length {name_len}")
+        raw = _read_exact(f, name_len, path, "an array name")
+        try:
+            name = raw.decode("ascii")
+        except UnicodeDecodeError as e:
+            raise FormatError(f"{path}: array name {raw[:32]!r} is not ASCII") from e
+        (ndim,) = _unpack(f, "<i", path, f"array '{name}''s rank")
+        if not 0 <= ndim <= MAX_RANK:
+            raise FormatError(f"{path}: array '{name}' has rank {ndim} (expected 0..{MAX_RANK})")
+        shape = _unpack(f, f"<{ndim}q", path, f"array '{name}''s shape")
+        if any(s < 0 for s in shape):
+            raise FormatError(f"{path}: array '{name}' has a negative extent {shape}")
+        nbytes = 8 * int(np.prod(shape, dtype=np.int64))
+        if nbytes > size - f.tell():
+            raise FormatError(f"{path}: array '{name}' runs past the end of the file")
+        if want is None or name in want:
+            data = _read_exact(f, nbytes, path, f"array '{name}'")
+            arrays[name] = np.frombuffer(data, "<f8").reshape(shape).copy()
+        else:
+            f.seek(nbytes, 1)
+    if f.tell() != size:
+        raise FormatError(
+            f"{path}: {size - f.tell()} bytes after the last of its {n_arrays} arrays"
+        )
+    return arrays
+
+
+def _golden_header(f, path) -> dict:
+    header = _read_header(f, path, GOLDEN_HEADERS, "golden file")
+    # A G1 file has no field and is a CASCI on RHF orbitals by definition.
+    code = header.get("reference_kind", REFERENCE_KIND_CODES["casci"])
+    if code not in REFERENCE_KINDS:
+        raise FormatError(f"{path}: unknown reference_kind {code}")
+    header["reference_kind"] = REFERENCE_KINDS[code]
+    # Where the array table begins, i.e. how long this file's header turned out
+    # to be: read off the stream, never computed from a layout.
+    header["arrays_at"] = f.tell()
+    return header
+
+
+def read_golden_header(path) -> dict:
+    """A golden's scalar header: ``ncas``, ``nelec_a``, ``nelec_b``,
+    ``ncore``, ``ndet``, ``e_casci``, ``e_nevpt2_total``, ``reference_kind``
+    (a name: ``"casci"`` for a ``G1`` file), plus ``magic`` and ``arrays_at``
+    (the byte offset of the array table, as read). Reads only the header."""
+    with open(path, "rb") as f:
+        return _golden_header(f, path)
+
+
+def read_golden(path, want: set[str] | None = None) -> tuple[dict, dict[str, np.ndarray]]:
+    """``(header, arrays)`` from a golden: :func:`read_golden_header`'s dict,
+    and the arrays named in ``want`` (all of them when ``None``; the files run
+    to tens of MB, so a caller needing one scalar names it). The whole array
+    table is walked either way, so a misread header fails even when one array
+    is asked for, and a ``ci`` that is read must hold ``ndet`` elements."""
+    with open(path, "rb") as f:
+        header = _golden_header(f, path)
+        arrays = _read_arrays(f, path, want)
+    if "ci" in arrays and arrays["ci"].size != header["ndet"]:
+        raise FormatError(
+            f"{path}: ci has {arrays['ci'].size} elements but the header says "
+            f"ndet = {header['ndet']}"
+        )
+    return header, arrays
+
+
+def read_gradgold(path) -> tuple[dict, dict[str, np.ndarray]]:
+    """``(header, arrays)`` from a gradient sidecar. ``header`` holds exactly
+    the six partition fields, so ``generate_golden.write_gradgold(path,
+    **header, arrays=arrays)`` writes the same file back."""
+    with open(path, "rb") as f:
+        header = _read_header(f, path, GRADGOLD_HEADERS, "gradient sidecar")
+        del header["magic"]
+        arrays = _read_arrays(f, path, None)
+    return header, arrays
+
+
+def read_mo_sidecar(path) -> tuple[dict, dict[str, str], dict[str, np.ndarray]]:
+    """``(header, fields, arrays)`` from an MO sidecar: the seven scalar
+    fields, the text section, and every array. The checks on what the arrays
+    must be are ``generate_golden.read_mo_sidecar``'s."""
+    with open(path, "rb") as f:
+        header = _read_header(f, path, MO_SIDECAR_HEADERS, "MO sidecar")
+        del header["magic"]
+        fields = _read_text_fields(f, path)
+        arrays = _read_arrays(f, path, None)
+    return header, fields, arrays
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2 or argv[0] != "arrays-at":
+        print("usage: golden_format.py arrays-at FILE.nevpt2gold", file=sys.stderr)
+        return 2
+    print(read_golden_header(Path(argv[1]))["arrays_at"])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

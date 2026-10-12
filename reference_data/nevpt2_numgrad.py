@@ -102,10 +102,10 @@ import generate_golden as gg
 # isort: split
 import argparse
 import re
-import struct
 import time
 from pathlib import Path
 
+import golden_format as gf
 import numpy as np
 
 # BOHR is PySCF's own Angstrom per bohr, imported rather than written out: the
@@ -207,40 +207,6 @@ def read_xyz(path: Path) -> list[tuple[str, tuple[float, float, float]]]:
     return geom
 
 
-def read_golden_header(path: Path) -> dict:
-    """The scalar header of a ``.nevpt2gold`` file -- the two energies this
-    script checks its rebuilt reference state against, and the reference kind
-    :func:`_check_reference_kind` gates on (layout:
-    ``generate_golden.write_golden``).
-
-    Both magics are accepted: a pre-kind ``NEVPT2G1`` file carries no
-    ``reference_kind`` field and is a CASCI on RHF orbitals by definition,
-    which is what every committed golden with a gradient sidecar is. A
-    ``NEVPT2G2`` file states its kind, and a ``casscf`` one is refused by
-    :func:`_check_reference_kind`."""
-    with open(path, "rb") as f:
-        magic = f.read(8)
-        assert magic in gg.GOLDEN_MAGICS, f"{path} is not a golden file"
-        ncas, nelec_a, nelec_b, ncore, ndet = struct.unpack("<iiiiq", f.read(24))
-        e_casci, e_corr = struct.unpack("<dd", f.read(16))
-        kind = "casci"
-        if magic == gg.GOLDEN_MAGIC:
-            (code,) = struct.unpack("<i", f.read(4))
-            assert code in gg.REFERENCE_KINDS, f"{path}: unknown reference_kind {code}"
-            kind = gg.REFERENCE_KINDS[code]
-        # Where the array table begins, i.e. how long the header turned out to
-        # be -- which depends on the magic, since NEVPT2G2 carries the
-        # reference_kind field NEVPT2G1 does not. Reported rather than
-        # recomputed, so :func:`_read_golden_arrays` cannot drift from the
-        # layout read just above it.
-        arrays_at = f.tell()
-    return dict(
-        ncas=ncas, nelec_a=nelec_a, nelec_b=nelec_b, ncore=ncore, ndet=ndet,
-        e_casci=e_casci, e_corr=e_corr, reference_kind=kind,
-        arrays_at=arrays_at,
-    )
-
-
 def _check_reference_kind(kind: str, path: Path) -> None:
     """Refuse a golden whose orbitals did not come from a CASCI on converged
     RHF orbitals. Everything here differentiates *that* reference: RHF
@@ -271,36 +237,11 @@ def read_golden_pc_total(path: Path) -> float | None:
     """The golden's ``e_pc_total`` -- block2's PC correlation energy on that
     state -- or ``None`` when the file carries no PC fields (``--no-pc``, e.g.
     LiF, whose PC metric is refused as a continuum). Scanned out of the array
-    table rather than the header, where only the SC pair lives.
-
-    Both golden layouts work: the array table starts wherever
-    :func:`read_golden_header` says it does (``arrays_at``), so a NEVPT2G2
-    file's extra ``reference_kind`` field is skipped without this function
-    knowing the layout."""
-    _h, arrays = _read_golden_arrays(path, {"e_pc_total"})
+    table by :func:`golden_format.read_golden`, so it reads either golden
+    layout without knowing either."""
+    _h, arrays = gf.read_golden(path, {"e_pc_total"})
     a = arrays.get("e_pc_total")
     return None if a is None else float(a.ravel()[0])
-
-
-def _read_golden_arrays(path: Path, want: set[str]) -> tuple[dict, dict]:
-    """``(header, arrays)`` from a ``.nevpt2gold``, keeping only the named
-    arrays (the files run to tens of MB and this script needs one scalar)."""
-    header = read_golden_header(path)
-    arrays: dict[str, np.ndarray] = {}
-    with open(path, "rb") as f:
-        f.seek(header["arrays_at"])
-        (n_arrays,) = struct.unpack("<i", f.read(4))
-        for _ in range(n_arrays):
-            (name_len,) = struct.unpack("<i", f.read(4))
-            name = f.read(name_len).decode()
-            (ndim,) = struct.unpack("<i", f.read(4))
-            shape = struct.unpack(f"<{ndim}q", f.read(8 * ndim))
-            count = int(np.prod(shape, dtype=np.int64))
-            if name in want:
-                arrays[name] = np.frombuffer(f.read(8 * count), "<f8").reshape(shape)
-            else:
-                f.seek(8 * count, 1)
-    return header, arrays
 
 
 def pc_energy(mc, pt, *, check: bool = True) -> float:
@@ -318,27 +259,6 @@ def pc_energy(mc, pt, *, check: bool = True) -> float:
     if gaps is not None:
         gg._check_pc_conditioning(gaps)
     return float(sum(pc.values()))
-
-
-def read_gradgold(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
-    """A ``.gradgold`` sidecar back into the ``(header, arrays)`` pair
-    :func:`generate_golden.write_gradgold` writes, so this script can append
-    its arrays and write the file out again unchanged otherwise."""
-    with open(path, "rb") as f:
-        assert f.read(8) == gg.GRADGOLD_MAGIC, f"{path} is not a gradient sidecar"
-        names = ("nao", "nmo", "ncore", "nact", "nvirt", "nelec_rhf")
-        header = dict(zip(names, struct.unpack("<6i", f.read(24)), strict=True))
-        (n_arrays,) = struct.unpack("<i", f.read(4))
-        arrays: dict[str, np.ndarray] = {}
-        for _ in range(n_arrays):
-            (name_len,) = struct.unpack("<i", f.read(4))
-            name = f.read(name_len).decode()
-            (ndim,) = struct.unpack("<i", f.read(4))
-            shape = struct.unpack(f"<{ndim}q", f.read(8 * ndim))
-            count = int(np.prod(shape, dtype=np.int64))
-            arrays[name] = np.frombuffer(f.read(8 * count), "<f8").reshape(shape)
-        assert not f.read(1), f"{path}: trailing bytes after the last array"
-    return header, arrays
 
 
 def displace(
@@ -611,7 +531,7 @@ def run(args) -> dict:
     # The golden's header first: reading it costs nothing, and its reference
     # kind decides whether differencing this state means anything at all, so
     # the refusal lands before the reference energy is computed.
-    gold = read_golden_header(args.golden)
+    gold = gf.read_golden_header(args.golden)
     rec["reference_kind"] = gold["reference_kind"]
     _check_reference_kind(gold["reference_kind"], args.golden)
 
@@ -622,7 +542,7 @@ def run(args) -> dict:
                labels=ref_labels, pc=args.pc)
 
     rec["d_e_casci"] = e_casci - gold["e_casci"]
-    rec["d_e_corr"] = e_corr - gold["e_corr"]
+    rec["d_e_corr"] = e_corr - gold["e_nevpt2_total"]
     if args.pc:
         # The golden's own PC answer, from the same block2 kernel on the same
         # state: a wiring check, like the SC pair below, and the one place a
@@ -809,7 +729,7 @@ def main() -> None:
             "--out PATH, or --no-write."
         )
 
-    header, arrays = read_gradgold(args.sidecar)
+    header, arrays = gf.read_gradgold(args.sidecar)
     # Replace rather than append on a re-run, so the file is a function of the
     # inputs: same order, same bytes.
     arrays = {k: v for k, v in arrays.items() if not k.startswith("grad_num")}

@@ -66,6 +66,13 @@ struct GoldenFile {
   // the older layout predates it and is a CASCI by definition, so this
   // default is also what a G1 file loads as.
   ReferenceKind reference = ReferenceKind::Casci;
+  // The byte offset the array table began at, i.e. how long this file's
+  // scalar header turned out to be: read off the cursor where the header
+  // parse stopped, never computed from a layout, so it differs between the
+  // two magics without anything here knowing by how much. Reported for the
+  // layout-contract tests (docs/reference-data.md, "The file format");
+  // nothing downstream needs it.
+  int64_t arraysAt = 0;
   std::unordered_map<std::string, Tensor> arrays;
 
   // An IO Error naming the first of `names` the file does not carry. Each

@@ -76,7 +76,7 @@ void appendI32(std::string& out, const std::int32_t v) { appendRaw(out, &v, 4); 
 void appendI64(std::string& out, const std::int64_t v) { appendRaw(out, &v, 8); }
 
 // One named array record: name length, name, rank, int64 extents, C-order f64
-// data (generate_golden.py's _write_arrays).
+// data (reference_data/golden_format.py's write_arrays).
 void appendArray(std::string& out, const std::string_view name, const std::vector<int64_t>& dims,
                  const std::vector<double>& data) {
   appendI32(out, static_cast<std::int32_t>(name.size()));

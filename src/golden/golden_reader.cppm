@@ -1,7 +1,7 @@
 // nevpt2.golden:reader -- the byte-level reader behind loadGolden and
 // loadGradGold: a bounded FILE* cursor and the one-array parser. Both file
-// formats end with the same named-array section (generate_golden.py's
-// _write_arrays writes it for both), so both parse it with the one readArray
+// formats end with the same named-array section (golden_format.py's
+// write_arrays writes it for both), so both parse it with the one readArray
 // here; what differs is the magic and the scalar header each loader reads
 // first. An internal partition: nothing here is exported, so it is reachable
 // from golden.cpp / gradgold.cpp (`import :reader;`) and from no importer of
@@ -47,6 +47,7 @@ class Reader {
     const long size = std::ftell(f);
     if (size < 0 || std::fseek(f, 0, SEEK_SET) != 0)
       return err_io(std::format("could not size {}: {}", r.label_, path));
+    r.size_ = size;
     r.remaining_ = size;
     return r;
   }
@@ -54,6 +55,9 @@ class Reader {
   const std::string& path() const { return path_; }
   const std::string& label() const { return label_; }
   int64_t remaining() const { return remaining_; }
+  // How many bytes have been read: where the next field starts. The one way
+  // a loader learns where its array table begins.
+  int64_t position() const { return size_ - remaining_; }
 
   Status bytes(void* dst, std::size_t n) {
     if (std::cmp_greater(n, remaining_) || std::fread(dst, 1, n, f_.get()) != n)
@@ -94,6 +98,7 @@ class Reader {
   std::unique_ptr<std::FILE, Closer> f_;
   std::string path_;
   std::string label_;
+  int64_t size_ = 0;
   int64_t remaining_ = 0;
 };
 

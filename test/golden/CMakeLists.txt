@@ -34,10 +34,32 @@ target_compile_definitions(
   golden_tests PRIVATE NEVPT2_TEST_GOLDEN_CAS44_CASSCF="${_golden_cas44_casscf}")
 unset(_golden_cas44_casscf)
 
+# The layout contract's C++ half (GoldenLayoutContractTests): EVERY golden and
+# gradient sidecar present in golden/ at configure time, so both header layouts
+# -- NEVPT2G1 (the CASCI goldens) and NEVPT2G2 (the *_casscf* ones) -- go
+# through loadGolden / loadGradGold, and a header change the reader does not
+# follow fails here instead of in a golden entry. Gitignored files are picked
+# up when they have been regenerated, and re-globbed on the next build
+# (CONFIGURE_DEPENDS). '|'-joined: a ';' would split the definition. The
+# Python half is reference_data/golden_layout_check.py (docs/reference-data.md,
+# "The file format").
+file(GLOB _contract_goldens CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/golden/*.nevpt2gold")
+file(GLOB _contract_gradgolds CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/golden/*.gradgold")
+list(SORT _contract_goldens)
+list(SORT _contract_gradgolds)
+list(JOIN _contract_goldens "|" _contract_goldens)
+list(JOIN _contract_gradgolds "|" _contract_gradgolds)
+target_compile_definitions(
+  golden_tests PRIVATE NEVPT2_TEST_COMMITTED_GOLDENS="${_contract_goldens}"
+                       NEVPT2_TEST_COMMITTED_GRADGOLDS="${_contract_gradgolds}")
+unset(_contract_goldens)
+unset(_contract_gradgolds)
+
 add_gtest_suite_tests(
   TARGET golden_tests
   SUITES GoldenLoadErrorTests GoldenRequireTests GoldenReferenceKindTests
-         GoldenReferenceKindGateTests GoldenCommittedCasscfTests GoldenCas44Tests)
+         GoldenReferenceKindGateTests GoldenCommittedCasscfTests GoldenCas44Tests
+         GoldenLayoutContractTests)
 
 # Host-only suites for the OTHER reader in nevpt2.golden: loadGradGold, the
 # `*.gradgold` gradient sidecar (docs/gradient-theory.md, section 3). Same
