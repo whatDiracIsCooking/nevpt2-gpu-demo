@@ -172,15 +172,14 @@ Four things ``--pc`` does need:
   values, and LiF's does -- so ``--pc`` on LiF stops at the reference state
   rather than producing a gradient of a number that is not well defined
   (docs/reference-data.md, "LiF and acrolein, the gradient-validation pair");
-* **a CI step three decades smaller, and that same guard run at every
-  displaced CI vector.** This is the one trap in the whole PC path and it is
-  silent: a determinant-axis displacement of the CI vector is not a spin
+* **a CI step of its own, and that same guard run at every displaced CI
+  vector.** This is the one trap in the whole PC path and it is silent: a determinant-axis displacement of the CI vector is not a spin
   eigenfunction, so it lifts the PC metric's structurally null modes, and a
   lifted mode past the lstsq cut is kept and divided by -- a *first-order*
   error in ``y_I`` that no step ladder converges away and that every residual
   in the solve reads as round-off. :data:`CI_STEP_PC` has the argument; the
-  measured ladder (a 2.5e-4 plateau at the SC step, 1.5e-8 three decades
-  below it) is in docs/testing.md, "The analytic gradient against the
+  measured ladder (a 2.5e-4 plateau at 1e-4, 1.5e-8 three decades below
+  it) is in docs/testing.md, "The analytic gradient against the
   numerical one".
 
 It is far slower than the SC run, and the whole cost is in the ``kappa``
@@ -342,28 +341,52 @@ REPO = Path(__file__).resolve().parent.parent
 #: different functions.
 CASES = ngrad.CASES
 
-#: The orbital-rotation step for the ``Y_xy`` difference quotients, in the
+# -- the difference-quotient steps, one set per scheme ---------------------
+#
+# Every step below is a MEASURED constant, read off a ladder recorded in
+# docs/testing.md, "The step constants, measured" -- the gradient re-run
+# with one step walked through powers of two and the others held -- and
+# gated every run by the residual-independent checks. The SC and PC sets
+# differ on purpose: the SC energy has near-singularities close to N2's
+# reference point (a near-pole along a CI direction, a frozen path whose
+# quotient converges only slowly), so the SC steps sit where N2 SC has
+# converged; the PC gradient does not move with KAPPA_STEP or NUC_STEP over
+# the same ladders, so PC keeps the steps every PC figure was measured at.
+
+#: The orbital-rotation step for the ``Y_xy`` difference quotients (and the
+#: constraint Jacobian ``M`` and ``Q`` the same sweep produces), SC, in the
 #: dimensionless ``kappa``. A Givens rotation by ``h`` is exact to machine
-#: precision, so the only errors are the quotient's own ``O(h^2)`` truncation
-#: and the energies' round-off divided by ``2h``; 1e-4 sits near the minimum
-#: of that pair for an ``E_corr`` converged to ~1e-12. Gated, every run, by
-#: the orbital-stationarity ladder (:func:`check_orbital_stationarity`); what
-#: it measures per case is docs/testing.md, "Residual-independent checks of
-#: the gradient path".
-KAPPA_STEP = 1e-4
+#: precision, so the errors are the quotient's truncation and the energies'
+#: round-off divided by ``2h``. ``2^-17``: on N2 CAS(4,4) SC the gradient's
+#: change between neighbouring rungs falls from 7.3e-6 at ``2^-9`` to 2.0e-8
+#: at ``2^-17``, and is round-off from there down; the shipped 1e-4 before
+#: #77 left ~1e-6 on the table (docs/testing.md, "The step constants,
+#: measured"). Gated by the orbital-stationarity ladder
+#: (:func:`check_orbital_stationarity`).
+KAPPA_STEP = 2.0 ** -17
 
-#: The step for the ``y_I = dE_corr/dc_I`` difference quotients. The RDMs are
-#: exactly quadratic in the CI vector, so ``E_corr`` is a smooth rational
-#: function of it and the same reasoning applies -- measured as a ladder in
-#: docs/testing.md, "The PC CI source term's step is a first-order trap", and
-#: gated every run by the ``y``-linearity ladder
-#: (:func:`check_ci_source_linearity`), which finds it unconverged on N2
-#: CAS(4,4) SC (docs/testing.md, "Residual-independent checks of the gradient
-#: path").
-CI_STEP = 1e-4
+#: The same step for ``--pc``: unchanged at 1e-4, because the PC gradient
+#: does not depend on it at the gate's scale -- N2 CAS(4,4) PC's gradient
+#: moves by at most 9.6e-9 per component over ``kappa`` steps ``2^-15`` to
+#: ``2^-19`` -- and every PC ladder passes at it, where one (a CI
+#: stationarity at round-off) does not at SC's ``2^-17`` (docs/testing.md,
+#: "The step constants, measured").
+KAPPA_STEP_PC = 1e-4
 
-#: The same step for ``--pc``, and it is **three decades smaller, for a
-#: reason that is not truncation error**.
+#: The step for the ``y_I = dE_corr/dc_I`` difference quotients, SC. The
+#: RDMs are exactly quadratic in the CI vector, so ``E_corr`` is a rational
+#: function of it -- but on N2 CAS(4,4) SC one with a near-pole at ``h ~
+#: 2^-7`` along a CI direction, so the quotient converges as ``h^2`` (ratio
+#: 4.00 per halving) only from ``2^-12`` down. ``2^-17`` is where that ladder
+#: has converged to 9e-9 and round-off has not started (docs/testing.md,
+#: "The step constants, measured"); 1e-4 before #77 was 1.2e-6 off. Gated by
+#: the ``y``-linearity ladder (:func:`check_ci_source_linearity`).
+CI_STEP = 2.0 ** -17
+
+#: The same step for ``--pc``, and it is **chosen for a reason that is not
+#: truncation error** -- three decades below the 1e-4 SC step #41 measured
+#: it against (``CI_STEP`` has since moved to ``2^-17`` for SC's own
+#: truncation, #77, and this constant did not move with it).
 #:
 #: PC-NEVPT2 solves one linear system per external tuple, and the internally
 #: contracted basis is linearly dependent: part of each block's spectrum is
@@ -394,16 +417,33 @@ CI_STEP = 1e-4
 #: (docs/testing.md, "Residual-independent checks of the gradient path").
 CI_STEP_PC = 1e-7
 
-#: The nuclear step for ``dPhi/dx``, in bohr. Deliberately the step
-#: ``nevpt2_numgrad.py`` differences the *energy* at, so the two gradients are
-#: taken on the same scale -- but note what is differenced here is one scalar
-#: along a frozen path, not a re-converged energy, and the two need not be
-#: smooth on the same scale: gated every run by the nuclear ladder
-#: (:func:`check_nuclear_ladder`), which on N2 CAS(4,4) SC finds the frozen
-#: path's quotient at this step short of its converged derivative by more
-#: than the gate (docs/testing.md, "Residual-independent checks of the
-#: gradient path").
-NUC_STEP = ngrad.STEP_BOHR
+#: The nuclear step for ``dPhi/dx``, in bohr, SC; the gradient is the
+#: Richardson extrapolant of the quotients at this step and half of it.
+#: What is differenced is one scalar along a frozen path, not the
+#: re-converged energy ``nevpt2_numgrad.py`` differences, and the two need not
+#: be smooth on the same scale: on N2 CAS(4,4) SC the frozen path's SC
+#: energy has a near-singularity within ~1e-4 bohr, and at
+#: ``nevpt2_numgrad.STEP_BOHR`` (0.0025, this constant's value before #77) the
+#: quotient was 2.5e-6 short of its converged slope. ``2^-13`` bohr is where
+#: the gradient's nuclear-step ladder has settled (a change of 4e-9 to the
+#: next rung, round-off below ``2^-15``): docs/testing.md, "The step
+#: constants, measured". Gated by the nuclear ladder
+#: (:func:`check_nuclear_ladder`).
+NUC_STEP = 2.0 ** -13
+
+#: The same step for ``--pc``: unchanged at ``nevpt2_numgrad.STEP_BOHR``,
+#: for the reason :data:`KAPPA_STEP_PC` gives -- N2 CAS(4,4) PC's gradient
+#: moves by 1.3e-9 between it and ``2^-13`` bohr, and its nuclear ladder
+#: passes at it (docs/testing.md, "The step constants, measured").
+NUC_STEP_PC = ngrad.STEP_BOHR
+
+
+def scheme_steps(pc: bool) -> tuple[float, float]:
+    """``(NUC_STEP, KAPPA_STEP)`` for the scheme being differentiated: the
+    PC pair with ``--pc``, else the SC pair (``--casci-only`` included, which
+    is validated against the numerical CASCI gradient at the SC steps)."""
+    return (NUC_STEP_PC, KAPPA_STEP_PC) if pc else (NUC_STEP, KAPPA_STEP)
+
 
 #: How far the rebuilt state may sit from the golden it claims to
 #: differentiate, in ``E_CASCI`` and ``E_corr``. Measured at 0.0 -- the same
@@ -1162,7 +1202,7 @@ def load_source_terms(path: Path, st: State) -> SourceTerms:
 
 
 def kappa_sweep(fn: Functional, st: State, cons: list, *, with_corr: bool,
-                step: float = KAPPA_STEP, log=print) -> dict:
+                step: float, log=print) -> dict:
     """One central-difference pass along every non-gauge ``kappa`` pair,
     returning everything that depends on that direction:
 
@@ -1302,7 +1342,7 @@ def pyscf_ci_source(fn: Functional, st: State,
     ``dE/dkappa`` before the sidecar existed) -- so it is **not** the
     derivative this gradient needs. Rebuilt per displaced CI vector here; a
     dump that holds them fixed will be visibly wrong against ``grad_num``."""
-    # Three decades smaller in PC mode, and :data:`CI_STEP_PC` says why: it is
+    # Its own constant in PC mode, and :data:`CI_STEP_PC` says why: it is
     # not a truncation-error choice, it is the step at which the PC metric's
     # null modes stay below the lstsq cut.
     if step is None:
@@ -1389,13 +1429,17 @@ class Gradients(lagrange.Gradients):
     one residual norm; :attr:`residuals` carries each block's own."""
 
     def __init__(self, st: State, src: SourceTerms, *, with_corr: bool = True,
-                 step: float = NUC_STEP, richardson: bool = True,
-                 pc: bool = False):
+                 step: float | None = None, richardson: bool = True,
+                 pc: bool = False, kappa_step: float | None = None):
         self.st = st
+        default_step, default_kappa = scheme_steps(pc)
+        step = default_step if step is None else step
+        kappa_step = default_kappa if kappa_step is None else kappa_step
         self.src = src
         self.with_corr = with_corr
         self.pc = pc
         self.step = step
+        self.kappa_step = kappa_step
         self.richardson = richardson
         self.pairs = kappa_pairs(st)
         self.cons = constraints(st)
@@ -1686,7 +1730,8 @@ class Gradients(lagrange.Gradients):
         # E_corr too unless a dump already supplied that half, in which case
         # the sweep is the cheap E_CASCI-only one and the dump's Y is added.
         sweep = kappa_sweep(self.fn, st, self.cons,
-                            with_corr=self.with_corr and not self.src.from_dump, log=log)
+                            with_corr=self.with_corr and not self.src.from_dump,
+                            step=self.kappa_step, log=log)
         self._jacobian = sweep["M"]
         self._q = sweep["Q"]
         self.src = SourceTerms(
@@ -1893,10 +1938,10 @@ class Gradients(lagrange.Gradients):
         for p, q in gauge:
             vals = []
             for sign in (+1.0, -1.0):
-                b = self.fn.evaluate(givens(st.mo_coeff, p, q, sign * KAPPA_STEP),
+                b = self.fn.evaluate(givens(st.mo_coeff, p, q, sign * self.kappa_step),
                                      st.ci, with_corr=self.with_corr)
                 vals.append(b["e_casci"] + b["e_corr"] + float(z @ b["hvec"]))
-            worst = max(worst, abs((vals[0] - vals[1]) / (2.0 * KAPPA_STEP)))
+            worst = max(worst, abs((vals[0] - vals[1]) / (2.0 * self.kappa_step)))
         return worst
 
     def kernel(self, **kwargs) -> np.ndarray:
@@ -2511,7 +2556,7 @@ def run(args) -> dict:
     rec["source_origin"] = src.origin
 
     g = Gradients(st, src, with_corr=with_corr, step=args.step,
-                  richardson=args.richardson, pc=args.pc)
+                  richardson=args.richardson, pc=args.pc, kappa_step=args.kappa_step)
     print("\nthe frozen orthonormal path, and one kappa sweep")
     g.prepare()
     print("\nthe multipliers")
@@ -2723,8 +2768,10 @@ def main() -> None:
                     help="drop E_corr from the source terms and from Phi: the "
                          "reference is then a plain CASCI and pyscf.grad.casci is "
                          "the oracle. The pipeline's own validation")
-    ap.add_argument("--step", type=float, default=NUC_STEP,
-                    help=f"nuclear central-difference step in bohr (default {NUC_STEP:g})")
+    ap.add_argument("--step", type=float, default=None,
+                    help=f"nuclear central-difference step in bohr (default "
+                         f"{NUC_STEP:g}, or {NUC_STEP_PC:g} with --pc; "
+                         "docs/testing.md, \"The step constants, measured\")")
     ap.add_argument("--no-richardson", dest="richardson", action="store_false",
                     help="difference at h only, and report no error bar. The default "
                          "differences at h and h/2 and stores the Richardson "
@@ -2756,9 +2803,15 @@ def main() -> None:
     ap.add_argument("--ci-step", type=float, default=None,
                     help="the step for the y_I = dE_corr/dc_I quotients "
                          f"(default {CI_STEP:g}, or {CI_STEP_PC:g} with --pc, "
-                         "which is three decades smaller for a reason that is "
+                         "which is its own constant for a reason that is "
                          "not truncation -- see CI_STEP_PC). Only here so the "
                          "measured ladder in docs/testing.md can be rerun")
+    ap.add_argument("--kappa-step", type=float, default=None,
+                    help="the step for the Y_xy / constraint-Jacobian / Q "
+                         f"quotients along each kappa rotation (default "
+                         f"{KAPPA_STEP:g}, or {KAPPA_STEP_PC:g} with --pc). "
+                         "Only here so the measured ladders in docs/testing.md "
+                         "can be rerun")
     ap.add_argument("--tol", type=float, default=GRAD_NUM_TOL,
                     help="what max |g - grad_num| has to be under, per "
                          f"component, to PASS (default {GRAD_NUM_TOL:g}). NOT "
@@ -2770,6 +2823,11 @@ def main() -> None:
                          "one's (docs/testing.md, \"Residual-independent checks "
                          "of the gradient path\" is read off these)")
     args = ap.parse_args()
+    default_step, default_kappa = scheme_steps(args.pc)
+    if args.step is None:
+        args.step = default_step
+    if args.kappa_step is None:
+        args.kappa_step = default_kappa
     if args.source == "dump" and args.source_path is None:
         raise SystemExit("--source dump needs --source-path PATH")
     if args.source == "pyscf":
