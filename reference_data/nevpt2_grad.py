@@ -173,7 +173,8 @@ Four things ``--pc`` does need:
   rather than producing a gradient of a number that is not well defined
   (docs/reference-data.md, "LiF and acrolein, the gradient-validation pair");
 * **a CI step of its own, and that same guard run at every displaced CI
-  vector.** This is the one trap in the whole PC path and it is silent: a determinant-axis displacement of the CI vector is not a spin
+  vector.** This is the one trap in the whole PC path and it is silent: a
+  determinant-axis displacement of the CI vector is not a spin
   eigenfunction, so it lifts the PC metric's structurally null modes, and a
   lifted mode past the lstsq cut is kept and divided by -- a *first-order*
   error in ``y_I`` that no step ladder converges away and that every residual
@@ -327,6 +328,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import golden_format as gf
 import numpy as np
 from pyscf import fci, mcscf, mrpt, scf
 from pyscf.grad import lagrange
@@ -2495,9 +2497,9 @@ def run(args) -> dict:
                           "core_irreps")))
     rec["committed_case"] = committed
     if committed:
-        gold = ngrad.read_golden_header(REPO / "golden" / f"{args.case}.nevpt2gold")
+        gold = gf.read_golden_header(REPO / "golden" / f"{args.case}.nevpt2gold")
         rec["d_e_casci"] = st.e_casci - gold["e_casci"]
-        rec["d_e_corr"] = st.e_corr - gold["e_corr"]
+        rec["d_e_corr"] = st.e_corr - gold["e_nevpt2_total"]
         if max(abs(rec["d_e_casci"]), abs(rec["d_e_corr"])) > REF_STATE_TOL:
             raise SystemExit(
                 f"the rebuilt state does not match golden/{args.case}.nevpt2gold: "
@@ -2623,7 +2625,7 @@ def run(args) -> dict:
     else:
         sidecar = REPO / "golden" / f"{args.case}.gradgold"
         if committed and sidecar.exists():
-            _h, arrays = ngrad.read_gradgold(sidecar)
+            _h, arrays = gf.read_gradgold(sidecar)
             if "grad_num" in arrays:
                 rec["grad_num"] = np.asarray(arrays["grad_num"])
                 rec["grad_num_probed"] = np.asarray(arrays["grad_num_probed"])

@@ -25,10 +25,16 @@
 //                         file and not only a spliced one
 //   GoldenCas44Tests      the committed golden/n2_ccpvdz_cas44.nevpt2gold:
 //                         header fields and array shapes
+//   GoldenLayoutContractTests
+//                         the layout contract's C++ half: every golden and
+//                         gradient sidecar in golden/, of both header
+//                         layouts, loads, with its array table found where
+//                         that file's header ends
 //
 // The malformed files are written to a per-test temp directory, removed in
 // TearDown. The committed goldens are only ever read; their paths come from
-// CMake (NEVPT2_TEST_GOLDEN_CAS44, NEVPT2_TEST_GOLDEN_CAS44_CASSCF), not from
+// CMake (NEVPT2_TEST_GOLDEN_CAS44, NEVPT2_TEST_GOLDEN_CAS44_CASSCF,
+// NEVPT2_TEST_COMMITTED_GOLDENS, NEVPT2_TEST_COMMITTED_GRADGOLDS), not from
 // this source.
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
@@ -43,6 +49,9 @@ import nevpt2.golden;
 #endif
 #ifndef NEVPT2_TEST_GOLDEN_CAS44_CASSCF
 #error "NEVPT2_TEST_GOLDEN_CAS44_CASSCF must be defined by test/golden/CMakeLists.txt"
+#endif
+#if !defined(NEVPT2_TEST_COMMITTED_GOLDENS) || !defined(NEVPT2_TEST_COMMITTED_GRADGOLDS)
+#error "NEVPT2_TEST_COMMITTED_GOLDENS/_GRADGOLDS must be defined by test/golden/CMakeLists.txt"
 #endif
 
 // Not a module unit (gtest is a textual header), so no partition: the
@@ -154,15 +163,22 @@ TEST_F(GoldenLoadErrorTests, TrailingBytesAreAnIoError) {
 }
 
 TEST_F(GoldenLoadErrorTests, NdetNotTheCiLengthIsAnIoError) {
-  // The header's ndet (the int64 after the magic and four int32s) bumped by
-  // one: ci still holds the real count.
+  // The header's ndet bumped by one: ci still holds the real count. Found by
+  // its value inside the scalar header (which ends at arraysAt) rather than
+  // at a position written out here; the other header fields of this file
+  // (4, 2, 2, 5) cannot hold the int64 36's byte pattern, which the
+  // uniqueness check below confirms.
+  const Result<GoldenFile> g = loadGolden(std::string(kGoldenCas44));
+  ASSERT_TRUE(g.has_value()) << g.error().message;
   std::string bytes = readAll(std::string(kGoldenCas44));
-  constexpr std::size_t kNdetOffset = 8 + 4 * 4;
-  ASSERT_GT(bytes.size(), kNdetOffset + 8);
-  std::int64_t ndet = 0;
-  std::memcpy(&ndet, bytes.data() + kNdetOffset, 8);
+  std::int64_t ndet = g->ndet;
+  const std::string pattern(reinterpret_cast<const char*>(&ndet), 8);
+  const std::string header = bytes.substr(0, static_cast<std::size_t>(g->arraysAt));
+  const std::size_t at = header.find(pattern);
+  ASSERT_NE(at, std::string::npos);
+  ASSERT_EQ(header.find(pattern, at + 1), std::string::npos) << "ndet's bytes are not unique";
   ++ndet;
-  std::memcpy(bytes.data() + kNdetOffset, &ndet, 8);
+  std::memcpy(bytes.data() + at, &ndet, 8);
   expectIoError(loadGolden(write("bad_ndet.nevpt2gold", bytes)),
                 std::format("but the header says ndet = {}", ndet));
 }
@@ -218,14 +234,20 @@ TEST(GoldenRequireTests, CheckNdetRefusesAMismatch) {
 // between the two layouts, and the transformation regenerating a committed
 // golden performs today (docs/reference-data.md, "Regenerating the golden
 // file").
-std::string asG2(const std::string_view g1, const std::int32_t kind) {
-  // 8 magic + (4 + 4 + 4 + 4 + 8) scalars + (8 + 8) energies.
-  constexpr std::size_t kKindOffset = 8 + 24 + 16;
-  std::string out(g1);
+//
+// The field goes where the G1 file's scalar header ends, which is where
+// loadGolden found its array table (GoldenFile::arraysAt) -- read off the
+// file, not a header length written out here, so this splice cannot drift
+// from the reader it tests. Empty if the committed file does not load.
+std::string cas44AsG2(const std::int32_t kind) {
+  const Result<GoldenFile> g1 = loadGolden(std::string(kGoldenCas44));
+  EXPECT_TRUE(g1.has_value()) << g1.error().message;
+  if (!g1.has_value()) return {};
+  std::string out = readAll(std::string(kGoldenCas44));
   out.replace(0, 8, "NEVPT2G2");
   std::string field(4, '\0');
   std::memcpy(field.data(), &kind, 4);
-  out.insert(kKindOffset, field);
+  out.insert(static_cast<std::size_t>(g1->arraysAt), field);
   return out;
 }
 
@@ -247,8 +269,6 @@ TEST_F(GoldenReferenceKindTests, TheCommittedGoldenIsAPreKindFileAndReadsAsCasci
 }
 
 TEST_F(GoldenReferenceKindTests, G2RoundTripsBothKinds) {
-  const std::string g1 = readAll(std::string(kGoldenCas44));
-  ASSERT_GT(g1.size(), 48u);
   const Result<GoldenFile> reference = loadGolden(std::string(kGoldenCas44));
   ASSERT_TRUE(reference.has_value()) << reference.error().message;
 
@@ -256,11 +276,13 @@ TEST_F(GoldenReferenceKindTests, G2RoundTripsBothKinds) {
       {0, ReferenceKind::Casci}, {1, ReferenceKind::Casscf}};
   for (const auto& [code, kind] : kinds) {
     const std::string name = std::format("g2_kind{}.nevpt2gold", code);
-    Result<GoldenFile> r = loadGolden(write(name, asG2(g1, code)));
+    Result<GoldenFile> r = loadGolden(write(name, cas44AsG2(code)));
     ASSERT_TRUE(r.has_value()) << r.error().message;
     EXPECT_EQ(r->reference, kind) << code;
-    // The four inserted bytes are the ONLY difference: the rest of the
-    // header, and every array, parse exactly as the G1 file's did.
+    // The four inserted bytes are the ONLY difference: the array table
+    // starts that much later, and the rest of the header, and every array,
+    // parse exactly as the G1 file's did.
+    EXPECT_EQ(r->arraysAt, reference->arraysAt + 4);
     EXPECT_EQ(r->ncas, reference->ncas);
     EXPECT_EQ(r->nelecA, reference->nelecA);
     EXPECT_EQ(r->nelecB, reference->nelecB);
@@ -281,13 +303,11 @@ TEST_F(GoldenReferenceKindTests, G2RoundTripsBothKinds) {
 }
 
 TEST_F(GoldenReferenceKindTests, AnUnknownReferenceKindIsAnIoError) {
-  const std::string g1 = readAll(std::string(kGoldenCas44));
-  ASSERT_GT(g1.size(), 48u);
   // A well-formed G2 file in every other respect, so what is refused is the
   // kind code and nothing else.
   for (const std::int32_t code : {-1, 2, 7}) {
     const Result<GoldenFile> r =
-        loadGolden(write(std::format("bad_kind{}.nevpt2gold", code), asG2(g1, code)));
+        loadGolden(write(std::format("bad_kind{}.nevpt2gold", code), cas44AsG2(code)));
     expectIoError(r, std::format("reference_kind = {} is not a kind this reader knows", code));
   }
 }
@@ -332,9 +352,7 @@ TEST_F(GoldenReferenceKindTests, TheGateRefusesALoadedCasscfGolden) {
   // End to end: a G2 file whose kind is CASSCF loads fine and is refused by
   // the gate, which is the order the demo does it in -- all host-side, with
   // no card.
-  const std::string g1 = readAll(std::string(kGoldenCas44));
-  ASSERT_GT(g1.size(), 48u);
-  Result<GoldenFile> r = loadGolden(write("casscf.nevpt2gold", asG2(g1, 1)));
+  Result<GoldenFile> r = loadGolden(write("casscf.nevpt2gold", cas44AsG2(1)));
   ASSERT_TRUE(r.has_value()) << r.error().message;
   EXPECT_EQ(referenceKindName(r->reference), "CASSCF");
   const Status s = r->requireCasciReference("--gradient-source");
@@ -495,6 +513,72 @@ TEST_F(GoldenCas44Tests, ArraysAreRowMajor) {
   EXPECT_EQ(h2e.stride(1), n * n);
   EXPECT_EQ(h2e.stride(2), n);
   EXPECT_EQ(h2e.stride(3), 1);
+}
+
+// --- GoldenLayoutContractTests ------------------------------------------------
+//
+// The C++ half of the golden layout contract (docs/reference-data.md, "The
+// file format"; the Python half is reference_data/golden_layout_check.py).
+// One header change -- NEVPT2G1 -> NEVPT2G2 -- broke three readers, so every
+// committed file of BOTH layouts goes through loadGolden here, and a change to
+// the header that the reader does not follow fails this suite rather than
+// misreading a golden. A misread header cannot pass quietly: loadGolden walks
+// the whole array table and refuses a malformed array header, a short file or
+// a byte left over, and a ci that is not ndet long.
+
+std::vector<std::string> splitPaths(const std::string_view joined) {
+  std::vector<std::string> out;
+  for (const auto part : std::views::split(joined, '|'))
+    if (!part.empty()) out.emplace_back(std::string_view(part));
+  return out;
+}
+
+TEST(GoldenLayoutContractTests, EveryCommittedGoldenOfBothLayoutsLoads) {
+  const std::vector<std::string> paths = splitPaths(NEVPT2_TEST_COMMITTED_GOLDENS);
+  ASSERT_FALSE(paths.empty()) << "test/golden/CMakeLists.txt globbed no golden";
+  std::map<std::string, int> perMagic;
+  std::map<std::string, std::set<int64_t>> arraysAtPerMagic;
+  for (const std::string& path : paths) {
+    SCOPED_TRACE(path);
+    const std::string magic = readAll(path).substr(0, 8);
+    const Result<GoldenFile> r = loadGolden(path);
+    ASSERT_TRUE(r.has_value()) << r.error().message;
+    ++perMagic[magic];
+    arraysAtPerMagic[magic].insert(r->arraysAt);
+    // Every demo reads these, and only a correctly-placed array table yields
+    // them under their own names.
+    EXPECT_TRUE(r->require({"ci", "class_energies", "h1e", "h2e"}).has_value());
+    EXPECT_EQ(r->get("ci").size(), r->ndet);
+    EXPECT_GT(r->ncas, 0);
+    EXPECT_EQ(r->get("h1e").dims(), (std::vector<int64_t>{r->ncas, r->ncas}));
+    // The layout says the kind: G1 is a CASCI by definition.
+    if (magic == "NEVPT2G1") EXPECT_EQ(r->reference, ReferenceKind::Casci);
+  }
+  // Both layouts on disk, or this suite is not testing what it claims to.
+  EXPECT_GT(perMagic["NEVPT2G1"], 0) << "no committed NEVPT2G1 golden was loaded";
+  EXPECT_GT(perMagic["NEVPT2G2"], 0) << "no committed NEVPT2G2 golden was loaded";
+  EXPECT_EQ(std::ssize(perMagic), 2) << "a golden in a third layout: extend this suite";
+  // Within one layout the header has one length, and the two layouts' differ:
+  // the reader found each file's array table where that file put it.
+  for (const auto& [magic, at] : arraysAtPerMagic) EXPECT_EQ(std::ssize(at), 1) << magic;
+  EXPECT_NE(arraysAtPerMagic["NEVPT2G1"], arraysAtPerMagic["NEVPT2G2"]);
+}
+
+TEST(GoldenLayoutContractTests, EveryCommittedGradientSidecarLoadsAgainstItsGolden) {
+  const std::vector<std::string> paths = splitPaths(NEVPT2_TEST_COMMITTED_GRADGOLDS);
+  ASSERT_FALSE(paths.empty()) << "test/golden/CMakeLists.txt globbed no gradient sidecar";
+  for (const std::string& path : paths) {
+    SCOPED_TRACE(path);
+    const Result<GradGoldFile> side = loadGradGold(path);
+    ASSERT_TRUE(side.has_value()) << side.error().message;
+    EXPECT_TRUE(side->require({"mo_coeff"}).has_value());
+    std::filesystem::path twin(path);
+    twin.replace_extension(".nevpt2gold");
+    if (!std::filesystem::exists(twin)) continue;
+    const Result<GoldenFile> golden = loadGolden(twin.string());
+    ASSERT_TRUE(golden.has_value()) << golden.error().message;
+    EXPECT_TRUE(side->checkAgainst(*golden).has_value());
+  }
 }
 
 }  // namespace nevpt2::test::golden

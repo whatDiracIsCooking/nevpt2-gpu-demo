@@ -149,10 +149,10 @@ for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
     os.environ[_var] = "1"
 
 import argparse  # noqa: E402
-import struct  # noqa: E402
 import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 
+import golden_format as gf  # noqa: E402
 import numpy as np  # noqa: E402
 
 #: The CASCI Davidson tolerance. PySCF's default (1e-8) stops at a residual of
@@ -244,35 +244,22 @@ PC_SOLVE_ORDER = (
     "rsabpq-", "ijabpq+", "ijabpq-", "irabpq1", "rabcpqg*", "iabcpqg*",
 )
 
-#: Magic bytes identifying a golden-reference file -- see :func:`write_golden`'s
-#: docstring for the full binary layout (``src/golden/golden.cppm`` reads it).
-#: ``G2`` is the current layout: it ends its scalar header with the
-#: ``reference_kind`` field (:data:`REFERENCE_KINDS`).
-GOLDEN_MAGIC = b"NEVPT2G2"
-
-#: The layout before ``reference_kind``, which every **committed** golden is
-#: written in. It stays readable -- by ``loadGolden`` and by every reader here
-#: -- and means ``"casci"``, which is the only thing it could mean: a golden
-#: has always been a CASCI diagonalisation on converged RHF orbitals
-#: (docs/reference-data.md, "What 'CASSCF input' means here, and why the golden
-#: state is CASCI"). Accepting it is what keeps the committed files from having
-#: to be rewritten for a one-field header change.
-GOLDEN_MAGIC_V1 = b"NEVPT2G1"
-
-#: Every magic a golden file may carry, newest first.
-GOLDEN_MAGICS = (GOLDEN_MAGIC, GOLDEN_MAGIC_V1)
-
-#: The ``reference_kind`` codes a ``G2`` scalar header may hold: which
-#: reference produced the orbitals the state sits in. Provenance lives in the
-#: file so a consumer can refuse what it does not support -- every derivative
-#: in this tree is derived for the CASCI-on-RHF Lagrangian
-#: (docs/gradient-theory.md, §1.1 and §1.2), so the gradient paths refuse a
-#: ``"casscf"`` golden. ``src/golden/golden.cppm``'s ``ReferenceKind`` is the
-#: same two codes.
-REFERENCE_KINDS = {0: "casci", 1: "casscf"}
-
-#: ``REFERENCE_KINDS`` inverted: the name :func:`write_golden` takes.
-REFERENCE_KIND_CODES = {name: code for code, name in REFERENCE_KINDS.items()}
+#: The format constants, re-exported from :mod:`golden_format` (the one
+#: module that reads and packs the three formats here, and the only place a
+#: header layout is written down): ``G2`` is the current golden layout, ending
+#: its scalar header with the ``reference_kind`` field (:data:`REFERENCE_KINDS`);
+#: ``G1`` is the layout before it, which every committed **CASCI** golden is
+#: written in and which means ``"casci"`` (docs/reference-data.md, "The file
+#: format"). Accepting it is what keeps the committed files from having to be
+#: rewritten for a one-field header change. ``src/golden/golden.cppm``'s
+#: ``ReferenceKind`` is the same two codes, and every derivative in this tree
+#: is derived for the CASCI-on-RHF Lagrangian (docs/gradient-theory.md, §1.1
+#: and §1.2), so the gradient paths refuse a ``"casscf"`` golden.
+GOLDEN_MAGIC = gf.GOLDEN_MAGIC
+GOLDEN_MAGIC_V1 = gf.GOLDEN_MAGIC_V1
+GOLDEN_MAGICS = gf.GOLDEN_MAGICS
+REFERENCE_KINDS = gf.REFERENCE_KINDS
+REFERENCE_KIND_CODES = gf.REFERENCE_KIND_CODES
 
 #: Magic bytes identifying a gradient **sidecar** (``*.gradgold``) -- a
 #: SEPARATE file from the golden it sits beside, carrying only what an analytic
@@ -283,7 +270,7 @@ REFERENCE_KIND_CODES = {name: code for code, name in REFERENCE_KINDS.items()}
 #: golden's bytes, and a regenerated golden differing from the committed one is
 #: this project's signal that something changed (docs/reference-data.md,
 #: "Regenerating the golden file").
-GRADGOLD_MAGIC = b"NEVPT2D1"
+GRADGOLD_MAGIC = gf.GRADGOLD_MAGIC
 
 #: How far from zero the RHF Fock's core-active, core-virtual and
 #: active-virtual blocks may be in the canonicalised MO basis before
@@ -318,7 +305,7 @@ O2_FOCK_TOL = 1e-10
 #: optimiser: a fresh CASSCF under :data:`CASSCF_CONV_TOL` /
 #: :data:`CASSCF_CONV_TOL_GRAD` reproduces bit for bit, measured
 #: (docs/reference-data.md, "A fresh CASSCF reproduces, measured").
-MO_SIDECAR_MAGIC = b"NEVPT2M1"
+MO_SIDECAR_MAGIC = gf.MO_SIDECAR_MAGIC
 
 #: ``--casscf``'s optimiser settings, all three far past PySCF's defaults
 #: (1e-7 energy, ``sqrt(conv_tol)`` ~ 3.2e-4 gradient, 50 macro iterations).
@@ -391,22 +378,6 @@ MO_GEOM_TOL = 1e-10
 MO_PROVENANCE_FIELDS = frozenset({"atom_spec", "pyscf", "numpy"})
 
 
-def _write_arrays(f, arrays: dict[str, np.ndarray]) -> None:
-    """The named-array section both file formats end with: an int32 count,
-    then per array a name, a rank, int64 extents and C-order f64 data. Shared
-    so the two writers cannot drift, and so the golden's bytes are untouched
-    by the sidecar's arrival."""
-    f.write(struct.pack("<i", len(arrays)))
-    for name, arr in arrays.items():
-        arr = np.ascontiguousarray(arr, dtype=np.float64)
-        name_b = name.encode("ascii")
-        f.write(struct.pack("<i", len(name_b)))
-        f.write(name_b)
-        f.write(struct.pack("<i", arr.ndim))
-        f.write(struct.pack(f"<{arr.ndim}q", *arr.shape))
-        f.write(arr.tobytes(order="C"))
-
-
 def write_golden(
     path: Path,
     *,
@@ -453,7 +424,11 @@ def write_golden(
     "Regenerating the golden file" skips the header for those files; the
     committed ``*_casscf*`` goldens were written as ``G2`` and compare whole.
 
-    ``src/golden/golden.cppm`` is the reader for exactly this layout.
+    The scalar header is packed from ``golden_format.GOLDEN_HEADERS``, the
+    one table every Python reader also reads it by; ``src/golden/golden.cpp``'s
+    ``loadGolden`` is the C++ reader. A header change is made in both, under a
+    new magic, and ``golden_layout_check.py`` must pass afterwards
+    (docs/reference-data.md, "The file format").
     """
     if reference_kind not in REFERENCE_KIND_CODES:
         raise SystemExit(
@@ -461,11 +436,12 @@ def write_golden(
             f"{sorted(REFERENCE_KIND_CODES)}"
         )
     with open(path, "wb") as f:
-        f.write(GOLDEN_MAGIC)
-        f.write(struct.pack("<iiiiq", ncas, nelec_a, nelec_b, ncore, ndet))
-        f.write(struct.pack("<dd", e_casci, e_nevpt2_total))
-        f.write(struct.pack("<i", REFERENCE_KIND_CODES[reference_kind]))
-        _write_arrays(f, arrays)
+        f.write(gf.pack_header(gf.GOLDEN_HEADERS, GOLDEN_MAGIC, dict(
+            ncas=ncas, nelec_a=nelec_a, nelec_b=nelec_b, ncore=ncore, ndet=ndet,
+            e_casci=e_casci, e_nevpt2_total=e_nevpt2_total,
+            reference_kind=REFERENCE_KIND_CODES[reference_kind],
+        )))
+        gf.write_arrays(f, arrays)
 
 
 def write_gradgold(
@@ -481,7 +457,7 @@ def write_gradgold(
 ) -> None:
     """Write the gradient sidecar (``*.gradgold``) for the golden beside it.
 
-    Same named-array section as :func:`write_golden` (:func:`_write_arrays`),
+    Same named-array section as :func:`write_golden` (``gf.write_arrays``),
     a different magic and a different scalar header -- the sidecar's header is
     the orbital-space partition the array shapes are written in terms of, not
     a CI state, because the state is the golden's job.
@@ -509,25 +485,15 @@ def write_gradgold(
     so the inventory makes the small cases cheap and a large case is still
     large -- which is why the gradient validation set is small molecules.
 
-    ``src/golden/golden.cppm``'s ``loadGradGold`` reads exactly this layout.
+    ``src/golden/golden.cppm``'s ``loadGradGold`` reads exactly this layout,
+    and ``golden_format.read_gradgold`` is the Python reader (the header is
+    ``golden_format.GRADGOLD_HEADERS``).
     """
     with open(path, "wb") as f:
-        f.write(GRADGOLD_MAGIC)
-        f.write(struct.pack("<6i", nao, nmo, ncore, nact, nvirt, nelec_rhf))
-        _write_arrays(f, arrays)
-
-
-def _write_fields(f, fields: dict[str, str]) -> None:
-    """The MO sidecar's text section: an int32 count, then per field a UTF-8
-    key and a UTF-8 value, each length-prefixed. The golden and the gradient
-    sidecar hold only numbers; a fingerprint has to name a basis and a point
-    group, so this one format carries text."""
-    f.write(struct.pack("<i", len(fields)))
-    for key, val in fields.items():
-        for text in (key, val):
-            b = text.encode("utf-8")
-            f.write(struct.pack("<i", len(b)))
-            f.write(b)
+        f.write(gf.pack_header(gf.GRADGOLD_HEADERS, GRADGOLD_MAGIC, dict(
+            nao=nao, nmo=nmo, ncore=ncore, nact=nact, nvirt=nvirt, nelec_rhf=nelec_rhf,
+        )))
+        gf.write_arrays(f, arrays)
 
 
 def write_mo_sidecar(
@@ -579,11 +545,12 @@ def write_mo_sidecar(
     the fingerprint is :func:`_mo_fingerprint`.
     """
     with open(path, "wb") as f:
-        f.write(MO_SIDECAR_MAGIC)
-        f.write(struct.pack("<6i", nao, nmo, ncore, ncas, nelec_a, nelec_b))
-        f.write(struct.pack("<d", e_casscf))
-        _write_fields(f, fields)
-        _write_arrays(f, arrays)
+        f.write(gf.pack_header(gf.MO_SIDECAR_HEADERS, MO_SIDECAR_MAGIC, dict(
+            nao=nao, nmo=nmo, ncore=ncore, ncas=ncas, nelec_a=nelec_a, nelec_b=nelec_b,
+            e_casscf=e_casscf,
+        )))
+        gf.write_fields(f, fields)
+        gf.write_arrays(f, arrays)
 
 
 def read_mo_sidecar(path: Path) -> dict:
@@ -594,37 +561,16 @@ def read_mo_sidecar(path: Path) -> dict:
     A sidecar is *input*, so what this can diagnose is a refusal and not an
     assertion: the wrong magic (the usual mistake -- a golden handed to
     ``--mo-from``), a missing or mis-shaped array, trailing bytes."""
-    out: dict = {}
-    with open(path, "rb") as f:
-        magic = f.read(8)
-        if magic != MO_SIDECAR_MAGIC:
-            raise SystemExit(
-                f"{path} is not an MO sidecar: magic {magic!r}, expected "
-                f"{MO_SIDECAR_MAGIC!r} (--mo-from reads what --casscf --mo-out "
-                "writes)"
-            )
-        names = ("nao", "nmo", "ncore", "ncas", "nelec_a", "nelec_b")
-        out.update(zip(names, struct.unpack("<6i", f.read(24)), strict=True))
-        (out["e_casscf"],) = struct.unpack("<d", f.read(8))
-        fields: dict[str, str] = {}
-        (n,) = struct.unpack("<i", f.read(4))
-        for _ in range(n):
-            pair = []
-            for _ in range(2):
-                (ln,) = struct.unpack("<i", f.read(4))
-                pair.append(f.read(ln).decode("utf-8"))
-            fields[pair[0]] = pair[1]
-        out["fields"] = fields
-        (n,) = struct.unpack("<i", f.read(4))
-        for _ in range(n):
-            (ln,) = struct.unpack("<i", f.read(4))
-            name = f.read(ln).decode("ascii")
-            (nd,) = struct.unpack("<i", f.read(4))
-            shape = struct.unpack(f"<{nd}q", f.read(8 * nd))
-            nbytes = 8 * int(np.prod(shape))
-            out[name] = np.frombuffer(f.read(nbytes), "<f8").reshape(shape).copy()
-        if f.read(1):
-            raise SystemExit(f"{path}: trailing bytes after the last array")
+    try:
+        header, fields, arrays = gf.read_mo_sidecar(path)
+    except gf.FormatError as e:
+        # The usual mistake is a golden handed to --mo-from.
+        raise SystemExit(
+            f"{e} (--mo-from reads what --casscf --mo-out writes, magic "
+            f"{MO_SIDECAR_MAGIC!r})"
+        ) from e
+    out: dict = dict(header, fields=fields)
+    out.update(arrays)
     for name in ("mo_coeff", "geom"):
         if name not in out:
             raise SystemExit(f"{path}: no {name} array")
