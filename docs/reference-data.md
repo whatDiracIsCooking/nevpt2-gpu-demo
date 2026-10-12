@@ -1065,11 +1065,42 @@ CASCI** gradient (`nevpt2_numgrad.py`'s own `grad_casci`, which it prints and
 also writes to an `--npz`, where `--casci-only --grad-num` gates against it)
 it lands at **1.8e-8** on LiF, **1.7e-7** on acrolein and **1.3e-8** on N2
 CAS(4,4), at the SC steps since #77. At the steps before it, the same runs
-against the same `grad_casci` give 2.0e-8, 1.5e-7 and 1.5e-8; this section
-recorded acrolein at 5.3e-8 then, which a fresh `nevpt2_numgrad.py --npz`
-does not reproduce at either set of steps — the analytic side's two runs
-agree with each other to 1.7e-8, so the difference is not the steps, and
-its cause was not chased for #77.
+against the same `grad_casci` give 2.0e-8, 1.5e-7 and 1.5e-8.
+
+**This section first recorded acrolein at 5.3e-8 (#60), and that figure was
+never what the code produced** (#80). Neither side has moved since:
+
+- *The numerical side reproduces itself bit for bit.* Three acrolein
+  `nevpt2_numgrad.py --no-write --npz` runs (two concurrent, one after) wrote
+  byte-identical files, every array equal; #60's own `nevpt2_numgrad.py`
+  (checked out at that merge) prints every per-component line identically,
+  `grad_casci` included; and a fresh LiF run equals the committed
+  `lif_def2svp_cas46.gradgold`'s four `grad_num*` arrays exactly. `uv.lock`
+  and `pyproject.toml` are byte-identical between #60 and now (one commit
+  has ever touched `uv.lock`, before #60), and `generate_golden` forced
+  single-threading then as now.
+- *No displaced point is on another root.* At all 96 displaced acrolein
+  points every CASCI converged, its energy is the lowest of four roots of the
+  same active Hamiltonian diagonalised without symmetry to 1.7e-13, the gap
+  to the second root is never below 0.151 Eh, and `grad_casci`'s own
+  Richardson residual (computed, but not kept, by `nevpt2_numgrad.py`) is at
+  most 1.6e-9.
+- *The analytic side at #60 gives today's answer.* #60's `nevpt2_grad.py
+  --casci-only` returns a gradient **identical** (max difference 0.0) to
+  today's at the old steps (`--step 0.0025 --kappa-step 1e-4 --ci-step
+  1e-4`), and it lands **1.511e-7** from `grad_casci`, at atom 2 x. The same
+  check on LiF at #60 gives 2.044e-8, which is the 2.0e-8 the section
+  recorded alongside the 5.3e-8.
+
+So 5.3e-8 does not come from the command the section implies at the code
+of its time; the PR that recorded it lists that command but not its output.
+It is a recording error, not drift, and no committed golden or sidecar is
+touched by it. (One of the sixteen component differences, atom 7 y, is
+5.34e-8, but nothing on record says that is how the figure arose.) What
+remains unexplained is the size of the 1.5e-7–1.7e-7 gap itself: at the
+current steps it is about 25 times the analytic side's skeleton Richardson
+bar (6.6e-9) and 100 times `grad_casci`'s (1.6e-9), and neither bar accounts
+for it; it is well inside the 1e-6 gate.
 
 **`pyscf.grad.casci` is not an oracle for either committed case** of the
 pair, and the run says so rather than reporting a disagreement as a failure.
