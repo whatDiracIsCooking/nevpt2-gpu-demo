@@ -32,7 +32,12 @@
 // come out of it; the partition :kappa_full_check is where that lives, and it
 // prints its own PASS line too.
 //
-// It is the only caller of nevpt2.gradient; the demos do not link it.
+// WITH --dump-source-terms PATH IT WRITES THEM INSTEAD: the whole Y_xy (out of
+// the same sidecar) and the CI source term y_I, as a `.gradsrc` that
+// reference_data/nevpt2_grad.py --source dump builds a nuclear gradient from
+// (#73). The partition :source_dump is where that lives; its PASS line says
+// the file was written and read back unchanged. The writer is nevpt2.gradsrc,
+// beside this file: the library computes, the binary decides to write.
 
 // A module unit, so each binary is apps/<app>/{main.cppm,CMakeLists.txt}.
 // Nothing imports it. main() is written plainly: clang attaches main to the
@@ -48,6 +53,8 @@ export import :kappa_check;
 // --kappa-full: the same for the WHOLE kappa space, out of the gradient
 // sidecar beside the golden. Its own PASS line as well.
 export import :kappa_full_check;
+// --dump-source-terms: Y_xy and y_I written to a .gradsrc, and read back.
+export import :source_dump;
 
 import std;
 // nevpt2.cli: every flag this binary takes, and the ones it refuses.
@@ -75,6 +82,7 @@ int main(int argc, char** argv) {
   const nevpt2::cli::CommonOptions& opt = parsedOpts.common;
   const bool kappaActArg = parsedOpts.kappaAct;
   const bool kappaFullArg = parsedOpts.kappaFull;
+  const std::string& dumpPath = parsedOpts.dumpSourceTermsPath;
   std::string gradgoldPath = parsedOpts.gradgoldPath;
 
   // A missing, unreadable or malformed golden file -- or one without an array
@@ -147,11 +155,10 @@ int main(int argc, char** argv) {
   const nevpt2::EnergyResult energies =
       nevpt2::energiesDevice(dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, *res);
 
-  // --kappa-full: the WHOLE source term, out of the gradient sidecar beside
-  // the golden -- the path derived from the golden's unless --gradgold gave
-  // one. A missing or malformed sidecar is the user's input, reported once
-  // here (:kappa_full_check).
-  if (kappaFullArg) {
+  // --kappa-full and --dump-source-terms read the gradient sidecar beside the
+  // golden -- the path derived from the golden's unless --gradgold gave one.
+  // A missing or malformed sidecar is the user's input, reported once here.
+  const auto loadSidecar = [&]() -> nevpt2::Result<nevpt2::GradGoldFile> {
     if (gradgoldPath.empty()) {
       static constexpr std::string_view kGoldenSuffix = ".nevpt2gold";
       gradgoldPath = opt.goldenPath;
@@ -160,7 +167,38 @@ int main(int argc, char** argv) {
       gradgoldPath += ".gradgold";
     }
     std::printf("gradient sidecar:  %s\n", gradgoldPath.c_str());
-    nevpt2::Result<nevpt2::GradGoldFile> sidecar = nevpt2::loadGradGold(gradgoldPath);
+    return nevpt2::loadGradGold(gradgoldPath);
+  };
+
+  // --dump-source-terms: Y_xy and y_I, written (:source_dump). They feed the
+  // CASCI-on-RHF Lagrangian of reference_data/nevpt2_grad.py, so a CASSCF
+  // golden is refused as Unsupported, as nevpt2_demo's derivative paths
+  // refuse one.
+  if (!dumpPath.empty()) {
+    if (const nevpt2::Status st = g.requireCasciReference("--dump-source-terms"); !st) {
+      nevpt2::report(st.error());
+      return 1;
+    }
+    nevpt2::Result<nevpt2::GradGoldFile> sidecar = loadSidecar();
+    if (!sidecar) {
+      nevpt2::report(sidecar.error());
+      return 1;
+    }
+    const nevpt2::GradGoldFile gg = *std::move(sidecar);
+    const nevpt2::Result<bool> ok =
+        dumpSourceTerms(g, gg, energies, dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca,
+                        opt.rdm.nTiles, dumpPath, *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
+
+  // --kappa-full: the WHOLE source term, checked (:kappa_full_check).
+  if (kappaFullArg) {
+    nevpt2::Result<nevpt2::GradGoldFile> sidecar = loadSidecar();
     if (!sidecar) {
       nevpt2::report(sidecar.error());
       return 1;

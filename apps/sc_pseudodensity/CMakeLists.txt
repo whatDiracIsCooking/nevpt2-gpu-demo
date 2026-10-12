@@ -3,9 +3,25 @@
 # as nevpt2_demo: imports the component modules, carries no device code of its
 # own, and main.cppm is a module unit, so it goes in a CXX_MODULES file set
 # for the dependency scan rather than in plain sources.
+#
+# nevpt2.gradsrc -- the `.gradsrc` writer (and the reader its round trip
+# needs) that --dump-source-terms uses: the GPU's own Y_xy and y_I as a NumPy
+# .npz for reference_data/nevpt2_grad.py --source dump (#73). The one module
+# library under apps/, and on purpose: nevpt2.gradient computes, and writing
+# what it computed is this binary's decision, not the component's. A library
+# rather than a partition only so test/gradsrc/ can round-trip it with no
+# card. Host code alone -- no device, no GPU runtime.
+add_cxx_module_library(
+  NAME nevpt2.gradsrc
+  PRIMARY_INTERFACE gradsrc.cppm
+  PARTITIONS gradsrc_archive.cppm
+  IMPLEMENTATION gradsrc.cpp
+  LINK_PUBLIC nevpt2::tensor nevpt2::error_handling
+)
+
 add_executable(nevpt2_sc_pseudodensity)
 target_sources(nevpt2_sc_pseudodensity PRIVATE FILE_SET CXX_MODULES
-               FILES main.cppm kappa_check.cppm kappa_full_check.cppm)
+               FILES main.cppm kappa_check.cppm kappa_full_check.cppm source_dump.cppm)
 set_target_properties(nevpt2_sc_pseudodensity PROPERTIES CXX_MODULE_STD ON)
 target_compile_features(nevpt2_sc_pseudodensity PRIVATE cxx_std_23)
 target_compile_options(nevpt2_sc_pseudodensity PRIVATE -Wall)
@@ -46,6 +62,8 @@ target_link_libraries(nevpt2_sc_pseudodensity PRIVATE
   # rotation of every stored block, which their finite differences rerun the
   # energy at.
   nevpt2::kappa_rotation
+  # --dump-source-terms: the .gradsrc writer and reader.
+  nevpt2::gradsrc
   nevpt2::golden
   nevpt2::link_tables
   nevpt2::cli

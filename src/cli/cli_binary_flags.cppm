@@ -37,7 +37,10 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   the tangent RDM build beside their own (#38, #39).
 //   the --cublas / --ozaki family and --fused-digest: every binary but
 //                   nevpt2_pc_tangent (kNotPcTangent, above).
-//   each binary's own flags: that binary alone.
+//   each binary's own flags: that binary alone. --dump-source-terms is
+//                   nevpt2_sc_pseudodensity's because Y_xy needs the gradient
+//                   sidecar only it reads; nevpt2_demo computes y_I too, but
+//                   half a dump is not one.
 // README.md, "Which binary takes which flag", is this table in prose; keep
 // the two together.
 constexpr std::array kFlagTable{
@@ -63,6 +66,7 @@ constexpr std::array kFlagTable{
     FlagSpec{"--kappa-act", "", kScPd},
     FlagSpec{"--kappa-full", "", kScPd},
     FlagSpec{"--gradgold", "path", kScPd},
+    FlagSpec{"--dump-source-terms", "path", kScPd},
     FlagSpec{"--fd-steps", "N", kPcTangent},
     FlagSpec{"--fd-start-pow", "N", kPcTangent},
 };
@@ -111,6 +115,8 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
     opt.kappaFull = true;
   } else if (a == "--gradgold") {
     opt.gradgoldPath = std::string(args[++i]);
+  } else if (a == "--dump-source-terms") {
+    opt.dumpSourceTermsPath = std::string(args[++i]);
   } else if (a == "--batch") {
     const Result<std::int64_t> v = parseInteger<std::int64_t>(a, args[++i]);
     if (!v) return std::unexpected(v.error());
@@ -167,9 +173,16 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
       if (opt.kappaAct && opt.kappaFull)
         return err_config(
             "--kappa-act and --kappa-full are two checks of the same source term; pass one");
-      if (!opt.gradgoldPath.empty() && !opt.kappaFull)
+      // The dump WRITES the source terms the two checks check: one job per
+      // run, as the checks are one at a time.
+      if (!opt.dumpSourceTermsPath.empty() && (opt.kappaAct || opt.kappaFull))
         return err_config(
-            "--gradgold is the sidecar --kappa-full reads; it does nothing on its own");
+            "--dump-source-terms writes the source terms --kappa-act and --kappa-full check; "
+            "run one at a time");
+      if (!opt.gradgoldPath.empty() && !opt.kappaFull && opt.dumpSourceTermsPath.empty())
+        return err_config(
+            "--gradgold is the sidecar --kappa-full and --dump-source-terms read; it does "
+            "nothing on its own");
       return {};
     case Binary::PcTangent:
       if (opt.fdSteps < kMinFdSteps || opt.fdSteps > kMaxFdSteps)

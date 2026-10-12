@@ -251,22 +251,30 @@ THE SOURCE TERMS
 an antisymmetric ``kappa`` and a normalised ``c`` define: ``Y_xy - Y_yx``, and
 ``P y``. Two providers, and the file says which it used:
 
-``--source dump PATH``
-    the GPU's own answer, from a ``.gradsrc`` sidecar
-    (:func:`load_source_terms`): ``numpy.savez`` holding ``kappa_source``
+``--source dump --source-path PATH``
+    the GPU's own answer, from a ``.gradsrc`` file that
+    ``nevpt2_sc_pseudodensity --dump-source-terms PATH`` writes
+    (:func:`load_source_terms`): an ``.npz`` holding ``kappa_source``
     (``(n_mo, n_mo)``, either ``Y`` or its antisymmetrisation -- only
-    ``Y_xy - Y_yx`` is ever read) and ``ci_source`` (the ``y_I`` vector, in
-    the CI vector's own shape), plus the state's ``ncore``/``nact``/``nvirt``
-    for a fit check. **No flag in this tree writes one yet**: ``src/gradient/``
-    computes both (``--gradient-source`` for ``y_I``, ``--kappa-full`` for
-    ``Y``) and prints only residuals and norms, so there is nothing to read.
-    That is the missing dump path.
-    A dump must also carry the **orbital energies' response**: ``e_core`` and
-    ``e_virt`` are the generalized Fock's diagonal and so are functions of
-    both ``kappa`` and ``c``. The device's ``Y_xy`` now includes the
-    ``kappa`` half (that is what the ``*.gradgold`` sidecar is for), but its
-    ``y_I`` holds them fixed, and :func:`pyscf_ci_source` says what that
-    omission costs.
+    ``Y_xy - Y_yx`` is ever read), ``ci_source`` (the ``y_I`` vector, in the
+    CI vector's own shape), the ``ci`` they were taken at, the state's
+    ``ncore``/``nact``/``nvirt`` and ``e_corr``. It is in the **golden's**
+    active basis, and is carried into section 2.6's on read.
+    **It is not the derivative this gradient needs, and the reason is
+    known**: the device's ``Y`` holds the ``f3ac``/``f3ca`` digests fixed
+    (docs/gradients.md, section 6) and its ``y`` holds ``e_core``/``e_virt``
+    fixed (:func:`pyscf_ci_source` says why that matters). What the gradient
+    comes out at with it, and the attribution to those two omissions:
+    docs/testing.md, "The GPU as the source-term provider".
+``--source both --source-path PATH``
+    the dump is the provider gated against ``grad_num``; PySCF's terms are
+    computed as well, compared with it componentwise
+    (:func:`compare_sources`), and solved on the **same** sweep, so the
+    report carries both gradients beside ``grad_num`` and a difference can
+    only come from the source terms. ``--localise`` adds PySCF's functional
+    with the device's two omissions put back (:func:`localise_sources`);
+    ``--sources-only`` stops after the comparison. SC only: the GPU has no PC
+    source terms (#74).
 ``--source pyscf`` (the default)
     central differences of PySCF's own SC-NEVPT2 energy: at fixed CI along
     every non-gauge ``kappa`` pair for ``Y``, and at fixed orbitals along
@@ -304,6 +312,13 @@ Usage::
         --pc --npz /tmp/acrolein.numgrad.npz
     uv run python reference_data/nevpt2_grad.py --case acrolein_def2svp_cas65 \
         --pc --grad-num /tmp/acrolein.numgrad.npz
+    # the GPU as the provider: dump its source terms, then both gradients and
+    # grad_num in one table (docs/testing.md, "The GPU as the source-term
+    # provider"):
+    ./build/src/nevpt2_sc_pseudodensity --golden golden/lif_def2svp_cas46.nevpt2gold \
+        --tiles 3 --dump-source-terms /tmp/lif.gradsrc
+    uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
+        --source both --source-path /tmp/lif.gradsrc
     # and the CASCI validation gated the same way, against the npz's grad_casci:
     uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 \
         --casci-only --grad-num /tmp/n2_cas44.numgrad.npz
@@ -679,6 +694,13 @@ class State:
     #: exists at all (``generate_golden._check_pc_conditioning``).
     e_corr_pc: float | None = None
     pc_gap: float | None = None
+    #: The golden's own CI vector, BEFORE the section 2.6 rotation, and the
+    #: active-block rotation ``vec`` that took it (and the orbitals) to the
+    #: basis this state is held in. A ``.gradsrc`` dump is in the golden's
+    #: basis -- the only one the GPU knows -- so :func:`load_source_terms`
+    #: carries it across with these.
+    ci_golden: np.ndarray | None = None
+    act_rot: np.ndarray | None = None
 
     @property
     def nocc(self) -> int:
@@ -778,9 +800,8 @@ def build_state(case: str, spec: dict, *, pc: bool = False) -> State:
     eps, vec = np.linalg.eigh(np.asarray(ga0["fock_rhf"])[a, a])
     mo = np.asarray(pt.mo_coeff).copy()
     mo[:, a] = mo[:, a] @ vec
-    ci = fci.addons.transform_ci_for_orbital_rotation(
-        np.asarray(pt.load_ci()), nact, pt.nelecas, vec
-    )
+    ci_golden = np.asarray(pt.load_ci()).copy()
+    ci = fci.addons.transform_ci_for_orbital_rotation(ci_golden, nact, pt.nelecas, vec)
     pt.mo_coeff = mo
     pt.ci = ci
     e_corr, ga = arrays_for(pt)
@@ -805,6 +826,7 @@ def build_state(case: str, spec: dict, *, pc: bool = False) -> State:
         nelecas=tuple(pt.nelecas), nelec_rhf=nelec_rhf,
         f=f, fock_rhf=fock_rhf, n_act_occ=n_act_occ,
         act_eps=eps, e_casci=float(mc.e_tot), e_corr=e_corr, invariants=invariants,
+        ci_golden=ci_golden, act_rot=vec,
     )
     if pc:
         gaps: list = []
@@ -979,19 +1001,45 @@ class Functional:
             _pc_guard(gaps, displaced=displaced, where=where)
         return float(sum(pc.values()))
 
-    def corr_at_ci(self, eris: dict, C: np.ndarray, ci: np.ndarray) -> float:
+    def corr_at_ci(self, eris: dict, C: np.ndarray, ci: np.ndarray,
+                   eps: np.ndarray | None = None) -> float:
         """``E_corr`` at fixed orbitals and a moved CI vector, with the
         orbital energies rebuilt from it -- the quotient
         :func:`pyscf_ci_source` differences, in whichever mode is active.
         A PC energy here is at a displaced CI vector, so :meth:`pc_energy`
-        guards it."""
+        guards it.
+
+        ``eps`` holds the orbital energies fixed instead: **not** the
+        derivative a gradient needs, but the one the device's ``y_I`` takes
+        (:func:`localise_sources`, which is the only caller that passes it)."""
         self.pt.ci = ci
         self.mc.ci = ci
         dm1, _dm2, dms, _ = _dms_from(self.pt, eris, self.state)
-        eps = np.diag(self.generalized_fock(eris, dm1)).copy()
+        if eps is None:
+            eps = np.diag(self.generalized_fock(eris, dm1)).copy()
         self.pt.mo_energy = eps
         if self.pc:
             return self.pc_energy(C, ci, eps, where="a y_I quotient's displaced CI vector")
+        per_class = gg._pyscf_per_class(self.pt, dms, eris)
+        return float(sum(per_class[c][1] for c in gg.CLASSES))
+
+    def sc_corr_at_orbitals(self, C: np.ndarray, digests: dict | None = None) -> float:
+        """The SC ``E_corr`` at these orbitals and the state's own CI vector,
+        the orbital energies rebuilt from them -- with the ``f3ca``/``f3ac``
+        digests taken from ``digests`` instead of rebuilt when it is given.
+
+        Holding the digests fixed is **not** the derivative a gradient needs;
+        it is the functional the device's ``Y_xy`` differentiates
+        (docs/gradients.md, section 6), and :func:`localise_sources` is the
+        only caller that passes them."""
+        st = self.state
+        eris = self.eris(C)
+        self.pt.ci = st.ci
+        self.mc.ci = st.ci
+        dm1, _dm2, dms, _ = _dms_from(self.pt, eris, st)
+        if digests is not None:
+            dms["f3ca"], dms["f3ac"] = digests["f3ca"], digests["f3ac"]
+        self.pt.mo_energy = np.diag(self.generalized_fock(eris, dm1)).copy()
         per_class = gg._pyscf_per_class(self.pt, dms, eris)
         return float(sum(per_class[c][1] for c in gg.CLASSES))
 
@@ -1173,14 +1221,33 @@ class SourceTerms:
     seconds: float = 0.0
 
 
+#: How far a dump's ``ci`` may sit from the rebuilt state's (after the sign is
+#: fixed) and still be the same state: the rebuild is bit-reproducible
+#: (docs/reference-data.md, "Reproducibility"), so this only absorbs the
+#: Davidson tolerance, and a different state is decades away.
+DUMP_CI_TOL = 1e-8
+
+
 def load_source_terms(path: Path, st: State) -> SourceTerms:
-    """A ``.gradsrc`` dump: the GPU's ``Y_xy`` and ``y_I``, checked against the
-    state they claim to belong to.
+    """A ``.gradsrc`` dump -- ``nevpt2_sc_pseudodensity --dump-source-terms``'s
+    -- the GPU's ``Y_xy`` and ``y_I``, checked against the state they claim to
+    belong to and carried into the basis this state is held in.
 
     ``kappa_source`` may be ``Y`` or an already-antisymmetrised ``A``; only
-    ``Y - Y^T`` is read, so both give the same answer."""
+    ``Y - Y^T`` is read, so both give the same answer.
+
+    **The dump is in the golden's basis, and this state is not.** The GPU
+    knows one active basis, the golden's natural orbitals; :func:`build_state`
+    rotates the active block by ``W = st.act_rot`` into ``F``'s eigenbasis
+    (section 2.6), carrying the CI vector along. At fixed CI vector an
+    orbital rotation in the new basis is ``W kappa' W^T`` in the old one, so
+    ``Y' = W^T Y W``; and ``y`` is a covector of the CI rotation ``T(W)``,
+    which is orthogonal, so ``y' = T(W) y`` -- the same transform the state
+    took. The dump's own ``ci`` is the fingerprint: it must be the golden's
+    vector up to a sign, and the sign is applied to ``y`` (``E`` is even in
+    ``c``, so ``y`` is odd)."""
     with np.load(path) as z:
-        for key in ("kappa_source", "ci_source"):
+        for key in ("kappa_source", "ci_source", "ci"):
             if key not in z:
                 raise SystemExit(f"{path}: no '{key}' array -- not a gradient source dump")
         for key, want in (("ncore", st.ncore), ("nact", st.nact), ("nvirt", st.nvirt)):
@@ -1191,15 +1258,35 @@ def load_source_terms(path: Path, st: State) -> SourceTerms:
                 )
         y_mat = np.asarray(z["kappa_source"], dtype=float)
         y_ci = np.asarray(z["ci_source"], dtype=float)
+        ci_dump = np.asarray(z["ci"], dtype=float)
+        e_corr = float(z["e_corr"]) if "e_corr" in z else None
     if y_mat.shape != (st.nmo, st.nmo):
         raise SystemExit(
             f"{path}: kappa_source is {y_mat.shape}, expected ({st.nmo}, {st.nmo})"
         )
-    if y_ci.size != st.ci.size:
+    if y_ci.size != st.ci.size or ci_dump.size != st.ci.size:
         raise SystemExit(
-            f"{path}: ci_source has {y_ci.size} elements, the CI vector has {st.ci.size}"
+            f"{path}: ci_source / ci have {y_ci.size} / {ci_dump.size} elements, the CI "
+            f"vector has {st.ci.size}"
         )
-    return SourceTerms(kappa=y_mat - y_mat.T, ci=y_ci.reshape(st.ci.shape),
+    ref = st.ci_golden.ravel()
+    sign = 1.0 if float(ci_dump.ravel() @ ref) >= 0.0 else -1.0
+    off = float(np.abs(sign * ci_dump.ravel() - ref).max())
+    if off > DUMP_CI_TOL:
+        raise SystemExit(
+            f"{path}: its CI vector is {off:.2e} from the golden's (allowed "
+            f"{DUMP_CI_TOL:g}, after the sign): the dump is of a different state"
+        )
+    if e_corr is not None and abs(e_corr - st.e_corr) > REF_STATE_TOL:
+        raise SystemExit(
+            f"{path}: its E_corr is {e_corr - st.e_corr:+.2e} from the rebuilt state's"
+        )
+    w = np.eye(st.nmo)
+    w[st.act, st.act] = st.act_rot
+    y_rot = w.T @ y_mat @ w
+    y_ci_rot = fci.addons.transform_ci_for_orbital_rotation(
+        sign * y_ci.reshape(st.ci.shape), st.nact, st.nelecas, st.act_rot)
+    return SourceTerms(kappa=y_rot - y_rot.T, ci=np.asarray(y_ci_rot).reshape(st.ci.shape),
                        origin=f"dump {path}", from_dump=True)
 
 
@@ -1230,6 +1317,9 @@ def kappa_sweep(fn: Functional, st: State, cons: list, *, with_corr: bool,
     pairs = kappa_pairs(st)
     dm1 = fn.reference_dm1(st)
     A = np.zeros((st.nmo, st.nmo))
+    # E_corr's half of A on its own: what a dump's Y replaces, and what
+    # --source both compares it with.
+    A_corr = np.zeros((st.nmo, st.nmo))
     M = np.zeros((len(pairs), len(cons)))
     Q = np.zeros((len(pairs), st.ci.size))
     t0 = time.perf_counter()
@@ -1240,11 +1330,14 @@ def kappa_sweep(fn: Functional, st: State, cons: list, *, with_corr: bool,
         a = ((b[0]["e_casci"] + b[0]["e_corr"]) - (b[1]["e_casci"] + b[1]["e_corr"])) \
             / (2.0 * step)
         A[p, q], A[q, p] = a, -a
-        M[k] = (constraint_vector(b[0], cons) - constraint_vector(b[1], cons)) / (2.0 * step)
+        ac = (b[0]["e_corr"] - b[1]["e_corr"]) / (2.0 * step)
+        A_corr[p, q], A_corr[q, p] = ac, -ac
+        M[k] =(constraint_vector(b[0], cons) - constraint_vector(b[1], cons)) / (2.0 * step)
         Q[k] = (b[0]["hvec"] - b[1]["hvec"]) / (2.0 * step)
         if (k + 1) % 250 == 0:
             log(f"    {k + 1}/{len(pairs)} kappa pairs, {time.perf_counter() - t0:.0f}s")
-    return {"A": A, "M": M, "Q": Q, "seconds": time.perf_counter() - t0}
+    return {"A": A, "A_corr": A_corr, "A_casci": A - A_corr, "M": M, "Q": Q,
+            "seconds": time.perf_counter() - t0, "with_corr": with_corr}
 
 
 def allowed_determinants(st: State) -> np.ndarray:
@@ -1375,6 +1468,116 @@ def pyscf_ci_source(fn: Functional, st: State,
     fn.pt.ci = st.ci
     fn.mc.ci = st.ci
     return y.reshape(st.ci.shape)
+
+
+# --------------------------------------------------------------------------
+# Two providers, compared componentwise (--source both)
+# --------------------------------------------------------------------------
+
+#: The four spaces :meth:`State.space_of` numbers, for the per-block table.
+SPACE_NAMES = ("core", "act_O", "act_V", "virt")
+
+
+def _block_rows(st: State, a_dump: np.ndarray, a_ref: np.ndarray) -> list[dict]:
+    """``A_pq`` from two sources over every non-gauge pair, grouped by the
+    pair's two spaces: per block, how many pairs, the largest ``|A|`` either
+    way, the largest difference and where it is."""
+    rows: dict = {}
+    for p, q in kappa_pairs(st):
+        key = (st.space_of(p), st.space_of(q))
+        d = abs(float(a_dump[p, q] - a_ref[p, q]))
+        r = rows.setdefault(key, dict(block=f"{SPACE_NAMES[key[0]]}-{SPACE_NAMES[key[1]]}",
+                                      n=0, max_ref=0.0, max_dump=0.0, max_delta=0.0,
+                                      at=(p, q)))
+        r["n"] += 1
+        r["max_ref"] = max(r["max_ref"], abs(float(a_ref[p, q])))
+        r["max_dump"] = max(r["max_dump"], abs(float(a_dump[p, q])))
+        if d >= r["max_delta"]:
+            r["max_delta"], r["at"] = d, (p, q)
+    return [rows[k] for k in sorted(rows)]
+
+
+def _ci_row(st: State, y_dump: np.ndarray, y_ref: np.ndarray, mask: np.ndarray) -> dict:
+    """``P y`` from the dump against a reference ``y`` (already projected),
+    on the state's own irrep -- the only components the gradient reads."""
+    c = st.ci.ravel()
+    py = y_dump.ravel() - float(c @ y_dump.ravel()) * c
+    d = np.abs(py - y_ref.ravel()) * mask
+    worst = int(np.argmax(d))
+    return dict(n=int(mask.sum()), max_ref=float(np.abs(y_ref.ravel() * mask).max()),
+                max_dump=float(np.abs(py * mask).max()), max_delta=float(d.max()),
+                at=worst, c_dot_y=float(c @ y_dump.ravel()),
+                outside=float(np.abs(py * ~mask).max()) if (~mask).any() else 0.0)
+
+
+def compare_sources(st: State, dump: SourceTerms, a_corr: np.ndarray, y_ref: np.ndarray,
+                    label: str) -> dict:
+    """The dump's two source terms against a reference pair, componentwise:
+    ``A = Y - Y^T`` block by block over every non-gauge rotation, and ``P y``
+    determinant by determinant on the state's irrep. Printed, and returned for
+    the report."""
+    mask = allowed_determinants(st)
+    blocks = _block_rows(st, dump.kappa, a_corr)
+    ci = _ci_row(st, dump.ci, y_ref, mask)
+    print(f"\n  the dump against {label}, componentwise (Eh; A_pq = dE_corr/dkappa_pq "
+          "along each non-gauge rotation)")
+    print(f"    {'block':<12} {'pairs':>6} {'max|A| ref':>12} {'max|A| dump':>12} "
+          f"{'max|delta|':>11}  at (p, q)")
+    for r in blocks:
+        print(f"    {r['block']:<12} {r['n']:>6} {r['max_ref']:>12.4e} {r['max_dump']:>12.4e} "
+              f"{r['max_delta']:>11.3e}  {r['at']}")
+    print(f"    {'y_I (P y)':<12} {ci['n']:>6} {ci['max_ref']:>12.4e} {ci['max_dump']:>12.4e} "
+          f"{ci['max_delta']:>11.3e}  determinant {ci['at']}")
+    print(f"    (the dump's c.y = {ci['c_dot_y']:+.6e}, dropped by the projection; max |P y| "
+          f"outside the state's irrep, which the gradient never reads: {ci['outside']:.2e})")
+    return dict(label=label, blocks=blocks, ci=ci,
+                max_kappa=max(r["max_delta"] for r in blocks), max_ci=ci["max_delta"])
+
+
+def localise_sources(fn: Functional, st: State, step: float, *, ci_step: float) -> dict:
+    """PySCF's own SC functional with the device's two omissions put back in
+    (docs/gradients.md, sections 1 and 6): ``A_corr`` with the ``f3ca``/``f3ac``
+    digests frozen at the state's, and ``y`` with the orbital energies frozen
+    at the state's ``e_core``/``e_virt``. **Neither is a derivative this
+    gradient needs**; they exist so that a disagreement between the two
+    providers can be pinned on those omissions -- if the dump matches these
+    and not the exact ones, nothing else is wrong with it.
+
+    Costs one more ``E_corr`` sweep over the ``kappa`` pairs and one more over
+    the determinants."""
+    t0 = time.perf_counter()
+    eris = fn.eris(st.mo_coeff)
+    fn.pt.ci = st.ci
+    fn.mc.ci = st.ci
+    _dm1, _dm2, dms, _ = _dms_from(fn.pt, eris, st)
+    digests = {"f3ca": dms["f3ca"], "f3ac": dms["f3ac"]}
+    a = np.zeros((st.nmo, st.nmo))
+    for p, q in kappa_pairs(st):
+        e = [fn.sc_corr_at_orbitals(givens(st.mo_coeff, p, q, s * step), digests)
+             for s in (+1.0, -1.0)]
+        a[p, q] = (e[0] - e[1]) / (2.0 * step)
+        a[q, p] = -a[p, q]
+    # y with e_core/e_virt frozen: pyscf_ci_source's own projected quotient,
+    # through corr_at_ci's eps override.
+    eps0 = np.diag(st.f).copy()
+    eris = fn.eris(st.mo_coeff)
+    y = np.zeros(st.ci.size)
+    c = st.ci.ravel().copy()
+    for i in np.flatnonzero(allowed_determinants(st)):
+        d = np.zeros_like(c)
+        d[i] = 1.0
+        d -= float(c @ d) * c
+        scale = float(np.linalg.norm(d))
+        if scale < 1e-12:
+            continue
+        d /= scale
+        v = [fn.corr_at_ci(eris, st.mo_coeff, (c + s * ci_step * d).reshape(st.ci.shape),
+                           eps=eps0) for s in (+1.0, -1.0)]
+        y[i] = scale * (v[0] - v[1]) / (2.0 * ci_step)
+    fn.pt.ci = st.ci
+    fn.mc.ci = st.ci
+    fn.pt.mo_energy = eps0
+    return dict(a_corr=a, y=y.reshape(st.ci.shape), seconds=time.perf_counter() - t0)
 
 
 # --------------------------------------------------------------------------
@@ -1699,11 +1902,18 @@ class Gradients(lagrange.Gradients):
 
     # -- the driver -------------------------------------------------------
 
-    def prepare(self, log=print) -> None:
+    def prepare(self, log=print, *, sweep: dict | None = None,
+                sweep_corr: bool | None = None) -> None:
         """Everything the hooks need that is a property of the reference state
         rather than of a displacement: the active Hamiltonian the CI
         Z-vector's operator reads, the frozen path's ``S^{1/2}``, the
-        zero-by-symmetry components, and the constraint Jacobian."""
+        zero-by-symmetry components, and the constraint Jacobian.
+
+        ``sweep`` hands in another instance's :attr:`sweep` instead of running
+        one -- ``--source both`` solves twice on one state and pays for the
+        expensive pass once. ``sweep_corr`` forces ``E_corr`` into the sweep
+        even under a dump, so that PySCF's half of ``A`` exists to be compared
+        with it."""
         st = self.st
         self._fn_cache = {}
         self._S0_half = sym_power(self.fn.ovlp, 0.5)
@@ -1731,13 +1941,20 @@ class Gradients(lagrange.Gradients):
         # ONE sweep gives all three kappa-direction objects. It differentiates
         # E_corr too unless a dump already supplied that half, in which case
         # the sweep is the cheap E_CASCI-only one and the dump's Y is added.
-        sweep = kappa_sweep(self.fn, st, self.cons,
-                            with_corr=self.with_corr and not self.src.from_dump,
-                            step=self.kappa_step, log=log)
+        if sweep is None:
+            if sweep_corr is None:
+                sweep_corr = self.with_corr and not self.src.from_dump
+            sweep = kappa_sweep(self.fn, st, self.cons, with_corr=sweep_corr,
+                                step=self.kappa_step, log=log)
+        if self.with_corr and not self.src.from_dump and not sweep["with_corr"]:
+            raise SystemExit("prepare: PySCF's source term needs a sweep that "
+                             "differentiated E_corr")
+        self.sweep = sweep
         self._jacobian = sweep["M"]
         self._q = sweep["Q"]
         self.src = SourceTerms(
-            kappa=sweep["A"] + (self.src.kappa if self.src.from_dump else 0.0),
+            kappa=(sweep["A_casci"] + self.src.kappa) if self.src.from_dump
+            else (sweep["A"] if self.with_corr else sweep["A_casci"]),
             ci=self.src.ci, origin=self.src.origin, from_dump=self.src.from_dump,
         )
         log(f"  one kappa sweep over {len(self.pairs)} pairs in "
@@ -2537,12 +2754,25 @@ def run(args) -> dict:
               "reference is then a plain CASCI, whose analytic gradient PySCF has.")
 
     # --- the CI source term ----------------------------------------------
+    both = args.source == "both"
+    if both and (args.casci_only or args.pc):
+        raise SystemExit(
+            "--source both compares the GPU's SC source terms with PySCF's; the GPU has "
+            "no PC ones (#74) and --casci-only has none at all"
+        )
     print("\nsource terms (Park Eqs. 26-27)")
     t_src = time.perf_counter()
+    src_pyscf = None
     if args.source_path is not None:
         src = load_source_terms(args.source_path, st)
-        print(f"  read from {args.source_path}: max |Y - Y^T| = "
-              f"{np.abs(src.kappa).max():.6e}, |y| = {np.linalg.norm(src.ci):.8f}")
+        print(f"  read from {args.source_path} and carried into section 2.6's basis: "
+              f"max |Y - Y^T| = {np.abs(src.kappa).max():.6e}, "
+              f"|y| = {np.linalg.norm(src.ci):.8f}")
+        if both:
+            y = pyscf_ci_source(fn, st, step=args.ci_step)
+            src_pyscf = SourceTerms(kappa=np.zeros((st.nmo, st.nmo)), ci=y, origin="pyscf")
+            print(f"  and PySCF's y_I over {y.size} determinants by central differences "
+                  f"(the comparison's other side), {time.perf_counter() - t_src:.0f}s")
     elif not with_corr:
         # A CASCI is variational in c, so y = 0 exactly.
         src = SourceTerms(kappa=np.zeros((st.nmo, st.nmo)),
@@ -2560,7 +2790,28 @@ def run(args) -> dict:
     g = Gradients(st, src, with_corr=with_corr, step=args.step,
                   richardson=args.richardson, pc=args.pc, kappa_step=args.kappa_step)
     print("\nthe frozen orthonormal path, and one kappa sweep")
-    g.prepare()
+    # Under --source both the one sweep differentiates E_corr too, so PySCF's
+    # half of A exists to compare the dump's with -- and to solve with.
+    g.prepare(sweep_corr=True if both else None)
+
+    if both:
+        print("\nthe two providers' source terms, componentwise (#73)")
+        # `src` is still the dump as read: prepare() put A_casci + Y in g.src.
+        rec["compare"] = compare_sources(st, src, g.sweep["A_corr"],
+                                         src_pyscf.ci, "PySCF's exact derivatives")
+        if args.localise:
+            print("\n  localising: PySCF's own functional with the device's two "
+                  "omissions put back (digests frozen in A, e_core/e_virt frozen in y)")
+            loc = localise_sources(fn, st, args.kappa_step,
+                                   ci_step=args.ci_step if args.ci_step else CI_STEP)
+            print(f"  ({loc['seconds']:.0f}s)")
+            rec["localise"] = compare_sources(st, src, loc["a_corr"], loc["y"],
+                                              "PySCF with the device's omissions")
+        if args.sources_only:
+            rec["sources_only"] = True
+            rec["wall"] = time.perf_counter() - t0
+            return rec
+
     print("\nthe multipliers")
     g.solve_multipliers(log=print)
     rec["residuals"] = dict(g.residuals)
@@ -2596,6 +2847,30 @@ def run(args) -> dict:
     rec["ldotjnuc"] = g.ldotjnuc
     rec["zero_axes"] = np.array(g.zero_axes, dtype=int)
     rec["point_group"] = g.point_group
+    if both:
+        # The other provider through the SAME sweep, Jacobian and Q: the two
+        # gradients then differ only through the source terms, which is the
+        # point -- a disagreement localises to Y and y, not to the solve.
+        print("\nthe same solve with PySCF's source terms, on the same sweep")
+        def solve_with(terms: SourceTerms) -> tuple[np.ndarray, dict]:
+            gx = Gradients(st, terms, with_corr=True, step=args.step,
+                           richardson=args.richardson, pc=False, kappa_step=args.kappa_step)
+            gx.prepare(log=lambda *a: None, sweep=g.sweep)
+            gx.solve_multipliers(log=lambda *a: None)
+            return gx.kernel(), dict(gx.residuals)
+
+        rec["grad_pyscf"], rec["residuals_pyscf"] = solve_with(src_pyscf)
+        print(f"  CI |P(H-E)Pz + Py| = {rec['residuals_pyscf']['ci_cg']:.3e}, orbital "
+              f"|M lambda + B| = {rec['residuals_pyscf']['orbital_direct']:.3e}")
+        # And the attribution: one source term from each provider, so the
+        # gradient's distance from PySCF's splits into what Y costs and what y
+        # costs (exactly, to first order: the gradient is linear in both).
+        print("  and the two mixed solves that attribute the difference: GPU Y with "
+              "PySCF's y, PySCF's Y with the GPU's y")
+        rec["grad_gpu_y_only"], _ = solve_with(SourceTerms(
+            kappa=src.kappa, ci=src_pyscf.ci, origin="GPU Y + PySCF y", from_dump=True))
+        rec["grad_gpu_ci_only"], _ = solve_with(SourceTerms(
+            kappa=g.sweep["A_corr"], ci=src.ci, origin="PySCF Y + GPU y", from_dump=True))
     rec["wall"] = time.perf_counter() - t0
     rec["kappa_evals"] = fn.nevals + g.fn.nevals
 
@@ -2636,6 +2911,13 @@ def run(args) -> dict:
         rec["grad_num_max_delta"] = float(np.abs(rec["grad"] - rec["grad_num"])[probed].max())
         rec["grad_num_tol"] = args.tol
         rec["grad_num_pass"] = rec["grad_num_max_delta"] <= args.tol
+        if both:
+            rec["grad_num_max_delta_pyscf"] = float(
+                np.abs(rec["grad_pyscf"] - rec["grad_num"])[probed].max())
+    if both:
+        rec["provider_max_delta"] = float(np.abs(rec["grad"] - rec["grad_pyscf"]).max())
+        rec["attrib_kappa"] = float(np.abs(rec["grad_gpu_y_only"] - rec["grad_pyscf"]).max())
+        rec["attrib_ci"] = float(np.abs(rec["grad_gpu_ci_only"] - rec["grad_pyscf"]).max())
     return rec
 
 
@@ -2649,6 +2931,16 @@ def report(rec: dict) -> None:
     print(f"\n== {rec['case']}  {rec['basis']}  CAS({rec['nelecas']},{rec['ncas']})  "
           f"{which}")
     print(f"source terms: {rec['source_origin']}")
+    if "compare" in rec:
+        for key in ("compare", "localise"):
+            if key in rec:
+                c = rec[key]
+                print(f"the dump against {c['label']}: max |delta A| = {c['max_kappa']:.3e} "
+                      f"(worst block {max(c['blocks'], key=lambda r: r['max_delta'])['block']}), "
+                      f"max |delta P y| = {c['max_ci']:.3e}")
+    if rec.get("sources_only"):
+        print(f"--sources-only: no gradient was solved ({rec['wall']:.1f}s)")
+        return
     r = rec["residuals"]
     print(f"Z-vector residuals -- CI |P(H-E)Pz + Py| = {r['ci_cg']:.3e} "
           f"({'converged' if r['ci_cg_converged'] else 'NOT CONVERGED'}), "
@@ -2704,13 +2996,42 @@ def report(rec: dict) -> None:
         # the oracle is a finite difference. Rationale, the error bars it is
         # built from and the measured results: docs/testing.md, "The analytic
         # gradient against the numerical one".
+        if "grad_pyscf" in rec:
+            # #73's table: both providers and grad_num, component by component.
+            gp = rec["grad_pyscf"]
+            print("\n  both providers, one sweep, one solve each (Eh/bohr; '-' = not "
+                  "differenced by nevpt2_numgrad.py, zero by symmetry):")
+            print(f"  {'comp':>6} {'GPU-sourced':>16} {'PySCF-sourced':>16} {'grad_num':>16} "
+                  f"{'|GPU-PySCF|':>12} {'|GPU-num|':>11} {'|PySCF-num|':>12}")
+            for i in range(rec["natm"]):
+                for cx in range(3):
+                    num = (f"{ref[i, cx]:+16.10f}" if probed[i, cx]
+                           else f"{'-':>16}")
+                    dn = (f"{abs(grad[i, cx] - ref[i, cx]):>11.2e}" if probed[i, cx]
+                          else f"{'-':>11}")
+                    dp = (f"{abs(gp[i, cx] - ref[i, cx]):>12.2e}" if probed[i, cx]
+                          else f"{'-':>12}")
+                    print(f"  {i:>4}{AXES[cx]:>2} {grad[i, cx]:+16.10f} {gp[i, cx]:+16.10f} "
+                          f"{num} {abs(grad[i, cx] - gp[i, cx]):>12.2e} {dn} {dp}")
+            print(f"  max |GPU-sourced - PySCF-sourced| over all {grad.size} components = "
+                  f"{rec['provider_max_delta']:.3e}")
+            print(f"  of which, solving with ONE of the GPU's terms and PySCF's other: "
+                  f"the GPU's Y alone moves the gradient by {rec['attrib_kappa']:.3e}, the "
+                  f"GPU's y alone by {rec['attrib_ci']:.3e}")
+        tag = " (GPU source terms)" if "grad_pyscf" in rec else ""
         verdict = "PASS" if rec["grad_num_pass"] else "FAIL"
         relation = "<=" if rec["grad_num_pass"] else ">"
-        print(f"{verdict}: {rec['case']} {scheme} analytic "
+        print(f"{verdict}: {rec['case']} {scheme} analytic{tag} "
               f"vs numerical gradient, max |delta| = "
               f"{rec['grad_num_max_delta']:.3e} {relation} "
               f"{rec['grad_num_tol']:g} (docs/testing.md, \"The analytic "
               "gradient against the numerical one\")")
+        if "grad_num_max_delta_pyscf" in rec:
+            d_py = rec["grad_num_max_delta_pyscf"]
+            ok_py = d_py <= rec["grad_num_tol"]
+            print(f"{'PASS' if ok_py else 'FAIL'}: {rec['case']} {scheme} analytic (PySCF "
+                  f"source terms) vs numerical gradient, max |delta| = {d_py:.3e} "
+                  f"{'<=' if ok_py else '>'} {rec['grad_num_tol']:g}")
     if rec["residuals"].get("ham_response_richardson") is not None:
         print(f"\nRichardson error bars on the frozen-path quotients (the error on "
               f"the gradient above): {rec['residuals']['ham_response_richardson']:.1e} "
@@ -2760,12 +3081,29 @@ def main() -> None:
                          "pyscf.grad.casci's own redundant-block division assumes, "
                          "so --casci-only --energy-ordered is the one place its "
                          "analytic gradient is a valid oracle")
-    ap.add_argument("--source", default="pyscf", choices=("pyscf", "dump"),
+    ap.add_argument("--source", default="pyscf", choices=("pyscf", "dump", "both"),
                     help="where Y_xy and y_I come from: 'pyscf' (default, central "
-                         "differences of PySCF's own SC-NEVPT2) or 'dump' (a "
-                         "*.gradsrc the GPU wrote; --source-path)")
+                         "differences of PySCF's own SC-NEVPT2), 'dump' (a "
+                         "*.gradsrc the GPU wrote: nevpt2_sc_pseudodensity "
+                         "--dump-source-terms; --source-path), or 'both': the "
+                         "dump is the provider gated against grad_num, and "
+                         "PySCF's terms are compared with it componentwise and "
+                         "solved on the same sweep, so the report carries both "
+                         "gradients beside grad_num (docs/testing.md, \"The GPU "
+                         "as the source-term provider\"). SC only")
     ap.add_argument("--source-path", type=Path, default=None,
-                    help="the .gradsrc dump --source dump reads")
+                    help="the .gradsrc dump --source dump / both reads")
+    ap.add_argument("--sources-only", action="store_true",
+                    help="with --source both: stop after the componentwise "
+                         "comparison of the two providers' source terms -- no "
+                         "Z-vector solve, no gradient, no gate")
+    ap.add_argument("--localise", action="store_true",
+                    help="with --source both: also compare the dump with "
+                         "PySCF's functional carrying the device's two "
+                         "documented omissions (f3 digests frozen in Y, "
+                         "e_core/e_virt frozen in y), so a disagreement can be "
+                         "pinned on them. One more E_corr sweep over the kappa "
+                         "pairs and the determinants")
     ap.add_argument("--casci-only", action="store_true",
                     help="drop E_corr from the source terms and from Phi: the "
                          "reference is then a plain CASCI and pyscf.grad.casci is "
@@ -2830,13 +3168,20 @@ def main() -> None:
         args.step = default_step
     if args.kappa_step is None:
         args.kappa_step = default_kappa
-    if args.source == "dump" and args.source_path is None:
-        raise SystemExit("--source dump needs --source-path PATH")
+    if args.source in ("dump", "both") and args.source_path is None:
+        raise SystemExit(f"--source {args.source} needs --source-path PATH")
+    if (args.sources_only or args.localise) and args.source != "both":
+        raise SystemExit("--sources-only and --localise compare two providers; they "
+                         "need --source both")
     if args.source == "pyscf":
         args.source_path = None
 
     rec = run(args)
     report(rec)
+    if rec.get("sources_only"):
+        # A comparison, not a gate: nothing was solved, so there is nothing
+        # for grad_num to judge and nothing for --out to write.
+        return
     if args.out is not None:
         # Plain arrays and scalars only -- readable with a bare
         # numpy.load(), no pickle, the same stance the golden files take.

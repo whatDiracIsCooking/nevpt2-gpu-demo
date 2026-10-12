@@ -163,11 +163,13 @@ struct Options {
   // nevpt2_df_demo: --batch N (>= 0), --check-blocks.
   std::int64_t batch = kDefaultBatch;
   bool checkBlocks = false;
-  // nevpt2_sc_pseudodensity: --kappa-act, --kappa-full (one at a time),
-  // --gradgold PATH (only with --kappa-full).
+  // nevpt2_sc_pseudodensity: --kappa-act, --kappa-full, --dump-source-terms
+  // PATH (one at a time), --gradgold PATH (only with --kappa-full or
+  // --dump-source-terms, the two that read the sidecar).
   bool kappaAct = false;
   bool kappaFull = false;
   std::string gradgoldPath;
+  std::string dumpSourceTermsPath;
   // nevpt2_pc_tangent: --fd-steps N, --fd-start-pow N.
   int fdSteps = kDefaultFdSteps;
   int fdStartPow = kDefaultFdStartPow;

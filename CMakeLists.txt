@@ -375,6 +375,50 @@ if(NEVPT2_BUILD_TESTING)
     unset(_kf_side)
   endforeach()
 
+  # --- the GPU's own source terms, written: --dump-source-terms -------------------
+  #
+  # nevpt2_sc_pseudodensity --dump-source-terms (apps/sc_pseudodensity/
+  # source_dump.cppm, #73): the whole Y_xy (out of the same sidecar --kappa-full
+  # reads) and y_I, written to a `.gradsrc` -- a NumPy .npz -- in this build
+  # directory, then read back. The derivatives themselves are the --kappa-full
+  # and --gradient-source entries' to check; this one checks that the probed
+  # matrix IS the pairing (one seeded full direction, reassociation noise), that
+  # y's walk ran on this state (its E_corr against energiesDevice, 1e-7) and
+  # that the file reads back bit for bit. Its PASS line is its own.
+  #
+  # What a NUCLEAR gradient built from the file comes out at is NOT an entry
+  # here: that comparison runs reference_data/nevpt2_grad.py --source both, so
+  # it would put PySCF in the test path and it needs no card -- the same three
+  # reasons the PySCF-sourced gradient has none (docs/testing.md, "The GPU as
+  # the source-term provider" and "Why there is no ctest entry for it"). It is
+  # the same manual gate.
+  #
+  # Not `small`: Y is one basis direction per MO pair (378 at N2, 253 at LiF),
+  # each pass a full slab walk, which is --kappa-full's own reason for staying
+  # out of the sanitizer tier; the writer's host code is the unit tier's
+  # (test/gradsrc/), which every sanitizer preset runs. Acrolein is not here
+  # because its sidecar is gitignored -- and the dump would cost minutes.
+  set(_nevpt2_dump_dir "${CMAKE_CURRENT_BINARY_DIR}/gradsrc")
+  file(MAKE_DIRECTORY "${_nevpt2_dump_dir}")
+  foreach(_case n2_ccpvdz_cas44 n2_ccpvdz_cas88 lif_def2svp_cas46)
+    set(_dump_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.nevpt2gold")
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.gradgold")
+      message(WARNING "nevpt2: gradient sidecar missing, test "
+                      "'nevpt2_sc_pseudodensity_dump_${_case}' not registered")
+    else()
+      _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_dump_${_case}
+                            "${_dump_gold}" --tiles 3
+                            --dump-source-terms "${_nevpt2_dump_dir}/${_case}.gradsrc")
+      if(TEST nevpt2_sc_pseudodensity_dump_${_case})
+        set_tests_properties(nevpt2_sc_pseudodensity_dump_${_case} PROPERTIES
+          PASS_REGULAR_EXPRESSION
+            "PASS: the GPU's source terms Y_xy and y_I were assembled, written to")
+      endif()
+    endif()
+    unset(_dump_gold)
+  endforeach()
+  unset(_nevpt2_dump_dir)
+
   # --- *_pc: PC-NEVPT2 ----------------------------------------------
   #
   # The same RDM build as the SC entry at the same --tiles; the PC stage runs

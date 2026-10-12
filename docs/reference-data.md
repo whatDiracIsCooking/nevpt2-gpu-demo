@@ -555,7 +555,11 @@ never from a length it knows:
 | `.mogold` | Python: `golden_format.read_mo_sidecar` | `generate_golden.read_mo_sidecar` (`--mo-from`, which adds its own checks); no C++ reader — it is generator input |
 
 `.gradsrc` (`nevpt2_grad.py --source dump`) is a NumPy `.npz`, not this
-format, and is read by `np.load`. The writers are in `generate_golden.py`
+format, and is read by `np.load` (`nevpt2_grad.load_source_terms`). It is
+the one file here the C++ side **writes**: `nevpt2_sc_pseudodensity
+--dump-source-terms` through `nevpt2.gradsrc` (`apps/sc_pseudodensity/`),
+whose `readGradSrc` exists only for that binary's round trip and
+`test/gradsrc/`. It is never committed. The other writers are in `generate_golden.py`
 (`write_golden`, `write_gradgold`, `write_mo_sidecar`) and pack their scalar
 headers from the same tables `golden_format.py` reads them by
 (`GOLDEN_HEADERS`, `GRADGOLD_HEADERS`, `MO_SIDECAR_HEADERS`, keyed by magic).
@@ -1035,8 +1039,12 @@ zero-by-symmetry 1.7e-15 / 3.0e-11, column sums ≤5.6e-11 / ≤1.0e-8.
 
 The cost is the `kappa` sweep: one central difference of the SC-NEVPT2 energy
 per non-gauge rotation, `O(n_mo²)` of them — 937 s of acrolein's 1029 s.
-That is what makes the source terms self-contained and is the one thing a GPU
-dump would replace.
+That is what makes the source terms self-contained, and it is what the GPU's
+own dump (`nevpt2_sc_pseudodensity --dump-source-terms`, read with `--source
+dump`) was meant to replace. It cannot yet: the device's `Y` and `y` each hold
+one dependence fixed that the exact energy does not, and a gradient built from
+them misses `grad_num` by orders of magnitude more than the gate allows —
+[`testing.md`](testing.md), "The GPU as the source-term provider".
 
 **The comparison against `grad_num` is the gate, and it lives in
 [`testing.md`](testing.md), "The analytic gradient against the numerical
@@ -1435,7 +1443,7 @@ not used.
 | `reference_data/generate_golden.py` | the **only** file that defines the golden state (`block2_pc_probe.py` imports its `_build_state`). Runs a deterministic `mcscf.CASCI` (see "What "CASSCF input" means here" above), canonicalises it exactly as `pyscf.mrpt.NEVPT.kernel` does, and writes the CI vector, `dm1`/`dm2`, every MO-integral block, and PySCF's own per-class NEVPT2 answer into one flat binary file. `--df` does the same density-fitted and adds the `B_*` blocks. Unless `--no-pc`, it also runs block2's PC-NEVPT2 on the same state and writes `pc_class_energies` / `e_pc_total` (see "PC fields" above). `--casscf --mo-out` / `--mo-from` is the two-step CASSCF-orbital path, and the only thing here that runs an orbital optimiser (see "The MO sidecar" above) |
 | `reference_data/block2_pc_probe.py` | rebuilds a golden's state with `generate_golden._build_state` (imported, not copied), checks it is bit-identical to the committed CI vector, and runs block2's `WickSCNEVPT2` and `WickICNEVPT2` (PC) on it: per-class energies, timings, peak RSS, and the PC linear-solve / metric conditioning (`--metric`). Writes no golden. See [`pc-nevpt2.md`](pc-nevpt2.md) |
 | `reference_data/nevpt2_numgrad.py` | the **numerical** nuclear gradient: displaced RHF → CASCI → SC-NEVPT2 runs (states built by `generate_golden._build_state`, imported) differenced and Richardson-extrapolated into a sidecar's `grad_num` / `grad_num_residual` / `grad_num_probed` / `grad_num_step`. Refuses a displacement whose detected point group — or whose core/active irrep selection — differs from the reference geometry's, rather than produce a number from a different active space, and refuses a golden whose `reference_kind` is not `casci`. `--pc` differences block2's partially-contracted energy on the same displaced states (and writes no sidecar); `--npz PATH` writes the gradient arrays alone, which is how a PC one, or any case whose committed sidecar holds no `grad_num`, reaches `nevpt2_grad.py --grad-num`. Writes no golden and no new sidecar; only the two gradient-validation cases carry its arrays in their sidecars (see "The numerical gradient" above) |
-| `reference_data/nevpt2_grad.py` | the **analytic** nuclear gradient: a `pyscf.grad.lagrange.Gradients` subclass that solves the CI and orbital Z-vector equations of [`gradient-theory.md`](gradient-theory.md), §2 and contracts them into a gradient, differentiating one scalar along a frozen orthonormal path. SC by default, block2's PC with `--pc` (the same Lagrangian: only `E_corr` changes). Source terms from PySCF by default, or from a `.gradsrc` dump (`--source dump`) when the GPU side grows one. Ends by gating itself against `grad_num` and printing `PASS:`/`FAIL:` ([`testing.md`](testing.md), "The analytic gradient against the numerical one"). Writes **nothing** unless `--out` is given, and never a committed file; `--casci-only` is its own validation (see "The analytic gradient" above) |
+| `reference_data/nevpt2_grad.py` | the **analytic** nuclear gradient: a `pyscf.grad.lagrange.Gradients` subclass that solves the CI and orbital Z-vector equations of [`gradient-theory.md`](gradient-theory.md), §2 and contracts them into a gradient, differentiating one scalar along a frozen orthonormal path. SC by default, block2's PC with `--pc` (the same Lagrangian: only `E_corr` changes). Source terms from PySCF by default, or from the GPU's `.gradsrc` dump (`--source dump`, written by `nevpt2_sc_pseudodensity --dump-source-terms`), or both side by side (`--source both`: the two compared componentwise and solved on one sweep; [`testing.md`](testing.md), "The GPU as the source-term provider"). Ends by gating itself against `grad_num` and printing `PASS:`/`FAIL:` ([`testing.md`](testing.md), "The analytic gradient against the numerical one"). Writes **nothing** unless `--out` is given, and never a committed file; `--casci-only` is its own validation (see "The analytic gradient" above) |
 | `reference_data/casscf_repro_probe.py` | the **CASSCF reproducibility** measurement: ≥5 back-to-back RHF → symmetry-adapted `mcscf.CASSCF` → orbital-gradient → fresh `mcscf.CASCI` → SC-NEVPT2 runs under `generate_golden`'s own settings (imported, so single-threaded with the same Davidson tolerance), reporting the spread of E_CASSCF / E_corr / ‖g_orb‖ and whether any run changed stationary point. `--perturb EPS` starts the optimiser from a random same-irrep rotation instead. Writes no golden; its output is what "A fresh CASSCF reproduces, measured" above quotes, and where the `--mo-from` gate thresholds come from |
 | `reference_data/golden_format.py` | the **one Python parser** of the three formats in `golden/`: the header tables (keyed by magic) the writers pack from and the readers read by, `read_golden` / `read_golden_header` / `read_gradgold` / `read_mo_sidecar`, and `arrays-at FILE` for the regeneration check's `cmp -i`. `struct` and NumPy only, and no thread settings, so the timing script can use it (see "The file format" above) |
 | `reference_data/golden_layout_check.py` | the Python half of the **layout contract**: every committed file of both golden layouts, and every sidecar, through every reader and back through its writer byte for byte, plus a scan for any parser outside `golden_format.py`. Ends `PASS:`/`FAIL:`; a manual gate, no ctest entry ([`testing.md`](testing.md), "The golden layout contract") |

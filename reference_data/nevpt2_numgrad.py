@@ -185,6 +185,18 @@ CASES = {
         core_irreps=None,
         sidecar_grad_num=False,
     ),
+    # Here for nevpt2_grad.py --source both --sources-only (#73): the second
+    # size its GPU source terms are compared with PySCF's at. Its committed
+    # sidecar carries no grad_num either, and no gradient gate is run on it.
+    "n2_ccpvdz_cas88": dict(
+        geometry="reference_data/geometries/n2.xyz",
+        basis="cc-pvdz",
+        ncas=8,
+        nelecas=8,
+        cas_irreps=None,
+        core_irreps=None,
+        sidecar_grad_num=False,
+    ),
 }
 
 #: Component names, in the order they index a coordinate.

@@ -876,8 +876,10 @@ sum for SC, so the analytic run takes **150 s against 9.3 s** at N2 CAS(4,4)
 2846 rotations), against the SC wall of the same sweep in
 [`reference-data.md`](reference-data.md), "The analytic gradient", which keeps
 the two SC walls. Nothing is wrong with that — it is
-the price of a self-contained source term, and the one thing a GPU dump would
-replace ([`reference-data.md`](reference-data.md), "The analytic gradient").
+the price of a self-contained source term, and what the GPU's own dump was
+meant to replace — which it cannot yet, even for SC ("The GPU as the
+source-term provider", below), and for PC there is no device source term at
+all (#74).
 The numerical side is far cheaper and does both schemes in one pass: 494 s for
 acrolein's 96 displaced states and 35.9 s for N2's 36, SC and PC together.
 
@@ -1074,8 +1076,10 @@ Three reasons, each sufficient on its own:
   it. A ctest entry that shells out to `nevpt2_grad.py` inverts that and makes
   the Python environment part of the product.
 - **it needs no card, and the golden tier is 100% `gpu`.** This comparison is
-  between two offline gradients; no `src/` or `apps/` binary participates
-  (there is no dump path yet — [`gradients.md`](gradients.md), §1).
+  between two offline gradients; no `src/` or `apps/` binary participates.
+  The GPU-sourced variant ("The GPU as the source-term provider", below) has
+  one binary step — the dump — and that step is a ctest entry of its own; the
+  comparison after it is offline like this one.
 - **the walls are minutes to hours.** Acrolein's PC pair is 6.3 h end to
   end. Even labelled `slow` that is not an entry anyone would run, and
   `ctest --preset fast` would become unusable if it were not.
@@ -1084,6 +1088,159 @@ So this is a **manual gate**, like the sanitizer tier and the cross-backend
 check: the commands are above, they print `PASS:`/`FAIL:` and set an exit
 status, and the protocol is the same one "No CI, and the local gate" states —
 run them and say what they printed.
+
+## The GPU as the source-term provider
+
+Every gradient in the section above was built from **PySCF's** source terms.
+#73 closes the open link: `nevpt2_sc_pseudodensity --dump-source-terms PATH`
+writes the GPU's own `Y_xy` and `y_I` to a `.gradsrc`, and
+`nevpt2_grad.py --source both` builds the nuclear gradient from them, solves
+it a second time from PySCF's on the **same** `kappa` sweep (so the two can
+differ only through the source terms), and prints both beside `grad_num`.
+SC only: the GPU has no PC source terms (#74). The gate is the same 1e-6 per
+component, for the reason "The tolerance, and why it is not 1e-7" gives.
+
+**The GPU-sourced gradient fails, on every case, by four to six decades —
+and the failure is entirely the two dependences the device's functional is
+documented to hold fixed** ([`gradients.md`](gradients.md), §1, §5.5, §6):
+the `f3ac`/`f3ca` digests in `Y`, and `e_core`/`e_virt` in `y`. With those two
+put back into PySCF's functional, the two providers agree to PySCF's own
+finite-difference truncation. No other disagreement is left to find.
+
+The dumps were taken on the RX 9060 XT (gfx1200; preset `hip`, `--tiles 3`,
+the default digest); everything after them is single-threaded Python on the
+same box's Ryzen 9 5900X, PySCF 2.14.0:
+
+```bash
+build-hip/src/nevpt2_sc_pseudodensity --golden golden/lif_def2svp_cas46.nevpt2gold \
+    --tiles 3 --dump-source-terms /tmp/lif.gradsrc
+uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
+    --source both --source-path /tmp/lif.gradsrc            # gated on grad_num
+uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
+    --source both --source-path /tmp/lif.gradsrc --sources-only --localise
+# acrolein's sidecar is gitignored: regenerate it (generate_golden.py --gradgold
+# --out elsewhere; the arrays match the committed golden's exactly) and pass it
+# with --gradgold; its grad_num comes from nevpt2_numgrad.py --npz, --grad-num
+```
+
+### The verdict, and which term costs what
+
+| | LiF CAS(4,6) | acrolein CAS(6,5) | N2 CAS(4,4) |
+|---|---|---|---|
+| components compared | 6 | 16 (in-plane) | 6 |
+| **GPU-sourced**: max \|g − grad_num\| | **7.47e-3 — FAIL** | **6.33e-1 — FAIL** | **9.76e-2 — FAIL** |
+| PySCF-sourced, same sweep: max \|g − grad_num\| | 8.3e-9 — PASS | 6.5e-8 — PASS | 4.4e-8 — PASS |
+| max \|GPU-sourced − PySCF-sourced\| | 7.47e-3 | 6.33e-1 | 9.77e-2 |
+| … the GPU's `Y` alone (with PySCF's `y`) | 7.55e-3 | 6.34e-1 | 9.78e-2 |
+| … the GPU's `y` alone (with PySCF's `Y`) | 7.9e-5 | 8.4e-4 | 1.6e-4 |
+
+The PySCF-sourced row reproduces "What is run, and what it comes out at"
+exactly (8.3e-9, 6.5e-8, 4.4e-8), so the shared sweep and the second
+solve change nothing. The largest components show what the GPU-sourced number
+*is*: LiF's Li z comes out at −0.0147047919 against `grad_num`'s
+−0.0072358529, N2's at +0.1425259048 against +0.0448800876, and acrolein's
+worst, C2 x, at +0.6525725264 against +0.0194046166 — wrong by factors of two
+to thirty, not by a tolerance. Both attribution rows are
+first-order exact (the gradient is linear in the source terms), and the
+digests in `Y` are the whole story to within a percent; the orbital energies
+in `y` are two to three decades smaller and still two decades over the gate.
+
+### The source terms, componentwise
+
+`--source both` compares the dump with PySCF's `A_pq = Y_pq − Y_qp` over
+every non-gauge rotation, block by block, and `P y` determinant by
+determinant on the state's irrep. `--localise` repeats the comparison against
+PySCF's functional **with the device's two omissions put back** — the
+digests frozen at the state's along every rotation, the orbital energies
+frozen at the golden's along every CI direction. Max \|dump − PySCF\| per
+block, against the exact derivatives and then against the localised ones:
+
+| block | N2 CAS(4,4) | N2 CAS(8,8) | LiF CAS(4,6) | acrolein CAS(6,5) |
+|---|---|---|---|---|
+| core–core | 5.3e-11 / 5.3e-11 | 1.8e-11 / 1.8e-11 | 1.2e-10 / 1.2e-10 | 4.8e-10 / 4.8e-10 |
+| core–virt | 2.0e-7 / 2.0e-7 | 3.5e-9 / 3.5e-9 | 6.4e-9 / 6.4e-9 | 1.7e-8 / 1.7e-8 |
+| core–act | 0 (by symmetry) | **2.4e-1** / 1.2e-9 | 0 (by symmetry) | **4.0e-1** / 8.2e-4 |
+| act_O–act_V | 1.8e-12 / 1.3e-11 | **3.1e-1** / 4.1e-9 | **1.4e-1** / 2.4e-9 | **2.2e-1** / 5.8e-5 |
+| act_O–virt | **2.9e-1** / 4.1e-5 | **6.9e-1** / 3.5e-7 | **5.5e-1** / 1.8e-7 | **5.6e-1** / 2.2e-3 |
+| act_V–virt | **1.1e-2** / 6.3e-10 | **3.8e-2** / 4.8e-10 | **5.9e-2** / 2.2e-10 | **2.8e-2** / 5.6e-7 |
+| virt–virt | 4.7e-11 / 4.7e-11 | 2.6e-10 / 2.6e-10 | 2.5e-10 / 2.5e-10 | 1.8e-10 / 1.8e-10 |
+| `P y` | **3.2e-4** / 9.0e-9 | **5.4e-3** / 7.2e-10 | **3.3e-3** / 5.8e-10 | **3.7e-3** / 9.5e-10 |
+
+Read it three ways:
+
+- **The conventions are right.** Core–core and virt–virt are blocks where
+  neither omission reaches (no active two-electron index, no orbital energy
+  moves — [`gradients.md`](gradients.md), §6), and there the dump is PySCF's
+  to ≤5e-10 on every case. So the dump's sign, its `Y_pq = ½ dE/dt` normalisation and the
+  reader's carry from the golden's natural-orbital basis into §2.6's are all
+  correct; an error in any of them would show here first.
+- **Every block an active index touches is wrong by the digests, and only
+  there.** Active–active and active–virtual rotations move the active
+  two-electron integrals the digests are built from, and so do core–active
+  ones — zero by symmetry on N2 CAS(4,4) and LiF, but not on N2 CAS(8,8) or
+  acrolein, where they are as wrong as the rest.
+- **What is left after localising is PySCF's truncation, not the device.**
+  Every leftover checked — the worst of each case, acrolein's 2.2e-3 and
+  8.2e-4 included — converges **onto the dump** as PySCF's step shrinks — the frozen-digest
+  functional has large higher derivatives, so `KAPPA_STEP = 2^-17`, converged
+  for the exact functional ("The step constants, measured"), is not converged
+  for this one:
+
+| PySCF's step h | 2^-13 | 2^-15 | 2^-17 | 2^-19 | 2^-21 |
+|---|---|---|---|---|---|
+| N2 CAS(4,4) act_O–virt (6, 12), digests frozen: dump − PySCF | 1.1e-2 | 6.6e-4 | 4.1e-5 | 2.6e-6 | 1.6e-7 |
+| N2 CAS(4,4) core–virt (1, 9): dump − PySCF | 1.7e-6 | 1.3e-6 | 2.0e-7 | 1.4e-8 | −3.4e-10 |
+| LiF act_O–virt (4, 15), digests frozen: dump − PySCF | −4.5e-5 | −2.8e-6 | −1.8e-7 | −1.3e-8 | 9.9e-10 |
+| acrolein act_O–virt (13, 43), digests frozen: dump − PySCF | −8.9e-1 | 5.1e-2 | 2.2e-3 | 1.3e-4 | 8.4e-6 |
+| acrolein core–act_O (9, 13), digests frozen: dump − PySCF | −5.6e-1 | −1.5e-2 | −8.2e-4 | −5.1e-5 | −3.2e-6 |
+
+  Sixteen-fold per two halvings, `h²`, once past the coarse rungs where the
+  frozen-digest quotient is still wild (acrolein's flips sign at `2^-13`);
+  acrolein act_V–virt and act_O–act_V do the same. The core–virt pair is
+  one N2 does not differentiate cleanly at the committed step even for the
+  *exact* functional (no digest moves along it); it is 2e-7 there, a decade
+  inside the gate, and N2's PySCF-sourced gradient lands at 4.4e-8 regardless.
+
+**The residual-independent checks see it too, without `grad_num`.** The
+GPU-sourced runs fail six of their eleven ("Residual-independent checks of the
+gradient path"): both `y`-linearity ladders (the dump's `y` against
+directional quotients of PySCF's exact functional — #40's fourth error, the
+orbital energies held fixed, is exactly what that check was built to catch),
+and both CI- and both orbital-stationarity ladders of the Lagrangian. The
+nuclear ladders and the projection of `z` pass, as they should: the solve
+and the contraction are right, only their input is not.
+
+**What would close it**, neither in this tree: `Y`'s digest term needs the
+4-RDM contraction's transpose ([`gradients.md`](gradients.md), §6), and `y`'s
+orbital-energy term a `dm1` coefficient folded in before the sigma
+([`gradients.md`](gradients.md), §5.5). The dump and `--source both` are the
+seam either would be checked through: the attribution rows above say which
+term is fixed, and the `--localise` columns would become the exact ones.
+
+### What it costs, and what is a ctest entry
+
+The dump's `Y` is one basis direction per MO pair, 16 to a slab walk
+(`scFullRotationMatrix`); `y` is one reverse sweep. On the RX 9060 XT: `Y`
+in 1.9 s (378 pairs) at N2 CAS(4,4), 27.6 s at CAS(8,8), 4.8 s (253 pairs) at
+LiF and 385 s (2850 pairs) at acrolein; `y` in 0.02 s to 1.2 s. The PySCF
+side's walls are "What is run"'s plus one `y` sweep and two more solves; at
+LiF the whole `--source both` run is 82 s, at acrolein 1321 s. N2 CAS(8,8)'s
+`--sources-only --localise` took 13129 s: its degenerate π pairs leave the
+active orbitals not symmetry-pure, so every one of its 4900 determinants is
+differenced, twice.
+
+The dump is a binary run, so it is a `gpu` ctest entry:
+`nevpt2_sc_pseudodensity_dump_<case>` for N2 CAS(4,4), CAS(8,8) and LiF,
+writing into the build directory and matching `PASS: the GPU's source terms
+Y_xy and y_I were assembled, written to … and read back unchanged` — the
+matrix against the direct pairing on a seeded full direction (reassociation,
+1e-9 relative), `y`'s walk against `energiesDevice` (1e-7), and the file read
+back bit for bit. Not `small` (the probe count is `--kappa-full`'s reason);
+not acrolein, whose sidecar is gitignored. `test/gradsrc/` holds the writer
+card-free: the round trip, the bytes through an independent zip/NPY parser,
+and the refusals. Everything after the dump — `--source both` — is offline
+Python and stays out of ctest for the three reasons "Why there is no ctest
+entry for it" gives.
 
 ## Residual-independent checks of the gradient path
 
