@@ -602,10 +602,17 @@ its own, and each prints one `PASS:` line a ctest entry matches
 differentiate against), they are two different checks of the same derivative
 and so refuse each other, and neither has a `--pc` path.
 
+**A flag a binary does not act on is refused, never ignored.** The gradient
+binaries used to parse `--rdm-tangent` and do nothing with it; now one table
+in `nevpt2.cli` says which binary implements which flag, and anything else is
+an *unsupported* error naming the binaries that do. The matrix, and why each
+refusal is there, is in [`README.md`](../README.md), "Which binary takes which
+flag"; `test/cli/` holds it, host-only.
+
 **Everything that builds a tangent runs the emitted or the native-fp64 BLAS
 digest.** `--cublas`, `--ozaki` and `--fused-digest` are refused at flag
-parsing by `--rdm-tangent` (in the shared CLI), by `--sc-tangent` and
-`--gradient-source` (in the integral-direct demo) and by `nevpt2_pc_tangent`,
+parsing by `--rdm-tangent`, `--sc-tangent` and `--gradient-source` (as a
+combination) and by `nevpt2_pc_tangent` (as flags it does not implement),
 because a tangent built from an approximate digest is not the derivative of
 anything the energy stage computed. `nevpt2_sc_pseudodensity` is the
 exception, and consistently so: it builds no tangent RDMs — it reads the RDMs

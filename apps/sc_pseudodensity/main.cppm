@@ -38,12 +38,6 @@
 // Nothing imports it. main() is written plainly: clang attaches main to the
 // global module even inside a named module's purview (CWG 2811), so it links
 // as the ordinary `main`.
-module;
-
-// stderr is a macro, which `import std` does not carry, so <cstdio> comes in
-// through the global module fragment.
-#include <cstdio>
-
 export module nevpt2.app.sc_pseudodensity;
 
 // --kappa-act: the active-active block of the orbital source term, checked
@@ -56,7 +50,7 @@ export import :kappa_check;
 export import :kappa_full_check;
 
 import std;
-// nevpt2.cli: --golden, --tiles and the rest of the flags the demos take.
+// nevpt2.cli: every flag this binary takes, and the ones it refuses.
 import nevpt2.cli;
 import nevpt2.gradient;  // re-exports nevpt2.energy (and so .einsum, .device_tensor, .wwr, .tensor)
 import nevpt2.golden;
@@ -64,57 +58,24 @@ import nevpt2.link_tables;
 import nevpt2.rdm_build;
 
 int main(int argc, char** argv) {
-  constexpr std::string_view kGoldenHint = "path.nevpt2gold";
-  constexpr std::string_view kExtraFlags =
-      "[--kappa-act] [--kappa-full] [--gradgold path.gradgold]";
   const std::vector<std::string_view> args(argv + 1, argv + argc);
-  nevpt2::cli::CommonOptions opt;
-  bool kappaActArg = false;
-  bool kappaFullArg = false;
-  std::string gradgoldPath;
 
-  // The common flags first (nevpt2.cli), then this binary's own; anything
-  // else is a usage error.
-  for (std::size_t i = 0; i < args.size(); ++i) {
-    const nevpt2::Result<bool> used = nevpt2::cli::parseCommonFlag(args, i, opt);
-    if (!used) {
-      nevpt2::report(used.error());
-      return 1;
-    }
-    if (*used) continue;
-    if (args[i] == "--kappa-act") {
-      kappaActArg = true;
-    } else if (args[i] == "--kappa-full") {
-      kappaFullArg = true;
-    } else if (args[i] == "--gradgold" && i + 1 < args.size()) {
-      gradgoldPath = std::string(args[++i]);
-    } else {
-      std::fputs(nevpt2::cli::usage(argv[0], kGoldenHint, kExtraFlags).c_str(), stderr);
-      return 1;
-    }
-  }
-  if (const nevpt2::Status st = nevpt2::cli::finalize(opt, kGoldenHint); !st) {
-    nevpt2::report(st.error());
+  // Every flag, the common ones and this binary's own, and every check that
+  // spans them (nevpt2.cli's parseArgs). A flag this binary does not
+  // implement -- --pc (there is no PC pseudodensity assembly), --profile,
+  // --rdm-tangent -- is refused as Unsupported rather than ignored; a bad
+  // value or combination is a config Error. Reported once, here.
+  nevpt2::Result<nevpt2::cli::Options> parsed =
+      nevpt2::cli::parseArgs(nevpt2::cli::Binary::ScPseudodensity, args);
+  if (!parsed) {
+    nevpt2::report(parsed.error());
     return 1;
   }
-  if (opt.pc) {
-    std::fputs("error: --pc has no pseudodensity assembly yet (this checks the "
-               "strongly-contracted one)\n",
-               stderr);
-    return 1;
-  }
-  if (kappaActArg && kappaFullArg) {
-    std::fputs("error: --kappa-act and --kappa-full are two checks of the same source term; "
-               "pass one\n",
-               stderr);
-    return 1;
-  }
-  if (!gradgoldPath.empty() && !kappaFullArg) {
-    std::fputs("error: --gradgold is the sidecar --kappa-full reads; it does nothing on its "
-               "own\n",
-               stderr);
-    return 1;
-  }
+  const nevpt2::cli::Options parsedOpts = *std::move(parsed);
+  const nevpt2::cli::CommonOptions& opt = parsedOpts.common;
+  const bool kappaActArg = parsedOpts.kappaAct;
+  const bool kappaFullArg = parsedOpts.kappaFull;
+  std::string gradgoldPath = parsedOpts.gradgoldPath;
 
   // A missing, unreadable or malformed golden file -- or one without an array
   // this reads -- is the user's input: reported once, here, with a nonzero

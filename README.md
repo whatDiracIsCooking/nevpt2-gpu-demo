@@ -244,18 +244,48 @@ binary's:
 | `--mantissa-bits N` | the maximum mantissa bits for `--cublas`'s emulation, 1..53 (default 53); refused without `--cublas`, so CUDA only |
 | `--blas-digest` / `--digest-emitted` | choose the digest. The default differs by backend: emitted on CUDA, BLAS on HIP |
 | `--ozaki` | the int8 tensor-core (Ozaki-scheme) digest, on **both** backends. Accurate to fp64 rounding, slower than the default digest on both cards; not usable with `--cublas` |
-| `--ozaki-pairs P` | keep only digit pairs with p + q <= P (0..14; default 14, all 64 pairs). P <= 5 makes cc-pVTZ's PC metric refuse |
-| `--ozaki-check` | also run each `--ozaki` GEMM natively and print the largest difference (a diagnostic; synchronizes per GEMM) |
+| `--ozaki-pairs P` | keep only digit pairs with p + q <= P (0..14; default 14, all 64 pairs). P <= 5 makes cc-pVTZ's PC metric refuse; refused without `--ozaki` |
+| `--ozaki-check` | also run each `--ozaki` GEMM natively and print the largest difference (a diagnostic; synchronizes per GEMM); refused without `--ozaki` |
 | `--fused-digest` | run a GEMM digest's three GEMMs as one, over the stacked `[R; W_ca; W_ac]`. Needs `--blas-digest`, `--cublas` or `--ozaki`; off by default. Pays most with `--cublas` |
 | `--consume-emitted` | use the emitted kernel for the consume step instead of the GEMM |
 | `--rdm-tangent` | also run the tangent RDM build — the derivative of dm3/f3ac/f3ca with respect to the CI vector — and check it against twice the plain build. It holds about twice the per-tile intermediates, so it needs more tiles than the plain build; not usable with `--cublas`, `--ozaki` or `--fused-digest` |
 | `--pool-threshold BYTES\|max` | the memory pool's release threshold (default `max`) |
-| `--sc-tangent` | **integral-direct demo only**: instead of the golden comparison, differentiate the SC total with respect to the CI vector and check that tangent against the class norms' exact affine increment, Euler's identity and a central finite difference of the energy itself. Same digest restriction as `--rdm-tangent`, and no `--pc` path |
-| `--gradient-source` | **integral-direct demo only**: instead of the golden comparison, assemble the SC-NEVPT2 CI source term `y_I = dE/dc_I` (Park Eq. 48) in reverse mode and check it against the forward tangent by duality — `<u, y> = Edot(u)`, exactly, for several seeded directions and for the state itself, plus the full Jacobian column by column where the determinant space is small enough. Same digest restriction as `--rdm-tangent`, and no `--pc` path |
-| `--batch N` | **DF demo only**: slab length along each integral block's batch index (default 8; `0` = one slab per block). A memory lever |
+| `--sc-tangent` | **integral-direct demo only**: instead of the golden comparison, differentiate the SC total with respect to the CI vector and check that tangent against the class norms' exact affine increment, Euler's identity and a central finite difference of the energy itself. Same digest restriction as `--rdm-tangent`, no `--pc` path, and no `--profile` (it prints no profile tables) |
+| `--gradient-source` | **integral-direct demo only**: instead of the golden comparison, assemble the SC-NEVPT2 CI source term `y_I = dE/dc_I` (Park Eq. 48) in reverse mode and check it against the forward tangent by duality — `<u, y> = Edot(u)`, exactly, for several seeded directions and for the state itself, plus the full Jacobian column by column where the determinant space is small enough. Same digest restriction as `--rdm-tangent`, no `--pc` path, and no `--profile`; not with `--sc-tangent` |
+| `--batch N` | **DF demo only**: slab length along each integral block's batch index (default 8; `0` = one slab per block; >= 0). A memory lever |
 | `--check-blocks` | **DF demo only**: also compare every DF-built integral block against the file's four-index arrays |
 
-An unrecognized argument prints the binary's usage line.
+An argument no binary takes, or a flag missing its value, is an *invalid
+configuration* error carrying the binary's usage line.
+
+**Which binary takes which flag.** One table in `src/cli/` (the
+`:binary_flags` partition) says which of the four binaries implements each
+flag, and a binary given a flag it does not implement refuses it as
+*unsupported*, naming the binaries that do — it never parses a flag and then
+ignores it. `test/cli/` holds this matrix against the table:
+
+| flag | `nevpt2_demo` | `nevpt2_df_demo` | `nevpt2_sc_pseudodensity` | `nevpt2_pc_tangent` |
+|---|:-:|:-:|:-:|:-:|
+| `--golden`, `--tiles`, `--pool-threshold` | ✓ | ✓ | ✓ | ✓ |
+| `--blas-digest`, `--digest-emitted`, `--consume-emitted` | ✓ | ✓ | ✓ | ✓ |
+| `--cublas`, `--mantissa-bits`, `--ozaki`, `--ozaki-pairs`, `--ozaki-check`, `--fused-digest` | ✓ | ✓ | ✓ | refused |
+| `--pc` | ✓ | ✓ | refused | refused |
+| `--profile` | ✓ | ✓ | refused | refused |
+| `--rdm-tangent` | ✓ | ✓ | refused | refused |
+| `--sc-tangent`, `--gradient-source` | ✓ | refused | refused | refused |
+| `--batch`, `--check-blocks` | refused | ✓ | refused | refused |
+| `--kappa-act`, `--kappa-full`, `--gradgold` | refused | refused | ✓ | refused |
+| `--fd-steps`, `--fd-start-pow` | refused | refused | refused | ✓ |
+
+Why the refusals: `nevpt2_pc_tangent` is a tangent path throughout, and the
+tangent RDM build is the emitted or the native-fp64 BLAS digest only; it is
+also PC throughout, so `--pc` would change nothing. `nevpt2_sc_pseudodensity`
+has no PC pseudodensities. Neither gradient binary prints a profile table or
+runs the `--rdm-tangent` check. Beyond the matrix, a combination one binary
+cannot run is an *invalid configuration* error (`--sc-tangent` with `--ozaki`,
+`--kappa-act` with `--kappa-full`, `--gradgold` without `--kappa-full`), and
+`--sc-tangent` / `--gradient-source` with `--profile` is refused as
+*unsupported*, since neither prints the tables.
 
 ### The gradient checks
 
@@ -271,7 +301,7 @@ against the other. They read the same reference files, and each prints its own
 | `nevpt2_demo --rdm-tangent` (also `nevpt2_df_demo`) | — | the tangent RDM build beside the plain one, against twice it |
 | `nevpt2_demo --sc-tangent` | — | the SC total's derivative with respect to the CI vector |
 | `nevpt2_demo --gradient-source` | — | the CI source term `y_I = dE/dc_I`, against that tangent by duality |
-| `nevpt2_sc_pseudodensity` | `--kappa-act` | the SC pseudodensity identities; with `--kappa-act`, the active–active orbital source term instead |
+| `nevpt2_sc_pseudodensity` | `--kappa-act`, or `--kappa-full [--gradgold PATH]` | the SC pseudodensity identities; with `--kappa-act`, the active–active orbital source term instead; with `--kappa-full`, the whole orbital source term out of the `*.gradgold` sidecar |
 | `nevpt2_pc_tangent` | `--fd-steps N` (3..8, default 4), `--fd-start-pow N` (1..30, default 12: the first step is `2^-N`) | PC's derivative with respect to the CI vector, against a Richardson-verified finite difference |
 
 Everything that builds a *tangent* — the first three rows and

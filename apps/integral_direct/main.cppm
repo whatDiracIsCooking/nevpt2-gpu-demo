@@ -49,8 +49,8 @@ import std;
 export import :gradient_source_check;
 export import :tangent_check;
 
-// nevpt2.cli: the flags both demos take, and the checks that span them
-// (--cublas is refused there on a build without it).
+// nevpt2.cli: every flag this demo takes, which flags it implements, and the
+// checks that span them (--cublas is refused there on a build without it).
 import nevpt2.cli;
 import nevpt2.energy;  // re-exports nevpt2.einsum, .device_tensor, .wwr, .tensor
 import nevpt2.golden;
@@ -60,73 +60,36 @@ import nevpt2.profile;
 import nevpt2.rdm_build;
 
 int main(int argc, char** argv) {
-  constexpr std::string_view kGoldenHint = "path.nevpt2gold";
-  constexpr std::string_view kExtraFlags = "[--sc-tangent] [--gradient-source]";
   // --sc-tangent's one direction, fixed so the check is reproducible run to
   // run (the several directions of the dot-product test are later work).
   constexpr std::uint64_t kTangentSeed = 0x5eed'0032u;
   const std::vector<std::string_view> args(argv + 1, argv + argc);
-  nevpt2::cli::CommonOptions opt;
+
+  // Every flag, the common ones and this demo's own, and every check that
+  // spans them (nevpt2.cli's parseArgs): a flag this demo does not implement
+  // is refused, a bad value or combination is a config Error -- reported
+  // once, here.
+  nevpt2::Result<nevpt2::cli::Options> parsed =
+      nevpt2::cli::parseArgs(nevpt2::cli::Binary::Demo, args);
+  if (!parsed) {
+    nevpt2::report(parsed.error());
+    return 1;
+  }
+  const nevpt2::cli::Options parsedOpts = *std::move(parsed);
+  const nevpt2::cli::CommonOptions& opt = parsedOpts.common;
   // --sc-tangent: instead of the golden comparison, differentiate the SC
   // total with respect to the CI vector and check it against Euler's identity
   // and a central finite difference of the energy itself (:tangent_check).
-  // This demo's own flag, not nevpt2.cli's: the density-fitted demo has no
-  // tangent path.
-  bool scTangentArg = false;
   // --gradient-source: instead of the golden comparison, assemble the CI
   // source term y_I = dE/dc_I and check it against the forward tangent by
-  // duality (:gradient_source_check). This demo's own flag, like
-  // --sc-tangent and for the same reason: the density-fitted demo has no
-  // tangent path.
-  bool gradientSourceArg = false;
-
-  // The common flags first (nevpt2.cli), then this demo's own; anything else
-  // is a usage error. A bad value, or a bad combination, is a config Error
-  // reported once.
-  for (std::size_t i = 0; i < args.size(); ++i) {
-    const nevpt2::Result<bool> used = nevpt2::cli::parseCommonFlag(args, i, opt);
-    if (!used) {
-      nevpt2::report(used.error());
-      return 1;
-    }
-    if (*used) continue;
-    if (args[i] == "--sc-tangent") {
-      scTangentArg = true;
-    } else if (args[i] == "--gradient-source") {
-      gradientSourceArg = true;
-    } else {
-      std::fputs(nevpt2::cli::usage(argv[0], kGoldenHint, kExtraFlags).c_str(), stderr);
-      return 1;
-    }
-  }
-  if (const nevpt2::Status st = nevpt2::cli::finalize(opt, kGoldenHint); !st) {
-    nevpt2::report(st.error());
-    return 1;
-  }
-  if (scTangentArg && gradientSourceArg) {
-    nevpt2::report(nevpt2::Error::config(
-        "--sc-tangent and --gradient-source are two different checks of the same "
-        "derivative; run one at a time"));
-    return 1;
-  }
-  // Both differentiation checks run the tangent RDM build, which is the
-  // emitted or the native-fp64 BLAS digest only -- the same rule finalize()
-  // applies to --rdm-tangent, which it cannot apply here because these are
-  // this demo's flags.
+  // duality (:gradient_source_check). Both are this demo's alone (the
+  // density-fitted demo has no tangent path), and parseArgs has already
+  // refused them together, with an approximate digest, with --pc and with
+  // --profile.
+  const bool scTangentArg = parsedOpts.scTangent;
+  const bool gradientSourceArg = parsedOpts.gradientSource;
   const bool differentiates = scTangentArg || gradientSourceArg;
   const char* const whichFlag = scTangentArg ? "--sc-tangent" : "--gradient-source";
-  if (differentiates && (opt.rdm.cublas || opt.rdm.ozaki || opt.rdm.fusedDigest)) {
-    nevpt2::report(nevpt2::Error::config(std::format(
-        "{} runs the tangent RDM build, which is the emitted digest or "
-        "--blas-digest; not --cublas, --ozaki or --fused-digest",
-        whichFlag)));
-    return 1;
-  }
-  if (differentiates && opt.pc) {
-    nevpt2::report(nevpt2::Error::config(std::format(
-        "{} differentiates the strongly-contracted energy; it has no --pc path", whichFlag)));
-    return 1;
-  }
 
   // A missing, unreadable or malformed golden file -- or one without an
   // array this demo reads -- is the user's input: reported once, here, with a

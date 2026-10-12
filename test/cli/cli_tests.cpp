@@ -1,15 +1,26 @@
-// Suites for nevpt2.cli, the command-line front end both demos share.
+// Suites for nevpt2.cli, the command line of all four golden-reading binaries.
 //
 // Host-only ON PURPOSE: parsing builds values and Errors and never touches a
 // device, so this binary is not REQUIRES_GPU and runs with no card visible.
 //
-//   CliIntegerTests   parseInteger: whole integers that fit T, only
-//   CliFlagTests      parseCommonFlag: which flags it takes, what they set,
-//                     and what it leaves for the app
-//   CliFinalizeTests  finalize: --golden, --tiles >= 1, --ozaki-pairs 0..14,
-//                     --mantissa-bits 1..53 and only with --cublas, the
-//                     digest conflicts
-//   CliUsageTests     usage(): the app's own flags in their place
+//   CliIntegerTests      parseInteger: whole integers that fit T, only
+//   CliFlagTests         parseCommonFlag: which flags it takes, what they set,
+//                        and what it leaves for the binary
+//   CliFinalizeTests     finalize: --golden, --tiles >= 1, --ozaki-pairs
+//                        0..14 and only with --ozaki (so --ozaki-check),
+//                        --mantissa-bits 1..53 and only with --cublas, the
+//                        digest conflicts
+//   CliUsageTests        usage(b): each binary's own flags, and only its own
+//   CliMatrixTests       the binary/flag matrix: exactly which binary
+//                        implements which flag, and that every flag a binary
+//                        does not implement is refused as Unsupported
+//   CliParseArgsTests    parseArgs' shared behaviour: an unknown argument, a
+//                        missing value, finalize() applied, and every flag
+//                        combination a registered ctest entry passes accepted
+//   CliDemoFlagTests     nevpt2_demo's --sc-tangent / --gradient-source
+//   CliDfDemoFlagTests   nevpt2_df_demo's --batch / --check-blocks
+//   CliScPseudodensityFlagTests  --kappa-act / --kappa-full / --gradgold
+//   CliPcTangentFlagTests        --fd-steps / --fd-start-pow
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
 // textual std #include before any import.
@@ -90,6 +101,7 @@ TEST(CliFlagTests, EveryCommonFlagSetsItsField) {
   EXPECT_TRUE(r->rdm.blasDigest);
   EXPECT_TRUE(r->rdm.ozaki);
   EXPECT_EQ(r->rdm.ozakiMaxPairSum, 5);
+  EXPECT_TRUE(r->ozakiPairsGiven);
   EXPECT_TRUE(r->rdm.ozakiCheck);
   EXPECT_TRUE(r->rdm.fusedDigest);
   EXPECT_TRUE(r->rdmTangent);
@@ -177,6 +189,34 @@ TEST(CliFinalizeTests, OzakiPairsIsZeroToFourteen) {
     const Status st = finalize(opt, "path.nevpt2gold");
     ASSERT_FALSE(st.has_value()) << pairs;
     EXPECT_EQ(st.error().message, "--ozaki-pairs must be in 0..14");
+  }
+}
+
+TEST(CliFinalizeTests, OzakiPairsAndOzakiCheckNeedOzaki) {
+  // Only the --ozaki digest reads either, so without it each would be parsed
+  // and ignored.
+  {
+    CommonOptions opt = withGolden();
+    opt.rdm.ozakiMaxPairSum = 5;
+    opt.ozakiPairsGiven = true;
+    const Status st = finalize(opt, "path.nevpt2gold");
+    ASSERT_FALSE(st.has_value());
+    EXPECT_EQ(st.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(st.error().message,
+              "--ozaki-pairs sets the --ozaki digest's truncation; it needs --ozaki");
+    opt.rdm.ozaki = true;
+    EXPECT_TRUE(finalize(opt, "path.nevpt2gold").has_value());
+  }
+  {
+    CommonOptions opt = withGolden();
+    opt.rdm.ozakiCheck = true;
+    const Status st = finalize(opt, "path.nevpt2gold");
+    ASSERT_FALSE(st.has_value());
+    EXPECT_EQ(st.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(st.error().message,
+              "--ozaki-check checks the --ozaki digest's GEMMs; it needs --ozaki");
+    opt.rdm.ozaki = true;
+    EXPECT_TRUE(finalize(opt, "path.nevpt2gold").has_value());
   }
 }
 
@@ -304,17 +344,456 @@ TEST(CliFinalizeTests, RdmTangentRefusesTheDigestsItHasNoTangentFor) {
 
 // --- CliUsageTests ------------------------------------------------------------
 
-TEST(CliUsageTests, NoExtraFlags) {
-  const std::string u = usage("nevpt2_demo", "path.nevpt2gold", "");
+TEST(CliUsageTests, NamesTheBinaryAndItsGolden) {
+  const std::string u = usage(Binary::Demo);
   EXPECT_TRUE(u.starts_with("usage: nevpt2_demo --golden <path.nevpt2gold> [--tiles N]"));
   EXPECT_TRUE(u.ends_with("(the --cublas family is CUDA-only)\n"));
+  EXPECT_TRUE(usage(Binary::DfDemo)
+                  .starts_with("usage: nevpt2_df_demo --golden <path_df.nevpt2gold> [--tiles N]"));
 }
 
-TEST(CliUsageTests, ExtraFlagsComeBeforeTheCommonOnes) {
-  const std::string u = usage("nevpt2_df_demo", "path_df.nevpt2gold", "[--check-blocks]");
-  EXPECT_TRUE(
-      u.starts_with("usage: nevpt2_df_demo --golden <path_df.nevpt2gold> [--check-blocks] "
-                    "[--tiles N]"));
+TEST(CliUsageTests, ListsExactlyTheFlagsTheBinaryImplements) {
+  for (const Binary b : kBinaries) {
+    const std::string u = usage(b);
+    for (const FlagSpec& f : flagTable()) {
+      // "[--ozaki]" is a prefix of "[--ozaki-pairs P]"'s text but not of its
+      // bracket, so match the bracketed spelling.
+      const std::string spelled =
+          f.valueName.empty() ? std::format("[{}]", f.name)
+                              : std::format("[{} {}]", f.name, f.valueName);
+      if (f.name == "--golden") continue;
+      EXPECT_EQ(u.contains(spelled), implements(b, f.name)) << binaryName(b) << " " << f.name;
+    }
+  }
+  // nevpt2_pc_tangent takes no --cublas, so no note about it either.
+  EXPECT_FALSE(usage(Binary::PcTangent).contains("CUDA-only"));
+}
+
+// --- CliMatrixTests -----------------------------------------------------------
+
+// parseArgs(b, --golden g.nevpt2gold, extra...).
+Result<Options> parse(const Binary b, const std::vector<std::string_view>& extra) {
+  std::vector<std::string_view> args{"--golden", "g.nevpt2gold"};
+  args.insert(args.end(), extra.begin(), extra.end());
+  return parseArgs(b, args);
+}
+
+// The matrix, written out by hand: the contract README.md ("Which binary
+// takes which flag") records, held against flagTable(). D = nevpt2_demo,
+// F = nevpt2_df_demo, S = nevpt2_sc_pseudodensity, P = nevpt2_pc_tangent.
+struct MatrixRow {
+  std::string_view flag;
+  std::string_view binaries;
+};
+constexpr std::array kExpectedMatrix{
+    MatrixRow{"--golden", "DFSP"},          MatrixRow{"--tiles", "DFSP"},
+    MatrixRow{"--pc", "DF"},                MatrixRow{"--profile", "DF"},
+    MatrixRow{"--rdm-tangent", "DF"},       MatrixRow{"--consume-emitted", "DFSP"},
+    MatrixRow{"--blas-digest", "DFSP"},     MatrixRow{"--digest-emitted", "DFSP"},
+    MatrixRow{"--fused-digest", "DFS"},     MatrixRow{"--cublas", "DFS"},
+    MatrixRow{"--mantissa-bits", "DFS"},    MatrixRow{"--ozaki", "DFS"},
+    MatrixRow{"--ozaki-pairs", "DFS"},      MatrixRow{"--ozaki-check", "DFS"},
+    MatrixRow{"--pool-threshold", "DFSP"},  MatrixRow{"--sc-tangent", "D"},
+    MatrixRow{"--gradient-source", "D"},    MatrixRow{"--batch", "F"},
+    MatrixRow{"--check-blocks", "F"},       MatrixRow{"--kappa-act", "S"},
+    MatrixRow{"--kappa-full", "S"},         MatrixRow{"--gradgold", "S"},
+    MatrixRow{"--fd-steps", "P"},           MatrixRow{"--fd-start-pow", "P"},
+};
+
+char letterOf(const Binary b) {
+  switch (b) {
+    case Binary::Demo:
+      return 'D';
+    case Binary::DfDemo:
+      return 'F';
+    case Binary::ScPseudodensity:
+      return 'S';
+    case Binary::PcTangent:
+      return 'P';
+  }
+  return '?';
+}
+
+TEST(CliMatrixTests, TableIsTheDocumentedMatrix) {
+  ASSERT_EQ(flagTable().size(), kExpectedMatrix.size());
+  for (std::size_t r = 0; r < kExpectedMatrix.size(); ++r) {
+    EXPECT_EQ(flagTable()[r].name, kExpectedMatrix[r].flag) << r;
+    for (const Binary b : kBinaries)
+      EXPECT_EQ(implements(b, kExpectedMatrix[r].flag),
+                kExpectedMatrix[r].binaries.contains(letterOf(b)))
+          << binaryName(b) << " " << kExpectedMatrix[r].flag;
+  }
+}
+
+TEST(CliMatrixTests, EveryRowIsAFlagSomeBinaryTakes) {
+  std::set<std::string_view> seen;
+  for (const FlagSpec& f : flagTable()) {
+    EXPECT_TRUE(f.name.starts_with("--")) << f.name;
+    EXPECT_NE(f.binaries, 0) << f.name;
+    EXPECT_TRUE(seen.insert(f.name).second) << "duplicate row " << f.name;
+    EXPECT_EQ(findFlag(f.name), &f);
+  }
+  EXPECT_EQ(findFlag("--no-such-flag"), nullptr);
+  for (const Binary b : kBinaries) EXPECT_FALSE(implements(b, "--no-such-flag"));
+}
+
+// The arguments that hand `flag` to parseArgs: the flag, and a value
+// parseInteger accepts if it takes one. Prefixed with --golden.
+std::vector<std::string_view> withFlag(const FlagSpec& f) {
+  std::vector<std::string_view> args{"--golden", "g.nevpt2gold", f.name};
+  if (!f.valueName.empty()) args.push_back("1");
+  return args;
+}
+
+TEST(CliMatrixTests, EveryFlagABinaryLacksIsRefusedAsUnsupported) {
+  for (const Binary b : kBinaries) {
+    for (const FlagSpec& f : flagTable()) {
+      if (implements(b, f.name)) continue;
+      const Result<Options> r = parseArgs(b, withFlag(f));
+      ASSERT_FALSE(r.has_value()) << binaryName(b) << " accepted " << f.name;
+      EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << binaryName(b) << " " << f.name;
+      EXPECT_TRUE(r.error().message.starts_with(
+          std::format("{} does not implement {} (only ", binaryName(b), f.name)))
+          << r.error().message;
+    }
+  }
+}
+
+TEST(CliMatrixTests, RdmTangentIsRefusedByTheGradientBinaries) {
+  // #39's finding: both gradient binaries used to parse --rdm-tangent and do
+  // nothing with it.
+  for (const Binary b : {Binary::ScPseudodensity, Binary::PcTangent}) {
+    const Result<Options> r = parse(b, {"--rdm-tangent"});
+    ASSERT_FALSE(r.has_value()) << binaryName(b);
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported);
+    EXPECT_EQ(r.error().message,
+              std::format("{} does not implement --rdm-tangent (only nevpt2_demo, "
+                          "nevpt2_df_demo); a flag a binary would not act on is refused, "
+                          "not ignored",
+                          binaryName(b)));
+  }
+  // ...and the demos, which run it, still take it.
+  for (const Binary b : {Binary::Demo, Binary::DfDemo}) {
+    const Result<Options> r = parse(b, {"--rdm-tangent"});
+    ASSERT_TRUE(r.has_value()) << binaryName(b) << ": " << r.error().message;
+    EXPECT_TRUE(r->common.rdmTangent);
+  }
+}
+
+TEST(CliMatrixTests, PcAndProfileAreTheDemosAlone) {
+  for (const std::string_view flag : {"--pc", "--profile"}) {
+    for (const Binary b : {Binary::ScPseudodensity, Binary::PcTangent}) {
+      const Result<Options> r = parse(b, {flag});
+      ASSERT_FALSE(r.has_value()) << binaryName(b) << " " << flag;
+      EXPECT_EQ(r.error().kind, ErrorKind::Unsupported);
+    }
+  }
+}
+
+TEST(CliMatrixTests, PcTangentRefusesTheDigestsWithNoTangentPath) {
+  for (const std::string_view flag : {"--cublas", "--ozaki", "--fused-digest", "--ozaki-check"}) {
+    const Result<Options> r = parse(Binary::PcTangent, {flag});
+    ASSERT_FALSE(r.has_value()) << flag;
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << flag;
+  }
+  // The two exact digests and the consume switch are its to take.
+  for (const std::string_view flag : {"--blas-digest", "--digest-emitted", "--consume-emitted"}) {
+    const Result<Options> r = parse(Binary::PcTangent, {flag});
+    EXPECT_TRUE(r.has_value()) << flag << ": " << r.error().message;
+  }
+}
+
+TEST(CliMatrixTests, RefusedBeforeItsValueIsRead) {
+  // Another binary's valued flag is refused as Unsupported even with a bad
+  // value or none: the binary never gets as far as parsing it.
+  for (const std::vector<std::string_view>& args :
+       {std::vector<std::string_view>{"--golden", "g.nevpt2gold", "--fd-steps", "lots"},
+        std::vector<std::string_view>{"--golden", "g.nevpt2gold", "--fd-steps"}}) {
+    const Result<Options> r = parseArgs(Binary::Demo, args);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported);
+  }
+}
+
+// --- CliParseArgsTests --------------------------------------------------------
+
+TEST(CliParseArgsTests, DefaultsForEveryBinary) {
+  for (const Binary b : kBinaries) {
+    const Result<Options> r = parse(b, {});
+    ASSERT_TRUE(r.has_value()) << binaryName(b) << ": " << r.error().message;
+    EXPECT_EQ(r->common.goldenPath, "g.nevpt2gold");
+    EXPECT_FALSE(r->scTangent);
+    EXPECT_FALSE(r->gradientSource);
+    EXPECT_EQ(r->batch, kDefaultBatch);
+    EXPECT_FALSE(r->checkBlocks);
+    EXPECT_FALSE(r->kappaAct);
+    EXPECT_FALSE(r->kappaFull);
+    EXPECT_TRUE(r->gradgoldPath.empty());
+    EXPECT_EQ(r->fdSteps, kDefaultFdSteps);
+    EXPECT_EQ(r->fdStartPow, kDefaultFdStartPow);
+  }
+}
+
+TEST(CliParseArgsTests, AnUnknownArgumentIsAConfigErrorCarryingTheUsage) {
+  for (const Binary b : kBinaries) {
+    for (const std::string_view bad : {"--sc_tangent", "--kappa-ful", "--fd-step", "-v", "x"}) {
+      const Result<Options> r = parse(b, {bad});
+      ASSERT_FALSE(r.has_value()) << binaryName(b) << " " << bad;
+      EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+      EXPECT_TRUE(r.error().message.starts_with(std::format(
+          "unrecognized argument \"{}\"; usage: {} --golden", bad, binaryName(b))))
+          << r.error().message;
+      EXPECT_FALSE(r.error().message.ends_with("\n"));
+    }
+  }
+}
+
+TEST(CliParseArgsTests, AValuedFlagAtTheEndIsAConfigError) {
+  for (const Binary b : kBinaries) {
+    for (const FlagSpec& f : flagTable()) {
+      if (f.valueName.empty() || !implements(b, f.name)) continue;
+      const Result<Options> r = parse(b, {f.name});
+      ASSERT_FALSE(r.has_value()) << binaryName(b) << " " << f.name;
+      EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+      EXPECT_TRUE(r.error().message.starts_with(
+          std::format("{} takes a value ({}); usage: ", f.name, f.valueName)))
+          << r.error().message;
+    }
+  }
+}
+
+TEST(CliParseArgsTests, MissingGoldenNamesTheBinarysHint) {
+  const Result<Options> demo = parseArgs(Binary::PcTangent, std::vector<std::string_view>{});
+  ASSERT_FALSE(demo.has_value());
+  EXPECT_EQ(demo.error().message, "--golden <path.nevpt2gold> is required");
+  const Result<Options> df = parseArgs(Binary::DfDemo, std::vector<std::string_view>{});
+  ASSERT_FALSE(df.has_value());
+  EXPECT_EQ(df.error().message, "--golden <path_df.nevpt2gold> is required");
+}
+
+TEST(CliParseArgsTests, AppliesFinalize) {
+  const Result<Options> r = parse(Binary::ScPseudodensity, {"--tiles", "0"});
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().message, "--tiles must be >= 1");
+}
+
+TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
+  // The flags each registered ctest entry passes (root CMakeLists.txt), less
+  // --golden: a refusal must never reject one of these.
+  struct Entry {
+    Binary b;
+    std::vector<std::string_view> args;
+    bool cublas = false;
+  };
+  const std::vector<Entry> entries{
+      {Binary::Demo, {"--tiles", "3"}},
+      {Binary::Demo, {"--tiles", "40"}},
+      {Binary::Demo, {"--tiles", "3", "--cublas"}, true},
+      {Binary::Demo, {"--pc", "--tiles", "3"}},
+      {Binary::Demo, {"--pc", "--tiles", "40"}},
+      {Binary::Demo, {"--tiles", "3", "--consume-emitted"}},
+      {Binary::Demo, {"--tiles", "3", "--cublas", "--consume-emitted"}, true},
+      {Binary::Demo, {"--tiles", "3", "--blas-digest"}},
+      {Binary::Demo, {"--pc", "--tiles", "3", "--blas-digest"}},
+      {Binary::Demo, {"--tiles", "3", "--digest-emitted"}},
+      {Binary::Demo, {"--tiles", "3", "--ozaki"}},
+      {Binary::Demo, {"--tiles", "3", "--profile"}},
+      {Binary::Demo, {"--tiles", "3", "--cublas", "--profile"}, true},
+      {Binary::Demo, {"--tiles", "3", "--rdm-tangent"}},
+      {Binary::Demo, {"--tiles", "3", "--sc-tangent"}},
+      {Binary::Demo, {"--tiles", "3", "--gradient-source"}},
+      {Binary::DfDemo, {"--tiles", "3", "--check-blocks"}},
+      {Binary::DfDemo, {"--tiles", "3", "--batch", "5", "--check-blocks"}},
+      {Binary::DfDemo, {"--tiles", "40"}},
+      {Binary::DfDemo, {"--tiles", "3", "--cublas"}, true},
+      {Binary::DfDemo, {"--pc", "--tiles", "3"}},
+      {Binary::DfDemo, {"--pc", "--tiles", "3", "--batch", "5"}},
+      {Binary::DfDemo, {"--pc", "--tiles", "3", "--batch", "5", "--ozaki"}},
+      {Binary::DfDemo, {"--pc", "--tiles", "3", "--ozaki"}},
+      {Binary::DfDemo, {"--tiles", "3", "--consume-emitted"}},
+      {Binary::DfDemo, {"--tiles", "3", "--blas-digest"}},
+      {Binary::DfDemo, {"--tiles", "3", "--digest-emitted"}},
+      {Binary::DfDemo, {"--tiles", "3", "--profile"}},
+      {Binary::ScPseudodensity, {"--tiles", "3"}},
+      {Binary::ScPseudodensity, {"--tiles", "3", "--kappa-act"}},
+      {Binary::ScPseudodensity, {"--tiles", "3", "--kappa-full"}},
+      {Binary::PcTangent, {"--tiles", "3"}},
+      {Binary::PcTangent, {"--tiles", "40", "--fd-steps", "3"}},
+  };
+  for (const Entry& e : entries) {
+    if (e.cublas && !kHaveCublasEmul) continue;  // a HIP build registers none of these
+    const Result<Options> r = parse(e.b, e.args);
+    EXPECT_TRUE(r.has_value()) << binaryName(e.b) << ": " << r.error().message;
+  }
+}
+
+// --- CliDemoFlagTests ---------------------------------------------------------
+
+TEST(CliDemoFlagTests, EachCheckSetsItsField) {
+  const Result<Options> sc = parse(Binary::Demo, {"--sc-tangent"});
+  ASSERT_TRUE(sc.has_value()) << sc.error().message;
+  EXPECT_TRUE(sc->scTangent);
+  EXPECT_FALSE(sc->gradientSource);
+  const Result<Options> gs = parse(Binary::Demo, {"--gradient-source", "--blas-digest"});
+  ASSERT_TRUE(gs.has_value()) << gs.error().message;
+  EXPECT_TRUE(gs->gradientSource);
+  EXPECT_FALSE(gs->scTangent);
+}
+
+TEST(CliDemoFlagTests, TheTwoChecksRefuseEachOther) {
+  const Result<Options> r = parse(Binary::Demo, {"--sc-tangent", "--gradient-source"});
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+  EXPECT_EQ(r.error().message,
+            "--sc-tangent and --gradient-source are two different checks of the same "
+            "derivative; run one at a time");
+}
+
+TEST(CliDemoFlagTests, EachCheckRefusesTheDigestsWithNoTangentPath) {
+  for (const std::string_view which : {"--sc-tangent", "--gradient-source"}) {
+    for (const std::vector<std::string_view>& digest :
+         {std::vector<std::string_view>{"--ozaki"},
+          std::vector<std::string_view>{"--blas-digest", "--fused-digest"}}) {
+      std::vector<std::string_view> args{which};
+      args.insert(args.end(), digest.begin(), digest.end());
+      const Result<Options> r = parse(Binary::Demo, args);
+      ASSERT_FALSE(r.has_value()) << which;
+      EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+      EXPECT_EQ(r.error().message,
+                std::format("{} runs the tangent RDM build, which is the emitted digest or "
+                            "--blas-digest; not --cublas, --ozaki or --fused-digest",
+                            which));
+    }
+  }
+}
+
+TEST(CliDemoFlagTests, EachCheckRefusesPc) {
+  for (const std::string_view which : {"--sc-tangent", "--gradient-source"}) {
+    const Result<Options> r = parse(Binary::Demo, {which, "--pc"});
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(r.error().message,
+              std::format("{} differentiates the strongly-contracted energy; it has no --pc path",
+                          which));
+  }
+}
+
+TEST(CliDemoFlagTests, EachCheckRefusesProfileItWouldNotPrint) {
+  for (const std::string_view which : {"--sc-tangent", "--gradient-source"}) {
+    const Result<Options> r = parse(Binary::Demo, {which, "--profile"});
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported);
+    EXPECT_EQ(r.error().message,
+              std::format("{} prints no profile tables; --profile times the energy run", which));
+  }
+}
+
+TEST(CliDemoFlagTests, RdmTangentRunsBesideEitherCheck) {
+  for (const std::string_view which : {"--sc-tangent", "--gradient-source"}) {
+    const Result<Options> r = parse(Binary::Demo, {which, "--rdm-tangent"});
+    EXPECT_TRUE(r.has_value()) << which << ": " << r.error().message;
+  }
+}
+
+// --- CliDfDemoFlagTests -------------------------------------------------------
+
+TEST(CliDfDemoFlagTests, BatchAndCheckBlocksSetTheirFields) {
+  const Result<Options> r = parse(Binary::DfDemo, {"--batch", "0", "--check-blocks"});
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(r->batch, 0);
+  EXPECT_TRUE(r->checkBlocks);
+}
+
+TEST(CliDfDemoFlagTests, BatchIsAWholeNonNegativeInteger) {
+  const Result<Options> neg = parse(Binary::DfDemo, {"--batch", "-1"});
+  ASSERT_FALSE(neg.has_value());
+  EXPECT_EQ(neg.error().kind, ErrorKind::InvalidConfig);
+  EXPECT_EQ(neg.error().message, "--batch must be >= 0");
+  const Result<Options> bad = parse(Binary::DfDemo, {"--batch", "eight"});
+  ASSERT_FALSE(bad.has_value());
+  EXPECT_EQ(bad.error().message, "--batch takes an integer, not \"eight\"");
+}
+
+// --- CliScPseudodensityFlagTests ----------------------------------------------
+
+TEST(CliScPseudodensityFlagTests, EachCheckSetsItsField) {
+  const Result<Options> act = parse(Binary::ScPseudodensity, {"--kappa-act"});
+  ASSERT_TRUE(act.has_value()) << act.error().message;
+  EXPECT_TRUE(act->kappaAct);
+  EXPECT_FALSE(act->kappaFull);
+  const Result<Options> full =
+      parse(Binary::ScPseudodensity, {"--kappa-full", "--gradgold", "x.gradgold"});
+  ASSERT_TRUE(full.has_value()) << full.error().message;
+  EXPECT_TRUE(full->kappaFull);
+  EXPECT_EQ(full->gradgoldPath, "x.gradgold");
+}
+
+TEST(CliScPseudodensityFlagTests, KappaActAndKappaFullRefuseEachOther) {
+  const Result<Options> r = parse(Binary::ScPseudodensity, {"--kappa-act", "--kappa-full"});
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+  EXPECT_EQ(r.error().message,
+            "--kappa-act and --kappa-full are two checks of the same source term; pass one");
+}
+
+TEST(CliScPseudodensityFlagTests, GradgoldNeedsKappaFull) {
+  for (const std::vector<std::string_view>& args :
+       {std::vector<std::string_view>{"--gradgold", "x.gradgold"},
+        std::vector<std::string_view>{"--kappa-act", "--gradgold", "x.gradgold"}}) {
+    const Result<Options> r = parse(Binary::ScPseudodensity, args);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(r.error().message,
+              "--gradgold is the sidecar --kappa-full reads; it does nothing on its own");
+  }
+}
+
+TEST(CliScPseudodensityFlagTests, TakesAnyDigestTheDemosTake) {
+  // It builds no tangent RDMs, so the approximate digests are its to run.
+  const Result<Options> r = parse(Binary::ScPseudodensity, {"--kappa-full", "--ozaki"});
+  EXPECT_TRUE(r.has_value()) << r.error().message;
+}
+
+// --- CliPcTangentFlagTests ----------------------------------------------------
+
+TEST(CliPcTangentFlagTests, FdStepsIsThreeToEight) {
+  for (const int steps : {kMinFdSteps, kDefaultFdSteps, kMaxFdSteps}) {
+    const std::string v = std::to_string(steps);
+    const Result<Options> r = parse(Binary::PcTangent, {"--fd-steps", v});
+    ASSERT_TRUE(r.has_value()) << steps << ": " << r.error().message;
+    EXPECT_EQ(r->fdSteps, steps);
+  }
+  EXPECT_EQ(kMinFdSteps, 3);
+  EXPECT_EQ(kMaxFdSteps, 8);
+  for (const std::string_view steps : {"2", "9", "0", "-3"}) {
+    const Result<Options> r = parse(Binary::PcTangent, {"--fd-steps", steps});
+    ASSERT_FALSE(r.has_value()) << steps;
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(r.error().message, "--fd-steps must be in 3..8");
+  }
+}
+
+TEST(CliPcTangentFlagTests, FdStartPowIsOneToThirty) {
+  for (const std::string_view pow : {"1", "12", "30"}) {
+    const Result<Options> r = parse(Binary::PcTangent, {"--fd-start-pow", pow});
+    ASSERT_TRUE(r.has_value()) << pow << ": " << r.error().message;
+    EXPECT_EQ(std::to_string(r->fdStartPow), pow);
+  }
+  for (const std::string_view pow : {"0", "31", "-12"}) {
+    const Result<Options> r = parse(Binary::PcTangent, {"--fd-start-pow", pow});
+    ASSERT_FALSE(r.has_value()) << pow;
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(r.error().message, "--fd-start-pow must be in 1..30");
+  }
+}
+
+TEST(CliPcTangentFlagTests, ABadValueIsAConfigErrorNamingTheFlag) {
+  for (const std::string_view flag : {"--fd-steps", "--fd-start-pow"}) {
+    const Result<Options> r = parse(Binary::PcTangent, {flag, "4.5"});
+    ASSERT_FALSE(r.has_value()) << flag;
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(r.error().message, std::format("{} takes an integer, not \"4.5\"", flag));
+  }
 }
 
 }  // namespace nevpt2::test::cli

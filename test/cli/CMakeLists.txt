@@ -9,4 +9,6 @@ add_gtest_executable(
 
 add_gtest_suite_tests(
   TARGET cli_tests
-  SUITES CliIntegerTests CliFlagTests CliFinalizeTests CliUsageTests)
+  SUITES CliIntegerTests CliFlagTests CliFinalizeTests CliUsageTests CliMatrixTests
+         CliParseArgsTests CliDemoFlagTests CliDfDemoFlagTests CliScPseudodensityFlagTests
+         CliPcTangentFlagTests)

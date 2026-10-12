@@ -34,8 +34,8 @@ import std;
 // primary interface to re-export its interface partitions.
 export import :block_check;
 
-// nevpt2.cli: the flags both demos take, and the checks that span them
-// (--cublas is refused there on a build without it).
+// nevpt2.cli: every flag this demo takes, which flags it implements, and the
+// checks that span them (--cublas is refused there on a build without it).
 import nevpt2.cli;
 import nevpt2.df_integrals;   // re-exports nevpt2.energy, .einsum, .device_tensor, .wwr
 import nevpt2.golden;
@@ -44,51 +44,24 @@ import nevpt2.profile;
 import nevpt2.rdm_build;
 
 int main(int argc, char** argv) {
-  constexpr std::string_view kGoldenHint = "path_df.nevpt2gold";
-  constexpr std::string_view kExtraFlags = "[--batch N (0 = whole blocks)] [--check-blocks]";
   const std::vector<std::string_view> args(argv + 1, argv + argc);
-  nevpt2::cli::CommonOptions opt;
-  // Slab length along each block's batch index. A MEMORY lever, chosen to
-  // force several slabs on the blocks batched over a virtual (nvirt 15..48
-  // on the committed cases); those batched over a core index (Si, Sijrs, Sij;
-  // ncore 1..5) fit in one -- not a measured speed optimum. 0 = one slab per
-  // block.
-  std::int64_t batchArg = 8;
-  bool checkBlocksArg = false;
 
-  // The common flags first (nevpt2.cli), then this demo's own; anything else
-  // is a usage error. A bad value, or a bad combination, is a config Error
-  // reported once.
-  for (std::size_t i = 0; i < args.size(); ++i) {
-    const nevpt2::Result<bool> used = nevpt2::cli::parseCommonFlag(args, i, opt);
-    if (!used) {
-      nevpt2::report(used.error());
-      return 1;
-    }
-    if (*used) continue;
-    if (args[i] == "--batch" && i + 1 < args.size()) {
-      const nevpt2::Result<std::int64_t> batch =
-          nevpt2::cli::parseInteger<std::int64_t>("--batch", args[++i]);
-      if (!batch) {
-        nevpt2::report(batch.error());
-        return 1;
-      }
-      batchArg = *batch;
-    } else if (args[i] == "--check-blocks") {
-      checkBlocksArg = true;
-    } else {
-      std::fputs(nevpt2::cli::usage(argv[0], kGoldenHint, kExtraFlags).c_str(), stderr);
-      return 1;
-    }
-  }
-  if (const nevpt2::Status st = nevpt2::cli::finalize(opt, kGoldenHint); !st) {
-    nevpt2::report(st.error());
+  // Every flag, the common ones and this demo's own, and every check that
+  // spans them (nevpt2.cli's parseArgs): a flag this demo does not implement
+  // is refused, a bad value or combination is a config Error -- reported
+  // once, here.
+  nevpt2::Result<nevpt2::cli::Options> parsed =
+      nevpt2::cli::parseArgs(nevpt2::cli::Binary::DfDemo, args);
+  if (!parsed) {
+    nevpt2::report(parsed.error());
     return 1;
   }
-  if (batchArg < 0) {
-    nevpt2::report(nevpt2::Error::config("--batch must be >= 0"));
-    return 1;
-  }
+  const nevpt2::cli::Options parsedOpts = *std::move(parsed);
+  const nevpt2::cli::CommonOptions& opt = parsedOpts.common;
+  // --batch: slab length along each block's batch index, a MEMORY lever
+  // (nevpt2::cli::kDefaultBatch says why 8); 0 = one slab per block.
+  const std::int64_t batchArg = parsedOpts.batch;
+  const bool checkBlocksArg = parsedOpts.checkBlocks;
 
   // A missing, unreadable or malformed golden file -- or one without an
   // array this demo reads -- is the user's input: reported once, here, with a

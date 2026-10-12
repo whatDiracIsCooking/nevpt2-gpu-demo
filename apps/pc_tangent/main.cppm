@@ -32,16 +32,10 @@
 // Nothing imports it. main() is written plainly: clang attaches main to the
 // global module even inside a named module's purview (CWG 2811), so it links
 // as the ordinary `main`.
-module;
-
-// stderr is a macro, which `import std` does not carry, so <cstdio> comes in
-// through the global module fragment.
-#include <cstdio>
-
 export module nevpt2.app.pc_tangent;
 
 import std;
-// nevpt2.cli: --golden, --tiles and the rest of the flags the demos take.
+// nevpt2.cli: every flag this binary takes, and the ones it refuses.
 import nevpt2.cli;
 import nevpt2.golden;
 import nevpt2.link_tables;
@@ -50,34 +44,15 @@ import nevpt2.link_tables;
 import nevpt2.pc_tangent;
 
 int main(int argc, char** argv) {
-  constexpr std::string_view kGoldenHint = "path.nevpt2gold";
-  constexpr std::string_view kExtraFlags = "[--fd-steps N] [--fd-start-pow N]";
-  // The finite-difference steps: successive halvings of 2^-kStartPow, as many
-  // as --fd-steps asks for.
-  //
-  // WHY THE LARGEST STEP IS SMALL. The displaced state is not a CASCI
-  // eigenstate, and its PC metric grows modes the state's own does not have.
-  // The direction is chosen so that the ones scaling as h^2 never appear at
-  // all (nevpt2.pc_tangent's `pcTangentDirection`), but Sir still grows one
-  // at ~h^4 relative, with a Dyall eigenvalue that makes
-  // lambda_k + Delta_t negative -- so the PC stage refuses the class, rightly:
-  // the energy at that state does not exist and neither does a difference
-  // quotient built from it. Below h ~ 2^-10 that mode falls under
-  // PC_TAU = 1e-13 * s_max and is dropped like the structural ones, so every
-  // class comes back with the state's own dropped count. 2^-12 is where it is
-  // run, comfortably inside that and still leaving the h^2 truncation error
-  // ~3e-6 Eh -- five decades above the difference's own noise floor (~1e-11
-  // Eh, the RDM build's reassociation divided by 2h), so the Richardson
-  // ratios measure truncation and nothing else
-  // (docs/pc-nevpt2.md, "The tangent with respect to the CI vector").
-  //
-  // Four steps is the default; each one costs two more states -- two more RDM
-  // builds and PC stages -- which at 12 orbitals is minutes, so a caller that
-  // wants fewer can say so (never fewer than three: the report gates on a RUN
-  // of nevpt2::kPcMinFourfoldRun = 2 fourfold halvings, not on one step --
-  // docs/testing.md, "Residual-independent checks of the gradient path").
-  constexpr int kStartPow = 12;
-  constexpr int kDefaultFdSteps = 4;
+  // The finite-difference steps: --fd-steps successive halvings of
+  // 2^-(--fd-start-pow). Why the first step is 2^-12 by default, and why
+  // never fewer than three steps, is beside their defaults in nevpt2.cli
+  // (kDefaultFdStartPow, kMinFdSteps). nevpt2.cli does not link this
+  // binary's nevpt2.pc_tangent, so the floor it checks is pinned to the
+  // report's here: three steps make a run of kPcMinFourfoldRun = 2 fourfold
+  // halvings, the fewest printPcTangentReport accepts.
+  static_assert(nevpt2::cli::kMinFdSteps == nevpt2::kPcMinFourfoldRun + 1,
+                "--fd-steps' floor must be the report's minimum fourfold run plus one");
   // The direction's seed: fixed, so the whole check is reproducible run to
   // run and card to card.
   constexpr std::uint64_t kSeed = 0x5eed'0033u;
@@ -92,69 +67,24 @@ int main(int argc, char** argv) {
   constexpr double kRatioTol = 0.5;
 
   const std::vector<std::string_view> args(argv + 1, argv + argc);
-  nevpt2::cli::CommonOptions opt;
-  int fdSteps = kDefaultFdSteps;
-  int startPow = kStartPow;
 
-  for (std::size_t i = 0; i < args.size(); ++i) {
-    const nevpt2::Result<bool> used = nevpt2::cli::parseCommonFlag(args, i, opt);
-    if (!used) {
-      nevpt2::report(used.error());
-      return 1;
-    }
-    if (*used) continue;
-    if (args[i] == "--fd-steps" && i + 1 < args.size()) {
-      const nevpt2::Result<int> v = nevpt2::cli::parseInteger<int>("--fd-steps", args[++i]);
-      if (!v) {
-        nevpt2::report(v.error());
-        return 1;
-      }
-      fdSteps = *v;
-      continue;
-    }
-    if (args[i] == "--fd-start-pow" && i + 1 < args.size()) {
-      const nevpt2::Result<int> v =
-          nevpt2::cli::parseInteger<int>("--fd-start-pow", args[++i]);
-      if (!v) {
-        nevpt2::report(v.error());
-        return 1;
-      }
-      startPow = *v;
-      continue;
-    }
-    std::fputs(nevpt2::cli::usage(argv[0], kGoldenHint, kExtraFlags).c_str(), stderr);
+  // Every flag, the common ones and this binary's own, and every check that
+  // spans them (nevpt2.cli's parseArgs). A flag this binary does not
+  // implement is refused as Unsupported rather than ignored: --pc (it is PC
+  // throughout), --profile, --rdm-tangent, and the --cublas / --ozaki family
+  // and --fused-digest (the tangent RDM build is the emitted or the
+  // native-fp64 BLAS digest only). A bad value or combination is a config
+  // Error. Reported once, here.
+  nevpt2::Result<nevpt2::cli::Options> parsed =
+      nevpt2::cli::parseArgs(nevpt2::cli::Binary::PcTangent, args);
+  if (!parsed) {
+    nevpt2::report(parsed.error());
     return 1;
   }
-  if (const nevpt2::Status st = nevpt2::cli::finalize(opt, kGoldenHint); !st) {
-    nevpt2::report(st.error());
-    return 1;
-  }
-  // Three steps make a run of two fourfold halvings, the fewest the report
-  // accepts (kPcMinFourfoldRun); the upper bound is only there so a typo
-  // cannot queue hours of RDM builds.
-  if (fdSteps < nevpt2::kPcMinFourfoldRun + 1 || fdSteps > 8) {
-    const nevpt2::Status st = nevpt2::err_config(
-        std::format("--fd-steps must be in {}..8", nevpt2::kPcMinFourfoldRun + 1));
-    nevpt2::report(st.error());
-    return 1;
-  }
-  // 2^-1 is already far past what the denominator condition allows; past
-  // 2^-30 the difference quotient is all rounding.
-  if (startPow < 1 || startPow > 30) {
-    const nevpt2::Status st = nevpt2::err_config("--fd-start-pow must be in 1..30");
-    nevpt2::report(st.error());
-    return 1;
-  }
-  // The tangent RDM build runs the emitted digest or the native-fp64 BLAS
-  // one; the approximate digests and the fused GEMM have no tangent path
-  // (cli::finalize refuses them with --rdm-tangent for the same reason).
-  if (opt.rdm.cublas || opt.rdm.ozaki || opt.rdm.fusedDigest) {
-    const nevpt2::Status st = nevpt2::err_config(
-        "the PC tangent runs the tangent RDM build, which needs the emitted digest or "
-        "--blas-digest; not --cublas, --ozaki or --fused-digest");
-    nevpt2::report(st.error());
-    return 1;
-  }
+  const nevpt2::cli::Options parsedOpts = *std::move(parsed);
+  const nevpt2::cli::CommonOptions& opt = parsedOpts.common;
+  const int fdSteps = parsedOpts.fdSteps;
+  const int startPow = parsedOpts.fdStartPow;
 
   // A missing, unreadable or malformed golden file -- or one without an array
   // this reads -- is the user's input: reported once, here, with a nonzero
