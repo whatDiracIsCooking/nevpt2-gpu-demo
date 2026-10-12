@@ -245,7 +245,8 @@ int main(int argc, char** argv) {
   if (gradientSourceArg) {
     const nevpt2::EnergyResult base =
         nevpt2::energiesDevice(dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, *res);
-    const nevpt2::Result<bool> ok = checkCiSource(g, opt.rdm, dInts, rdm, base, *res);
+    const nevpt2::Result<bool> ok =
+        checkCiSource(g, opt.rdm, dInts, rdm, base, parsedOpts.gradgoldPath, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

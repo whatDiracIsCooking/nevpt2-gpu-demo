@@ -123,6 +123,57 @@ std::pair<double, double> normToEnergyTangent(
   return {normT, enerT};
 }
 
+// --- SC: the finish's derivative in Delta (#87) --------------------------------
+//
+// Delta_k is a signed sum of orbital energies, and those are NOT constants of
+// the CI vector: e_core / e_virt are the generalized Fock's diagonal, built
+// from the active 1-RDM (docs/gradients.md, Sec. 5.5). So the complete
+// forward tangent carries one more term per perturber, its Delta's tangent
+// against
+//
+//   dE_k/dDelta_k = N_k T_k^2                      (Park Eq. 38's R_k)
+//
+// -- E_k = -N_k / (Delta_k + H_k / N_k) differentiated in its third input.
+// nevpt2.sc_amplitudes' scMultipliers reads the same R_k out of the same
+// division for the ADJOINT; this is the forward side's own copy, for the
+// reason normToEnergyDerivative above gives. Guarded the same way.
+double normToEnergyDeltaDerivative(double norm, double h, double diff) {
+  if (!(std::fabs(norm) > NUMERICAL_ZERO)) return 0.0;
+  const double t = -1.0 / (diff + h / norm);
+  return norm * t * t;
+}
+
+// sum_k R_k Deltadot_k over one class's perturbers: the orbital energies' half
+// of the class energy's tangent, added to normToEnergyTangent's
+// P.Ndot + Q.Hdot. `diffDot` is the class's own Delta construction read at
+// the orbital energies' tangent (Delta is linear and homogeneous in them, so
+// that IS Deltadot). Same lengths, same order, or it aborts.
+double normToEnergyDeltaTangent(const std::vector<double>& norm, const std::vector<double>& h,
+                                const std::vector<double>& diff,
+                                const std::vector<double>& diffDot,
+                                std::source_location loc = std::source_location::current()) {
+  const std::size_t k = norm.size();
+  if (h.size() != k || diff.size() != k || diffDot.size() != k)
+    check(false,
+          std::format("normToEnergyDeltaTangent: norm/h/diff/diffDot lengths differ ({}, {}, "
+                      "{}, {})",
+                      k, h.size(), diff.size(), diffDot.size()),
+          loc);
+  double enerT = 0.0;
+  for (std::size_t i = 0; i < k; ++i)
+    enerT += normToEnergyDeltaDerivative(norm[i], h[i], diff[i]) * diffDot[i];
+  return enerT;
+}
+
+// The orbital energies' tangent along one CI direction, host-resident: what
+// energiesTangentDevice reads Deltadot from, in the golden's e_core / e_virt
+// order. nevpt2.gradient_plan's orbitalEnergyDot builds it from the active
+// 1-RDM's tangent and the gradient sidecar's integrals.
+struct OrbitalEnergyDot {
+  Tensor core;  // (ncore)
+  Tensor virt;  // (nvirt)
+};
+
 // --- PC ------------------------------------------------------------------------
 
 enum class PcStatus {

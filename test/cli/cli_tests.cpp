@@ -397,7 +397,7 @@ constexpr std::array kExpectedMatrix{
     MatrixRow{"--pool-threshold", "DFSP"},  MatrixRow{"--sc-tangent", "D"},
     MatrixRow{"--gradient-source", "D"},    MatrixRow{"--batch", "F"},
     MatrixRow{"--check-blocks", "F"},       MatrixRow{"--kappa-act", "S"},
-    MatrixRow{"--kappa-full", "S"},         MatrixRow{"--gradgold", "S"},
+    MatrixRow{"--kappa-full", "S"},         MatrixRow{"--gradgold", "DS"},
     MatrixRow{"--dump-source-terms", "S"},  MatrixRow{"--fd-steps", "P"},
     MatrixRow{"--fd-start-pow", "P"},
 };
@@ -604,6 +604,7 @@ TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
       {Binary::Demo, {"--tiles", "3", "--rdm-tangent"}},
       {Binary::Demo, {"--tiles", "3", "--sc-tangent"}},
       {Binary::Demo, {"--tiles", "3", "--gradient-source"}},
+      {Binary::Demo, {"--tiles", "3", "--gradient-source", "--gradgold", "x.gradgold"}},
       {Binary::DfDemo, {"--tiles", "3", "--check-blocks"}},
       {Binary::DfDemo, {"--tiles", "3", "--batch", "5", "--check-blocks"}},
       {Binary::DfDemo, {"--tiles", "40"}},
@@ -641,6 +642,27 @@ TEST(CliDemoFlagTests, EachCheckSetsItsField) {
   ASSERT_TRUE(gs.has_value()) << gs.error().message;
   EXPECT_TRUE(gs->gradientSource);
   EXPECT_FALSE(gs->scTangent);
+}
+
+TEST(CliDemoFlagTests, GradgoldRidesOnGradientSource) {
+  // #87: the CI source term reads the orbital energies' response from the
+  // sidecar, so --gradgold is accepted beside --gradient-source ...
+  const Result<Options> gs =
+      parse(Binary::Demo, {"--gradient-source", "--gradgold", "x.gradgold"});
+  ASSERT_TRUE(gs.has_value()) << gs.error().message;
+  EXPECT_TRUE(gs->gradientSource);
+  EXPECT_EQ(gs->gradgoldPath, "x.gradgold");
+  // ... and refused without it: nothing else in this demo reads it.
+  for (const std::vector<std::string_view>& args :
+       {std::vector<std::string_view>{"--gradgold", "x.gradgold"},
+        std::vector<std::string_view>{"--sc-tangent", "--gradgold", "x.gradgold"}}) {
+    const Result<Options> r = parse(Binary::Demo, args);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(r.error().message,
+              "--gradgold is the sidecar --gradient-source reads the orbital energies' "
+              "response from; it does nothing on its own");
+  }
 }
 
 TEST(CliDemoFlagTests, TheTwoChecksRefuseEachOther) {

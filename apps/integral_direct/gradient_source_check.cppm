@@ -20,6 +20,18 @@
 //
 //   <u, y> == Edot(u),
 //
+// WHICH FUNCTIONAL, and the sidecar (#87). e_core / e_virt are the
+// generalized Fock's diagonal, built from the active 1-RDM, so they move with
+// the CI vector. Given the gradient sidecar (--gradgold PATH), BOTH sides
+// carry that: the reverse sweep scatters each class's R_t onto the orbital
+// energies its Delta_t reads and folds dE/de into dE/d(dm1) through
+// W_p = (pp|ut) - (1/2)(pu|tp), and the forward tangent reads every class's
+// Delta at e_dot = <dm1_dot, W>. Without one, both hold them fixed at the
+// golden's. Either way the identity is exact on the functional both sides
+// differentiate -- which is exactly why it could not see the orbital
+// energies missing from BOTH (docs/testing.md, "The GPU as the source-term
+// provider"): that takes an independent provider, PySCF's.
+//
 // an algebraic identity between two independent computations -- no step size,
 // no truncation error, nothing but floating-point reassociation. That is why
 // this is a PERMANENT 1e-7 gate and not a finite-difference plateau: the
@@ -52,6 +64,9 @@
 module;
 
 #include <cstdio>  // stdout: a macro, which `import std` does not carry
+// NEVPT2_TRY: a macro, which no import carries -- a sidecar that cannot be
+// read or does not fit the golden is the caller's input.
+#include "error_handling/error_macros.h"
 
 export module nevpt2.app.integral_direct:gradient_source_check;
 
@@ -68,6 +83,11 @@ import nevpt2.rdm_host_dm;
 // the tree's usual one, decades above what is measured
 // (docs/testing.md, "The CI source term's forward-reverse duality").
 constexpr double kCiSourceTol = 1e-7;
+
+// The sidecar's orbital energies rebuilt from h^eff and W against dm1, held
+// to the golden's e_core / e_virt (relative Frobenius): what says the sidecar
+// belongs to this golden, as --kappa-full's own self-check bound has it.
+constexpr double kEpsRebuildTol = 1e-10;
 
 // How many determinants the column-by-column Jacobian is run up to. CAS(4,4)
 // is 36 and CAS(8,8) is 4900; one forward tangent per determinant is minutes
@@ -123,30 +143,83 @@ double ciSourceDot(const nevpt2::Tensor& x, const nevpt2::Tensor& y) {
 // the direction -- dm1/dm2 tangents on the host (exact, both forms being
 // quadratic), dm3/f3ac/f3ca tangents on the device, then the eight classes'
 // tangent. Every device tensor it allocates is freed when it returns.
+//
+// `eps` non-null: the orbital energies move too, e_dot = <dm1_dot, W> from
+// the same host dm1 tangent the RDM side reads.
 double ciSourceTangentAlong(const nevpt2::HostDm12Builder& builder, const nevpt2::Tensor& ci,
                             const nevpt2::Tensor& u, const nevpt2::RdmBuildOptions& rdmOpt,
                             const nevpt2::Tensor& h2e, const nevpt2::NevptIntegralsDevice& ints,
                             const nevpt2::DeviceTensor& dDm1, const nevpt2::DeviceTensor& dDm2,
-                            const nevpt2::RdmBuildResult& rdm, const nevpt2::DeviceResources& res) {
+                            const nevpt2::RdmBuildResult& rdm,
+                            const nevpt2::OrbitalEnergyResponse* eps,
+                            const nevpt2::DeviceResources& res) {
   const nevpt2::HostDm12 dot = builder.dm12Dot(ci, u);
   const nevpt2::DeviceTensor dDm1Dot = nevpt2::uploadTensor(dot.dm1, res);
   const nevpt2::DeviceTensor dDm2Dot = nevpt2::uploadTensor(dot.dm2, res);
   const nevpt2::RdmBuildResult rdmDot = nevpt2::buildRdmTangentsDevice(
       rdmOpt, ci, u, builder.norb(), builder.nelecA(), builder.nelecB(), h2e, res);
+  const std::optional<nevpt2::OrbitalEnergyDot> epsDot =
+      eps ? std::optional(nevpt2::orbitalEnergyDot(*eps, dot.dm1)) : std::nullopt;
   return nevpt2::energiesTangentDevice(ints, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1Dot,
-                                       dDm2Dot, rdmDot.dm3, rdmDot.f3ac, rdmDot.f3ca, res)
+                                       dDm2Dot, rdmDot.dm3, rdmDot.f3ac, rdmDot.f3ca,
+                                       epsDot ? &*epsDot : nullptr, res)
       .totalDot;
+}
+
+// || a - b || / || b || over the core and virtual halves together.
+double relativeEpsGap(const nevpt2::OrbitalEnergyDot& a, const nevpt2::Tensor& eCore,
+                      const nevpt2::Tensor& eVirt) {
+  double num = 0.0, den = 0.0;
+  for (std::int64_t i = 0; i < eCore.size(); ++i) {
+    num += (a.core.flat(i) - eCore.flat(i)) * (a.core.flat(i) - eCore.flat(i));
+    den += eCore.flat(i) * eCore.flat(i);
+  }
+  for (std::int64_t r = 0; r < eVirt.size(); ++r) {
+    num += (a.virt.flat(r) - eVirt.flat(r)) * (a.virt.flat(r) - eVirt.flat(r));
+    den += eVirt.flat(r) * eVirt.flat(r);
+  }
+  return std::sqrt(num / std::max(den, 1e-300));
+}
+
+// The orbital energies' response W out of the gradient sidecar at `path`,
+// after checking the sidecar describes `g`: its partition, its four arrays,
+// and e_core / e_virt rebuilt from its h^eff and W against the golden's dm1.
+// Every failure is the caller's input, an Error reported once at main.
+nevpt2::Result<nevpt2::OrbitalEnergyResponse> loadOrbitalEnergyResponse(
+    const nevpt2::GoldenFile& g, const std::string& path) {
+  std::printf("  gradient sidecar: %s\n", path.c_str());
+  const nevpt2::GradGoldFile gg = NEVPT2_TRY(nevpt2::loadGradGold(path));
+  NEVPT2_TRY(gg.checkAgainst(g));
+  NEVPT2_TRY(gg.require({"heff", "g_xa_cc", "g_xc_ca", "g_xa_vv", "g_xv_va"}));
+  nevpt2::OrbitalEnergyResponse w =
+      nevpt2::orbitalEnergyResponse(gg.ncore, gg.nact, gg.nvirt, gg.get("g_xa_cc"),
+                                    gg.get("g_xc_ca"), gg.get("g_xa_vv"), gg.get("g_xv_va"));
+  const double gap = relativeEpsGap(nevpt2::orbitalEnergiesFrom(w, gg.get("heff"), g.get("dm1")),
+                                    g.get("e_core"), g.get("e_virt"));
+  std::printf("  e_core / e_virt rebuilt as h^eff_pp + <dm1, W_p>, against the golden's: "
+              "%.2e relative (< %.0e)\n",
+              gap, kEpsRebuildTol);
+  if (!(gap < kEpsRebuildTol))
+    return nevpt2::err_config(std::format(
+        "{}: its h^eff and orbital-energy integrals rebuild the golden's e_core / e_virt only "
+        "to {:.3e} relative (need {:.0e}): this sidecar does not belong to the golden",
+        path, gap, kEpsRebuildTol));
+  return w;
 }
 
 // Runs the three checks above for one golden state, prints every number, and
 // returns whether all of them are within kCiSourceTol. An active space the
 // host RDM builder refuses is a configuration Error (the caller reports it
 // once); everything else here is a number.
+//
+// `gradgoldPath` empty: the orbital energies are held fixed on both sides.
+// Otherwise both sides carry their response, read from that sidecar.
 nevpt2::Result<bool> checkCiSource(const nevpt2::GoldenFile& g,
                                    const nevpt2::RdmBuildOptions& rdmOpt,
                                    const nevpt2::NevptIntegralsDevice& ints,
                                    const nevpt2::RdmBuildResult& baseRdm,
                                    const nevpt2::EnergyResult& energies,
+                                   const std::string& gradgoldPath,
                                    const nevpt2::DeviceResources& res) {
   nevpt2::Result<nevpt2::HostDm12Builder> builder =
       nevpt2::HostDm12Builder::create(g.ncas, g.nelecA, g.nelecB);
@@ -155,6 +228,14 @@ nevpt2::Result<bool> checkCiSource(const nevpt2::GoldenFile& g,
   const nevpt2::Tensor& h2e = g.get("h2e");
 
   std::printf("\n--gradient-source: y_I = dE/dc_I (Park Eq. 48) against the forward tangent\n");
+  std::optional<nevpt2::OrbitalEnergyResponse> epsResponse;
+  if (!gradgoldPath.empty())
+    epsResponse = NEVPT2_TRY(loadOrbitalEnergyResponse(g, gradgoldPath));
+  const nevpt2::OrbitalEnergyResponse* eps = epsResponse ? &*epsResponse : nullptr;
+  const char* const functional =
+      eps ? "the orbital energies moving with the active density"
+          : "the orbital energies held fixed (no --gradgold)";
+  std::printf("  functional: %s\n", functional);
 
   // The host rebuild IS the dm1/dm2 both sides read, so the whole check is
   // internally consistent at one state; the unit tier is what holds that
@@ -173,7 +254,7 @@ nevpt2::Result<bool> checkCiSource(const nevpt2::GoldenFile& g,
   const auto t0 = std::chrono::steady_clock::now();
   const nevpt2::ScCiSourceResult src =
       nevpt2::scCiSourceDevice(ints, ci, g.nelecA, g.nelecB, dDm1, dDm2, rdm.dm3, rdm.f3ac,
-                               rdm.f3ca, sigmaOpt, res);
+                               rdm.f3ca, sigmaOpt, eps, res);
   const double ySeconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   double yNorm = 0.0;
@@ -182,6 +263,14 @@ nevpt2::Result<bool> checkCiSource(const nevpt2::GoldenFile& g,
   std::printf("  y built in %.2fs (sigma tiles=%lld, ndet=%lld); |y| = %.8f\n", ySeconds,
               static_cast<long long>(sigmaOpt.nTiles),
               static_cast<long long>(src.y.size()), yNorm);
+  if (src.orbitalEnergiesMove) {
+    double dEdeNorm = 0.0;
+    for (const double v : src.dEdCore) dEdeNorm += v * v;
+    for (const double v : src.dEdVirt) dEdeNorm += v * v;
+    std::printf("  dE/de over %zu core + %zu virtual orbitals, folded onto dm1 through W: "
+                "|dE/de| = %.8f\n",
+                src.dEdCore.size(), src.dEdVirt.size(), std::sqrt(dEdeNorm));
+  }
 
   bool ok = true;
 
@@ -203,7 +292,7 @@ nevpt2::Result<bool> checkCiSource(const nevpt2::GoldenFile& g,
   const auto compare = [&](const std::string& what, const nevpt2::Tensor& u) {
     const double dotY = ciSourceDot(u, src.y);
     const double edot = ciSourceTangentAlong(*builder, ci, u, rdmOpt, h2e, ints, dDm1, dDm2,
-                                             rdm, res);
+                                             rdm, eps, res);
     const double d = std::fabs(dotY - edot);
     worst = std::max(worst, d);
     ok = ok && d < kCiSourceTol;
@@ -227,7 +316,7 @@ nevpt2::Result<bool> checkCiSource(const nevpt2::GoldenFile& g,
     for (std::int64_t I = 0; I < ndet; ++I) {
       const nevpt2::Tensor e = ciSourceUnit(src.y.dims(), I);
       const double edot =
-          ciSourceTangentAlong(*builder, ci, e, rdmOpt, h2e, ints, dDm1, dDm2, rdm, res);
+          ciSourceTangentAlong(*builder, ci, e, rdmOpt, h2e, ints, dDm1, dDm2, rdm, eps, res);
       const double d = std::fabs(src.y.flat(I) - edot);
       yMax = std::max(yMax, std::fabs(src.y.flat(I)));
       if (d > jWorst) {
@@ -247,7 +336,7 @@ nevpt2::Result<bool> checkCiSource(const nevpt2::GoldenFile& g,
   }
 
   std::printf("\n%s: the CI source term and the forward tangent agree to %.0e "
-              "(worst |<u,y> - Edot(u)| = %.3e)\n",
-              ok ? "PASS" : "FAIL", kCiSourceTol, worst);
+              "(worst |<u,y> - Edot(u)| = %.3e), %s\n",
+              ok ? "PASS" : "FAIL", kCiSourceTol, worst, functional);
   return ok;
 }

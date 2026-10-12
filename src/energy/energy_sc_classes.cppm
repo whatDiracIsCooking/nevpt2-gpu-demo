@@ -246,6 +246,23 @@ std::vector<double> sirDiff(const Tensor& hostECore, const Tensor& hostEVirt, in
   return diff;
 }
 
+// Sijrs: eps_a + eps_b - eps_i - eps_j over the slab's i and every (a, j, b),
+// cvcv's own (i, a, j, b) order -- the negative of energy_sijrs' `djba`. The
+// class's energy runs on the device (energy_Sijrs) and never needs this; the
+// orbital energies' tangent does (:sc_tangent's tangent_Sijrs).
+std::vector<double> sijrsDiff(const Tensor& hostECore, const Tensor& hostEVirt, int64_t b0,
+                              int64_t b1) {
+  const int64_t ncore = hostECore.size(), nvirt = hostEVirt.size();
+  std::vector<double> diff;
+  diff.reserve(static_cast<std::size_t>((b1 - b0) * nvirt * ncore * nvirt));
+  for (int64_t i = b0; i < b1; ++i)
+    for (int64_t a = 0; a < nvirt; ++a)
+      for (int64_t j = 0; j < ncore; ++j)
+        for (int64_t b = 0; b < nvirt; ++b)
+          diff.push_back(hostEVirt(a) + hostEVirt(b) - hostECore(i) - hostECore(j));
+  return diff;
+}
+
 // --- the two host packings ----------------------------------------------------
 
 // One class's perturber vectors as normToEnergy takes them: N, H and Delta,

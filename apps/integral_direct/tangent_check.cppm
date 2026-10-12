@@ -61,6 +61,14 @@
 // ratio across each halving: 4 while truncation dominates, then a plateau and
 // a rise once round-off in E / 2h takes over.
 //
+// WHICH FUNCTIONAL. The golden's e_core / e_virt, held fixed: the energy is
+// rerun at displaced RDMs only, and the tangent runs without the orbital
+// energies' tangent (epsDot = null). That is the functional this check was
+// built to license. The orbital energies' own response (#87), which
+// --gradient-source adds to both of its modes given the sidecar, is checked
+// elsewhere -- card-free in test/gradient_plan/ and test/energy_finish/, and
+// against PySCF's exact derivative (docs/gradients.md, Sec. 5.5).
+//
 // THIS IS A DEVELOPMENT CROSS-CHECK, run once to license the EXACT tests
 // downstream: the finite difference validates the tangent, and the tangent
 // (not a step size) then validates the adjoint, at this tree's usual 1e-7.
@@ -230,7 +238,7 @@ nevpt2::Result<bool> checkScTangent(const nevpt2::GoldenFile& g,
         nevpt2::buildRdmTangentsDevice(rdmOpt, ci, ci, norb, g.nelecA, g.nelecB, h2e, res);
     const nevpt2::EnergyTangentResult t = nevpt2::energiesTangentDevice(
         ints, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1Dot, dDm2Dot, rdmDot.dm3,
-        rdmDot.f3ac, rdmDot.f3ca, res);
+        rdmDot.f3ac, rdmDot.f3ca, /*epsDot=*/nullptr, res);
     const nevpt2::EnergyResult e =
         nevpt2::energiesDevice(ints, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, res);
 
@@ -276,7 +284,7 @@ nevpt2::Result<bool> checkScTangent(const nevpt2::GoldenFile& g,
       nevpt2::buildRdmTangentsDevice(rdmOpt, ci, u, norb, g.nelecA, g.nelecB, h2e, res);
   const nevpt2::EnergyTangentResult t = nevpt2::energiesTangentDevice(
       ints, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1Dot, dDm2Dot, rdmDot.dm3, rdmDot.f3ac,
-      rdmDot.f3ca, res);
+      rdmDot.f3ca, /*epsDot=*/nullptr, res);
 
   std::printf("\n  Edot(u) = %.12f  (seed 0x%llx, |u| = 1, <c|u> = 0)\n", t.totalDot,
               static_cast<unsigned long long>(seed));

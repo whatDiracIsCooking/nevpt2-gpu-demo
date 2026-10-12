@@ -237,6 +237,17 @@ EnergyResult energiesDevice(const NevptIntegralsDevice& ints,
 // one-electron norm term), drop it in the tangent; Sijrs contracts no RDM at
 // all, so its tangent is exactly zero. The only derivative taken is
 // nevpt2.energy_finish's normToEnergyTangent, the scalar finish's.
+//
+// THE ORBITAL ENERGIES ARE AN OPTIONAL SECOND INPUT (#87). e_core / e_virt
+// are the generalized Fock's diagonal, built from the active 1-RDM, so in the
+// complete functional they move along a CI direction too. Handed their
+// tangent (`epsDot`, an OrbitalEnergyDot -- nevpt2.gradient_plan's
+// orbitalEnergyDot builds it from dm1_dot and the gradient sidecar), every
+// class adds sum_k R_k Deltadot_k (normToEnergyDeltaTangent), Deltadot being
+// the class's own Delta construction read at that tangent -- Sijrs included,
+// whose Delta is four orbital energies. Null holds them fixed: the functional
+// the golden's finished e_core / e_virt define, which is what a case with no
+// sidecar can differentiate (docs/gradients.md, Sec. 5.5).
 struct EnergyTangentResult {
   std::array<double, 8> norms{};        // as EnergyResult: sum_k N_k per class
   std::array<double, 8> energies{};     // as EnergyResult
@@ -264,6 +275,7 @@ EnergyTangentResult energiesTangentDevice(const ActiveIntegralsDevice& active,
                                           const DeviceTensor& dm2Dot, const DeviceTensor& dm3Dot,
                                           const DeviceTensor& f3acDot,
                                           const DeviceTensor& f3caDot,
+                                          const OrbitalEnergyDot* epsDot,
                                           const DeviceResources& res);
 
 // The integral-direct entry point: full blocks, one slab each.
@@ -274,6 +286,7 @@ EnergyTangentResult energiesTangentDevice(const NevptIntegralsDevice& ints,
                                           const DeviceTensor& dm2Dot, const DeviceTensor& dm3Dot,
                                           const DeviceTensor& f3acDot,
                                           const DeviceTensor& f3caDot,
+                                          const OrbitalEnergyDot* epsDot,
                                           const DeviceResources& res);
 
 // --- the class metrics and Dyall Hamiltonians -------------------------------

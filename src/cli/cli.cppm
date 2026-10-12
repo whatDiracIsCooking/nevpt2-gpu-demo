@@ -157,7 +157,8 @@ inline constexpr int kMaxFdSteps = 8;
 // refuses another binary's flag before it could set one.
 struct Options {
   CommonOptions common;
-  // nevpt2_demo: --sc-tangent, --gradient-source (one at a time; SC only).
+  // nevpt2_demo: --sc-tangent, --gradient-source (one at a time; SC only),
+  // and --gradgold PATH beside --gradient-source (the field below).
   bool scTangent = false;
   bool gradientSource = false;
   // nevpt2_df_demo: --batch N (>= 0), --check-blocks.
@@ -165,7 +166,8 @@ struct Options {
   bool checkBlocks = false;
   // nevpt2_sc_pseudodensity: --kappa-act, --kappa-full, --dump-source-terms
   // PATH (one at a time), --gradgold PATH (only with --kappa-full or
-  // --dump-source-terms, the two that read the sidecar).
+  // --dump-source-terms, the two that read the sidecar). nevpt2_demo reads
+  // gradgoldPath too, with --gradient-source alone.
   bool kappaAct = false;
   bool kappaFull = false;
   std::string gradgoldPath;

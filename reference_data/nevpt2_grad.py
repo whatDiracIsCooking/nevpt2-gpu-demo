@@ -260,19 +260,20 @@ an antisymmetric ``kappa`` and a normalised ``c`` define: ``Y_xy - Y_yx``, and
     CI vector's own shape), the ``ci`` they were taken at, the state's
     ``ncore``/``nact``/``nvirt`` and ``e_corr``. It is in the **golden's**
     active basis, and is carried into section 2.6's on read.
-    **It is not the derivative this gradient needs, and the reason is
+    **It is not yet the derivative this gradient needs, and the reason is
     known**: the device's ``Y`` holds the ``f3ac``/``f3ca`` digests fixed
-    (docs/gradients.md, section 6) and its ``y`` holds ``e_core``/``e_virt``
-    fixed (:func:`pyscf_ci_source` says why that matters). What the gradient
-    comes out at with it, and the attribution to those two omissions:
-    docs/testing.md, "The GPU as the source-term provider".
+    (docs/gradients.md, section 6). Its ``y`` held ``e_core``/``e_virt``
+    fixed too until #87 (:func:`pyscf_ci_source` says why that matters); a
+    dump written since carries their response. What the gradient comes out
+    at with it, and the attribution: docs/testing.md, "The GPU as the
+    source-term provider".
 ``--source both --source-path PATH``
     the dump is the provider gated against ``grad_num``; PySCF's terms are
     computed as well, compared with it componentwise
     (:func:`compare_sources`), and solved on the **same** sweep, so the
     report carries both gradients beside ``grad_num`` and a difference can
     only come from the source terms. ``--localise`` adds PySCF's functional
-    with the device's two omissions put back (:func:`localise_sources`);
+    with the omissions #73 measured put back (:func:`localise_sources`);
     ``--sources-only`` stops after the comparison. SC only: the GPU has no PC
     source terms (#74).
 ``--source pyscf`` (the default)
@@ -1432,11 +1433,12 @@ def pyscf_ci_source(fn: Functional, st: State,
 
         f_pq = h^eff_pq + sum_tu gamma_tu(c) [ (pq|tu) - (1/2)(pt|uq) ]
 
-    The device's ``y_I`` holds them fixed -- the golden file hands them in as
-    finished numbers (docs/gradients.md, section 6, on the same omission for
-    ``dE/dkappa`` before the sidecar existed) -- so it is **not** the
-    derivative this gradient needs. Rebuilt per displaced CI vector here; a
-    dump that holds them fixed will be visibly wrong against ``grad_num``."""
+    The device's ``y_I`` held them fixed until #87 -- the golden file hands
+    them in as finished numbers -- and was visibly wrong against ``grad_num``
+    for it; it now carries their response, out of the gradient sidecar
+    (docs/gradients.md, section 5.5). Rebuilt per displaced CI vector here,
+    which is what makes this the independent check of that term: both of
+    the device's modes share it, so its own duality cannot see it."""
     # Its own constant in PC mode, and :data:`CI_STEP_PC` says why: it is
     # not a truncation-error choice, it is the step at which the PC metric's
     # null modes stay below the lstsq cut.
@@ -1535,13 +1537,16 @@ def compare_sources(st: State, dump: SourceTerms, a_corr: np.ndarray, y_ref: np.
 
 
 def localise_sources(fn: Functional, st: State, step: float, *, ci_step: float) -> dict:
-    """PySCF's own SC functional with the device's two omissions put back in
-    (docs/gradients.md, sections 1 and 6): ``A_corr`` with the ``f3ca``/``f3ac``
-    digests frozen at the state's, and ``y`` with the orbital energies frozen
-    at the state's ``e_core``/``e_virt``. **Neither is a derivative this
-    gradient needs**; they exist so that a disagreement between the two
-    providers can be pinned on those omissions -- if the dump matches these
-    and not the exact ones, nothing else is wrong with it.
+    """PySCF's own SC functional with the two omissions #73 measured put back
+    in (docs/gradients.md, sections 1 and 6): ``A_corr`` with the
+    ``f3ca``/``f3ac`` digests frozen at the state's, and ``y`` with the orbital
+    energies frozen at the state's ``e_core``/``e_virt``. **Neither is a
+    derivative this gradient needs**; they exist so that a disagreement
+    between the two providers can be pinned on those omissions -- if the dump
+    matches these and not the exact ones, nothing else is wrong with it.
+    The ``y`` half describes a dump from before #87: one written since
+    carries the orbital energies' response, so it matches the EXACT ``y`` and
+    misses this one by what the response is worth.
 
     Costs one more ``E_corr`` sweep over the ``kappa`` pairs and one more over
     the determinants."""
@@ -3099,11 +3104,13 @@ def main() -> None:
                          "Z-vector solve, no gradient, no gate")
     ap.add_argument("--localise", action="store_true",
                     help="with --source both: also compare the dump with "
-                         "PySCF's functional carrying the device's two "
-                         "documented omissions (f3 digests frozen in Y, "
-                         "e_core/e_virt frozen in y), so a disagreement can be "
-                         "pinned on them. One more E_corr sweep over the kappa "
-                         "pairs and the determinants")
+                         "PySCF's functional carrying the two omissions #73 "
+                         "measured (f3 digests frozen in Y, e_core/e_virt "
+                         "frozen in y -- the y half closed by #87, so a dump "
+                         "written since matches the exact y, not this one), "
+                         "so a disagreement can be pinned on them. One more "
+                         "E_corr sweep over the kappa pairs and the "
+                         "determinants")
     ap.add_argument("--casci-only", action="store_true",
                     help="drop E_corr from the source terms and from Phi: the "
                          "reference is then a plain CASCI and pyscf.grad.casci is "

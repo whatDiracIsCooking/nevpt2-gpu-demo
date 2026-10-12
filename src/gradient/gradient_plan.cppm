@@ -16,7 +16,11 @@
 //   :sc_classes  the eight classes' Delta constructions and the two
 //                symmetrized classes' multipliers (sijrMultipliers,
 //                srsiMultipliers);
-//   :ci_source   ciSourceFolded / ciSourceSymmetrized / ciSourceAddInto.
+//   :ci_source   ciSourceFolded / ciSourceSymmetrized / ciSourceAddInto;
+//   gradient.cpp orbitalEnergyResponse / orbitalEnergyDm1Coefficient and,
+//                through :terms and :sc_classes, deltaAdjointInto -- the
+//                orbital energies' CI response (#87), whose forward half
+//                (orbitalEnergyDot, orbitalEnergiesFrom) the binaries call.
 //
 // And one rule shared beyond nevpt2.gradient: longestFourfoldRun, the step
 // ladder every finite-difference check of the gradient path is gated on --
@@ -662,6 +666,152 @@ Tensor ciSourceSymmetrized(const Tensor& d3) {
 void ciSourceAddInto(const Tensor& x, Tensor& y) {
   check(x.dims() == y.dims(), "ciSourceAddInto: shapes differ");
   for (int64_t i = 0; i < y.size(); ++i) y.flatRef(i) += x.flat(i);
+}
+
+// --- the orbital energies' CI response (#87) ---------------------------------
+//
+// e_core / e_virt are the generalized Fock's diagonal, and f is built from the
+// active 1-RDM:
+//
+//   e_p = h^eff_pp + sum_ut gamma_ut W_p[u, t],
+//   W_p[u, t] = (pp|ut) - (1/2) (pu|tp)                  p core or virtual
+//
+// -- the active-density line of docs/gradients.md, Sec. 6's deps formula with
+// the rotation taken out, and what :general's fockDiagResidual rebuilds the
+// sidecar's f diagonal from. So the orbital energies are AFFINE in dm1, and
+// the CI source term's missing piece (Sec. 5.5) is one more dm1 coefficient,
+//
+//   dE/d(gamma_ut) += sum_p (dE/de_p) W_p[u, t],
+//
+// with dE/de_p = sum_t R_t dDelta_t/de_p (Park Eq. 38's multiplier, scattered
+// onto the orbital energies each Delta reads: deltaAdjoint below). Forward
+// mode is the transpose: e_p_dot = sum_ut gamma_dot_ut W_p[u, t], and every
+// class's Delta read at it is its Deltadot.
+
+// W over every core and every virtual orbital, (nact, nact, ncore) and
+// (nact, nact, nvirt), from the four gradient-sidecar arrays the
+// orbital-energy rules read on their tied pairs (docs/gradient-theory.md,
+// Sec. 3.3; `g_xP_QR[x, p, q, r] = (x p | q r)`, x over the whole MO range):
+//
+//   core i:     (ii|ut) = g_xa_cc[u, t, i, i]   (iu|ti) = (ui|it) = g_xc_ca[u, i, i, t]
+//   virtual r:  (rr|ut) = g_xa_vv[u, t, r]      (ru|tr) = (ur|rt) = g_xv_va[u, r, r, t]
+//
+// with u, t read at their general index ncore + u. Pure host arithmetic;
+// test/gradient_plan/'s OrbitalEnergyResponseTests rebuild the golden's
+// e_core / e_virt from it and the sidecar's h^eff, which pins every index.
+struct OrbitalEnergyResponse {
+  Tensor core;  // (nact, nact, ncore): W_i[u, t]
+  Tensor virt;  // (nact, nact, nvirt): W_r[u, t]
+};
+
+OrbitalEnergyResponse orbitalEnergyResponse(const int64_t ncore, const int64_t nact,
+                                            const int64_t nvirt, const Tensor& gXaCc,
+                                            const Tensor& gXcCa, const Tensor& gXaVv,
+                                            const Tensor& gXvVa) {
+  const int64_t nmo = ncore + nact + nvirt;
+  check(gXaCc.dims() == std::vector<int64_t>{nmo, nact, ncore, ncore} &&
+            gXcCa.dims() == std::vector<int64_t>{nmo, ncore, ncore, nact} &&
+            gXaVv.dims() == std::vector<int64_t>{nmo, nact, nvirt} &&
+            gXvVa.dims() == std::vector<int64_t>{nmo, nvirt, nvirt, nact},
+        "orbitalEnergyResponse: a sidecar array's shape is not its partition's");
+  OrbitalEnergyResponse w{Tensor({nact, nact, ncore}), Tensor({nact, nact, nvirt})};
+  for (int64_t u = 0; u < nact; ++u)
+    for (int64_t t = 0; t < nact; ++t) {
+      for (int64_t i = 0; i < ncore; ++i)
+        w.core(u, t, i) = gXaCc(ncore + u, t, i, i) - 0.5 * gXcCa(ncore + u, i, i, t);
+      for (int64_t r = 0; r < nvirt; ++r)
+        w.virt(u, t, r) = gXaVv(ncore + u, t, r) - 0.5 * gXvVa(ncore + u, r, r, t);
+    }
+  return w;
+}
+
+// The forward half: the orbital energies' tangent along a 1-RDM tangent,
+// e_p_dot = sum_ut gammaDot[u, t] W_p[u, t].
+OrbitalEnergyDot orbitalEnergyDot(const OrbitalEnergyResponse& w, const Tensor& gammaDot) {
+  const int64_t nact = w.core.dim(0), ncore = w.core.dim(2), nvirt = w.virt.dim(2);
+  check(gammaDot.dims() == std::vector<int64_t>{nact, nact},
+        "orbitalEnergyDot: the 1-RDM tangent is not (nact, nact)");
+  OrbitalEnergyDot d{Tensor({ncore}), Tensor({nvirt})};
+  for (int64_t u = 0; u < nact; ++u)
+    for (int64_t t = 0; t < nact; ++t) {
+      const double g = gammaDot(u, t);
+      for (int64_t i = 0; i < ncore; ++i) d.core(i) += g * w.core(u, t, i);
+      for (int64_t r = 0; r < nvirt; ++r) d.virt(r) += g * w.virt(u, t, r);
+    }
+  return d;
+}
+
+// The orbital energies themselves, rebuilt: e_p = h^eff_pp + sum_ut gamma W_p
+// -- the check that a sidecar's W belongs to the golden beside it (its
+// e_core / e_virt must come back out), returned in OrbitalEnergyDot's two
+// fields because it is the same pair of vectors. `heff` is the sidecar's
+// (nmo, nmo) h^eff, `gamma` the active 1-RDM.
+OrbitalEnergyDot orbitalEnergiesFrom(const OrbitalEnergyResponse& w, const Tensor& heff,
+                                     const Tensor& gamma) {
+  const int64_t nact = w.core.dim(0), ncore = w.core.dim(2), nvirt = w.virt.dim(2);
+  check(heff.dims() == std::vector<int64_t>{ncore + nact + nvirt, ncore + nact + nvirt},
+        "orbitalEnergiesFrom: h^eff is not (nmo, nmo)");
+  OrbitalEnergyDot e = orbitalEnergyDot(w, gamma);
+  for (int64_t i = 0; i < ncore; ++i) e.core(i) += heff(i, i);
+  for (int64_t r = 0; r < nvirt; ++r) e.virt(r) += heff(ncore + nact + r, ncore + nact + r);
+  return e;
+}
+
+// The reverse half: the dm1 coefficient sum_p (dE/de_p) W_p, (nact, nact),
+// which the CI source term adds to dE/d(dm1) before the fold. `dEdCore` /
+// `dEdVirt` are dE/de over the core and virtual orbitals (deltaAdjoint,
+// summed over the eight classes).
+Tensor orbitalEnergyDm1Coefficient(const OrbitalEnergyResponse& w,
+                                   const std::vector<double>& dEdCore,
+                                   const std::vector<double>& dEdVirt) {
+  const int64_t nact = w.core.dim(0), ncore = w.core.dim(2), nvirt = w.virt.dim(2);
+  check(std::ssize(dEdCore) == ncore && std::ssize(dEdVirt) == nvirt,
+        "orbitalEnergyDm1Coefficient: dE/de is not (ncore) + (nvirt)");
+  Tensor g1({nact, nact});
+  for (int64_t u = 0; u < nact; ++u)
+    for (int64_t t = 0; t < nact; ++t) {
+      double s = 0.0;
+      for (int64_t i = 0; i < ncore; ++i) s += dEdCore[static_cast<std::size_t>(i)] * w.core(u, t, i);
+      for (int64_t r = 0; r < nvirt; ++r) s += dEdVirt[static_cast<std::size_t>(r)] * w.virt(u, t, r);
+      g1(u, t) = s;
+    }
+  return g1;
+}
+
+// dE/de_p from one class's slab: the TRANSPOSE of its Delta construction
+// applied to that slab's R multipliers,
+//
+//   dEdCore[i] += sum_t R_t dDelta_t/de_i,    dEdVirt[r] likewise,
+//
+// read off by PROBING `deltaOf(ec, ev)` -- the very function the slab's
+// multipliers and Deltadot are built from -- with one unit vector per
+// orbital. Exact, because Delta_t is a signed sum of orbital energies (linear
+// and homogeneous, DeltaTests' EveryClassIsLinearAndHomogeneous...), and no
+// per-class transpose is transcribed. Costs (ncore + nvirt) Delta builds per
+// slab, which is nothing beside the slab's einsums at every size a sidecar
+// exists for.
+template <class DeltaFn>
+void deltaAdjointInto(DeltaFn&& deltaOf, const std::vector<double>& r, std::vector<double>& dEdCore,
+                      std::vector<double>& dEdVirt) {
+  const int64_t ncore = std::ssize(dEdCore), nvirt = std::ssize(dEdVirt);
+  Tensor ec({ncore}), ev({nvirt});
+  const auto pair = [&]() {
+    const std::vector<double> d = deltaOf(ec, ev);
+    check(d.size() == r.size(), "deltaAdjointInto: Delta and R have different lengths");
+    double s = 0.0;
+    for (std::size_t k = 0; k < d.size(); ++k) s += r[k] * d[k];
+    return s;
+  };
+  for (int64_t i = 0; i < ncore; ++i) {
+    ec(i) = 1.0;
+    dEdCore[static_cast<std::size_t>(i)] += pair();
+    ec(i) = 0.0;
+  }
+  for (int64_t v = 0; v < nvirt; ++v) {
+    ev(v) = 1.0;
+    dEdVirt[static_cast<std::size_t>(v)] += pair();
+    ev(v) = 0.0;
+  }
 }
 
 // --- the step ladder ---------------------------------------------------------

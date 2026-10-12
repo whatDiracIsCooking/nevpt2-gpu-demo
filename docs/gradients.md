@@ -25,13 +25,13 @@ respect to a nuclear coordinate.
 
 | | state |
 |---|---|
-| the SC energy's derivative w.r.t. the CI vector, `y_I = dE/dc_I` (Park Eq. 48) | **in tree**, both modes, checked against each other exactly (§5) |
+| the SC energy's derivative w.r.t. the CI vector, `y_I = dE/dc_I` (Park Eq. 48) | **in tree**, both modes, checked against each other exactly (§5) — and, given the `*.gradgold` sidecar, of the **complete** functional, the orbital energies' response to the active density included (§5.5) |
 | the SC energy's pseudodensities (Park Eqs. 41–47) | **in tree**, checked by their own algebraic identities (§5.2) |
 | the PC energy's derivative w.r.t. the CI vector | **in tree** (§4.3), checked against a finite difference |
 | the orbital source term `Y_xy = dE/dkappa_xy` (Park Eq. 26) | **in tree over the whole `kappa` space** — active–active, core–core, virtual–virtual and mixed — both modes, checked against each other exactly (§6) |
 | the RDMs' own derivatives w.r.t. the CI vector | **in tree**, host `dm1`/`dm2` and device `dm3`/`f3ac`/`f3ca` (§4.1) |
 | the pseudocanonical multipliers `z^c` (Park Eqs. 56–57) | **in tree**, divided out of `Y`'s two inactive blocks, refusing a degeneracy the division cannot resolve (§6) |
-| the GPU's `Y_xy` and `y_I` **written out**, for a nuclear gradient to be built from | **in tree**: `nevpt2_sc_pseudodensity --dump-source-terms PATH` writes both to a `.gradsrc` (§8), which `reference_data/nevpt2_grad.py --source dump` / `both` reads. A gradient built from it is **not** the NEVPT2 gradient, because of the two dependences held fixed below — measured, and localised to exactly those two, in [`testing.md`](testing.md), "The GPU as the source-term provider" |
+| the GPU's `Y_xy` and `y_I` **written out**, for a nuclear gradient to be built from | **in tree**: `nevpt2_sc_pseudodensity --dump-source-terms PATH` writes both to a `.gradsrc` (§8), which `reference_data/nevpt2_grad.py --source dump` / `both` reads. A gradient built from it is **not** yet the NEVPT2 gradient, because of the one dependence `Y` holds fixed below — measured, and localised to exactly that one, in [`testing.md`](testing.md), "The GPU as the source-term provider". Its `y` is the exact one there |
 | the CI Z-vector equation, the selection-boundary multipliers, the CPHF solve | **not in tree** — **offline Python only**, `reference_data/nevpt2_grad.py`, a `pyscf.grad.lagrange.Gradients` subclass ([`reference-data.md`](reference-data.md), "The analytic gradient"). Deliberately offline: this repo's shape is "offline Python generates the reference, the C++ GPU demo reproduces it", and a PySCF solve inside the runtime would invert that. Derived in [`gradient-theory.md`](gradient-theory.md), §2; nothing in `src/` implements them |
 | derivative MO integrals — the one- and two-electron skeleton derivatives — and the nuclear-repulsion derivative | **not in tree**, and not in the reference data either |
 | a nuclear gradient, a geometry optimisation, or any derivative w.r.t. a coordinate | **not in tree** |
@@ -44,13 +44,17 @@ two-electron integrals move under, never the two that Eqs. 56–57 read) and
 what it would cost to lift. The orbital energies, which were held fixed with
 it, now move in `Y`.
 
-**And one is held fixed by the CI source term:** `y_I` holds `e_core` /
-`e_virt` fixed, though they are the generalized Fock's diagonal and so move
-with the active density (§5.5). Neither omission shows in any check this
-tree's binaries run — each mode pair differentiates the same functional — and
-both show at once in a nuclear gradient: the `.gradsrc` dump (§8) is what
-measured them, and the attribution between the two is [`testing.md`](testing.md),
-"The GPU as the source-term provider".
+**The CI source term holds nothing fixed, given the sidecar.** `e_core` /
+`e_virt` are the generalized Fock's diagonal and so move with the active
+density; `y_I` and its forward tangent both carry that response when they are
+handed the sidecar's integrals (§5.5), which the dump always is and
+`--gradient-source` is wherever a sidecar is committed. Without one —
+CAS(10,10) — both modes hold the orbital energies at the golden's and say so.
+The omission they used to share showed in no check this tree's binaries run —
+each mode pair differentiates the same functional — and only in a nuclear
+gradient: the `.gradsrc` dump (§8) is what measured it, and what now measures
+it gone, in [`testing.md`](testing.md), "The GPU as the source-term
+provider".
 
 ## 2. Forward and reverse, and why the permanent tests are exact
 
@@ -395,14 +399,47 @@ allows. What `y` is *for* is the right-hand side of the decoupled CI Z-vector
 equation ([`gradient-theory.md`](gradient-theory.md), §2.2) — the one
 derivative of `E` the Lagrangian needs in determinant space.
 
-**It is taken with the orbital energies fixed.** `Delta_t` reads `e_core` /
-`e_virt` as finished numbers from the golden, and the forward tangent reads
-them the same way, so the duality is exact on a functional in which they do
-not move. In the energy they do: they are the generalized Fock's diagonal, and
-`f` is built from the active 1-RDM, so `de/dc_I` is a term the exact `y_I`
-carries and this one does not. Adding it is a `dm1` coefficient
-`sum_p (dE/de_p) [(pp|tu) - (1/2)(pt|up)]` folded in before the sigma, from
-arrays the sidecar already carries; it is not in tree.
+**The orbital energies move with the CI vector, and both modes carry it.**
+`Delta_t` reads `e_core` / `e_virt`, which are the generalized Fock's
+diagonal; `f` is built from the active 1-RDM, so
+
+```
+  e_p = h^eff_pp + sum_ut gamma_ut W_p[u, t],   W_p[u, t] = (pp|ut) - (1/2)(pu|tp)
+```
+
+for `p` core or virtual — affine in `dm1`, with `W` read off four of the
+sidecar's tied arrays (`orbitalEnergyResponse`, `nevpt2.gradient_plan`).
+Handed `W` (scCiSourceDevice's `eps`):
+
+- **reverse**: every class scatters its `R_t` (Park Eq. 38) onto the orbital
+  energies its `Delta_t` reads — `deltaAdjointInto` probes the class's own
+  `delta` construction with unit vectors, so no transpose is transcribed —
+  and the summed `dE/de` becomes one more `dm1` coefficient,
+  `sum_p (dE/de_p) W_p`, folded in before the sigma like the rest;
+- **forward**: `energiesTangentDevice`'s `epsDot` is `e_dot = <dm1_dot, W>`,
+  and every class adds `sum_t R_t Deltadot_t`, `Deltadot` being its own
+  `Delta` construction read at `e_dot` — Sijrs included, whose `Delta` is
+  four orbital energies and whose tangent is otherwise zero.
+
+The duality stays exact, now on the complete functional. **It cannot check
+the new term**, though, and that is the lesson of the omission it replaces:
+both modes read the same `W`, so a wrong `W` — or the term dropped from both
+— cancels between them exactly as the omission did. What checks it is
+outside the pair: the card-free `test/gradient_plan/` suites rebuild the
+golden's `e_core` / `e_virt` from `W`, which pins every index, and
+`normToEnergyDeltaDerivative`'s `R` is held to a difference quotient in
+`test/energy_finish/`; end to end, the dump's `P y` is held against PySCF's
+exact derivative, which an omission shared by both modes fails
+([`testing.md`](testing.md), "The orbital energies' CI response" and "The GPU
+as the source-term provider"). `--sc-tangent`'s finite difference does not
+license this term: it differences the energy at the golden's fixed orbital
+energies, the functional it was built for, and runs the tangent without
+`epsDot`.
+
+A case with no sidecar cannot form `W` — the golden does not carry `(pp|ut)`
+for `p` outside the active space — so there both modes hold the orbital
+energies fixed, and `--gradient-source` prints which functional it
+differentiated.
 
 ## 6. The orbital source term
 
@@ -609,11 +646,11 @@ its own, and each prints one `PASS:` line a ctest entry matches
 |---|---|
 | `nevpt2_demo --rdm-tangent`, `nevpt2_df_demo --rdm-tangent` | the tangent RDM build beside the plain one, checked against twice it |
 | `nevpt2_demo --sc-tangent` | the SC total's tangent: the norms' affine increment, Euler, and the one-time finite difference |
-| `nevpt2_demo --gradient-source` | `y_I = dE/dc_I` in reverse mode, gated on the duality against the forward tangent, plus the Jacobian where `ndet` allows |
+| `nevpt2_demo --gradient-source` | `y_I = dE/dc_I` in reverse mode, gated on the duality against the forward tangent, plus the Jacobian where `ndet` allows. With `--gradgold PATH` both modes carry the orbital energies' response (§5.5) and the sidecar is first checked against the golden (its `h^eff` and `W` must rebuild `e_core` / `e_virt`); without it they hold the orbital energies fixed. The PASS line names which |
 | `nevpt2_sc_pseudodensity` | the Eqs. 40–47 identities for all eight classes |
 | `nevpt2_sc_pseudodensity --kappa-act` | the active–active orbital source term: adjoint against tangent, with a finite difference beside them |
 | `nevpt2_sc_pseudodensity --kappa-full` | the same over the whole `kappa` space, out of the `*.gradgold` sidecar (`--gradgold PATH` overrides the derived path): the duality, the sidecar's promotion table against the arrays it reads, the active block against `--kappa-act`'s own entry point, two intra-space finite differences, and Eqs. 56–57 |
-| `nevpt2_sc_pseudodensity --dump-source-terms PATH` | not a check of the derivatives but their **export**: `Y_xy` over every MO pair (`scFullRotationMatrix`, out of the sidecar as `--kappa-full` reads it) and `y_I` (`scCiSourceDevice`), written to `PATH` as a `.gradsrc` — a NumPy `.npz` holding `kappa_source`, `ci_source`, the `ci` they were taken at, the partition and `e_corr`, all in the golden's own basis — then read back. Its gate is that the matrix is the pairing, that `y`'s walk ran on this state and that the file reads back bit for bit. `reference_data/nevpt2_grad.py --source dump` builds a nuclear gradient from it, carrying both terms into its own active basis; `--source both` puts that gradient beside PySCF's and `grad_num` |
+| `nevpt2_sc_pseudodensity --dump-source-terms PATH` | not a check of the derivatives but their **export**: `Y_xy` over every MO pair (`scFullRotationMatrix`, out of the sidecar as `--kappa-full` reads it) and `y_I` (`scCiSourceDevice`, with the orbital energies' response out of the same sidecar), written to `PATH` as a `.gradsrc` — a NumPy `.npz` holding `kappa_source`, `ci_source`, the `ci` they were taken at, the partition and `e_corr`, all in the golden's own basis — then read back. Its gate is that the matrix is the pairing, that `y`'s walk ran on this state and that the file reads back bit for bit. `reference_data/nevpt2_grad.py --source dump` builds a nuclear gradient from it, carrying both terms into its own active basis; `--source both` puts that gradient beside PySCF's and `grad_num` |
 | `nevpt2_pc_tangent` | the PC tangent: Euler, and a Richardson-verified central difference. `--fd-steps` and `--fd-start-pow` set the sweep |
 
 `--sc-tangent` and `--gradient-source` are the integral-direct demo's alone
@@ -645,9 +682,11 @@ file so the goldens do not grow for every reader that does not want them.
 What it holds, which cases carry one, and how it is generated are in
 [`reference-data.md`](reference-data.md), "The gradient sidecar" and "The
 numerical gradient"; the inventory it implements is
-[`gradient-theory.md`](gradient-theory.md), §3.3 and §3.5. `--kappa-full` is
-what reads it — the core, virtual and mixed blocks of `Y` are exactly what
-those arrays are for — and only the cases that carry one can run that check.
+[`gradient-theory.md`](gradient-theory.md), §3.3 and §3.5. `--kappa-full` and
+`--dump-source-terms` read all of it — the core, virtual and mixed blocks of
+`Y` are exactly what those arrays are for — and `--gradient-source` four of
+its tied arrays and `h^eff`, for the orbital energies' response (§5.5); only
+the cases that carry one can run those.
 
 ## 9. Where the numbers are
 
@@ -659,5 +698,6 @@ those arrays are for — and only the cases that carry one can run that check.
 | the PC tangent's ratios, residuals, step constraints and crossover | [`pc-nevpt2.md`](pc-nevpt2.md), "The tangent with respect to the CI vector" |
 | what the tangent build costs, and the tile floors it needs | [`performance.md`](performance.md), "The tangent RDM build (`--rdm-tangent`)", "Tile floors", "`--tiles` on the CI source term (`--gradient-source`)" |
 | the sidecar's arrays and sizes, and the numerical gradient | [`reference-data.md`](reference-data.md), "The gradient sidecar", "The numerical gradient", "LiF and acrolein, the gradient-validation pair" |
+| the orbital energies' CI response: how well `W` rebuilds the golden's orbital energies, and what a wrong pick or a dropped term misses by | [`testing.md`](testing.md), "The orbital energies' CI response" |
 | a nuclear gradient built from the GPU's own source terms, against PySCF-sourced and `grad_num`, and which omission costs what | [`testing.md`](testing.md), "The GPU as the source-term provider" |
 | the derivation this implements | [`gradient-theory.md`](gradient-theory.md) |

@@ -134,6 +134,16 @@ struct ScClassGradient {
   // direction came with the gradient sidecar (scFullRotationDevice), and
   // shared by both modes: see "The full source term Y_xy" below.
   std::vector<double> rotEps{};
+
+  // --- the orbital energies' CI response (#87) ---
+  // dE/de over the core and the virtual orbitals, this class's share: Park
+  // Eq. 38's R_t scattered onto the orbital energies its Delta_t reads
+  // (nevpt2.gradient_plan's deltaAdjointInto). Accumulated only when
+  // `epsAdjoint` is set -- by scCiSourceDevice, when it is handed the
+  // orbital energies' response -- and left empty otherwise.
+  bool epsAdjoint = false;
+  std::vector<double> dEdCore{};
+  std::vector<double> dEdVirt{};
 };
 
 struct ScGradientResult {
@@ -525,6 +535,13 @@ struct ScCiSourceResult {
   // y_I over the determinant space, in the CI vector's own
   // (nstringsA, nstringsB) shape.
   Tensor y;
+  // Whether `y` carries the orbital energies' response (an
+  // OrbitalEnergyResponse was handed in), and if so dE/de over the core and
+  // virtual orbitals, summed over the eight classes -- what was folded into
+  // dE/d(dm1) through it. Empty when the orbital energies were held fixed.
+  bool orbitalEnergiesMove = false;
+  std::vector<double> dEdCore{};
+  std::vector<double> dEdVirt{};
   // The same walk's Eq. 40-47 numbers: free, since the sweep runs on top of
   // exactly that walk, and printScGradientReport reports them unchanged.
   ScGradientResult pseudodensities;
@@ -536,6 +553,16 @@ struct ScCiSourceResult {
 // tiles the sigma kernels' determinant axis -- a launch-granularity knob, not
 // a memory one (nevpt2.sigma_vector's SigmaVectorOptions says why).
 //
+// `eps` is the orbital energies' response to the active density
+// (nevpt2.gradient_plan's OrbitalEnergyResponse, built from the gradient
+// sidecar). Non-null, y is the derivative of the COMPLETE functional, in
+// which e_core / e_virt move with the CI vector: each class's R_t is
+// scattered onto the orbital energies its Delta_t reads, and the resulting
+// dE/de is folded into dE/d(dm1) through W before the sigma calls
+// (docs/gradients.md, Sec. 5.5). Null holds them fixed at the golden's, the
+// functional a case with no sidecar can differentiate. Forward mode's
+// counterpart is energiesTangentDevice's `epsDot`.
+//
 // Everything runs on res.stream() and every device allocation is a
 // DeviceBuffer from res's pool; the five coefficient tensors live from the
 // first class to the last sigma call and are freed when this returns.
@@ -544,14 +571,16 @@ ScCiSourceResult scCiSourceDevice(const ActiveIntegralsDevice& active, IntegralS
                                   int64_t nelecB, const DeviceTensor& dm1,
                                   const DeviceTensor& dm2, const DeviceTensor& dm3,
                                   const DeviceTensor& f3ac, const DeviceTensor& f3ca,
-                                  const SigmaVectorOptions& sigma, const DeviceResources& res);
+                                  const SigmaVectorOptions& sigma,
+                                  const OrbitalEnergyResponse* eps, const DeviceResources& res);
 
 // The integral-direct entry point: full blocks, one slab each.
 ScCiSourceResult scCiSourceDevice(const NevptIntegralsDevice& ints, const Tensor& ci,
                                   int64_t nelecA, int64_t nelecB, const DeviceTensor& dm1,
                                   const DeviceTensor& dm2, const DeviceTensor& dm3,
                                   const DeviceTensor& f3ac, const DeviceTensor& f3ca,
-                                  const SigmaVectorOptions& sigma, const DeviceResources& res);
+                                  const SigmaVectorOptions& sigma,
+                                  const OrbitalEnergyResponse* eps, const DeviceResources& res);
 
 // Step 3 above on its own: y_I from the five RDM coefficient tensors
 // g1 = dE/d(dm1), g2, g3, gac = dE/d(f3ac), gca = dE/d(f3ca) and the state

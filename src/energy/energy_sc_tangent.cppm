@@ -39,7 +39,13 @@
 //
 // THE ONE ACTUAL DERIVATIVE is the scalar finish's, nevpt2.energy_finish's
 // normToEnergyTangent (Park, JCTC 2019, Eqs. 36-37): with the base N, H and
-// Delta from the same walk, Edot = sum_k (P_k Ndot_k + Q_k Hdot_k).
+// Delta from the same walk, Edot = sum_k (P_k Ndot_k + Q_k Hdot_k). And, when
+// the caller hands in the orbital energies' tangent (`epsDot`, #87), its Delta
+// derivative too: + sum_k R_k Deltadot_k (Eq. 38, normToEnergyDeltaTangent),
+// Deltadot being each class's own Delta vector read at that tangent -- the
+// same *Diff / pack functions, which are linear and homogeneous in the
+// orbital energies. Sijrs, whose tangent is otherwise zero, then needs its
+// per-tuple norms, which tangent_Sijrs builds for that case alone.
 //
 // COST: one extra tangent block per metric and Dyall block (held beside its
 // base, so the peak is about twice a class's intermediates) and one extra
@@ -131,7 +137,8 @@ void addSlab(ScTangentSums& acc, const ScTangentSums& slab) {
 // synchronizes that stream itself.
 ScTangentSums tangentFinish(const DeviceTensor& norm, const DeviceTensor& h,
                             const DeviceTensor& normDot, const DeviceTensor& hDot,
-                            const std::vector<double>& diff, const DeviceResources& dr) {
+                            const std::vector<double>& diff, const std::vector<double>* diffDot,
+                            const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const Tensor hostNorm = downloadTensor(norm, s);
   const Tensor hostH = downloadTensor(h, s);
@@ -141,17 +148,39 @@ ScTangentSums tangentFinish(const DeviceTensor& norm, const DeviceTensor& h,
   const auto [nDot, eDot] =
       normToEnergyTangent(hostNorm.data(), hostH.data(), diff, hostNormDot.data(),
                           hostHDot.data());
-  return {n, e, nDot, eDot};
+  const double eDotEps =
+      diffDot ? normToEnergyDeltaTangent(hostNorm.data(), hostH.data(), diff, *diffDot) : 0.0;
+  return {n, e, nDot, eDot + eDotEps};
 }
 
 // The same for a class that packs its perturbers on the host: the base pair
 // and the tangent pair come out of the SAME packing (it is linear), so the
-// tangent's own Delta -- identical by construction -- is discarded.
-ScTangentSums tangentFinishPacked(const TriVectors& base, const TriVectors& dot) {
+// tangent's own Delta -- identical by construction -- is discarded. `eps`,
+// when the orbital energies move, is the same packing read at their tangent:
+// its `diff` is Deltadot, in the perturbers' own order.
+ScTangentSums tangentFinishPacked(const TriVectors& base, const TriVectors& dot,
+                                  const TriVectors* eps) {
   const auto [n, e] = normToEnergy(base.norm, base.h, base.diff);
   const auto [nDot, eDot] =
       normToEnergyTangent(base.norm, base.h, base.diff, dot.norm, dot.h);
-  return {n, e, nDot, eDot};
+  const double eDotEps =
+      eps ? normToEnergyDeltaTangent(base.norm, base.h, base.diff, eps->diff) : 0.0;
+  return {n, e, nDot, eDot + eDotEps};
+}
+
+// A class's Delta read at the orbital energies' tangent, or nothing when they
+// are held fixed: `fn(core, virt)` is the class's own Delta construction, and
+// Delta is linear and homogeneous in the orbital energies, so that IS
+// Deltadot.
+template <class DiffFn>
+std::optional<std::vector<double>> diffDotOf(const OrbitalEnergyDot* eps, DiffFn&& fn) {
+  if (eps == nullptr) return std::nullopt;
+  return fn(eps->core, eps->virt);
+}
+
+// The pointer tangentFinish takes.
+const std::vector<double>* ptrOf(const std::optional<std::vector<double>>& v) {
+  return v ? &*v : nullptr;
 }
 
 // --- the eight classes --------------------------------------------------------
@@ -165,7 +194,7 @@ ScTangentSums tangentFinishPacked(const TriVectors& base, const TriVectors& dot)
 
 ScTangentSums tangent_Sr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                          const Tensor& hostEVirt, const ScRdms& r, const ScRdms& d,
-                         int64_t norb, const DeviceResources& dr) {
+                         const OrbitalEnergyDot* eps, int64_t norb, const DeviceResources& dr) {
   const DeviceTensor& h1e = ai.h1e;
   const DeviceTensor& h2e = ai.h2e;
 
@@ -188,15 +217,17 @@ ScTangentSums tangent_Sr(const ActiveIntegralsDevice& ai, IntegralSource& src, i
     DeviceTensor enerDot = srHSlab(h2e_v, h1e_v, a16Dot, a17Dot, a19Dot, dr);
     DeviceTensor normDot = srNormSlab(h2e_v, h1e_v, d.dm1, d.dm2, d.dm3, dr);
 
-    addSlab(acc, tangentFinish(norm, ener, normDot, enerDot,
-                               sliceHost(hostEVirt, b0, b1), dr));
+    const auto diffDot =
+        diffDotOf(eps, [&](const Tensor&, const Tensor& ev) { return sliceHost(ev, b0, b1); });
+    addSlab(acc, tangentFinish(norm, ener, normDot, enerDot, sliceHost(hostEVirt, b0, b1),
+                               ptrOf(diffDot), dr));
   });
   return acc;
 }
 
 ScTangentSums tangent_Si(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                          const Tensor& hostECore, const ScRdms& r, const ScRdms& d,
-                         int64_t norb, const DeviceResources& dr) {
+                         const OrbitalEnergyDot* eps, int64_t norb, const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const DeviceTensor& h1e = ai.h1e;
   const DeviceTensor& h2e = ai.h2e;
@@ -230,22 +261,52 @@ ScTangentSums tangent_Si(const ActiveIntegralsDevice& ai, IntegralSource& src, i
     DeviceTensor enerDot = siHSlab(h2e_v, h1e_v, a22Dot, a23Dot, a25Dot, dr);
     DeviceTensor normDot = siNormSlab(h2e_v, h1e_v, dm1_hDot, dm2_hDot, dm3_hDot, dr);
 
-    addSlab(acc, tangentFinish(norm, ener, normDot, enerDot, siDiff(hostECore, b0, b1), dr));
+    const auto diffDot =
+        diffDotOf(eps, [&](const Tensor& ec, const Tensor&) { return siDiff(ec, b0, b1); });
+    addSlab(acc, tangentFinish(norm, ener, normDot, enerDot, siDiff(hostECore, b0, b1),
+                               ptrOf(diffDot), dr));
   });
   return acc;
 }
 
-// Sijrs reads no RDM: the base pair is energy_Sijrs', and both tangents are
-// exactly zero.
+// Sijrs reads no RDM: the base pair is energy_Sijrs', and at fixed orbital
+// energies both tangents are exactly zero. Its Delta is four of them, though,
+// so when they move (`eps`) its energy tangent is sum_t R_t Deltadot_t -- the
+// one place this class needs its per-tuple norms on the host, which
+// energy_Sijrs' device reduction never forms: theta = 2 g - g(a <-> b) and
+// N = g theta, the kernel's own two lines, as einsums over the same slab
+// (the adjoint side, nevpt2.gradient's gradientSijrs, builds them the same
+// way). H is identically zero here.
 ScTangentSums tangent_Sijrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
-                            const DeviceResources& dr) {
+                            const OrbitalEnergyDot* eps, const DeviceResources& dr) {
   const auto [n, e] = energy_Sijrs(ai, src, batch, dr);
-  return {n, e, 0.0, 0.0};
+  double eDot = 0.0;
+  const int64_t ncore = ai.e_core.size(), nvirt = ai.e_virt.size();
+  if (eps != nullptr && ncore > 0 && nvirt > 0) {
+    const wwrStream_t s = dr.stream();
+    const Tensor hostECore = downloadTensor(ai.e_core, s);
+    const Tensor hostEVirt = downloadTensor(ai.e_virt, s);
+    forBatches(src.extent(ExtBlock::Sijrs), batch, [&](int64_t b0, int64_t b1) {
+      DeviceTensor slab = src.slab(ExtBlock::Sijrs, b0, b1, dr);  // (ni, v, c, v)
+      const DeviceTensor theta = deviceTransposeNew(slab, {0, 3, 2, 1}, -1.0, dr);
+      deviceEinsumAccum("iajb->iajb", {&slab}, theta, 2.0, s);
+      const DeviceTensor norm = deviceEinsumNew("iajb,iajb->iajb", {&slab, &theta}, 1.0, dr);
+      // No sync before the download: it is enqueued behind the einsums that
+      // wrote `norm`, and downloadTensor synchronizes the stream itself.
+      const Tensor hostNorm = downloadTensor(norm, s);
+      const std::vector<double> noH(static_cast<std::size_t>(hostNorm.size()), 0.0);
+      eDot += normToEnergyDeltaTangent(hostNorm.data(), noH,
+                                       sijrsDiff(hostECore, hostEVirt, b0, b1),
+                                       sijrsDiff(eps->core, eps->virt, b0, b1));
+    });
+  }
+  return {n, e, 0.0, eDot};
 }
 
 ScTangentSums tangent_Sijr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                            const Tensor& hostECore, const Tensor& hostEVirt, const ScRdms& r,
-                           const ScRdms& d, const DeviceResources& dr) {
+                           const ScRdms& d, const OrbitalEnergyDot* eps,
+                           const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const DeviceTensor& h1e = ai.h1e;
   const DeviceTensor& h2e = ai.h2e;
@@ -265,18 +326,23 @@ ScTangentSums tangent_Sijr(const ActiveIntegralsDevice& ai, IntegralSource& src,
     DeviceTensor normTDot = sijrSlab(h2e_v, hdm1Dot, dr);
     DeviceTensor hTDot = sijrSlab(h2e_v, a3Dot, dr);
 
-    const TriVectors base = sijrPack(downloadTensor(normT, s), downloadTensor(hT, s), hostECore,
-                                     hostEVirt, b0);
+    const Tensor hostNormT = downloadTensor(normT, s);
+    const Tensor hostHT = downloadTensor(hT, s);
+    const TriVectors base = sijrPack(hostNormT, hostHT, hostECore, hostEVirt, b0);
     const TriVectors dot = sijrPack(downloadTensor(normTDot, s), downloadTensor(hTDot, s),
                                     hostECore, hostEVirt, b0);
-    addSlab(acc, tangentFinishPacked(base, dot));
+    const std::optional<TriVectors> epsPack =
+        eps ? std::optional(sijrPack(hostNormT, hostHT, eps->core, eps->virt, b0))
+            : std::nullopt;
+    addSlab(acc, tangentFinishPacked(base, dot, epsPack ? &*epsPack : nullptr));
   });
   return acc;
 }
 
 ScTangentSums tangent_Srsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                            const Tensor& hostECore, const Tensor& hostEVirt, const ScRdms& r,
-                           const ScRdms& d, const DeviceResources& dr) {
+                           const ScRdms& d, const OrbitalEnergyDot* eps,
+                           const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const DeviceTensor& h1e = ai.h1e;
   const DeviceTensor& h2e = ai.h2e;
@@ -306,16 +372,19 @@ ScTangentSums tangent_Srsi(const ActiveIntegralsDevice& ai, IntegralSource& src,
     srsiAccumSlab(hA, hB, k27Dot, hRowsDot, s);
   });
 
-  const TriVectors base =
-      srsiPack(downloadTensor(normT, s), downloadTensor(hT, s), hostECore, hostEVirt);
+  const Tensor hostNormT = downloadTensor(normT, s);
+  const Tensor hostHT = downloadTensor(hT, s);
+  const TriVectors base = srsiPack(hostNormT, hostHT, hostECore, hostEVirt);
   const TriVectors dot =
       srsiPack(downloadTensor(normTDot, s), downloadTensor(hTDot, s), hostECore, hostEVirt);
-  return tangentFinishPacked(base, dot);
+  const std::optional<TriVectors> epsPack =
+      eps ? std::optional(srsiPack(hostNormT, hostHT, eps->core, eps->virt)) : std::nullopt;
+  return tangentFinishPacked(base, dot, epsPack ? &*epsPack : nullptr);
 }
 
 ScTangentSums tangent_Srs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                           const Tensor& hostEVirt, const ScRdms& r, const ScRdms& d,
-                          const DeviceResources& dr) {
+                          const OrbitalEnergyDot* eps, const DeviceResources& dr) {
   const DeviceTensor& h1e = ai.h1e;
   const DeviceTensor& h2e = ai.h2e;
   if (hostEVirt.size() == 0) return {};
@@ -331,14 +400,17 @@ ScTangentSums tangent_Srs(const ActiveIntegralsDevice& ai, IntegralSource& src, 
     DeviceTensor normDot = srsNormSlab(h2e_v, rm2Dot, dr);
     DeviceTensor hDot = srsHSlab(h2e_v, a7Dot, dr);
 
-    addSlab(acc, tangentFinish(norm, h, normDot, hDot, srsDiff(hostEVirt, b0, b1), dr));
+    const auto diffDot =
+        diffDotOf(eps, [&](const Tensor&, const Tensor& ev) { return srsDiff(ev, b0, b1); });
+    addSlab(acc, tangentFinish(norm, h, normDot, hDot, srsDiff(hostEVirt, b0, b1),
+                               ptrOf(diffDot), dr));
   });
   return acc;
 }
 
 ScTangentSums tangent_Sij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                           const Tensor& hostECore, const ScRdms& r, const ScRdms& d,
-                          const DeviceResources& dr) {
+                          const OrbitalEnergyDot* eps, const DeviceResources& dr) {
   const DeviceTensor& h1e = ai.h1e;
   const DeviceTensor& h2e = ai.h2e;
   if (hostECore.size() == 0) return {};
@@ -363,14 +435,18 @@ ScTangentSums tangent_Sij(const ActiveIntegralsDevice& ai, IntegralSource& src, 
     DeviceTensor normDot = sijSlab(h2e_v, hdm2Dot, dr);
     DeviceTensor hDot = sijSlab(h2e_v, a9Dot, dr);
 
-    addSlab(acc, tangentFinish(norm, h, normDot, hDot, sijDiff(hostECore, b0, b1), dr));
+    const auto diffDot =
+        diffDotOf(eps, [&](const Tensor& ec, const Tensor&) { return sijDiff(ec, b0, b1); });
+    addSlab(acc, tangentFinish(norm, h, normDot, hDot, sijDiff(hostECore, b0, b1),
+                               ptrOf(diffDot), dr));
   });
   return acc;
 }
 
 ScTangentSums tangent_Sir(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                           const Tensor& hostECore, const Tensor& hostEVirt, const ScRdms& r,
-                          const ScRdms& d, const DeviceResources& dr) {
+                          const ScRdms& d, const OrbitalEnergyDot* eps,
+                          const DeviceResources& dr) {
   const DeviceTensor& h1e = ai.h1e;
   const DeviceTensor& h2e = ai.h2e;
 
@@ -395,8 +471,11 @@ ScTangentSums tangent_Sir(const ActiveIntegralsDevice& ai, IntegralSource& src, 
                                        /*withOneElectronTerm=*/false, dr);
     DeviceTensor hDot = sirHSlab(h2e_v1, h2e_v2, a12Dot, a13Dot, dr);
 
-    addSlab(acc, tangentFinish(norm, h, normDot, hDot,
-                               sirDiff(hostECore, hostEVirt, b0, b1), dr));
+    const auto diffDot = diffDotOf(eps, [&](const Tensor& ec, const Tensor& ev) {
+      return sirDiff(ec, ev, b0, b1);
+    });
+    addSlab(acc, tangentFinish(norm, h, normDot, hDot, sirDiff(hostECore, hostEVirt, b0, b1),
+                               ptrOf(diffDot), dr));
   });
   return acc;
 }
@@ -411,6 +490,7 @@ EnergyTangentResult energiesTangentDevice(const ActiveIntegralsDevice& ai, Integ
                                           const DeviceTensor& dm3Dot,
                                           const DeviceTensor& f3acDot,
                                           const DeviceTensor& f3caDot,
+                                          const OrbitalEnergyDot* epsDot,
                                           const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   // --profile: the launches below report in the energy table, like
@@ -422,17 +502,25 @@ EnergyTangentResult energiesTangentDevice(const ActiveIntegralsDevice& ai, Integ
 
   const ScRdms r{dm1, dm2, dm3, f3ac, f3ca};
   const ScRdms d{dm1Dot, dm2Dot, dm3Dot, f3acDot, f3caDot};
+  // The orbital energies' tangent is the caller's to give or withhold: it is
+  // what makes Edot the derivative of the COMPLETE functional, in which
+  // e_core / e_virt move with the active density (nevpt2.energy_finish's
+  // normToEnergyDeltaTangent). Its lengths are the golden's, so a mismatch
+  // is our bug.
+  if (epsDot != nullptr)
+    check(epsDot->core.size() == hostECore.size() && epsDot->virt.size() == hostEVirt.size(),
+          "energiesTangentDevice: the orbital energies' tangent has the wrong lengths");
 
   // CLASSES order, as energiesDevice.
   const std::array<ScTangentSums, 8> cls = {
-      tangent_Sr(ai, src, batch, hostEVirt, r, d, norb, dr),
-      tangent_Si(ai, src, batch, hostECore, r, d, norb, dr),
-      tangent_Sijrs(ai, src, batch, dr),
-      tangent_Sijr(ai, src, batch, hostECore, hostEVirt, r, d, dr),
-      tangent_Srsi(ai, src, batch, hostECore, hostEVirt, r, d, dr),
-      tangent_Srs(ai, src, batch, hostEVirt, r, d, dr),
-      tangent_Sij(ai, src, batch, hostECore, r, d, dr),
-      tangent_Sir(ai, src, batch, hostECore, hostEVirt, r, d, dr),
+      tangent_Sr(ai, src, batch, hostEVirt, r, d, epsDot, norb, dr),
+      tangent_Si(ai, src, batch, hostECore, r, d, epsDot, norb, dr),
+      tangent_Sijrs(ai, src, batch, epsDot, dr),
+      tangent_Sijr(ai, src, batch, hostECore, hostEVirt, r, d, epsDot, dr),
+      tangent_Srsi(ai, src, batch, hostECore, hostEVirt, r, d, epsDot, dr),
+      tangent_Srs(ai, src, batch, hostEVirt, r, d, epsDot, dr),
+      tangent_Sij(ai, src, batch, hostECore, r, d, epsDot, dr),
+      tangent_Sir(ai, src, batch, hostECore, hostEVirt, r, d, epsDot, dr),
   };
 
   EnergyTangentResult out;
@@ -454,6 +542,7 @@ EnergyTangentResult energiesTangentDevice(const NevptIntegralsDevice& ints,
                                           const DeviceTensor& dm2Dot, const DeviceTensor& dm3Dot,
                                           const DeviceTensor& f3acDot,
                                           const DeviceTensor& f3caDot,
+                                          const OrbitalEnergyDot* epsDot,
                                           const DeviceResources& res) {
   FullBlockSource src(ints);
   // Views: `ints` keeps owning everything (energiesDevice's arrangement).
@@ -461,7 +550,7 @@ EnergyTangentResult energiesTangentDevice(const NevptIntegralsDevice& ints,
                            ints.e_virt.view(),   ints.h1e_v_Sr.view(), ints.h1e_v_Si.view(),
                            ints.h1e_v_Sir.view()};
   return energiesTangentDevice(ai, src, /*batch=*/0, dm1, dm2, dm3, f3ac, f3ca, dm1Dot, dm2Dot,
-                               dm3Dot, f3acDot, f3caDot, res);
+                               dm3Dot, f3acDot, f3caDot, epsDot, res);
 }
 
 }  // namespace nevpt2

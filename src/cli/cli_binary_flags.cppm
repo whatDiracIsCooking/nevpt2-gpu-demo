@@ -39,8 +39,12 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   nevpt2_pc_tangent (kNotPcTangent, above).
 //   each binary's own flags: that binary alone. --dump-source-terms is
 //                   nevpt2_sc_pseudodensity's because Y_xy needs the gradient
-//                   sidecar only it reads; nevpt2_demo computes y_I too, but
-//                   half a dump is not one.
+//                   sidecar's full-MO-range arrays; nevpt2_demo computes y_I
+//                   too, but half a dump is not one.
+//   --gradgold      nevpt2_sc_pseudodensity (--kappa-full, --dump-source-terms)
+//                   and nevpt2_demo (--gradient-source, whose y_I and forward
+//                   tangent then carry the orbital energies' CI response,
+//                   #87): the two binaries that read the sidecar.
 // README.md, "Which binary takes which flag", is this table in prose; keep
 // the two together.
 constexpr std::array kFlagTable{
@@ -65,7 +69,7 @@ constexpr std::array kFlagTable{
     FlagSpec{"--check-blocks", "", kDfDemo},
     FlagSpec{"--kappa-act", "", kScPd},
     FlagSpec{"--kappa-full", "", kScPd},
-    FlagSpec{"--gradgold", "path", kScPd},
+    FlagSpec{"--gradgold", "path", kDemo | kScPd},
     FlagSpec{"--dump-source-terms", "path", kScPd},
     FlagSpec{"--fd-steps", "N", kPcTangent},
     FlagSpec{"--fd-start-pow", "N", kPcTangent},
@@ -146,6 +150,12 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
         return err_config(
             "--sc-tangent and --gradient-source are two different checks of the same "
             "derivative; run one at a time");
+      // The sidecar's one reader here is the CI source term's orbital-energy
+      // response (#87).
+      if (!opt.gradgoldPath.empty() && !opt.gradientSource)
+        return err_config(
+            "--gradgold is the sidecar --gradient-source reads the orbital energies' "
+            "response from; it does nothing on its own");
       if (!(opt.scTangent || opt.gradientSource)) return {};
       const std::string_view which = opt.scTangent ? "--sc-tangent" : "--gradient-source";
       // Both differentiation checks run the tangent RDM build, which is the

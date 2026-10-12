@@ -25,7 +25,8 @@ add_cxx_module_library(
 # (rotBlockInfo, activeAxesOf, spanOf, generalPickPlan, promotionPlan,
 # heffDressingPlan), the
 # eight classes' Delta vectors and the two symmetrized classes' slab
-# multipliers, termHasActive, and the CI source term's host folding. No GPU,
+# multipliers, termHasActive, the CI source term's host folding, and the
+# orbital energies' CI response (W out of the sidecar, dE/de, #87). No GPU,
 # so the unit tier tests it card-free (test/gradient_plan/); nevpt2.gradient
 # re-exports it.
 add_cxx_module_library(
