@@ -1264,8 +1264,8 @@ its `P y` is the next table):
 
 | | N2 CAS(4,4) | N2 CAS(8,8) | LiF CAS(4,6) | acrolein CAS(6,5) |
 |---|---|---|---|---|
-| determinants compared | 12 | @@CAS88N@@ | 225 | 52 |
-| max \|dump `P y` − PySCF's\| at `CI_STEP` = 2^-17 | **9.0e-9** | **@@CAS88@@** | **5.8e-10** | **9.6e-10** |
+| determinants compared | 12 | 4900 | 225 | 52 |
+| max \|dump `P y` − PySCF's\| at `CI_STEP` = 2^-17 | **9.0e-9** | **7.2e-10** | **5.8e-10** | **9.6e-10** |
 | … #73, orbital energies held fixed | 3.2e-4 | 5.4e-3 | 3.3e-3 | 3.7e-3 |
 
 What is left is PySCF's own truncation, and the ladder says so: the dump
@@ -1278,13 +1278,17 @@ projected quotient, restricted to those determinants; max over the three):
 | N2 CAS(4,4) | 2.3e-6 | 1.4e-7 | 9.0e-9 | 5.7e-10 | 8.2e-10 |
 | acrolein CAS(6,5) | 2.4e-7 | 1.5e-8 | 9.6e-10 | 2.8e-10 | 1.9e-9 |
 | LiF CAS(4,6) | 8.2e-11 | 1.5e-10 | 5.8e-10 | 2.5e-10 | 4.8e-9 |
-@@CAS88LADDER@@
+| N2 CAS(8,8) (its worst determinant) | 4.2e-11 | 2.0e-11 | 7.2e-10 | 1.5e-10 | 3.5e-9 |
+
 Sixteen-fold per two halvings — `h²` — down to the quotient's round-off
 floor, which `E/2h` reaches at 2^-19 and climbs off at 2^-21: the leftover at
-the committed step is PySCF's truncation, converging onto the dump. LiF's
-components are small enough that every rung is already at that floor.
+the committed step is PySCF's truncation, converging onto the dump. LiF's and
+N2 CAS(8,8)'s components are small enough that every rung is already at that
+floor. N2 CAS(8,8)'s 2^-17 pass differences all 4900 determinants and took
+6481 s (`--sources-only`, kappa sweep included), so its ladder is run at that
+pass's worst determinant alone rather than the worst three.
 
-Read it three ways:
+Read the block table three ways:
 
 - **The conventions are right.** Core–core and virt–virt are blocks where
   neither omission reaches (no active two-electron index, no orbital energy
