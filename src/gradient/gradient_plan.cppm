@@ -9,7 +9,8 @@
 //   :general     rotBlockInfo / activeAxesOf / rotBlockName / spanOf, and
 //                generalPick, which is generalPickPlan + the array lookup;
 //                promotionPlan / promotionSubscripts are the four-einsum
-//                promotion rule's index bookkeeping;
+//                promotion rule's index bookkeeping, and heffDressingPlan
+//                the one-electron blocks' core-dressing terms;
 //   :terms       kScActive / termHasActive, ScSlabMultipliers, sliceHost,
 //                plainMultipliers;
 //   :sc_classes  the eight classes' Delta constructions and the two
@@ -315,6 +316,70 @@ std::string promotionSubscripts(const PromotionPlan& pl) {
   subs += "->";
   subs += kAxisLabels;
   return subs;
+}
+
+// --- h^eff's core dressing ----------------------------------------------------
+
+// One term of the core dressing's response on a one-electron (h^eff) block:
+// `coeff * einsum(subscripts, source, kappa[:, core])`, the source labelled
+// with `z` for its general index and `m` for the core one the term
+// contracts, kappa's core columns labelled (z, m), out the block's own `ij`.
+struct HeffDressingTerm {
+  GeneralPickPlan pick;
+  std::string subscripts;
+  double coeff = 0.0;
+};
+
+// The core dressing h^eff_pq = h_pq + sum_j [ 2 (pq|jj) - (pj|jq) ] has its
+// two core labels TIED, so its derivative promotes each in turn:
+//
+//   4 sum_{x, j in core} kappa_xj (pq|xj)
+//     - sum_{x, j in core} kappa_xj [ (px|jq) + (pj|xq) ]
+//
+// -- three terms, in this order: the Coulomb, whose two promotions collapse
+// into one because (pq|xj) is symmetric in (x, j), and then the EXCHANGE
+// PAIR, whose two promotions do NOT collapse: (px|jq) and (pj|xq) are
+// different integrals. Writing the exchange as twice either one is the
+// natural simplification and it is WRONG (#38): it leaves a term that
+// survives even a core-internal rotation, where the true dressing response is
+// zero. Neither the duality nor the sidecar's restriction identities can see
+// that mistake; only a core-internal finite difference did (docs/testing.md,
+// "The full orbital source term"), and test/gradient_plan's
+// HeffDressingTests pins it card-free. :general's accumGeneralOneElectron
+// runs exactly these terms; `p` and `q` are the block's two spaces.
+std::array<HeffDressingTerm, 3> heffDressingPlan(
+    RotSpace p, RotSpace q, std::source_location loc = std::source_location::current()) {
+  const auto pickOf = [&](RotSpace a, RotSpace b, RotSpace c) {
+    const std::optional<GeneralPickPlan> pl = generalPickPlan(a, b, c);
+    if (!pl)
+      check(false,
+            "heffDressingPlan: the gradient sidecar carries no such one-general-index array "
+            "(docs/gradient-theory.md, Sec. 3.3)",
+            loc);
+    return *pl;
+  };
+  const char i = kAxisLabels[0], j = kAxisLabels[1];
+  // (pq|xj) = (x j | p q): P = core, the second distribution (S_p, S_q).
+  const GeneralPickPlan cou = pickOf(RotSpace::Core, p, q);
+  std::string couSubs = "zm";
+  couSubs += cou.swap ? j : i;
+  couSubs += cou.swap ? i : j;
+  couSubs += ",zm->ij";
+  // (px|jq) = (x p | j q): P = space(p), and (C, S_q) is stored in that order
+  // for every S_q, so this source is never swapped -- its axes are
+  // (x, p, j, q).
+  const GeneralPickPlan exc1 = pickOf(p, RotSpace::Core, q);
+  check(!exc1.swap, "heffDressingPlan: the first exchange source is not swapped", loc);
+  // (pj|xq) = (x q | p j): P = space(q), and the second distribution is
+  // (S_p, C), which IS swapped whenever p is not core.
+  const GeneralPickPlan exc2 = pickOf(q, p, RotSpace::Core);
+  std::string excSubs = "zj";
+  excSubs += exc2.swap ? 'm' : i;
+  excSubs += exc2.swap ? i : 'm';
+  excSubs += ",zm->ij";
+  return {HeffDressingTerm{cou, std::move(couSubs), 4.0},
+          HeffDressingTerm{exc1, "zimj,zm->ij", -1.0},
+          HeffDressingTerm{exc2, std::move(excSubs), -1.0}};
 }
 
 // --- term classification -----------------------------------------------------

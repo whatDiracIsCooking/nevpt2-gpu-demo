@@ -22,7 +22,8 @@ add_cxx_module_library(
 # nevpt2.gradient_plan -- the device assembly's pure host arithmetic, pulled
 # out of nevpt2.gradient's internal partitions (which no test can import) the
 # way nevpt2.rdm_plan was pulled out of the RDM build: the promotion table
-# (rotBlockInfo, activeAxesOf, spanOf, generalPickPlan, promotionPlan), the
+# (rotBlockInfo, activeAxesOf, spanOf, generalPickPlan, promotionPlan,
+# heffDressingPlan), the
 # eight classes' Delta vectors and the two symmetrized classes' slab
 # multipliers, termHasActive, and the CI source term's host folding. No GPU,
 # so the unit tier tests it card-free (test/gradient_plan/); nevpt2.gradient

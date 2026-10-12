@@ -25,6 +25,13 @@
 //   PromotionPlanTests        every two-electron block's four slots: the array
 //                             and swap, the einsum strings for Sr / Sijrs /
 //                             Sijr, and that no slot ever asks for (v, v)
+//   HeffDressingTests         heffDressingPlan, h^eff's core-dressing terms: the
+//                             hand table per one-electron block, and the
+//                             exchange pair that must NOT collapse (#38/#64) --
+//                             evaluated on the host over the committed CAS(4,4)
+//                             gradient sidecar, a core-internal rotation gets
+//                             nothing from the dressing while each exchange
+//                             member alone is far from zero
 //   TermClassificationTests   termHasActive
 //   DeltaTests                each class's Delta vector, in its tuple order,
 //                             and its linearity and homogeneity in the orbital
@@ -72,6 +79,9 @@ import nevpt2.test.shared_resources;
 #endif
 #ifndef NEVPT2_TEST_GOLDEN_CAS88
 #error "NEVPT2_TEST_GOLDEN_CAS88 must be defined by test/gradient_plan/CMakeLists.txt"
+#endif
+#ifndef NEVPT2_TEST_GRADGOLD_CAS44
+#error "NEVPT2_TEST_GRADGOLD_CAS44 must be defined by test/gradient_plan/CMakeLists.txt"
 #endif
 
 // Not a module unit (gtest is a textual header), so no partition: the
@@ -1275,6 +1285,231 @@ TEST(CiSourceVectorTests, MatchesTheUnfoldedHostDerivative) {
   }
   ASSERT_EQ(y.dims(), want.dims());
   EXPECT_LE(maxAbsDiff(y, want) / std::max(1.0, maxAbs(want)), kDeviceTol);
+}
+
+// ---------------------------------------------------------------------------
+// HeffDressingTests -- h^eff's core dressing, and the exchange pair that must
+// NOT collapse (#38, pinned by #64).
+//
+// The dressing's derivative has an exchange PAIR, sum_{x, j in core} kappa_xj
+// [ (px|jq) + (pj|xq) ], and the two are different integrals. Writing it as
+// twice either one is the natural simplification, and #38 made it: the
+// core-internal finite difference's quotient then sat 6.7e-04 away from the
+// analytic derivative and flatlined instead of falling as h^2 (docs/testing.md,
+// "The full orbital source term"). Neither the duality (both of its modes read
+// the same tangent) nor the sidecar's restriction identities (a
+// derivative-only term has no stored block to be a restriction of) could see
+// it, so these suites are what stands between a future reader and that
+// simplification. They run heffDressingPlan -- the very terms
+// accumGeneralOneElectron launches -- on the host, over the committed CAS(4,4)
+// gradient sidecar: a core-internal rotation must get NOTHING from the
+// dressing, and each exchange term alone must get decades more than round-off,
+// so that twice either one is caught. Card-free.
+// ---------------------------------------------------------------------------
+
+constexpr std::string_view kGradGoldCas44 = NEVPT2_TEST_GRADGOLD_CAS44;
+
+// The one-electron blocks and their (p, q) spaces.
+struct OneElectronBlock {
+  RotBlock b;
+  S p, q;
+};
+constexpr std::array<OneElectronBlock, 4> kOneElectronBlocks{{
+    {RotBlock::H1eSr, S::Virt, S::Act},
+    {RotBlock::H1eSi, S::Act, S::Core},
+    {RotBlock::H1eSir, S::Virt, S::Core},
+    {RotBlock::H1e, S::Act, S::Act},
+}};
+
+TEST(HeffDressingTests, OneElectronBlockSpacesMatchTheTable) {
+  for (const auto& [b, p, q] : kOneElectronBlocks) {
+    const RotBlockInfo info = rotBlockInfo(b);
+    ASSERT_EQ(info.rank, 2) << rotBlockName(b);
+    EXPECT_EQ(info.roles[0].space, p) << rotBlockName(b);
+    EXPECT_EQ(info.roles[1].space, q) << rotBlockName(b);
+  }
+}
+
+// The three terms per block, written out by hand from the dressing rule
+// (Coulomb (x j | p q), exchange (x p | j q) and (x q | p j)) under the
+// inventory's five stored orderings -- and the two exchange terms are
+// DIFFERENT terms on every block: a different array, or the same array read
+// with p and q on different axes.
+TEST(HeffDressingTests, TheExchangePairIsTwoDifferentTerms) {
+  struct Want {
+    RotBlock b;
+    G cou, exc1, exc2;
+    const char *couSubs, *exc2Subs;
+  };
+  const std::array<Want, 4> want{{
+      {RotBlock::H1eSr, G::XcVa, G::XvCa, G::XaCv, "zmij,zm->ij", "zjmi,zm->ij"},
+      {RotBlock::H1eSi, G::XcCa, G::XaCc, G::XcCa, "zmji,zm->ij", "zjmi,zm->ij"},
+      {RotBlock::H1eSir, G::XcCv, G::XvCc, G::XcCv, "zmji,zm->ij", "zjmi,zm->ij"},
+      {RotBlock::H1e, G::XcAa, G::XaCa, G::XaCa, "zmij,zm->ij", "zjmi,zm->ij"},
+  }};
+  for (std::size_t k = 0; k < want.size(); ++k) {
+    const auto& [b, p, q] = kOneElectronBlocks[k];
+    const Want& w = want[k];
+    ASSERT_EQ(w.b, b);
+    const std::array<HeffDressingTerm, 3> t = heffDressingPlan(p, q);
+    SCOPED_TRACE(rotBlockName(b));
+    EXPECT_EQ(t[0].pick.array, w.cou);
+    EXPECT_EQ(t[0].subscripts, w.couSubs);
+    EXPECT_EQ(t[0].coeff, 4.0);
+    EXPECT_EQ(t[1].pick.array, w.exc1);
+    EXPECT_FALSE(t[1].pick.swap);
+    EXPECT_EQ(t[1].subscripts, "zimj,zm->ij");
+    EXPECT_EQ(t[1].coeff, -1.0);
+    EXPECT_EQ(t[2].pick.array, w.exc2);
+    EXPECT_EQ(t[2].subscripts, w.exc2Subs);
+    EXPECT_EQ(t[2].coeff, -1.0);
+    // The property itself, independent of the hand table above.
+    EXPECT_TRUE(t[1].pick.array != t[2].pick.array || t[1].subscripts != t[2].subscripts)
+        << "the exchange pair has been collapsed into one term (#38)";
+  }
+}
+
+// A two-operand einsum on the host, `A,B->ij` with single-letter labels: the
+// reference the plan's subscripts are evaluated with. Small and slow on
+// purpose -- an odometer over every label.
+Tensor hostEinsum2(std::string_view subs, const Tensor& a, const Tensor& b) {
+  const std::size_t comma = subs.find(','), arrow = subs.find("->");
+  const std::string_view la = subs.substr(0, comma);
+  const std::string_view lb = subs.substr(comma + 1, arrow - comma - 1);
+  const std::string_view lo = subs.substr(arrow + 2);
+  EXPECT_EQ(std::ssize(la), a.rank()) << subs;
+  EXPECT_EQ(std::ssize(lb), b.rank()) << subs;
+  std::string labels;
+  std::vector<int64_t> extent;
+  const auto note = [&](std::string_view l, const Tensor& t) {
+    for (std::size_t k = 0; k < l.size(); ++k) {
+      const std::size_t at = labels.find(l[k]);
+      if (at == std::string::npos) {
+        labels += l[k];
+        extent.push_back(t.dim(static_cast<int64_t>(k)));
+      } else {
+        EXPECT_EQ(extent[at], t.dim(static_cast<int64_t>(k))) << subs << " label " << l[k];
+      }
+    }
+  };
+  note(la, a);
+  note(lb, b);
+  const auto offsetOf = [&](std::string_view l, const Tensor& t,
+                            const std::vector<int64_t>& idx) {
+    int64_t off = 0;
+    for (std::size_t k = 0; k < l.size(); ++k)
+      off += idx[labels.find(l[k])] * t.stride(static_cast<int64_t>(k));
+    return off;
+  };
+  std::vector<int64_t> outDims;
+  for (char c : lo) outDims.push_back(extent[labels.find(c)]);
+  Tensor out(outDims);
+  std::vector<int64_t> idx(labels.size(), 0);
+  for (;;) {
+    out.flatRef(offsetOf(lo, out, idx)) +=
+        a.flat(offsetOf(la, a, idx)) * b.flat(offsetOf(lb, b, idx));
+    std::size_t k = 0;
+    for (; k < idx.size(); ++k) {
+      if (++idx[k] < extent[k]) break;
+      idx[k] = 0;
+    }
+    if (k == idx.size()) break;
+  }
+  return out;
+}
+
+TEST(HeffDressingTests, HostEinsumOnAHandCase) {
+  // (2x2x1x1) "zimj" against (2x1) "zm": out[i,j] = sum_z a[z,i,0,j] b[z,0].
+  const Tensor a = Tensor::fromFlat({2, 2, 1, 1}, {1.0, 2.0, 3.0, 4.0});
+  const Tensor b = Tensor::fromFlat({2, 1}, {0.5, 0.25});
+  const Tensor out = hostEinsum2("zimj,zm->ij", a, b);
+  ASSERT_EQ(out.dims(), (std::vector<int64_t>{2, 1}));
+  EXPECT_EQ(out(0, 0), 1.0 * 0.5 + 3.0 * 0.25);
+  EXPECT_EQ(out(1, 0), 2.0 * 0.5 + 4.0 * 0.25);
+}
+
+const GradGoldFile* loadGradGoldCas44() {
+  static const std::optional<GradGoldFile> gg = []() -> std::optional<GradGoldFile> {
+    Result<GradGoldFile> r = loadGradGold(std::string(kGradGoldCas44));
+    if (!r.has_value()) {
+      ADD_FAILURE() << "loadGradGold(" << kGradGoldCas44 << "): " << r.error().message;
+      return std::nullopt;
+    }
+    return *std::move(r);
+  }();
+  return gg ? &*gg : nullptr;
+}
+
+// kappa[:, core] for a kappa that rotates ONLY inside the core: rows outside
+// the core are zero, and the core block is antisymmetric with distinct,
+// irrational-looking entries (no symmetry of the molecule can zero it).
+Tensor coreInternalKappaColumns(int64_t nmo, int64_t ncore) {
+  Tensor k({nmo, ncore});
+  for (int64_t a = 0; a < ncore; ++a)
+    for (int64_t b = a + 1; b < ncore; ++b) {
+      const double v =
+          std::sin(1.0 + 0.7 * static_cast<double>(a) + 1.3 * static_cast<double>(b));
+      k(a, b) = v;
+      k(b, a) = -v;
+    }
+  return k;
+}
+
+// The zero is round-off on sums of a few dozen O(1) products; the exchange
+// terms alone are decades above both bounds on every block that is not a
+// symmetry zero (docs/testing.md, "The full orbital source term", has what
+// was measured).
+constexpr double kDressingZeroTol = 1e-13;
+constexpr double kExchangeFloor = 1e-6;
+
+// The property, per block: under a core-internal rotation the true dressing
+// response is ZERO -- the Coulomb term vanishes on its own ((pq|xj) is
+// symmetric in x and j) and the exchange pair cancels between its two
+// members -- while either exchange member alone is far from zero, and the
+// two members are therefore DIFFERENT matrices ((px|jq) != (pj|xq)). A plan
+// that writes the pair as twice either one fails the first assertion by
+// 2 |exchange|.
+TEST(HeffDressingTests, ACoreInternalRotationGetsNothingFromTheDressing) {
+  const GradGoldFile* gg = loadGradGoldCas44();
+  ASSERT_NE(gg, nullptr);
+  ASSERT_GE(gg->ncore, 2) << "a core-internal rotation needs two core orbitals";
+  const Tensor kCore = coreInternalKappaColumns(gg->nmo, gg->ncore);
+  for (const auto& [b, p, q] : kOneElectronBlocks) {
+    SCOPED_TRACE(rotBlockName(b));
+    const std::array<HeffDressingTerm, 3> plan = heffDressingPlan(p, q);
+    std::array<Tensor, 3> term;
+    for (std::size_t k = 0; k < 3; ++k) {
+      const char* name = generalArrayName(plan[k].pick.array);
+      ASSERT_TRUE(gg->require({name}).has_value()) << name;
+      term[k] = hostEinsum2(plan[k].subscripts, gg->get(name), kCore);
+      for (int64_t e = 0; e < term[k].size(); ++e) term[k].flatRef(e) *= plan[k].coeff;
+    }
+    Tensor total = term[0];
+    for (int64_t e = 0; e < total.size(); ++e)
+      total.flatRef(e) += term[1].flat(e) + term[2].flat(e);
+    const double exchange1 = maxAbs(term[1]);
+    const double exchange2 = maxAbs(term[2]);
+    EXPECT_LE(maxAbs(term[0]), kDressingZeroTol) << "the Coulomb term survives";
+    EXPECT_LE(maxAbs(total), kDressingZeroTol)
+        << "the core dressing's response to a core-internal rotation is not zero -- has "
+           "the exchange pair been collapsed into twice one of its members? (#38)";
+    // h1e_v_Si is (a, c): its exchange integrals are (core act | core core),
+    // and at this case every core orbital is a sigma and every active one a
+    // pi, so they vanish by D2h symmetry -- exactly, for any kappa. That block
+    // cannot tell a collapsed pair from a correct one HERE, so it is held to
+    // its symmetry zero (which says the case is what this comment claims) and
+    // the other three blocks carry the non-collapse.
+    if (b == RotBlock::H1eSi) {
+      EXPECT_LE(std::max(exchange1, exchange2), kDressingZeroTol)
+          << "h1e_v_Si's exchange is no longer a symmetry zero at CAS(4,4): hold it to "
+             "the non-collapse assertions below instead";
+      continue;
+    }
+    EXPECT_GT(exchange1, kExchangeFloor) << "the first exchange term is not exercised";
+    EXPECT_GT(exchange2, kExchangeFloor) << "the second exchange term is not exercised";
+    EXPECT_GT(maxAbsDiff(term[1], term[2]), kExchangeFloor)
+        << "(px|jq) and (pj|xq) read as the same matrix";
+  }
 }
 
 // ---------------------------------------------------------------------------
