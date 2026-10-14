@@ -15,11 +15,20 @@
 //   y_I   over every determinant -- scCiSourceDevice, the reverse sweep whose
 //         duality against the forward tangent is nevpt2_demo
 //         --gradient-source's check (docs/testing.md, "The CI source term's
-//         forward-reverse duality").
+//         forward-reverse duality");
+//   Edot  along seeded directions (#88) -- :kappa_full_check's
+//         edotDirections, --kappa-full's four full ones plus one purely
+//         active-virtual and one purely core-active -- in its two terms: the
+//         frozen-digest tangent (scFullRotationDevice) and the f3ac/f3ca
+//         digests' own (scDigestRotationTangentDevice). That is what
+//         reference_data/nevpt2_grad.py --edot-check holds against PySCF's
+//         exact directional derivative, the independent provider for the
+//         term no pair of modes here can check.
 //
 // AND WHAT THEY ARE NOT. Both are derivatives of the functional this tree
 // differentiates, which holds one thing fixed that the exact energy does not
-// (docs/gradients.md, sections 1 and 6): Y holds the f3ac/f3ca digests fixed.
+// (docs/gradients.md, sections 1 and 6): Y holds the f3ac/f3ca digests fixed
+// (the Edot directions carry that term beside it, forward mode only, #88).
 // y is the complete functional's: the orbital energies e_core/e_virt move
 // with the active density, read from the same sidecar Y is (#87). What the
 // remaining omission costs a nuclear gradient is measured, against PySCF's
@@ -39,7 +48,11 @@
 //      sidecar's orbital-energy response W, which y now reads, rebuilding
 //      the golden's e_core / e_virt as h^eff_pp + <dm1, W_p>;
 //   3  the file read back (readGradSrc) and compared with what was written,
-//      exactly: the doubles are stored raw, so any difference is a bug.
+//      exactly: the doubles are stored raw, so any difference is a bug;
+//   4  each direction's frozen-digest tangent against sum_pq kappa_pq Y_pq off
+//      the matrix being written -- the duality again, across the file's own
+//      members, so the edot_frozen the reader adds the digests' term to is
+//      the derivative the dumped Y pairs to.
 //
 // Everything runs on the caller's one DeviceResources and its one stream.
 module;
@@ -73,6 +86,9 @@ constexpr double kDumpWalkTol = 1e-7;
 constexpr double kDumpEpsTol = 1e-10;
 // Check 1's direction, distinct from every seed --kappa-full and --kappa-act use.
 constexpr std::uint64_t kDumpSeed = 0x5eed'0073u;
+// Check 4's: the duality's own 1e-7 (exact arithmetic), across the probed
+// matrix and the direct tangent -- reassociation over n_mo^2 terms on top.
+constexpr double kDumpEdotTol = 1e-7;
 
 // Every element of `a` and `b` identical, bit for bit, and the shapes equal.
 bool sameTensor(const nevpt2::Tensor& a, const nevpt2::Tensor& b) {
@@ -185,7 +201,8 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
                                      const nevpt2::DeviceTensor& dm2,
                                      const nevpt2::DeviceTensor& dm3,
                                      const nevpt2::DeviceTensor& f3ac,
-                                     const nevpt2::DeviceTensor& f3ca, std::int64_t sigmaTiles,
+                                     const nevpt2::DeviceTensor& f3ca,
+                                     const nevpt2::RdmBuildOptions& rdmOpt,
                                      const std::string& path,
                                      const nevpt2::DeviceResources& res) {
   NEVPT2_TRY(gg.checkAgainst(g));
@@ -197,8 +214,8 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
               static_cast<long long>(nmo), static_cast<long long>(gg.ncore),
               static_cast<long long>(gg.nact), static_cast<long long>(gg.nvirt));
   const nevpt2::GeneralIntegralsDevice gen = uploadGeneral(gg, res);
-  const GpuSourceTerms terms = NEVPT2_TRY(
-      assembleSourceTerms(g, gg, energies, ints, gen, dm1, dm2, dm3, f3ac, f3ca, sigmaTiles, res));
+  const GpuSourceTerms terms = NEVPT2_TRY(assembleSourceTerms(
+      g, gg, energies, ints, gen, dm1, dm2, dm3, f3ac, f3ca, rdmOpt.nTiles, res));
   const nevpt2::Tensor& y = terms.kappa;
 
   // 1. the matrix against the direct pairing on one seeded full direction.
@@ -223,6 +240,33 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
   const bool walkOk = terms.walkOk;
   const bool epsOk = terms.epsOk;
 
+  // --- Edot along the seeded directions, in its two terms (#88) -------------
+  const std::vector<nevpt2::Tensor> kappas = edotDirections(gg.ncore, gg.nact, gg.nvirt);
+  std::vector<nevpt2::ScRotationRequest> edotReq;
+  for (const nevpt2::Tensor& kd : kappas)
+    edotReq.push_back(nevpt2::ScRotationRequest{kd, /*tangent=*/true});
+  const nevpt2::ScFullRotationResult frozen =
+      NEVPT2_TRY(nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, edotReq, res));
+  const std::vector<nevpt2::ScDigestTangent> digest =
+      NEVPT2_TRY(nevpt2::scDigestRotationTangentDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB,
+                                                       ints, gen, dm1, dm2, dm3, f3ac, f3ca,
+                                                       edotReq, res));
+  nevpt2::printScDigestTangentTable(frozen, digest);
+  // 4. the frozen-digest tangent against the matrix being written.
+  bool edotOk = true;
+  double edotGapMax = 0.0;
+  for (std::size_t d = 0; d < kappas.size(); ++d) {
+    double fromY = 0.0;
+    for (std::int64_t p = 0; p < nmo; ++p)
+      for (std::int64_t q = 0; q < nmo; ++q) fromY += kappas[d](p, q) * y(p, q);
+    const double gap = std::fabs(fromY - frozen.dirs[d].tangent);
+    edotGapMax = std::max(edotGapMax, gap);
+    edotOk = edotOk && gap <= kDumpEdotTol;
+  }
+  std::printf("  4. the %zu directions' frozen-digest Edot vs sum kappa.Y off the matrix: max "
+              "|delta| = %.2e (<= %.0e: %s)\n",
+              kappas.size(), edotGapMax, kDumpEdotTol, edotOk ? "ok" : "FAILED");
+
   // --- the file, and the file read back ----------------------------------------
   nevpt2::GradSrc out;
   out.kappaSource = y;
@@ -232,6 +276,17 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
   out.nact = gg.nact;
   out.nvirt = gg.nvirt;
   out.eCorr = energies.total;
+  const std::int64_t ndir = std::ssize(kappas);
+  out.edotKappa = nevpt2::Tensor({ndir, nmo, nmo});
+  out.edotFrozen = nevpt2::Tensor({ndir});
+  out.edotDigest = nevpt2::Tensor({ndir});
+  for (std::int64_t d = 0; d < ndir; ++d) {
+    const std::size_t du = static_cast<std::size_t>(d);
+    for (std::int64_t i = 0; i < nmo * nmo; ++i)
+      out.edotKappa.flatRef(d * nmo * nmo + i) = kappas[du].flat(i);
+    out.edotFrozen(d) = frozen.dirs[du].tangent;
+    out.edotDigest(d) = digest[du].total;
+  }
   NEVPT2_TRY(nevpt2::writeGradSrc(path, out));
   const nevpt2::GradSrc back = NEVPT2_TRY(nevpt2::readGradSrc(path));
   // 3. the round trip, bit for bit.
@@ -240,13 +295,17 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
                          sameTensor(back.ci, out.ci) && back.ncore == out.ncore &&
                          back.nact == out.nact && back.nvirt == out.nvirt &&
                          std::bit_cast<std::uint64_t>(back.eCorr) ==
-                             std::bit_cast<std::uint64_t>(out.eCorr);
+                             std::bit_cast<std::uint64_t>(out.eCorr) &&
+                         sameTensor(back.edotKappa, out.edotKappa) &&
+                         sameTensor(back.edotFrozen, out.edotFrozen) &&
+                         sameTensor(back.edotDigest, out.edotDigest);
   std::printf("  3. %s read back: %s\n", path.c_str(),
               roundTrip ? "every member identical, bit for bit" : "DIFFERS from what was written");
 
-  const bool ok = matrixOk && walkOk && epsOk && roundTrip;
+  const bool ok = matrixOk && walkOk && epsOk && roundTrip && edotOk;
   std::printf("\n%s: the GPU's source terms Y_xy and y_I were assembled, written to %s and "
-              "read back unchanged\n",
-              ok ? "PASS" : "FAIL", path.c_str());
+              "read back unchanged, with Edot(kappa) along %zu seeded directions in its "
+              "frozen-digest and digest terms\n",
+              ok ? "PASS" : "FAIL", path.c_str(), kappas.size());
   return ok;
 }

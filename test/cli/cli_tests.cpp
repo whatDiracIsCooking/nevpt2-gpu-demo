@@ -857,9 +857,52 @@ TEST(CliScPseudodensityFlagTests, OtherBinariesRefuseSourceOracle) {
 }
 
 TEST(CliScPseudodensityFlagTests, TakesAnyDigestTheDemosTake) {
-  // It builds no tangent RDMs, so the approximate digests are its to run.
-  const Result<Options> r = parse(Binary::ScPseudodensity, {"--kappa-full", "--ozaki"});
-  EXPECT_TRUE(r.has_value()) << r.error().message;
+  // The identities, --kappa-act and --source-oracle build no tangent RDMs, so
+  // the approximate digests are theirs to run.
+  for (const std::vector<std::string_view>& mode :
+       {std::vector<std::string_view>{}, std::vector<std::string_view>{"--kappa-act"},
+        std::vector<std::string_view>{"--source-oracle", "x.srcgold"}}) {
+    for (const std::string_view digest : {"--ozaki", "--cublas", "--fused-digest"}) {
+      // --cublas is refused outright on a build without the emulated digest (HIP).
+      if (digest == "--cublas" && !kHaveCublasEmul) continue;
+      std::vector<std::string_view> args = mode;
+      args.push_back(digest);
+      // --fused-digest needs a GEMM digest to fuse.
+      if (digest == "--fused-digest") args.push_back("--blas-digest");
+      const Result<Options> r = parse(Binary::ScPseudodensity, args);
+      EXPECT_TRUE(r.has_value()) << digest << ": " << r.error().message;
+    }
+  }
+}
+
+TEST(CliScPseudodensityFlagTests, DigestTangentModesRefuseAnApproximateDigest) {
+  // --kappa-full and --dump-source-terms build the digests' tangent along a
+  // rotation (#88), which is formed from an exact digest only.
+  for (const std::vector<std::string_view>& mode :
+       {std::vector<std::string_view>{"--kappa-full"},
+        std::vector<std::string_view>{"--dump-source-terms", "x.gradsrc"}}) {
+    for (const std::string_view digest : {"--ozaki", "--cublas", "--fused-digest"}) {
+      // --cublas is refused outright on a build without the emulated digest (HIP).
+      if (digest == "--cublas" && !kHaveCublasEmul) continue;
+      std::vector<std::string_view> args = mode;
+      args.push_back(digest);
+      if (digest == "--fused-digest") args.push_back("--blas-digest");
+      const Result<Options> r = parse(Binary::ScPseudodensity, args);
+      ASSERT_FALSE(r.has_value()) << mode[0] << " " << digest;
+      EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+      EXPECT_EQ(r.error().message,
+                std::format("{} builds the f3ac/f3ca digests' tangent, which is the emitted "
+                            "digest or --blas-digest; not --cublas, --ozaki or --fused-digest",
+                            mode[0]));
+    }
+    // And the exact ones are accepted.
+    for (const std::string_view digest : {"--blas-digest", "--digest-emitted"}) {
+      std::vector<std::string_view> args = mode;
+      args.push_back(digest);
+      const Result<Options> r = parse(Binary::ScPseudodensity, args);
+      EXPECT_TRUE(r.has_value()) << mode[0] << " " << digest << ": " << r.error().message;
+    }
+  }
 }
 
 // --- CliPcTangentFlagTests ----------------------------------------------------

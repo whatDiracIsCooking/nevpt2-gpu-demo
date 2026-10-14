@@ -28,14 +28,16 @@
 // and mixed as well -- reading the gradient sidecar beside the golden
 // (`<case>.gradgold`, or --gradgold PATH) for the one-general-index integral
 // blocks and the full-MO-range Fock matrices a rotation that leaves the
-// active space needs. Five checks, two finite differences and Park Eqs. 56-57
-// come out of it; the partition :kappa_full_check is where that lives, and it
-// prints its own PASS line too.
+// active space needs. Six checks, three finite differences and Park Eqs.
+// 56-57 come out of it, with the f3ac/f3ca digests' own term printed beside
+// the duality (#88); the partition :kappa_full_check is where that lives, and
+// it prints its own PASS line too.
 //
 // WITH --dump-source-terms PATH IT WRITES THEM INSTEAD: the whole Y_xy (out of
-// the same sidecar) and the CI source term y_I, as a `.gradsrc` that
+// the same sidecar), the CI source term y_I and Edot(kappa) along seeded
+// directions in its two terms, as a `.gradsrc` that
 // reference_data/nevpt2_grad.py --source dump builds a nuclear gradient from
-// (#73). The partition :source_dump is where that lives; its PASS line says
+// (#73) and --edot-check holds against PySCF's exact Edot (#88). The partition :source_dump is where that lives; its PASS line says
 // the file was written and read back unchanged. The writer is nevpt2.gradsrc,
 // beside this file: the library computes, the binary decides to write.
 //
@@ -197,7 +199,7 @@ int main(int argc, char** argv) {
     const nevpt2::GradGoldFile gg = *std::move(sidecar);
     const nevpt2::Result<bool> ok =
         dumpSourceTerms(g, gg, energies, dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca,
-                        opt.rdm.nTiles, dumpPath, *res);
+                        opt.rdm, dumpPath, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;
@@ -239,7 +241,7 @@ int main(int argc, char** argv) {
     }
     const nevpt2::GradGoldFile gg = *std::move(sidecar);
     const nevpt2::Result<bool> ok = checkKappaFull(g, gg, energies, dInts, dDm1, dDm2, rdm.dm3,
-                                                   rdm.f3ac, rdm.f3ca, *res);
+                                                   rdm.f3ac, rdm.f3ca, opt.rdm, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

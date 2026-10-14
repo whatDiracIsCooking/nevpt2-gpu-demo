@@ -207,6 +207,17 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
         return err_config(
             "--gradgold is the sidecar --kappa-full, --dump-source-terms and --source-oracle "
             "read; it does nothing on its own");
+      // --kappa-full and --dump-source-terms build the f3ac/f3ca digests'
+      // tangent along a rotation (#88) -- the RDM build rerun at the dotted
+      // integrals -- and a tangent is only ever formed from an exact digest,
+      // the rule finalize() applies to --rdm-tangent. The identities,
+      // --kappa-act and --source-oracle build no tangent and take any digest.
+      if ((opt.kappaFull || !opt.dumpSourceTermsPath.empty()) &&
+          (c.rdm.cublas || c.rdm.ozaki || c.rdm.fusedDigest))
+        return err_config(std::format(
+            "{} builds the f3ac/f3ca digests' tangent, which is the emitted digest or "
+            "--blas-digest; not --cublas, --ozaki or --fused-digest",
+            opt.kappaFull ? "--kappa-full" : "--dump-source-terms"));
       return {};
     case Binary::PcTangent:
       if (opt.fdSteps < kMinFdSteps || opt.fdSteps > kMaxFdSteps)

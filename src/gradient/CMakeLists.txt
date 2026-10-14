@@ -68,7 +68,10 @@ add_cxx_module_library(
 # nevpt2::sigma_vector is PUBLIC: scCiSourceDevice takes its
 # SigmaVectorOptions, and the CI source term IS its three sigma entry points
 # fed the RDM coefficient tensors. It brings in the sigma kernels' own device
-# library, which is the only device code reaching this component.
+# library. nevpt2::rdm_build is PUBLIC too (#88): the digests' tangent along a
+# rotation is buildRdmsDevice run at the dotted active integrals, so
+# scDigestRotationTangentDevice takes its RdmBuildOptions and calls it. That
+# brings the RDM kernels' device libraries in as well; no kernel is new.
 add_cxx_module_library(
   NAME nevpt2.gradient
   PRIMARY_INTERFACE gradient.cppm
@@ -76,14 +79,14 @@ add_cxx_module_library(
              gradient_sc_classes.cppm gradient_rdm_adjoint.cppm gradient_ci_source.cppm
   IMPLEMENTATION gradient.cpp
   LINK_PUBLIC nevpt2::energy nevpt2::sc_amplitudes nevpt2::gradient_plan
-              nevpt2::sigma_vector
+              nevpt2::sigma_vector nevpt2::rdm_build
 )
 
 # nevpt2.pc_tangent -- the finite-difference check of PC-NEVPT2's CI-vector
 # tangent: it drives nevpt2.energy's pcTangentsDevice at one state and its
-# pcEnergiesDevice at the displaced states c +- h u. The only module in src/
-# that links the RDM build AND the energy stage, because that is what a
-# displaced state costs: nevpt2::rdm_host_dm rebuilds its dm1/dm2 on the host
+# pcEnergiesDevice at the displaced states c +- h u. It links the RDM build
+# AND the energy stage (as nevpt2.gradient now does, for the digests' orbital
+# response), because that is what a displaced state costs: nevpt2::rdm_host_dm rebuilds its dm1/dm2 on the host
 # (the golden file's arrays are only the state's own) and nevpt2::rdm_build
 # its dm3/f3ac/f3ca on the device. nevpt2::gradient_plan (host-only) is for
 # longestFourfoldRun, the step-ladder rule its report gates on.

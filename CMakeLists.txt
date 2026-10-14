@@ -357,9 +357,13 @@ if(NEVPT2_BUILD_TESTING)
   # docs/testing.md records, "The kernels' same-run self-variation"), two
   # finite differences -- a core-internal and a virtual-internal rotation,
   # which are the only ones the stored blocks can displace -- and Park
-  # Eqs. 56-57's pseudocanonical multipliers coming out determined. Its PASS
-  # line is its own, so no entry can pass on another's output
-  # (docs/testing.md, "The full orbital source term").
+  # Eqs. 56-57's pseudocanonical multipliers coming out determined -- and, for
+  # the f3ac/f3ca digests' own term (#88), printed beside the duality: an
+  # exact zero along the two intra-space rotations and a third finite
+  # difference, the energy with only the digests rebuilt along an active
+  # direction. Its PASS line is its own, so no entry can pass on another's
+  # output (docs/testing.md, "The full orbital source term" and "The digests'
+  # orbital response, forward mode").
   #
   # LiF is here for the Eqs. 56-57 half: its four core orbital energies are all
   # distinct, the smallest gap 0.85 Eh against the 3.3e-3 Eh 1s pair in N2's
@@ -407,8 +411,12 @@ if(NEVPT2_BUILD_TESTING)
   # directory, then read back. The derivatives themselves are the --kappa-full
   # and --gradient-source entries' to check; this one checks that the probed
   # matrix IS the pairing (one seeded full direction, reassociation noise), that
-  # y's walk ran on this state (its E_corr against energiesDevice, 1e-7) and
-  # that the file reads back bit for bit. Its PASS line is its own.
+  # y's walk ran on this state (its E_corr against energiesDevice, 1e-7), that
+  # each written Edot direction's frozen-digest tangent is <kappa, Y> off the
+  # written matrix (#88, 1e-7) and that the file reads back bit for bit. Its
+  # PASS line is its own. The written Edot -- frozen-digest tangent plus the
+  # digests' term -- against PySCF's exact directional derivative is
+  # nevpt2_grad.py --edot-check, the same manual gate as below.
   #
   # What a NUCLEAR gradient built from the file comes out at is NOT an entry
   # here: that comparison runs reference_data/nevpt2_grad.py --source both, so

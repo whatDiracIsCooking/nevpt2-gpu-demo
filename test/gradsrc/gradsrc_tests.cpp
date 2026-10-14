@@ -10,7 +10,9 @@
 //                          back bit for bit -- the doubles stored raw, the
 //                          shapes, the partition, a -0.0 and a denormal
 //                          included -- and the same contents always give the
-//                          same bytes
+//                          same bytes; the optional forward-Edot direction
+//                          members (#88) round-trip too, and a dump without
+//                          them reads them back empty
 //   GradSrcFormatTests     the bytes, read by an INDEPENDENT parser written
 //                          here: a zip archive of stored members whose CRC-32s
 //                          (recomputed bitwise, not by the writer's table) are
@@ -164,6 +166,40 @@ TEST_F(GradSrcRoundTripTests, EveryMemberComesBackBitForBit) {
   EXPECT_EQ(std::bit_cast<std::uint64_t>(back->eCorr), std::bit_cast<std::uint64_t>(s.eCorr));
 }
 
+// What a dump carrying the forward Edot(kappa) directions (#88) looks like:
+// three directions on sample()'s 28 MOs.
+GradSrc sampleWithDirections() {
+  GradSrc s = sample();
+  s.edotKappa = patterned({3, 28, 28}, 0.125);
+  s.edotFrozen = patterned({3}, -0.03);
+  s.edotDigest = patterned({3}, 0.007);
+  return s;
+}
+
+TEST_F(GradSrcRoundTripTests, TheDirectionMembersComeBackBitForBit) {
+  const GradSrc s = sampleWithDirections();
+  const std::string p = path("d.gradsrc");
+  ASSERT_TRUE(writeGradSrc(p, s).has_value());
+  const nevpt2::Result<GradSrc> back = readGradSrc(p);
+  ASSERT_TRUE(back.has_value()) << back.error().message;
+  ASSERT_TRUE(back->hasDirections());
+  EXPECT_TRUE(sameBits(back->edotKappa, s.edotKappa));
+  EXPECT_TRUE(sameBits(back->edotFrozen, s.edotFrozen));
+  EXPECT_TRUE(sameBits(back->edotDigest, s.edotDigest));
+  EXPECT_TRUE(sameBits(back->kappaSource, s.kappaSource));
+}
+
+TEST_F(GradSrcRoundTripTests, ADumpWithoutDirectionsReadsThemBackEmpty) {
+  // The members are optional as a set: a dump written before #88, or without
+  // them, still reads, with the three left empty.
+  ASSERT_TRUE(writeGradSrc(path("x.gradsrc"), sample()).has_value());
+  const nevpt2::Result<GradSrc> back = readGradSrc(path("x.gradsrc"));
+  ASSERT_TRUE(back.has_value()) << back.error().message;
+  EXPECT_FALSE(back->hasDirections());
+  EXPECT_EQ(back->edotFrozen.size(), 0);
+  EXPECT_EQ(back->edotDigest.size(), 0);
+}
+
 TEST_F(GradSrcRoundTripTests, SameContentsSameBytes) {
   const GradSrc s = sample();
   ASSERT_TRUE(writeGradSrc(path("a.gradsrc"), s).has_value());
@@ -203,6 +239,28 @@ TEST_F(GradSrcFormatTests, IsAStoredZipOfTheSevenNpyMembersWithGoodCrcs) {
   ASSERT_GE(b.size(), 22u);
   EXPECT_EQ(le(b, b.size() - 22, 4), 0x06054b50u);
   EXPECT_EQ(le(b, b.size() - 22 + 10, 2), members.size());
+}
+
+TEST_F(GradSrcFormatTests, TheDirectionMembersFollowTheSevenAsNpyFiles) {
+  ASSERT_TRUE(writeGradSrc(path("d.gradsrc"), sampleWithDirections()).has_value());
+  const std::vector<std::uint8_t> b = readBytes(path("d.gradsrc"));
+  const std::map<std::string, std::string> want{{"edot_kappa.npy", "(3, 28, 28)"},
+                                                {"edot_frozen.npy", "(3,)"},
+                                                {"edot_digest.npy", "(3,)"}};
+  std::vector<std::string> names;
+  for (const Member& m : walkLocalHeaders(b)) {
+    names.push_back(m.name);
+    EXPECT_EQ(crcBitwise(b.data() + m.dataAt, m.size), m.crc) << m.name;
+    if (!want.contains(m.name)) continue;
+    const std::size_t hlen = le(b, m.dataAt + 8, 2);
+    const std::string header(reinterpret_cast<const char*>(b.data()) + m.dataAt + 10, hlen);
+    EXPECT_NE(header.find("'descr': '<f8'"), std::string::npos) << header;
+    EXPECT_NE(header.find("'shape': " + want.at(m.name)), std::string::npos) << header;
+  }
+  EXPECT_EQ(names, (std::vector<std::string>{"kappa_source.npy", "ci_source.npy", "ci.npy",
+                                             "ncore.npy", "nact.npy", "nvirt.npy",
+                                             "e_corr.npy", "edot_kappa.npy", "edot_frozen.npy",
+                                             "edot_digest.npy"}));
 }
 
 TEST_F(GradSrcFormatTests, EachMemberIsAnNpyV1FileNumpyCanRead) {

@@ -289,6 +289,9 @@ sidecar's full-MO-range arrays; `nevpt2_demo` computes `y_I` too, but half a
 dump is refused rather than written. `nevpt2_demo` reads the sidecar for one
 thing, `--gradient-source`'s orbital-energy response. Beyond the matrix, a combination one binary
 cannot run is an *invalid configuration* error (`--sc-tangent` with `--ozaki`,
+`--kappa-full` or `--dump-source-terms` with `--cublas`, `--ozaki` or
+`--fused-digest` — both build the digests' tangent, which an approximate
+digest has no path for,
 `--kappa-act` with `--kappa-full`, `--dump-source-terms` with either,
 `--source-oracle` with any of the three,
 `--gradgold` without `--kappa-full`, `--dump-source-terms` or

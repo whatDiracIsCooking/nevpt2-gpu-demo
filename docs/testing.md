@@ -394,7 +394,10 @@ at all. So the two blocks Park Eqs. 56-57 read are an exact derivative.
 records that the forward route to the digests (they are linear in `h2e`, so
 `buildRdmsDevice` at the dotted `h2e` *is* their tangent) costs one digest
 rebuild per direction while reverse mode still needs a transpose kernel this
-tree does not have.
+tree does not have. #88 built that forward route: the same entries now print
+the digests' term beside the duality and gate a sixth check on it — "The
+digests' orbital response, forward mode" below has its numbers; the table
+here is the five checks the duality half was measured with.
 
 **Five checks, and the gate is their conjunction.** Measured on an RTX 3080
 (CUDA, Release, `--tiles 3`):
@@ -1357,7 +1360,9 @@ orbital-energy term, the other half of this section when #73 wrote it, is
 #87's `dm1` coefficient ([`gradients.md`](gradients.md), §5.5), and the
 attribution row above is what says it closed. The dump and `--source both`
 remain the seam the digest term would be checked through: the `--localise`
-`Y` columns would become the exact ones.
+`Y` columns would become the exact ones. Its **forward** half is already
+checked through the same dump, direction by direction — "The digests'
+orbital response, forward mode" below.
 
 ### What it costs, and what is a ctest entry
 
@@ -1384,6 +1389,181 @@ and the refusals. Everything after the dump — `--source both` — is offline
 Python and stays out of ctest for the three reasons "Why there is no ctest
 entry for it" gives; its componentwise half, with PySCF's side committed, is
 the next section's entry.
+
+## The digests' orbital response, forward mode
+
+#88 adds the term both of `Y`'s modes leave out — the `f3ac`/`f3ca` digests'
+own `h2e` dependence ([`gradients.md`](gradients.md), §6) — in **forward**
+mode: `scDigestRotationTangentDevice` reruns the plain RDM build at the
+direction's dotted `h2e` and feeds the digests it returns through
+`energiesTangentDevice`. It is reported as its own term beside the
+frozen-digest tangent; their sum is the exact `Edot(kappa)` at fixed CI.
+The duality cannot see it (it is the term the two modes share by leaving it
+out), so it has three checks of its own:
+
+- **the independent provider, offline**: `--dump-source-terms` writes six
+  seeded directions into the `.gradsrc` — `--kappa-full`'s four full ones,
+  one purely active–virtual, one purely core–active — with `edot_frozen` and
+  `edot_digest` along each, and `nevpt2_grad.py --edot-check` holds them
+  against PySCF's own SC functional along `C exp(t u)`, `u` the direction at
+  unit norm: **exact** (digests rebuilt at every point) against `frozen +
+  digest`, **frozen** (digests held at the state's — `--localise`'s
+  functional) against `frozen`, and the two differenced against `digest`.
+  Each is a `step_ladder` over `h = 2^-3 … 2^-21`: a run of at least three
+  fourfold halvings, then the Richardson extrapolant within the gradient
+  path's 1e-6 per unit `kappa` ("Residual-independent checks of the gradient
+  path");
+- **on the card**, `--kappa-full`'s check 6: the energy stage rerun with
+  every integral, RDM and orbital energy the state's own and *only* the
+  digests rebuilt from `h2e` rotated on the host by `exp(h kappa)`, along
+  check 3's active direction, differenced and Richardson-read as check 4 is;
+- **an exact zero**: a core- or virtual-internal rotation moves no active
+  integral, so `h2e_dot` — and every digest built from it — is exactly 0.0,
+  and so is the term (`--kappa-full`'s check 4 directions).
+
+Run on the RTX 3080 (CUDA, preset `default`, Release, `--tiles 3`, the
+default emitted digest), Python single-threaded with PySCF 2.14.0; acrolein
+with its sidecar regenerated out of tree (`generate_golden.py --gradgold
+--out` elsewhere, passed with `--gradgold`) as in "The GPU as the
+source-term provider":
+
+```bash
+./build/src/nevpt2_sc_pseudodensity --golden golden/<case>.nevpt2gold --tiles 3 \
+    --dump-source-terms /tmp/<case>.gradsrc       # + --gradgold PATH for acrolein
+uv run python reference_data/nevpt2_grad.py --case <case> \
+    --source dump --source-path /tmp/<case>.gradsrc --edot-check
+```
+
+### The provider gate
+
+**PASS on all four cases, 18 of 18 ladders each**, worst `|Richardson −
+GPU|` per unit `kappa` over the six directions:
+
+| | exact | frozen | digest | `--edot-check` wall |
+|---|---:|---:|---:|---:|
+| N2 CAS(4,4) | 1.2e-10 | 5.2e-10 | 3.8e-10 | 6 s |
+| N2 CAS(8,8) | 2.3e-11 | 2.3e-10 | 1.9e-10 | 285 s |
+| LiF CAS(4,6) | 7.3e-10 | 1.6e-10 | 1.1e-10 | 27 s |
+| acrolein CAS(6,5) | 4.7e-07 ¹ | 3.0e-08 | 1.6e-09 | 85 s |
+
+¹ the core–active direction's window maximum, below; on the other five
+acrolein directions the exact ladder's worst is 2.5e-10.
+
+**The term is not small**: along the four full directions it is
+1.7e-3 to 1.6e-2 in magnitude at N2 CAS(4,4), −4.6e-2 at LiF's direction 0 against a
+frozen-digest tangent of +4.6e-2 — the exact derivative there is 2.2e-4,
+two decades below either piece — and 5.8e-2 to 1.3e-1 in magnitude along
+the active–virtual directions. That is the size of #73's gradient failure seen
+one direction at a time ("The GPU as the source-term provider").
+
+**The leftover is PySCF's truncation, walked down.** LiF's active–virtual
+direction, `|PySCF quotient − GPU|` per rung:
+
+| h | exact | ratio | digest term | ratio |
+|---|---:|---:|---:|---:|
+| 2^-6 | 1.48e-05 | 3.69 | 1.74e-03 | 4.27 |
+| 2^-8 | 9.49e-07 | 3.98 | 1.07e-04 | 4.02 |
+| 2^-10 | 5.94e-08 | 4.00 | 6.66e-06 | 4.00 |
+| 2^-12 | 3.70e-09 | 4.01 | 4.16e-07 | 4.00 |
+| 2^-14 | 2.78e-10 | 3.23 | 2.60e-08 | 4.00 |
+| 2^-16 | 6.2e-11 | — | 1.63e-09 | 4.00 |
+| 2^-18 | 1.4e-10 | — | 6.8e-12 | — |
+
+— ratio 4.00 per halving for seven (exact) and eleven (digest) halvings, onto the GPU's number,
+until PySCF's own evaluation noise (~1e-14 Eh, divided by `2h`) takes over.
+
+**Two cases the plain ladder cannot read, and what reads them:**
+
+- **a direction that breaks the symmetry in every component.** N2 CAS(4,4)'s
+  and LiF's core–active blocks are σ core against π actives, so every
+  rotation there is symmetry-forbidden: `E(t)` is even in `t` to the last
+  bit, every quotient is exactly 0.0, and the GPU's three numbers are 0.0 as
+  well. There is no truncation to ladder; zero is the exact answer, and
+  `--edot-check` holds the GPU to it at the same 1e-6 (the oracle's
+  "zero by symmetry on both sides", "The SC source terms against PySCF's, on
+  a card"). The core–active block is exercised where symmetry allows it:
+  N2 CAS(8,8) (term −3.1e-2, 13 fourfold halvings) and acrolein.
+- **a near-pole of the frozen-digest functional.** Along acrolein's
+  core–active direction the frozen and digest pieces are +0.158 and −0.157
+  and their quotients converge as `h^2` only from `2^-14` down (ratio
+  6.46, 4.29, 4.06, 4.02, 4.00, 4.00, 4.00 to `2^-21`, onto the GPU's numbers
+  to 3.0e-8 and 1.0e-9): a perturber empty at the state, whose `Delta N + H`
+  the frozen digests leave nearly cancelling. The ladder therefore runs to
+  `2^-21` rather than `KAPPA_LADDER`'s `2^-17`, which left those two a run of
+  two. The **exact** functional carries no such pole — the two pieces carry
+  it with opposite signs — so its truncation is below PySCF's noise on every
+  rung where it would be asymptotic and its ladder shows no fourfold run.
+  Since the exact quotient *is* the frozen one plus the digest one rung by
+  rung, it is then held instead to a **window**: at least four consecutive
+  rungs every one within 1e-6 of the GPU's sum — 17 here (`2^-5 … 2^-21`,
+  worst 4.7e-7, best 8.0e-12 at `2^-14`), while its two pieces each pass
+  their own ladder. A window and not a sweep minimum, so a crossing cannot
+  pass for agreement.
+
+### The on-card checks
+
+`--kappa-full`'s new rows (one run each, the ctest entries' command line):
+
+| | CAS(4,4) | CAS(8,8) | LiF CAS(4,6) |
+|---|---|---|---|
+| check 6: the digests' term along check 3's active direction | −1.3e-17 (symmetry zero ²) | −2.0656630000e-02 | 2.9009533152e-02 |
+| check 6: plateau, fourfold halvings | 3.6e-12, 6 | 3.4e-12, 8 | 8.1e-11, 9 |
+| check 4 directions: max \|h2e_dot\|, the term | 0.0, 0.0 | 0.0, 0.0 | 0.0, 0.0 |
+| the whole entry, wall (`ctest`, Release) | 1.05 s | 17.40 s | 2.10 s |
+
+The three entries' walls were 1.11 s, 14.04 s and 1.75 s before #88; the
+dump entries' are now 1.32 s, 24.45 s and 2.54 s.
+
+² CAS(4,4)'s four active orbitals sit in four distinct D2h irreps, so no
+active rotation moves the energy at first order ("The active-rotation source
+term"); its check 6 confirms the zero through the same machinery, and the
+two other cases carry the content.
+
+### The negative control
+
+The digests' term zeroed in a scratch patch (`out[d].total = 0.0` in
+`scDigestRotationTangentDevice`, never committed), rebuilt, dumped and
+checked, N2 CAS(4,4) and LiF:
+
+- `--edot-check` **FAILS**, 8 of 18 ladders each: every frozen ladder still
+  passes (to 1.6e-10 or better) and every exact and digest ladder on a
+  direction with content fails by exactly the missing term, 1.7e-3 … 5.8e-2
+  (CAS(4,4)) and 2.9e-3 … 8.0e-2 (LiF); the symmetry-zero core–active
+  direction passes, as it must;
+- the **duality still passes** on both — "adjoint vs tangent (integral
+  halves), every direction within 1e-07: ok" — because it never contained
+  the term: that is the omission this whole section exists to catch;
+- `--kappa-full` itself FAILS on LiF through check 6 (a 0.0 term against a
+  finite difference that does not converge to it: no fourfold run, error
+  2.9e-2), and passes on CAS(4,4), where the active direction's term is a
+  symmetry zero and so is the patched one — the reason the offline provider,
+  not check 6, is the gate.
+
+### What is a ctest entry
+
+Everything on the card already is: the dump's entries
+(`nevpt2_sc_pseudodensity_dump_<case>`) now also write the six directions and
+check each frozen-digest tangent against `<kappa, Y>` off the matrix they
+write (`≤ 1e-7`; measured 3.6e-14, 1.5e-14, 1.8e-14 — and 3.4e-13 at
+acrolein), and the `--kappa-full` entries run checks 4 and 6 above inside
+their existing PASS line. `--edot-check` is offline Python and stays a
+manual gate for the three reasons "Why there is no ctest entry for it"
+gives. No tile floor changes: the digest tangent is the plain build
+([`performance.md`](performance.md), "Tile floors").
+
+**Under the sanitizers.** None of these six entries is `small`, so — as for
+"The full orbital source term" — they were run by name (`ctest --test-dir
+build-<preset> -R 'nevpt2_sc_pseudodensity_(kappa_full|dump)_'`, with the
+`asan` test preset's `ASAN_OPTIONS` / `LSAN_OPTIONS`) after each preset's own
+tier passed, and are clean under all four tools (seconds per entry):
+
+| | ubsan | memcheck | initcheck |
+|---|---:|---:|---:|
+| `kappa_full` CAS(4,4) / CAS(8,8) / LiF | 3.4 / 19.1 / 3.1 | 11.5 / 447.1 / 39.8 | 8.1 / 152.6 / 16.4 |
+| `dump` CAS(4,4) / CAS(8,8) / LiF | 3.1 / 24.9 / 3.3 | 17.4 / 691.5 / 58.9 | 11.7 / 253.7 / 23.7 |
+
+`asan` passed all six too (dump entries 4.1 / 25.8 / 3.9 s), no ASan or LSan
+report.
 
 ## The SC source terms against PySCF's, on a card
 

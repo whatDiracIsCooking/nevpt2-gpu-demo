@@ -10,12 +10,14 @@
 // integral array the energy stage reads AND of the orbital-energy vectors
 // `e_core` / `e_virt`, with the RDM side (dm1/dm2/dm3) fixed -- the
 // derivative's own definition -- and the `f3ac`/`f3ca` digests fixed, which is
-// the one gap left (nevpt2.gradient, "The full source term Y_xy", names it and
-// says what closing it would cost). The orbital energies were the active-block
-// work's other gap, and they move here: that is what the sidecar's generalized
-// Fock is for.
+// the one gap the two MODES leave (nevpt2.gradient, "The full source term
+// Y_xy", names it). The orbital energies were the active-block work's other
+// gap, and they move here: that is what the sidecar's generalized Fock is for.
+// The digests' own response is printed BESIDE the duality as a term of its own
+// (#88, scDigestRotationTangentDevice): the forward half of closing that gap,
+// kept out of the pair so the duality keeps comparing like with like.
 //
-// THE FIVE CHECKS, in the order they print:
+// THE SIX CHECKS, in the order they print:
 //
 //   1  THE SIDECAR AGAINST ITSELF AND THE GOLDEN (scGeneralIntegralCheck).
 //      Every promotion rule's own source array, restricted to the promoted
@@ -28,7 +30,14 @@
 //      both read the same tangents, so a wrong one cancels between them.
 //   2  THE DUALITY, on four seeded FULL antisymmetric directions:
 //      <kappa, Y>'s integral half against the forward tangent's. Exact
-//      arithmetic, no step size, gated at this tree's 1e-7.
+//      arithmetic, no step size, gated at this tree's 1e-7. Then, ungated
+//      here, the same four directions' Edot in its two terms -- the
+//      frozen-digest tangent and the digests' own term -- and their sum, the
+//      exact directional derivative at fixed CI. Its gate is an INDEPENDENT
+//      provider, PySCF's exact directional derivative, which no binary can
+//      reach: `--dump-source-terms` writes the directions and both terms, and
+//      reference_data/nevpt2_grad.py --edot-check holds them against it
+//      (docs/testing.md, "The digests' orbital response, forward mode").
 //   3  THE ACTIVE BLOCK, BIT FOR BIT AS FAR AS THE KERNELS GO. The same
 //      seeded active kappa run through scActiveRotationDevice (the
 //      active-block entry point) and, embedded in a full (n_mo, n_mo) kappa,
@@ -56,9 +65,10 @@
 //      integrals the sidecar does not carry in full), and does not need to
 //      be: the rule is ONE einsum over the whole general index, so the rows
 //      checks 3 and 4 exercise are the same code the mixed rows run.
-//      The same two directions also assert a derived exactness: an
+//      The same two directions also assert two derived exactnesses: an
 //      intra-space rotation moves NO orbital energy (f is diagonal there),
-//      so the `eps` term must vanish, and it is reported.
+//      so the `eps` term must vanish, and it moves no active integral, so
+//      h2e_dot and with it the digests' term are EXACTLY zero (#88).
 //   5  PARK EQS. 56-57, the pseudocanonical multipliers, off the assembled
 //      Y: one division per core and per virtual pair. Those two blocks of Y
 //      are exact (neither the digests nor the orbital energies move under an
@@ -68,6 +78,15 @@
 //      (scPseudocanonicalMultipliers). The matrix those divisions read is
 //      itself held against the direct pairing on an inactive-restricted
 //      direction first, so it is as checked as the pairing is.
+//   6  THE DIGESTS' TERM AGAINST ITS OWN FINITE DIFFERENCE (#88), on check
+//      3's active-restricted direction: the energy stage rerun with every
+//      integral, RDM and orbital energy the state's own and ONLY the digests
+//      rebuilt -- buildRdmsDevice at h2e rotated on the host by exp(h kappa)
+//      -- differenced and held to the digests' term, Richardson-verified as
+//      check 4 is. An active rotation's h2e_dot is the intra-active action
+//      alone; the sidecar's general part of it, which a mixed rotation adds,
+//      is the promotion table check 1 pins, and the whole term is held to
+//      PySCF by the offline provider gate above.
 module;
 
 #include <cstdio>  // stdout: a macro, which `import std` does not carry
@@ -297,20 +316,11 @@ double scTotalSpaceRotated(const nevpt2::GoldenFile& g, const nevpt2::GradGoldFi
   return nevpt2::energiesDevice(ints, dm1, dm2, dm3, f3ac, f3ca, res).total;
 }
 
-// One intra-space direction's finite-difference sweep, printed: the plateau
-// and the Richardson run, as --kappa-act's and --sc-tangent's. Returns
-// whether both criteria hold.
-bool finiteDifferenceSweep(const char* name, const nevpt2::GoldenFile& g,
-                           const nevpt2::GradGoldFile& gg, bool core,
-                           const nevpt2::Tensor& kappaBlock, double edot, double scale,
-                           const nevpt2::DeviceTensor& dm1, const nevpt2::DeviceTensor& dm2,
-                           const nevpt2::DeviceTensor& dm3, const nevpt2::DeviceTensor& f3ac,
-                           const nevpt2::DeviceTensor& f3ca,
-                           const nevpt2::DeviceResources& res) {
-  std::printf("\n  central differences of energiesDevice along exp(h kappa), %s-internal --\n"
-              "  every stored block's %s axes rotated on the host and that space's orbital\n"
-              "  energies taken from the rotated generalized Fock's diagonal:\n",
-              name, name);
+// One finite-difference sweep of `energyAt` (the SC total at exp(t kappa),
+// however the caller displaces it) against `edot`, printed: the plateau and
+// the Richardson run, as --kappa-act's and --sc-tangent's. Returns whether
+// both criteria hold. The caller prints what is being displaced first.
+bool sweepAgainst(double edot, double scale, const std::function<double(double)>& energyAt) {
   std::printf("  %5s %14s %20s %12s %12s %8s\n", "k", "h = 2^-k", "(E(+h)-E(-h))/2h", "|err|",
               "rel err", "ratio");
   std::array<double, kFdSteps> step{};
@@ -319,10 +329,8 @@ bool finiteDifferenceSweep(const char* name, const nevpt2::GoldenFile& g,
     const int k = kFdFirstExp + static_cast<int>(i);
     const double h = std::ldexp(1.0, -k);
     step[i] = h;
-    const double plus =
-        scTotalSpaceRotated(g, gg, core, kappaBlock, h, dm1, dm2, dm3, f3ac, f3ca, res);
-    const double minus =
-        scTotalSpaceRotated(g, gg, core, kappaBlock, -h, dm1, dm2, dm3, f3ac, f3ca, res);
+    const double plus = energyAt(h);
+    const double minus = energyAt(-h);
     const double d = (plus - minus) / (2.0 * h);
     err[i] = std::fabs(d - edot);
     const double rel = err[i] / std::max(1e-30, scale);
@@ -347,6 +355,77 @@ bool finiteDifferenceSweep(const char* name, const nevpt2::GoldenFile& g,
   return ok;
 }
 
+// One intra-space direction's finite-difference sweep (check 4).
+bool finiteDifferenceSweep(const char* name, const nevpt2::GoldenFile& g,
+                           const nevpt2::GradGoldFile& gg, bool core,
+                           const nevpt2::Tensor& kappaBlock, double edot, double scale,
+                           const nevpt2::DeviceTensor& dm1, const nevpt2::DeviceTensor& dm2,
+                           const nevpt2::DeviceTensor& dm3, const nevpt2::DeviceTensor& f3ac,
+                           const nevpt2::DeviceTensor& f3ca,
+                           const nevpt2::DeviceResources& res) {
+  std::printf("\n  central differences of energiesDevice along exp(h kappa), %s-internal --\n"
+              "  every stored block's %s axes rotated on the host and that space's orbital\n"
+              "  energies taken from the rotated generalized Fock's diagonal:\n",
+              name, name);
+  return sweepAgainst(edot, scale, [&](double t) {
+    return scTotalSpaceRotated(g, gg, core, kappaBlock, t, dm1, dm2, dm3, f3ac, f3ca, res);
+  });
+}
+
+// The SC total with ONLY the digests displaced (check 6): every integral, RDM
+// and orbital energy the state's own, and f3ac/f3ca rebuilt from h2e rotated
+// on the host by exp(t kappaAct) -- so its derivative at t = 0 is exactly the
+// digests' term along the embedded active direction, and nothing else.
+double scTotalDigestsRotated(const nevpt2::GoldenFile& g, const nevpt2::Tensor& kappaAct,
+                             double t, const nevpt2::NevptIntegralsDevice& ints,
+                             const nevpt2::DeviceTensor& dm1, const nevpt2::DeviceTensor& dm2,
+                             const nevpt2::DeviceTensor& dm3,
+                             const nevpt2::RdmBuildOptions& rdmOpt,
+                             const nevpt2::DeviceResources& res) {
+  const nevpt2::Tensor h2e =
+      nevpt2::rotateAxes(g.get("h2e"), {0, 1, 2, 3}, nevpt2::expKappa(scaled(kappaAct, t)));
+  const nevpt2::RdmBuildResult b =
+      nevpt2::buildRdmsDevice(rdmOpt, g.get("ci"), g.ncas, g.nelecA, g.nelecB, h2e, res);
+  return nevpt2::energiesDevice(ints, dm1, dm2, dm3, b.f3ac, b.f3ca, res).total;
+}
+
+// A seeded antisymmetric (n_mo, n_mo) kappa with only the (a, b) and (b, a)
+// blocks of the two index ranges kept, renormalised to unit Frobenius norm --
+// how a direction that is purely active-virtual, or purely core-active, is
+// drawn for the provider gate (#88).
+nevpt2::Tensor maskedKappa(std::int64_t nmo, std::uint64_t seed, std::int64_t aLo,
+                           std::int64_t aHi, std::int64_t bLo, std::int64_t bHi) {
+  const nevpt2::Tensor full = nevpt2::antisymmetricKappa(nmo, seed);
+  nevpt2::Tensor out({nmo, nmo});
+  double norm2 = 0.0;
+  for (std::int64_t p = aLo; p < aHi; ++p)
+    for (std::int64_t q = bLo; q < bHi; ++q) {
+      out(p, q) = full(p, q);
+      out(q, p) = -full(p, q);
+      norm2 += 2.0 * full(p, q) * full(p, q);
+    }
+  if (norm2 > 0.0)
+    for (std::int64_t i = 0; i < out.size(); ++i) out.flatRef(i) /= std::sqrt(norm2);
+  return out;
+}
+
+// The directions the forward Edot(kappa) is exported along (#88) and held to
+// PySCF's exact directional derivative offline: --kappa-full's own four
+// seeded FULL directions -- every block, mixed ones included -- and one purely
+// active-virtual and one purely core-active, so the two mixed blocks the
+// digests move under are each probed on their own. A partition with no core
+// (or no virtual) orbital has no such block and skips that direction.
+std::vector<nevpt2::Tensor> edotDirections(std::int64_t nc, std::int64_t na, std::int64_t nv) {
+  const std::int64_t nmo = nc + na + nv;
+  std::vector<nevpt2::Tensor> out;
+  for (std::size_t d = 0; d < kFullDirections; ++d)
+    out.push_back(
+        nevpt2::antisymmetricKappa(nmo, kFullSeedBase + static_cast<std::uint64_t>(d)));
+  if (nv > 0) out.push_back(maskedKappa(nmo, kFullSeedBase + 0x400u, nc, nc + na, nc + na, nmo));
+  if (nc > 0) out.push_back(maskedKappa(nmo, kFullSeedBase + 0x500u, 0, nc, nc, nc + na));
+  return out;
+}
+
 // Runs the whole --kappa-full check for one golden state and its sidecar, and
 // returns whether every criterion holds. Anything malformed in either file,
 // or a pseudocanonical multiplier the state does not determine, is an Error
@@ -359,6 +438,7 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
                                     const nevpt2::DeviceTensor& dm3,
                                     const nevpt2::DeviceTensor& f3ac,
                                     const nevpt2::DeviceTensor& f3ca,
+                                    const nevpt2::RdmBuildOptions& rdmOpt,
                                     const nevpt2::DeviceResources& res) {
   // The sidecar is found beside the golden by name, so the first thing to
   // settle is that the two describe the same state -- and then that it
@@ -417,6 +497,21 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
   ok = ok && dual;
   std::printf("  adjoint vs tangent (integral halves), every direction within %.0e: %s\n",
               kFullRotTol, dual ? "ok" : "FAILED");
+
+  // The digests' own term along the same four directions (#88): printed
+  // beside the duality, not folded into it. Its gate is PySCF's exact
+  // directional derivative, offline (--dump-source-terms, then
+  // nevpt2_grad.py --edot-check); check 6 below is its on-card one.
+  const auto tDig = std::chrono::steady_clock::now();
+  const std::vector<nevpt2::ScDigestTangent> digest =
+      NEVPT2_TRY(nevpt2::scDigestRotationTangentDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB,
+                                                       ints, gen, dm1, dm2, dm3, f3ac, f3ca,
+                                                       reqs, res));
+  nevpt2::printScDigestTangentTable(rot, digest);
+  std::printf("  the digests' term along %zu full directions: %.2fs (gated offline against "
+              "PySCF's exact Edot,\n  and on the card by check 6)\n",
+              kFullDirections,
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - tDig).count());
 
   double worstE = 0.0;
   for (int c = 0; c < 8; ++c)
@@ -506,12 +601,22 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
     const bool epsZero = std::fabs(r.dirs[0].eps) < kEpsZeroTol;
     const bool dualHere = std::fabs(r.dirs[0].integral - r.dirs[0].tangentIntegral) <
                           kFullRotTol;
-    ok = ok && epsZero && dualHere;
+    // No active index moves, so h2e_dot is an exactly-zero tensor and so is
+    // every digest built from it: the digests' term is 0.0, not small (#88).
+    const std::vector<nevpt2::ScDigestTangent> dig0 =
+        NEVPT2_TRY(nevpt2::scDigestRotationTangentDevice(rdmOpt, g.get("ci"), g.nelecA,
+                                                         g.nelecB, ints, gen, dm1, dm2, dm3,
+                                                         f3ac, f3ca, one, res));
+    const bool digestZero = dig0[0].total == 0.0 && dig0[0].h2eDotMax == 0.0;
+    ok = ok && epsZero && dualHere && digestZero;
     std::printf("\n  %s-internal direction: <kappa, Y> = %.14e, adjoint vs tangent %.2e\n",
                 name, r.dirs[0].adjoint,
                 std::fabs(r.dirs[0].integral - r.dirs[0].tangentIntegral));
     std::printf("  its orbital-energy response is zero by (O2): eps = %.2e (< %.0e: %s)\n",
                 r.dirs[0].eps, kEpsZeroTol, epsZero ? "ok" : "FAILED");
+    std::printf("  it moves no active integral: max |h2e_dot| = %.1e, the digests' term = %.1e "
+                "(exactly 0: %s)\n",
+                dig0[0].h2eDotMax, dig0[0].total, digestZero ? "ok" : "FAILED");
     const double scale = std::max(std::fabs(r.dirs[0].tangent), std::fabs(energies.total));
     ok = finiteDifferenceSweep(name, g, gg, core, block, r.dirs[0].tangent, scale, dm1, dm2,
                                dm3, f3ac, f3ca, res) &&
@@ -567,11 +672,31 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
   std::printf("  max |z^c| = %.6e at the smallest gap divided by, %.3e Eh\n", pc.maxZ,
               pc.smallestGap);
 
+  // --- 6. the digests' term against its own finite difference (#88) -------
+  const std::vector<nevpt2::ScRotationRequest> actEmbedded{
+      nevpt2::ScRotationRequest{embedBlock(kAct, nc, nmo), /*tangent=*/false}};
+  const std::vector<nevpt2::ScDigestTangent> digAct =
+      NEVPT2_TRY(nevpt2::scDigestRotationTangentDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB,
+                                                       ints, gen, dm1, dm2, dm3, f3ac, f3ca,
+                                                       actEmbedded, res));
+  std::printf("\n  the digests' term along check 3's active direction: %.14e\n"
+              "  central differences of energiesDevice with ONLY f3ac/f3ca rebuilt, from h2e\n"
+              "  rotated on the host by exp(h kappa) -- every integral, RDM and orbital energy\n"
+              "  the state's own:\n",
+              digAct[0].total);
+  const double digScale = std::max(std::fabs(digAct[0].total), std::fabs(energies.total));
+  const bool digestFd = sweepAgainst(digAct[0].total, digScale, [&](double t) {
+    return scTotalDigestsRotated(g, kAct, t, ints, dm1, dm2, dm3, rdmOpt, res);
+  });
+  ok = ok && digestFd;
+
   std::printf("\n%s: the full orbital source term's adjoint and tangent agree to %.0e on every "
               "direction, the sidecar's promotion table holds to %.0e, the active block is "
               "unchanged to the kernels' own reproducibility (itself inside its recorded "
               "envelope), the two intra-space finite "
-              "differences converge, and Park Eqs. 56-57 are determined\n",
+              "differences converge, Park Eqs. 56-57 are determined, and the digests' term "
+              "converges onto its own finite difference and vanishes on the intra-space "
+              "rotations\n",
               ok ? "PASS" : "FAIL", kFullRotTol, kSelfCheckTol);
   return ok;
 }

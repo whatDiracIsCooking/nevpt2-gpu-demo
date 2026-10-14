@@ -262,7 +262,10 @@ an antisymmetric ``kappa`` and a normalised ``c`` define: ``Y_xy - Y_yx``, and
     active basis, and is carried into section 2.6's on read.
     **It is not yet the derivative this gradient needs, and the reason is
     known**: the device's ``Y`` holds the ``f3ac``/``f3ca`` digests fixed
-    (docs/gradients.md, section 6). Its ``y`` held ``e_core``/``e_virt``
+    (docs/gradients.md, section 6). The device has their term in forward mode
+    only (#88): a dump since carries seeded directions with ``Edot`` in its
+    two terms, which ``--edot-check`` holds against PySCF's exact derivative
+    (:func:`check_edot`). Its ``y`` held ``e_core``/``e_virt``
     fixed too until #87 (:func:`pyscf_ci_source` says why that matters); a
     dump written since carries their response. What the gradient comes out
     at with it, and the attribution: docs/testing.md, "The GPU as the
@@ -320,6 +323,11 @@ Usage::
         --tiles 3 --dump-source-terms /tmp/lif.gradsrc
     uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
         --source both --source-path /tmp/lif.gradsrc
+    # the same dump's forward Edot(kappa) -- frozen-digest tangent + the
+    # f3ac/f3ca digests' term -- against PySCF's exact directional derivative
+    # (#88; docs/testing.md, "The digests' orbital response, forward mode"):
+    uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
+        --source dump --source-path /tmp/lif.gradsrc --edot-check
     # and the CASCI validation gated the same way, against the npz's grad_casci:
     uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 \
         --casci-only --grad-num /tmp/n2_cas44.numgrad.npz
@@ -1586,6 +1594,219 @@ def localise_sources(fn: Functional, st: State, step: float, *, ci_step: float) 
 
 
 # --------------------------------------------------------------------------
+# The GPU's forward Edot(kappa) against PySCF's exact one (#88)
+# --------------------------------------------------------------------------
+
+
+def load_edot_directions(path: Path, st: State) -> dict:
+    """A ``.gradsrc``'s forward ``Edot(kappa)`` members (#88): the seeded
+    directions ``edot_kappa`` and the GPU's two terms along each,
+    ``edot_frozen`` (the f3ac/f3ca digests held fixed) and ``edot_digest``
+    (the digests' own response). The exact ``Edot`` is their sum.
+
+    The directions are in the golden's basis, like ``kappa_source``; this
+    state is held in section 2.6's, so each is carried across the way
+    :func:`load_source_terms` carries ``Y``: the golden's orbitals ``C_g``
+    rotated by ``exp(t kappa)``, with the golden's CI vector, are this state's
+    ``C = C_g W`` rotated by ``exp(t W^T kappa W)`` with its CI vector, so the
+    direction here is ``W^T kappa W`` and ``Edot`` is unchanged. Call
+    :func:`load_source_terms` on the same file first: that is what checks the
+    file describes this state."""
+    with np.load(path) as z:
+        keys = ("edot_kappa", "edot_frozen", "edot_digest")
+        present = [k for k in keys if k in z]
+        if len(present) != len(keys):
+            raise SystemExit(
+                f"{path}: carries {present or 'none'} of {list(keys)} -- a dump without the "
+                "forward Edot directions (written before #88?); rerun "
+                "nevpt2_sc_pseudodensity --dump-source-terms"
+            )
+        kap = np.asarray(z["edot_kappa"], dtype=float)
+        frozen = np.asarray(z["edot_frozen"], dtype=float)
+        digest = np.asarray(z["edot_digest"], dtype=float)
+    if kap.ndim != 3 or kap.shape[1:] != (st.nmo, st.nmo) or frozen.shape != (kap.shape[0],) \
+            or digest.shape != (kap.shape[0],):
+        raise SystemExit(f"{path}: the Edot members' shapes do not fit n_mo = {st.nmo}")
+    w = np.eye(st.nmo)
+    w[st.act, st.act] = st.act_rot
+    return dict(kappa=[w.T @ k @ w for k in kap], frozen=frozen, digest=digest)
+
+
+#: The ``--edot-check`` ladders' steps: :data:`KAPPA_LADDER`'s start, but four
+#: rungs deeper, to ``2^-21``. Measured, not chosen: along acrolein's
+#: core-active direction the frozen-digest functional has a near-pole, and its
+#: quotient (and with it the digests' term) converges as ``h^2`` -- ratio
+#: 4.00 per halving -- only from ``2^-14`` down, onto the GPU's numbers, with
+#: PySCF's evaluation noise taking over below ``2^-21``; stopping at
+#: ``2^-17`` left a run of two (docs/testing.md, "The digests' orbital
+#: response, forward mode").
+EDOT_LADDER = (KAPPA_LADDER[0], 21)
+
+
+def check_edot(fn: Functional, st: State, dirs: dict) -> list[dict]:
+    """The GPU's forward ``Edot(kappa)`` (#88) against PySCF's own SC
+    functional, along each dumped direction -- the **independent provider**
+    for the f3ac/f3ca digests' term, which both of the device's modes leave
+    out of ``Y`` and so cannot check against each other (docs/gradients.md,
+    section 6).
+
+    Three step ladders per direction ``u = kappa / |kappa|``, each of central
+    differences of :meth:`Functional.sc_corr_at_orbitals` along
+    ``C exp(t u)`` at the state's own CI vector (the orbital energies rebuilt
+    at every point, as on the device):
+
+    * **exact** -- the digests rebuilt at every point: PySCF's exact
+      directional derivative, against the GPU's ``frozen + digest``;
+    * **frozen** -- the digests held at the state's: the functional the
+      device's ``Y`` differentiates, against ``frozen``;
+    * **digest** -- the difference of the two at each step, against
+      ``digest``: the term on its own.
+
+    Each is :func:`step_ladder`'s gate -- a run of fourfold halvings, then
+    the Richardson extrapolant within :data:`LADDER_TOL` of the GPU's number
+    -- so what is left over is shown to be the quotient's truncation, walked
+    down, not a single step's luck. Every point is cached, so the three
+    ladders cost two evaluations per step and sign."""
+    from scipy.linalg import expm
+
+    eris = fn.eris(st.mo_coeff)
+    fn.pt.ci = st.ci
+    fn.mc.ci = st.ci
+    _dm1, _dm2, dms, _ = _dms_from(fn.pt, eris, st)
+    frozen_digests = {"f3ca": dms["f3ca"], "f3ac": dms["f3ac"]}
+    steps = ladder_steps(EDOT_LADDER)
+    out = []
+    for d, kap in enumerate(dirs["kappa"]):
+        t0 = time.perf_counter()
+        norm = float(np.linalg.norm(kap))
+        u = kap / norm
+        cache: dict = {}
+
+        def corr(t: float, frozen: bool, u=u, cache=cache) -> float:
+            key = (t, frozen)
+            if key not in cache:
+                cache[key] = fn.sc_corr_at_orbitals(st.mo_coeff @ expm(t * u),
+                                                    frozen_digests if frozen else None)
+            return cache[key]
+
+        gpu_frozen = float(dirs["frozen"][d]) / norm
+        gpu_digest = float(dirs["digest"][d]) / norm
+        checks = {
+            "exact": step_ladder(f"dir {d} exact Edot", lambda t, c=corr: c(t, False),
+                                 steps, gpu_frozen + gpu_digest),
+            "frozen": step_ladder(f"dir {d} frozen-digest Edot", lambda t, c=corr: c(t, True),
+                                  steps, gpu_frozen),
+            "digest": step_ladder(f"dir {d} digest term",
+                                  lambda t, c=corr: c(t, False) - c(t, True), steps, gpu_digest),
+        }
+        # A direction whose every rotation breaks the state's symmetry (N2
+        # CAS(4,4)'s core-active block: sigma core, pi active) leaves E even
+        # in t to the last bit, so every quotient is exactly 0.0 and there is
+        # no truncation to ladder down. Zero is then the exact answer, and the
+        # GPU's number is held to it at the same tolerance.
+        for key, c in checks.items():
+            n = c.numbers
+            if not c.ok and np.all(n["fd"] == 0.0) and abs(n["ref"]) <= LADDER_TOL:
+                checks[key] = Check(
+                    c.name, True,
+                    f"every quotient exactly 0 (E even in t: zero by symmetry); |GPU| = "
+                    f"{abs(n['ref']):.2e}", c.table,
+                    dict(n, value=0.0, err=abs(n["ref"]), run=0, how="zero"))
+        # The exact quotient IS the frozen one plus the digest one, rung by
+        # rung. Where the frozen-digest functional has a near-pole (acrolein's
+        # core-active direction: a perturber empty at the state, whose
+        # Delta N + H the frozen digests leave nearly cancelling), the two
+        # pieces carry it with opposite signs and the exact functional is
+        # smooth: its truncation sits below PySCF's evaluation noise on every
+        # rung where it would be asymptotic, so its ladder has nothing to walk
+        # down and shows no fourfold run. Its two pieces then DO -- each
+        # gated on its own run and Richardson value above -- and the exact
+        # quotient is held to the GPU's sum on a window of at least
+        # LADDER_RUN + 1 consecutive rungs instead, every one within
+        # LADDER_TOL: a window, not a sweep minimum, so a crossing cannot pass
+        # for agreement (docs/testing.md, "The digests' orbital response,
+        # forward mode").
+        ex = checks["exact"]
+        if (not ex.ok and ex.numbers["run"] < LADDER_RUN and checks["frozen"].ok
+                and checks["digest"].ok):
+            left = np.abs(ex.numbers["fd"] - ex.numbers["ref"])
+            best, start, cur = (0, 0), 0, 0
+            for i, v in enumerate(left):
+                cur = cur + 1 if v <= LADDER_TOL else 0
+                if cur == 1:
+                    start = i
+                if cur > best[0]:
+                    best = (cur, start)
+            width, lo = best
+            if width >= LADDER_RUN + 1:
+                window = left[lo:lo + width]
+                checks["exact"] = Check(
+                    ex.name, True,
+                    f"no fourfold run (smooth: truncation below PySCF's noise); "
+                    f"|fd - GPU| <= {window.max():.2e} on {width} consecutive rungs from "
+                    f"2^-{round(-np.log2(ex.numbers['steps'][lo]))}, its two pieces each "
+                    f"laddered", ex.table,
+                    dict(ex.numbers, value=float(ex.numbers["fd"][lo + int(np.argmin(window))]),
+                         err=float(window.max()), run=0, window=width, how="window"))
+        # What the direction touches, by the RHF partition's four spaces, so a
+        # reader sees which blocks each one probes.
+        spaces = [st.space_of(p) for p in range(st.nmo)]
+        touched = sorted({f"{SPACE_NAMES[min(spaces[p], spaces[q])]}-"
+                          f"{SPACE_NAMES[max(spaces[p], spaces[q])]}"
+                          for p in range(st.nmo) for q in range(p + 1, st.nmo)
+                          if abs(u[p, q]) > 1e-14})
+        out.append(dict(dir=d, norm=norm, checks=checks, blocks=touched,
+                        seconds=time.perf_counter() - t0))
+        print(f"  direction {d}: {len(cache)} evaluations, {out[-1]['seconds']:.0f}s")
+    fn.pt.ci = st.ci
+    fn.mc.ci = st.ci
+    return out
+
+
+def report_edot(rows: list[dict], case: str) -> bool:
+    """:func:`check_edot`'s tables and its verdict line; returns whether every
+    ladder holds."""
+    print("\nthe GPU's forward Edot(kappa) against PySCF's exact directional derivative "
+          "(#88; Eh per unit kappa)")
+    print("  exact = PySCF with the f3ac/f3ca digests rebuilt at every point, against the GPU's "
+          "frozen + digest;\n  frozen = digests held at the state's, against the GPU's frozen; "
+          "digest = the two differenced,\n  against the GPU's digest term. 'Richardson' is the "
+          "ladder's extrapolant at its finest fourfold run.")
+    ok = True
+    for r in rows:
+        print(f"\n  direction {r['dir']} (|kappa| = {r['norm']:.6f}; blocks: "
+              f"{', '.join(r['blocks'])})")
+        print(f"    {'':<7} {'GPU':>20} {'PySCF Richardson':>20} {'|delta|':>10} {'run':>4}")
+        for key in ("exact", "frozen", "digest"):
+            c = r["checks"][key]
+            ok = ok and c.ok
+            n = c.numbers
+            note = {"zero": "  (zero by symmetry: every quotient exactly 0)",
+                    "window": f"  (window: {n.get('window', 0)} rungs within "
+                              f"{LADDER_TOL:g}; max shown)"}.get(n.get("how", ""), "")
+            print(f"    {key:<7} {n['ref']:+20.12e} {n['value']:+20.12e} {n['err']:10.2e} "
+                  f"{n['run']:>4}  {'ok' if c.ok else 'FAIL'}{note}")
+        # The leftover, rung by rung: |PySCF quotient - GPU| for the exact and
+        # digest ladders, falling fourfold while truncation dominates.
+        print(f"    {'h':<7} {'|exact fd - GPU|':>17} {'ratio':>7} {'|digest fd - GPU|':>18} "
+              f"{'ratio':>7}")
+        ex, dg = r["checks"]["exact"].numbers, r["checks"]["digest"].numbers
+        e_ex = np.abs(ex["fd"] - ex["ref"])
+        e_dg = np.abs(dg["fd"] - dg["ref"])
+        for i, h in enumerate(ex["steps"]):
+            rx = f"{e_ex[i - 1] / e_ex[i]:7.2f}" if i and e_ex[i] > 0 else f"{'-':>7}"
+            rd = f"{e_dg[i - 1] / e_dg[i]:7.2f}" if i and e_dg[i] > 0 else f"{'-':>7}"
+            print(f"    2^-{round(-np.log2(h)):<4d} {e_ex[i]:17.3e} {rx} {e_dg[i]:18.3e} {rd}")
+    n = 3 * len(rows)
+    held = sum(c.ok for r in rows for c in r["checks"].values())
+    print(f"\n{'PASS' if ok else 'FAIL'}: {case} the GPU's forward Edot(kappa) -- frozen-digest "
+          f"tangent + the f3ac/f3ca digests' term -- against PySCF's exact directional "
+          f"derivative along {len(rows)} dumped directions, {held} of {n} ladders within "
+          f"{LADDER_TOL:g} (docs/testing.md, \"The digests' orbital response, forward mode\")")
+    return ok
+
+
+# --------------------------------------------------------------------------
 # The gradient
 # --------------------------------------------------------------------------
 
@@ -2752,6 +2973,20 @@ def run(args) -> dict:
         print("  no golden for this selection: the active space was overridden, so "
               "this is deliberately a different state")
 
+    if args.edot_check:
+        # #88: the dump's forward Edot(kappa) along its seeded directions,
+        # against PySCF's exact directional derivative -- no sweep, no solve.
+        fn = Functional(st)
+        src = load_source_terms(args.source_path, st)  # checks the dump is this state
+        dirs = load_edot_directions(args.source_path, st)
+        print(f"\n--edot-check: {len(dirs['kappa'])} directions read from {args.source_path}, "
+              f"each laddered over h = 2^-{EDOT_LADDER[0]} .. 2^-{EDOT_LADDER[1]}")
+        rec["source_origin"] = src.origin
+        rec["edot"] = check_edot(fn, st, dirs)
+        rec["edot_only"] = True
+        rec["wall"] = time.perf_counter() - t0
+        return rec
+
     with_corr = not args.casci_only
     fn = Functional(st, pc=args.pc)
     if args.casci_only:
@@ -2936,6 +3171,10 @@ def report(rec: dict) -> None:
     print(f"\n== {rec['case']}  {rec['basis']}  CAS({rec['nelecas']},{rec['ncas']})  "
           f"{which}")
     print(f"source terms: {rec['source_origin']}")
+    if rec.get("edot_only"):
+        rec["edot_pass"] = report_edot(rec["edot"], rec["case"])
+        print(f"--edot-check: no gradient was solved ({rec['wall']:.1f}s)")
+        return
     if "compare" in rec:
         for key in ("compare", "localise"):
             if key in rec:
@@ -3111,6 +3350,14 @@ def main() -> None:
                          "so a disagreement can be pinned on them. One more "
                          "E_corr sweep over the kappa pairs and the "
                          "determinants")
+    ap.add_argument("--edot-check", action="store_true",
+                    help="with --source dump: hold the dump's forward Edot(kappa) "
+                         "(#88) -- its frozen-digest tangent plus the f3ac/f3ca "
+                         "digests' term, along each seeded direction it carries -- "
+                         "against PySCF's exact directional derivative, step-"
+                         "laddered, and stop: no sweep, no solve. Exit 1 on a FAIL "
+                         "(docs/testing.md, \"The digests' orbital response, "
+                         "forward mode\")")
     ap.add_argument("--casci-only", action="store_true",
                     help="drop E_corr from the source terms and from Phi: the "
                          "reference is then a plain CASCI and pyscf.grad.casci is "
@@ -3180,11 +3427,20 @@ def main() -> None:
     if (args.sources_only or args.localise) and args.source != "both":
         raise SystemExit("--sources-only and --localise compare two providers; they "
                          "need --source both")
+    if args.edot_check and (args.source not in ("dump", "both") or args.pc
+                            or args.casci_only):
+        raise SystemExit("--edot-check reads the GPU's Edot directions out of a dump: it "
+                         "needs --source dump (or both) --source-path PATH, and is SC only")
     if args.source == "pyscf":
         args.source_path = None
 
     rec = run(args)
     report(rec)
+    if rec.get("edot_only"):
+        # A gate of its own (#88), read the same way: exit 1 on a FAIL.
+        if not rec["edot_pass"]:
+            raise SystemExit(1)
+        return
     if rec.get("sources_only"):
         # A comparison, not a gate: nothing was solved, so there is nothing
         # for grad_num to judge and nothing for --out to write.
