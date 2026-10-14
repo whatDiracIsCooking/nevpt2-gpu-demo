@@ -132,6 +132,11 @@ run_here() {
   # And no `throw` in src/ or apps/ (devtools/throw-lint.sh): the
   # two-tier error model's gate, over the same one tree.
   "$REPO_ROOT/devtools/throw-lint.sh"
+  # Deliberately NOT golden_layout_check.py or ruff, which cpp-tier.sh runs:
+  # they are backend-independent, so the cpp-tier run every PR carries
+  # already covers them, and this can run inside the other backend's image,
+  # where a check of the Python environment would say nothing about the
+  # compile this script exists for.
 
   local -a cfg=(cmake --preset "$preset" -B "$build_dir")
   [ "$fresh" = 1 ] && cfg+=(--fresh)

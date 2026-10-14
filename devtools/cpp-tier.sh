@@ -4,8 +4,12 @@
 # suite beside it and no install tier; every golden ctest entry is labelled
 # `gpu`, so this needs a real card, and a green `-LE gpu` run proves only the
 # host-only GoogleTest suites (test/) -- logic, never an energy. It runs
-# devtools/stream-lint.sh --strict first (a gate), and
-# devtools/throw-lint.sh (no `throw` in src/ or apps/).
+# four gates first, none of which needs a card: devtools/stream-lint.sh
+# --strict, devtools/throw-lint.sh (no `throw` in src/ or apps/),
+# reference_data/golden_layout_check.py (the golden layout contract, and its
+# scan for stray file readers in src/ and apps/) and `ruff check`, the last
+# two through `uv run` against the locked environment (they FAIL, never skip,
+# when that environment is missing or stale).
 #
 #   devtools/cpp-tier.sh [--preset NAME] [--fresh] [--clean] [--no-test]
 #                        [--tidy] [--rocm] [-j N] [--report DIR]
@@ -53,7 +57,10 @@
 #                   changing a toolchain variable; a plain reconfigure keeps
 #                   the old value and the change appears to do nothing.
 #   --clean         rebuild every object (`--clean-first`), keeping the cache.
-#   --no-test       configure and build only.
+#   --no-test       configure and build only. The four gates above still
+#                   run: they need no card and cost about a second, and a
+#                   --no-test run is often the only run a no-card change
+#                   gets.
 #   --tidy          after a successful build, run clang-tidy over the .cpp
 #                   implementation units and apps/*/main.cppm using the
 #                   build's compile_commands.json. Reports findings; does NOT
@@ -80,7 +87,8 @@
 #                   one entry per golden case, so -R matches names like
 #                   nevpt2_cas1010 / nevpt2_cas1212 / nevpt2_cas1010_cublas.
 #
-# Exit status is the first failing phase's, so a scheduler can alert on it.
+# Exit status is the first failing phase's, so a scheduler can alert on it,
+# and the summary line names every phase that failed (`failed=...`).
 #: -- help stops here --
 #
 # Deliberately NOT what docker/compose.yaml's `build`/`test` services do, even
@@ -258,11 +266,36 @@ has_test_preset() {
   ctest --preset "$test_preset" --show-only >/dev/null 2>&1
 }
 
+declare -a failed_phases=()
 run_phase() {
   local name=$1; shift
   echo "--- $name: $* ---" | tee -a "$log"
   "$@" 2>&1 | tee -a "$log"
-  return "${PIPESTATUS[0]}"
+  local status=${PIPESTATUS[0]}
+  [ "$status" -eq 0 ] || failed_phases+=("$name")
+  return "$status"
+}
+
+# Run a Python tool in the project's LOCKED environment (uv.lock; /opt/venv in
+# every image, .venv from `uv sync` on a host). `uv sync --frozen --check`
+# first, which changes nothing and fails when the environment is missing or
+# does not match the lock -- so a box without it FAILS the phase rather than
+# skipping it (a gate that skips when it cannot run is how #84's stray reader
+# reached main), and `uv run` never quietly creates an empty venv and runs the
+# check against it. --no-sync because the tier checks the environment, it does
+# not install into it: `uv sync --frozen` is the fix the message names.
+in_locked_env() {
+  command -v uv >/dev/null 2>&1 || {
+    echo "cpp-tier: uv not found -- it is the one assumed host tool" \
+      "(.claude/CLAUDE.md, \"Setup\")" >&2
+    return 1
+  }
+  uv sync --frozen --check --quiet || {
+    echo "cpp-tier: the locked Python environment is missing or stale" \
+      "(${UV_PROJECT_ENVIRONMENT:-.venv}) -- run \`uv sync --frozen\`" >&2
+    return 1
+  }
+  uv run --frozen --no-sync "$@"
 }
 
 rc=0
@@ -277,6 +310,15 @@ run_phase stream-lint "$REPO_ROOT/devtools/stream-lint.sh" --strict || rc=$?
 # (abort tier) or a returned Error (value tier), never an exception. A gate,
 # folded into rc the same way.
 run_phase throw-lint "$REPO_ROOT/devtools/throw-lint.sh" || rc=$?
+
+# The golden layout contract (docs/testing.md, "The golden layout contract"):
+# every committed golden through every Python reader, and the scan for a stray
+# file reader in src/ or apps/ -- the check #84 turned red because no gate ran
+# it. Then ruff over the Python tree (pyproject.toml's [tool.ruff]). Both are
+# gates, folded into rc like the lints, and both run under --no-test too.
+run_phase golden-layout in_locked_env python \
+  "$REPO_ROOT/reference_data/golden_layout_check.py" || rc=$?
+run_phase ruff in_locked_env ruff check "$REPO_ROOT" || rc=$?
 
 configure=(cmake --preset "$preset")
 [ "$fresh" -eq 1 ] && configure+=(--fresh)
@@ -338,6 +380,9 @@ fi
 set -e
 
 verdict=$([ "$rc" -eq 0 ] && echo PASS || echo "FAIL(rc=$rc)")
+if [ "${#failed_phases[@]}" -gt 0 ]; then
+  verdict="$verdict failed=$(IFS=,; echo "${failed_phases[*]}")"
+fi
 summary="cpp-tier $verdict  rev=$rev  preset=$preset  stamp=$stamp"
 echo "$summary" | tee -a "$log"
 echo "$summary" >> "$report_dir/summary.log"

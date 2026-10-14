@@ -48,11 +48,26 @@ only compiles for the other backend says so.
 So the gate is local, and **saying what you ran is the whole protocol**:
 
 ```bash
-devtools/cpp-tier.sh                # CUDA, on a box with a card (runs both lints first)
-devtools/cross-backend-check.sh     # does the OTHER backend still compile (lints too)
+devtools/cpp-tier.sh                # CUDA, on a box with a card (runs the four gates below first)
+devtools/cross-backend-check.sh     # does the OTHER backend still compile (the two lints too)
 devtools/stream-lint.sh --strict    # every GPU call on the one stream; both scripts above run it
 devtools/throw-lint.sh              # no `throw` in src/, apps/ or test/; likewise
+uv run python reference_data/golden_layout_check.py   # "The golden layout contract", below; cpp-tier.sh runs it
+uv run ruff check                   # the Python lint (pyproject.toml's [tool.ruff]); likewise
 ```
+
+`cpp-tier.sh` runs the four as named phases (`stream-lint`, `throw-lint`,
+`golden-layout`, `ruff`) before it configures, and under `--no-test` too:
+none needs a card, and a `--no-test` run is often the only run a no-card
+change gets. A failing one fails the tier and is named in its summary line
+(`FAIL(rc=1) failed=golden-layout`). The two Python phases run through
+`uv run --frozen --no-sync` after `uv sync --frozen --check`, so a missing or
+stale environment (`/opt/venv` in every image, `.venv` on a host) **fails**
+the phase with `uv sync --frozen` as the fix, rather than skipping it: #84's
+stray reader reached `main` because the gate that would have caught it was
+one nobody ran. `cross-backend-check.sh` runs only the two lints: they read
+the one C++ tree it compiles for the other backend, while the Python phases
+are backend-independent and already ride every `cpp-tier.sh` run.
 
 `cross-backend-check.sh` proves the other backend *compiles*, not that it is
 right: a numerical claim needs that backend's card. The `compile-cuda` /
@@ -85,11 +100,11 @@ The Python half registers **no ctest entry**, for the same reasons the
 gradient comparison does not ("Why there is no ctest entry for it", below):
 it imports the offline scripts it checks, so an entry would put the PySCF
 environment in the test path, and it touches no card or binary while the
-golden tier is all `gpu`. Unlike that comparison it is cheap, so run it after
-any change to `reference_data/` that reads or writes these formats, **and**
-after any change that adds file reading to `src/` or `apps/`: its scan covers
-those too, and #73's `.gradsrc` reader went in without it and turned it red on
-`main`. A C++ file that reads a format other than the three golden layouts is
+golden tier is all `gpu`. Unlike that comparison it is cheap, so
+`devtools/cpp-tier.sh` runs it as its `golden-layout` phase ("No CI, and the
+local gate", above) on every preset, `--no-test` included. Its scan covers
+`src/` and `apps/` too: #73's `.gradsrc` reader went in when no gate ran it,
+and turned it red on `main`. A C++ file that reads a format other than the three golden layouts is
 named, with its reason, in the check's `CPP_NON_GOLDEN_READERS`; it may open a
 file but still fails the scan on a seek or a golden magic.
 
