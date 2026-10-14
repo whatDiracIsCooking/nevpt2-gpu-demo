@@ -30,10 +30,14 @@
 //                         gradient sidecar in golden/, of both header
 //                         layouts, loads, with its array table found where
 //                         that file's header ends; every source-term oracle
-//                         (*.srcgold, #92) loads and belongs to its golden
+//                         (*.srcgold, #92), of both flavours (SC "NEVPT2S1",
+//                         PC "NEVPT2P1" as <case>_pc.srcgold, #95), loads
+//                         and belongs to its golden
 //   SrcGoldLoadErrorTests loadSrcGold's refusals: a golden handed to it, a
 //                         truncated or over-long oracle, and an oracle held
-//                         to a golden it was not written for
+//                         to a golden it was not written for; the magic is
+//                         what sets the scheme, and srcGoldCase refuses a PC
+//                         oracle not named <case>_pc
 //
 // The malformed files are written to a per-test temp directory, removed in
 // TearDown. The committed goldens are only ever read; their paths come from
@@ -587,29 +591,39 @@ TEST(GoldenLayoutContractTests, EveryCommittedGradientSidecarLoadsAgainstItsGold
   }
 }
 
-// The golden and gradient sidecar beside an oracle path.
-std::filesystem::path besideOracle(const std::string& oracle, std::string_view ext) {
-  std::filesystem::path p(oracle);
-  p.replace_extension(ext);
-  return p;
+// The golden and gradient sidecar beside an oracle path: <case>.<ext>, where
+// a PC oracle is <case>_pc.srcgold (srcGoldCase).
+std::filesystem::path besideOracle(const std::string& oracle, SourceScheme scheme,
+                                   std::string_view ext) {
+  const Result<std::string> c = srcGoldCase(oracle, scheme);
+  EXPECT_TRUE(c.has_value()) << c.error().message;
+  return std::filesystem::path(oracle).parent_path() /
+         (c.value_or("") + std::string(ext));
 }
 
 TEST(GoldenLayoutContractTests, EveryCommittedSourceOracleLoadsAgainstItsGolden) {
   const std::vector<std::string> paths = splitPaths(NEVPT2_TEST_COMMITTED_SRCGOLDS);
   ASSERT_FALSE(paths.empty()) << "test/golden/CMakeLists.txt globbed no source-term oracle";
+  std::map<SourceScheme, int> perScheme;
   for (const std::string& path : paths) {
     SCOPED_TRACE(path);
     const Result<SrcGoldFile> o = loadSrcGold(path);
     ASSERT_TRUE(o.has_value()) << o.error().message;
+    ++perScheme[o->scheme];
     EXPECT_GT(o->kappaStep, 0.0);
     EXPECT_GT(o->ciStep, 0.0);
-    const Result<GoldenFile> golden = loadGolden(besideOracle(path, ".nevpt2gold").string());
+    const Result<GoldenFile> golden =
+        loadGolden(besideOracle(path, o->scheme, ".nevpt2gold").string());
     ASSERT_TRUE(golden.has_value()) << golden.error().message;
-    const Result<GradGoldFile> side = loadGradGold(besideOracle(path, ".gradgold").string());
+    const Result<GradGoldFile> side =
+        loadGradGold(besideOracle(path, o->scheme, ".gradgold").string());
     ASSERT_TRUE(side.has_value()) << side.error().message;
     const Status st = o->checkAgainst(*golden, *side);
     EXPECT_TRUE(st.has_value()) << st.error().message;
   }
+  // Both flavours on disk, or this suite is not testing what it claims to.
+  EXPECT_GT(perScheme[SourceScheme::Sc], 0) << "no committed SC (NEVPT2S1) oracle was loaded";
+  EXPECT_GT(perScheme[SourceScheme::Pc], 0) << "no committed PC (NEVPT2P1) oracle was loaded";
 }
 
 // --- SrcGoldLoadErrorTests ----------------------------------------------------
@@ -644,14 +658,59 @@ TEST_F(SrcGoldLoadErrorTests, TruncatedAndOverlongOraclesAreIoErrors) {
                       "1 bytes after the last");
 }
 
+TEST_F(SrcGoldLoadErrorTests, TheMagicIsTheScheme) {
+  // One layout, two magics: an SC oracle's bytes under the PC magic load as a
+  // PC oracle with every number unchanged, and under a third magic do not
+  // load at all.
+  const std::string oracle = firstCommittedOracle();
+  ASSERT_FALSE(oracle.empty());
+  const Result<SrcGoldFile> sc = loadSrcGold(oracle);
+  ASSERT_TRUE(sc.has_value()) << sc.error().message;
+  std::string bytes = readAll(oracle);
+  const std::string_view was(bytes.data(), 8);
+  ASSERT_TRUE(was == "NEVPT2S1" || was == "NEVPT2P1") << was;
+  const bool wasPc = was == "NEVPT2P1";
+  bytes.replace(0, 8, wasPc ? "NEVPT2S1" : "NEVPT2P1");
+  const Result<SrcGoldFile> flipped = loadSrcGold(write("flipped_pc.srcgold", bytes));
+  ASSERT_TRUE(flipped.has_value()) << flipped.error().message;
+  EXPECT_EQ(sc->scheme, wasPc ? SourceScheme::Pc : SourceScheme::Sc);
+  EXPECT_EQ(flipped->scheme, wasPc ? SourceScheme::Sc : SourceScheme::Pc);
+  EXPECT_EQ(flipped->nmo, sc->nmo);
+  EXPECT_EQ(flipped->ndet, sc->ndet);
+  EXPECT_EQ(flipped->get("a_corr").data(), sc->get("a_corr").data());
+  bytes.replace(0, 8, "NEVPT2X1");
+  expectOracleIoError(loadSrcGold(write("third.srcgold", bytes)),
+                      "expected 'NEVPT2S1' or 'NEVPT2P1'");
+}
+
+TEST_F(SrcGoldLoadErrorTests, APcOracleIsNamedForItsCase) {
+  const Result<std::string> pc = srcGoldCase("/x/golden/n2_ccpvdz_cas44_pc.srcgold",
+                                             SourceScheme::Pc);
+  ASSERT_TRUE(pc.has_value()) << pc.error().message;
+  EXPECT_EQ(*pc, "n2_ccpvdz_cas44");
+  const Result<std::string> sc = srcGoldCase("/x/golden/n2_ccpvdz_cas44.srcgold",
+                                             SourceScheme::Sc);
+  ASSERT_TRUE(sc.has_value()) << sc.error().message;
+  EXPECT_EQ(*sc, "n2_ccpvdz_cas44");
+  // A PC oracle without the suffix would claim the SC oracle's place.
+  const Result<std::string> bad = srcGoldCase("/x/golden/n2_ccpvdz_cas44.srcgold",
+                                              SourceScheme::Pc);
+  ASSERT_FALSE(bad.has_value());
+  EXPECT_EQ(bad.error().kind, ErrorKind::IO);
+  EXPECT_NE(bad.error().message.find("must end in '_pc.srcgold'"), std::string::npos)
+      << bad.error().message;
+}
+
 TEST_F(SrcGoldLoadErrorTests, AnOracleForAnotherStateIsRefused) {
   const std::string oracle = firstCommittedOracle();
   ASSERT_FALSE(oracle.empty());
   Result<SrcGoldFile> o = loadSrcGold(oracle);
   ASSERT_TRUE(o.has_value()) << o.error().message;
-  Result<GoldenFile> golden = loadGolden(besideOracle(oracle, ".nevpt2gold").string());
+  Result<GoldenFile> golden =
+      loadGolden(besideOracle(oracle, o->scheme, ".nevpt2gold").string());
   ASSERT_TRUE(golden.has_value()) << golden.error().message;
-  const Result<GradGoldFile> side = loadGradGold(besideOracle(oracle, ".gradgold").string());
+  const Result<GradGoldFile> side =
+      loadGradGold(besideOracle(oracle, o->scheme, ".gradgold").string());
   ASSERT_TRUE(side.has_value()) << side.error().message;
   // One CI coefficient moved by one ulp: a different state, bit for bit.
   Tensor& ci = golden->arrays.at("ci");

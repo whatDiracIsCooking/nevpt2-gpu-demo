@@ -6,7 +6,8 @@
 //
 // WHY IT LIVES IN apps/ AND NOT src/. nevpt2.gradient is a library that
 // computes; deciding to write what it computed to a file is the binary's
-// business (#73). So this is the one module library under apps/: declared by
+// business (#73). So this is a module library under apps/ (one of two, with
+// nevpt2.source_compare): declared by
 // apps/sc_pseudodensity/CMakeLists.txt beside the binary that writes it
 // (nevpt2_sc_pseudodensity --dump-source-terms), and a library at all only so
 // the unit tier (test/gradsrc/) can round-trip it without a card.

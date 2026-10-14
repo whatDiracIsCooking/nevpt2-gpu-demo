@@ -76,6 +76,20 @@ MO_SIDECAR_MAGIC = b"NEVPT2M1"
 #: ``sc_source_oracle.py`` writes it).
 SRCGOLD_MAGIC = b"NEVPT2S1"
 
+#: The same format's PC flavour (#95): block2's partially-contracted source
+#: terms, ``sc_source_oracle.py --pc``. One layout, one reader; the magic is
+#: the only thing that differs, and it is what says which energy the arrays
+#: differentiate, so an SC comparison can never read a PC oracle as its own.
+SRCGOLD_MAGIC_PC = b"NEVPT2P1"
+
+#: A source-term oracle's scheme, by magic: what :func:`read_srcgold` reports
+#: as ``header["scheme"]`` and :func:`write_srcgold` picks the magic from
+#: (``src/golden/golden.cppm``'s ``SourceScheme`` is the same two).
+SRCGOLD_SCHEMES = {SRCGOLD_MAGIC: "sc", SRCGOLD_MAGIC_PC: "pc"}
+
+#: ``SRCGOLD_SCHEMES`` inverted: the magic a writer takes.
+SRCGOLD_MAGIC_FOR = {scheme: magic for magic, scheme in SRCGOLD_SCHEMES.items()}
+
 #: A golden's state fields, common to both layouts: ``struct`` codes, all
 #: little-endian with no padding.
 _GOLDEN_STATE = (
@@ -110,11 +124,13 @@ MO_SIDECAR_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
 #: the RHF split of the active space (docs/gradient-theory.md, section 2.6:
 #: the first ``n_act_occ`` active orbitals of the basis ``a_corr`` is written
 #: in are act_O), the determinant count, and the two difference-quotient
-#: steps the arrays were taken at.
+#: steps the arrays were taken at. The SC and PC flavours share it.
+_SRCGOLD_LAYOUT = tuple(
+    (n, "i") for n in ("nmo", "ncore", "nact", "nvirt", "n_act_occ")
+) + (("ndet", "q"), ("kappa_step", "d"), ("ci_step", "d"))
 SRCGOLD_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
-    SRCGOLD_MAGIC: tuple(
-        (n, "i") for n in ("nmo", "ncore", "nact", "nvirt", "n_act_occ")
-    ) + (("ndet", "q"), ("kappa_step", "d"), ("ci_step", "d")),
+    SRCGOLD_MAGIC: _SRCGOLD_LAYOUT,
+    SRCGOLD_MAGIC_PC: _SRCGOLD_LAYOUT,
 }
 
 #: No array the generator writes has more than a handful of axes; a rank past
@@ -314,24 +330,39 @@ def read_mo_sidecar(path) -> tuple[dict, dict[str, str], dict[str, np.ndarray]]:
 
 
 def write_srcgold(path, *, header: dict, arrays: dict[str, np.ndarray]) -> None:
-    """Write a source-term oracle (``*.srcgold``): the ``NEVPT2S1`` magic, the
+    """Write a source-term oracle (``*.srcgold``): the magic of
+    ``header["scheme"]`` (``"sc"``: ``NEVPT2S1``, ``"pc"``: ``NEVPT2P1``), the
     :data:`SRCGOLD_HEADERS` scalar header from ``header``, then the named-array
     section every format here ends with. :func:`read_srcgold` reads it back
     into the same ``(header, arrays)``."""
+    magic = SRCGOLD_MAGIC_FOR[header["scheme"]]
     with open(path, "wb") as f:
-        f.write(pack_header(SRCGOLD_HEADERS, SRCGOLD_MAGIC, header))
+        f.write(pack_header(SRCGOLD_HEADERS, magic, header))
         write_arrays(f, arrays)
 
 
 def read_srcgold(path) -> tuple[dict, dict[str, np.ndarray]]:
-    """``(header, arrays)`` from a source-term oracle. ``header`` holds exactly
-    the :data:`SRCGOLD_HEADERS` fields, so :func:`write_srcgold` writes the
-    same file back."""
+    """``(header, arrays)`` from a source-term oracle. ``header`` holds the
+    :data:`SRCGOLD_HEADERS` fields plus ``scheme`` (``"sc"`` or ``"pc"``, off
+    the magic), so :func:`write_srcgold` writes the same file back."""
     with open(path, "rb") as f:
         header = _read_header(f, path, SRCGOLD_HEADERS, "source-term oracle")
-        del header["magic"]
+        header["scheme"] = SRCGOLD_SCHEMES[header.pop("magic")]
         arrays = _read_arrays(f, path, None)
     return header, arrays
+
+
+def srcgold_case(path, scheme: str) -> str:
+    """The case an oracle belongs to: its file name's stem, less the ``_pc``
+    suffix a PC oracle carries (``golden/<case>_pc.srcgold`` sits beside the
+    same ``<case>.nevpt2gold`` / ``.gradgold`` as the SC one). The C++ side
+    is ``srcGoldCase`` in ``src/golden/golden.cppm``."""
+    stem = Path(path).stem
+    if scheme == "pc":
+        if not stem.endswith("_pc"):
+            raise FormatError(f"{path}: a PC oracle's name must end in _pc.srcgold")
+        stem = stem[: -len("_pc")]
+    return stem
 
 
 def main(argv: list[str]) -> int:

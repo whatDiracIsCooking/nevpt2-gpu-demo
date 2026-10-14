@@ -465,7 +465,7 @@ if(NEVPT2_BUILD_TESTING)
   # one is independent, and it is the offline `nevpt2_grad.py --source both`
   # comparison of #73 with PySCF's side committed rather than recomputed.
   #
-  # The known gaps are PINNED: a block on source_oracle.cppm's kKnownGaps list
+  # The known gaps are PINNED: a block on source_compare.cppm's kKnownGaps list
   # must still disagree by more than the tolerance, every other block must
   # agree within it -- so the entry fails when a correct block breaks AND when
   # a fix lands without the list being updated. The list is empty since #89:
