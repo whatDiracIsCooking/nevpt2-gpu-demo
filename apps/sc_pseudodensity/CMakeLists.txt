@@ -21,7 +21,8 @@ add_cxx_module_library(
 
 add_executable(nevpt2_sc_pseudodensity)
 target_sources(nevpt2_sc_pseudodensity PRIVATE FILE_SET CXX_MODULES
-               FILES main.cppm kappa_check.cppm kappa_full_check.cppm source_dump.cppm)
+               FILES main.cppm kappa_check.cppm kappa_full_check.cppm source_dump.cppm
+                     source_oracle.cppm)
 set_target_properties(nevpt2_sc_pseudodensity PROPERTIES CXX_MODULE_STD ON)
 target_compile_features(nevpt2_sc_pseudodensity PRIVATE cxx_std_23)
 target_compile_options(nevpt2_sc_pseudodensity PRIVATE -Wall)
@@ -52,6 +53,26 @@ if(NOT _nevpt2_env_rows MATCHES "\\| \\*\\*([0-9.]+e-[0-9]+)\\*\\* \\|$")
 endif()
 target_compile_definitions(nevpt2_sc_pseudodensity
                            PRIVATE NEVPT2_SELF_VARIATION_ENVELOPE=${CMAKE_MATCH_1})
+# --source-oracle's tolerance (#92), the same way and for the same reason: it
+# is measured -- PySCF's side is a central difference, so the agreement can be
+# read only to that quotient's truncation -- and its ONE home is
+# docs/testing.md, "The SC source terms against PySCF's, on a card".
+file(STRINGS "${_nevpt2_testing_md}" _nevpt2_oracle_rows
+     REGEX "^\\| \\*\\*the source-oracle tolerance\\*\\*")
+list(LENGTH _nevpt2_oracle_rows _nevpt2_oracle_count)
+if(NOT _nevpt2_oracle_count EQUAL 1)
+  message(FATAL_ERROR "nevpt2_sc_pseudodensity: docs/testing.md must carry exactly one "
+                      "'| **the source-oracle tolerance** ... | **<x>e-<n>** |' row (\"The SC "
+                      "source terms against PySCF's, on a card\"); found ${_nevpt2_oracle_count}")
+endif()
+if(NOT _nevpt2_oracle_rows MATCHES "\\| \\*\\*([0-9.]+e-[0-9]+)\\*\\* \\|$")
+  message(FATAL_ERROR "nevpt2_sc_pseudodensity: docs/testing.md's source-oracle tolerance "
+                      "row does not end in '| **<x>e-<n>** |': ${_nevpt2_oracle_rows}")
+endif()
+target_compile_definitions(nevpt2_sc_pseudodensity
+                           PRIVATE NEVPT2_SOURCE_ORACLE_TOL=${CMAKE_MATCH_1})
+unset(_nevpt2_oracle_rows)
+unset(_nevpt2_oracle_count)
 unset(_nevpt2_testing_md)
 unset(_nevpt2_env_rows)
 unset(_nevpt2_env_count)

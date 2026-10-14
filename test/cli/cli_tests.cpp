@@ -20,7 +20,7 @@
 //   CliDemoFlagTests     nevpt2_demo's --sc-tangent / --gradient-source
 //   CliDfDemoFlagTests   nevpt2_df_demo's --batch / --check-blocks
 //   CliScPseudodensityFlagTests  --kappa-act / --kappa-full / --gradgold /
-//                                --dump-source-terms
+//                                --dump-source-terms / --source-oracle
 //   CliPcTangentFlagTests        --fd-steps / --fd-start-pow
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
@@ -398,8 +398,8 @@ constexpr std::array kExpectedMatrix{
     MatrixRow{"--gradient-source", "D"},    MatrixRow{"--batch", "F"},
     MatrixRow{"--check-blocks", "F"},       MatrixRow{"--kappa-act", "S"},
     MatrixRow{"--kappa-full", "S"},         MatrixRow{"--gradgold", "DS"},
-    MatrixRow{"--dump-source-terms", "S"},  MatrixRow{"--fd-steps", "P"},
-    MatrixRow{"--fd-start-pow", "P"},
+    MatrixRow{"--dump-source-terms", "S"},  MatrixRow{"--source-oracle", "S"},
+    MatrixRow{"--fd-steps", "P"},           MatrixRow{"--fd-start-pow", "P"},
 };
 
 char letterOf(const Binary b) {
@@ -621,6 +621,7 @@ TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
       {Binary::ScPseudodensity, {"--tiles", "3", "--kappa-act"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--kappa-full"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--dump-source-terms", "x.gradsrc"}},
+      {Binary::ScPseudodensity, {"--tiles", "3", "--source-oracle", "x.srcgold"}},
       {Binary::PcTangent, {"--tiles", "3"}},
       {Binary::PcTangent, {"--tiles", "40", "--fd-steps", "3"}},
   };
@@ -769,8 +770,8 @@ TEST(CliScPseudodensityFlagTests, GradgoldNeedsKappaFull) {
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
     EXPECT_EQ(r.error().message,
-              "--gradgold is the sidecar --kappa-full and --dump-source-terms read; it does "
-              "nothing on its own");
+              "--gradgold is the sidecar --kappa-full, --dump-source-terms and --source-oracle "
+              "read; it does nothing on its own");
   }
 }
 
@@ -815,6 +816,43 @@ TEST(CliScPseudodensityFlagTests, OtherBinariesRefuseDumpSourceTerms) {
     EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << binaryName(b);
     EXPECT_NE(r.error().message.find("only nevpt2_sc_pseudodensity"), std::string::npos)
         << r.error().message;
+  }
+}
+
+TEST(CliScPseudodensityFlagTests, SourceOracleSetsItsPath) {
+  const Result<Options> r = parse(Binary::ScPseudodensity, {"--source-oracle", "x.srcgold"});
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(r->sourceOraclePath, "x.srcgold");
+  EXPECT_TRUE(r->dumpSourceTermsPath.empty());
+  EXPECT_FALSE(r->kappaAct);
+  EXPECT_FALSE(r->kappaFull);
+  // It reads the sidecar too, so --gradgold is accepted beside it.
+  const Result<Options> g = parse(Binary::ScPseudodensity,
+                                  {"--source-oracle", "x.srcgold", "--gradgold", "s.gradgold"});
+  ASSERT_TRUE(g.has_value()) << g.error().message;
+  EXPECT_EQ(g->gradgoldPath, "s.gradgold");
+}
+
+TEST(CliScPseudodensityFlagTests, SourceOracleRefusesTheOtherJobs) {
+  for (const std::vector<std::string_view>& other :
+       {std::vector<std::string_view>{"--kappa-act"}, std::vector<std::string_view>{"--kappa-full"},
+        std::vector<std::string_view>{"--dump-source-terms", "x.gradsrc"}}) {
+    std::vector<std::string_view> args{"--source-oracle", "x.srcgold"};
+    args.insert(args.end(), other.begin(), other.end());
+    const Result<Options> r = parse(Binary::ScPseudodensity, args);
+    ASSERT_FALSE(r.has_value()) << other.front();
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(r.error().message,
+              "--source-oracle compares the source terms --dump-source-terms writes and "
+              "--kappa-act / --kappa-full check; run one at a time");
+  }
+}
+
+TEST(CliScPseudodensityFlagTests, OtherBinariesRefuseSourceOracle) {
+  for (const Binary b : {Binary::Demo, Binary::DfDemo, Binary::PcTangent}) {
+    const Result<Options> r = parse(b, {"--source-oracle", "x.srcgold"});
+    ASSERT_FALSE(r.has_value()) << binaryName(b);
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << binaryName(b);
   }
 }
 
