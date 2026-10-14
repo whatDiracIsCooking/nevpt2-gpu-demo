@@ -524,6 +524,16 @@ the pool's used high-water after that build beside it:
 | CAS(12,12) `--tiles 40` | 6824.0 MB | 6999.2 MB |
 | CAS(12,12) `--tiles 60` | 4549.4 MB | 4724.5 MB |
 
+**The digests' orbital tangent has no floor of its own.**
+`scDigestRotationTangentDevice` (`--kappa-full`, `--dump-source-terms`, #88)
+is the *plain* `buildRdmsDevice` run at the dotted integrals, one direction at
+a time, so its per-tile working set is the plain build's and the plain floors
+above are its floors; nothing about it was measured separately. Its other
+allocations — three zero RDM tangents (`n^2 + n^4 + n^6` doubles) and the
+energy tangent's slab walk — do not scale with `--tiles`. The cases that run
+it today (those with a gradient sidecar: N2 CAS(4,4), CAS(8,8), LiF CAS(4,6),
+acrolein CAS(6,5)) are far below any floor at `--tiles 3`.
+
 ### The tangent RDM build (`--rdm-tangent`)
 
 `buildRdmTangentsDevice` (`nevpt2.rdm_build`'s `:tangent` partition) is the

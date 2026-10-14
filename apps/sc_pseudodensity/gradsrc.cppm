@@ -36,6 +36,19 @@
 //                                against this
 //   ncore, nact, nvirt  0-d i8   the partition, checked against the state
 //   e_corr        0-d f8         the SC total the terms differentiate
+//
+// and, as a set of three or not at all, the forward Edot(kappa) along seeded
+// directions (#88) -- what nevpt2_grad.py --edot-check holds against PySCF's
+// exact directional derivative:
+//
+//   edot_kappa    (n_dir, n_mo, n_mo)  each direction, antisymmetric, in the
+//                                      golden's basis (the reader carries it
+//                                      into its own, as it does Y)
+//   edot_frozen   (n_dir,)             the frozen-digest tangent along it:
+//                                      the integral half + the orbital
+//                                      energies' response, f3ac/f3ca fixed
+//   edot_digest   (n_dir,)             the f3ac/f3ca digests' own term; the
+//                                      exact Edot is the sum of the two
 module;
 
 #include "error_handling/error_macros.h"  // NEVPT2_TRY: a macro, which no import carries
@@ -58,17 +71,27 @@ struct GradSrc {
   int64_t nact = 0;
   int64_t nvirt = 0;
   double eCorr = 0.0;
+  // The forward Edot(kappa) along seeded directions (#88): all three empty
+  // (default-constructed) for a dump without them, else (n_dir, n_mo, n_mo),
+  // (n_dir) and (n_dir).
+  Tensor edotKappa;
+  Tensor edotFrozen;
+  Tensor edotDigest;
+  bool hasDirections() const { return edotKappa.size() > 0; }
 };
 
 // Writes `src` to `path`. A shape that does not fit -- kappaSource not
-// (n_mo, n_mo) for the partition, ciSource and ci not the same shape -- is the
-// caller's bug (check()); a file that cannot be opened or written is an IO
-// Error.
+// (n_mo, n_mo) for the partition, ciSource and ci not the same shape, the
+// three direction members not all empty or not (n_dir, n_mo, n_mo) / (n_dir)
+// / (n_dir) -- is the caller's bug (check()); a file that cannot be opened or
+// written is an IO Error.
 Status writeGradSrc(const std::string& path, const GradSrc& src);
 
 // Reads a `.gradsrc` as writeGradSrc writes one. A missing or unreadable file,
 // a corrupt archive (bad signature, CRC mismatch, truncation), a member it does
-// not write, or a missing member is an IO Error naming the file.
+// not write, a missing member, or the direction members present only in part
+// or with mismatched shapes is an IO Error naming the file. A dump with no
+// direction members reads with the three left empty.
 Result<GradSrc> readGradSrc(const std::string& path);
 
 }  // namespace nevpt2

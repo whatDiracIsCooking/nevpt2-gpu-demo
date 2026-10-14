@@ -85,6 +85,10 @@ export import nevpt2.gradient_plan;
 // entry points the CI source term IS, once the pseudodensities are swept down
 // to the RDMs (Park Eq. 48).
 export import nevpt2.sigma_vector;
+// Re-exported: scDigestRotationTangentDevice takes the build's RdmBuildOptions
+// and runs buildRdmsDevice itself -- the digests' tangent along a rotation IS
+// that build at the dotted integrals (#88).
+export import nevpt2.rdm_build;
 
 export namespace nevpt2 {
 
@@ -339,10 +343,11 @@ Result<Tensor> scActiveRotationMatrix(const NevptIntegralsDevice& ints, const De
 // why `scPseudocanonicalMultipliers` below divides an exact numerator. The
 // forward route to it is one digest rebuild per direction (the digests are
 // linear in `h2e`, so `buildRdmsDevice` at the dotted `h2e` IS their
-// tangent); reverse mode still needs that contraction's transpose, a kernel
-// this tree does not have. Both modes differentiate the same functional
-// either way, so the duality stays exact (docs/testing.md, "The full orbital
-// source term").
+// tangent) -- scDigestRotationTangentDevice below, which reports it as a
+// term of its own (#88); reverse mode still needs that contraction's
+// transpose, a kernel this tree does not have. Both modes here differentiate
+// the same functional either way, so the duality stays exact (docs/testing.md,
+// "The full orbital source term").
 //
 // THE INTEGRAL HALF IS BIT-FOR-BIT THE ACTIVE BLOCK'S when `kappa` is
 // active-restricted, by construction and not by luck: the intra-active part
@@ -477,6 +482,63 @@ Result<ScGeneralCheck> scGeneralIntegralCheck(const NevptIntegralsDevice& ints,
 // agrees to `atol`. As printScRotationTable, the PASS/FAIL line is the
 // caller's.
 bool printScFullRotationTable(const ScFullRotationResult& r, double atol);
+
+// --- the digests' orbital response, forward mode (#88) -----------------------
+//
+// The term the two modes above both leave out: the f3ac/f3ca digests are the
+// active h2e contracted with the 4-RDM, so along a rotation they move with
+// h2e, and the exact Edot(kappa) is
+//
+//   Edot(kappa) = [ the frozen-digest tangent above: tangentIntegral + eps ]
+//               + sum_k Q_k Hdot_k |_{f3 -> f3_dot(kappa)}            (this)
+//
+// NO NEW KERNEL, by the pattern #27 set for the CI tangent ("a Dyall block's
+// tangent is its own builder called with the dotted integrals"): the whole
+// RDM build -- consume, digest, the fdm2 correction and the wedge -- is
+// LINEAR in h2e at a fixed CI vector, so the digests' tangent along kappa is
+// buildRdmsDevice itself run at h2e_dot(kappa), the very tangent the rotation
+// machinery forms for the Dyall blocks (intra-active action plus the
+// sidecar's general part; its dm3 output, which reads no integral, is
+// discarded). And the energy's response to a digest displacement at fixed
+// integrals is energiesTangentDevice with every other RDM tangent zero: the
+// digests enter make_a16 / make_a22 as plain addends, so only the H side
+// moves, and the orbital energies -- which no digest reaches -- are held.
+//
+// Reported as ITS OWN TERM beside the frozen-digest tangent rather than folded
+// into it, so the forward/reverse duality keeps comparing like with like and
+// stays exact: reverse mode needs this contraction's transpose, which is
+// later work (docs/gradients.md, Sec. 6). What validates it is outside the
+// pair: PySCF's exact directional derivative minus its frozen-digest one
+// (reference_data/nevpt2_grad.py --edot-check, reading the directions and
+// this term out of a `.gradsrc`), and on the card a finite difference of the
+// energy with only the digests rebuilt (apps/sc_pseudodensity/'s
+// --kappa-full).
+//
+// Exact digests only: `opt` must name the emitted or the native-fp64 BLAS
+// digest, as every tangent path's must (cli refuses --cublas / --ozaki /
+// --fused-digest with the flags that reach this; reaching it anyway is our
+// bug). `ci` is the CI vector the plain build ran on; `nelecA`/`nelecB` its
+// strings. One RDM build and one tangent slab walk per direction, on
+// res.stream(), at `opt.nTiles` -- the plain build's working set, so the
+// plain build's tile floors (docs/performance.md, "Tile floors").
+struct ScDigestTangent {
+  std::array<double, 8> classes{};  // each class's d/dt through the digests alone
+  double total = 0.0;               // their sum: Edot's digest term
+  double h2eDotMax = 0.0;           // max |h2e_dot(kappa)|: did kappa move h2e at all
+};
+
+Result<std::vector<ScDigestTangent>> scDigestRotationTangentDevice(
+    const RdmBuildOptions& opt, const Tensor& ci, int64_t nelecA, int64_t nelecB,
+    const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen, const DeviceTensor& dm1,
+    const DeviceTensor& dm2, const DeviceTensor& dm3, const DeviceTensor& f3ac,
+    const DeviceTensor& f3ca, const std::vector<ScRotationRequest>& dirs,
+    const DeviceResources& res);
+
+// Prints Edot(kappa) in its two terms -- the frozen-digest tangent, the
+// digest term -- and their sum, one line per direction. `full` and `digest`
+// are the answers for the same direction list, in the same order.
+void printScDigestTangentTable(const ScFullRotationResult& full,
+                               const std::vector<ScDigestTangent>& digest);
 
 // Prints the per-class table -- the amplitude energy against `energies`'
 // (nevpt2.energy's own answer for the same state) and against the golden

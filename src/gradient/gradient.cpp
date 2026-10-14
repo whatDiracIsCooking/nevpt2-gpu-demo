@@ -428,6 +428,77 @@ bool printScFullRotationTable(const ScFullRotationResult& r, double atol) {
   return ok;
 }
 
+// --- the digests' orbital response, forward mode (#88) ------------------------
+
+Result<std::vector<ScDigestTangent>> scDigestRotationTangentDevice(
+    const RdmBuildOptions& opt, const Tensor& ci, const int64_t nelecA, const int64_t nelecB,
+    const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen, const DeviceTensor& dm1,
+    const DeviceTensor& dm2, const DeviceTensor& dm3, const DeviceTensor& f3ac,
+    const DeviceTensor& f3ca, const std::vector<ScRotationRequest>& dirs,
+    const DeviceResources& res) {
+  // A tangent built from an approximate digest is not the derivative of
+  // anything the energy stage computed; nevpt2.cli refuses the combination,
+  // so reaching here with one is our bug.
+  check(!opt.cublas && !opt.ozaki && !opt.fusedDigest,
+        "scDigestRotationTangentDevice runs the emitted or the native-fp64 BLAS digest "
+        "(cli refuses --cublas / --ozaki / --fused-digest with --kappa-full and "
+        "--dump-source-terms)");
+  NEVPT2_TRY(checkGeneralShapes(ints, gen));
+  const wwrStream_t s = res.stream();
+  const int64_t norb = dm1.dims[0];
+  const ActiveIntegralsDevice ai = activeViewOf(ints);
+  // h2e_dot(kappa) per direction, exactly as the frozen-digest tangent's Dyall
+  // blocks read it: the intra-active action plus the sidecar's general part.
+  const ScRotation rot = NEVPT2_TRY(makeGeneralRotation(dirs, ai.h1e, ai.h2e, gen, dm1, res));
+
+  // The other RDMs' tangents are zero: a rotation at fixed CI moves no RDM,
+  // and only the digests' h2e dependence is differentiated here. Allocated
+  // once, zero-filled by their allocation, and only ever read.
+  const DeviceTensor dm1Zero = DeviceTensor::zeros(dm1.dims, res);
+  const DeviceTensor dm2Zero = DeviceTensor::zeros(dm2.dims, res);
+  const DeviceTensor dm3Zero = DeviceTensor::zeros(dm3.dims, res);
+
+  std::vector<ScDigestTangent> out(dirs.size());
+  for (std::size_t d = 0; d < rot.dirs.size(); ++d) {
+    // downloadTensor synchronizes the stream, so the rotation's einsums are
+    // complete; the build takes the integrals on the host, as the plain
+    // build's caller hands it the golden's.
+    const Tensor h2eDot = downloadTensor(rot.dirs[d].h2eDot, s);
+    for (int64_t i = 0; i < h2eDot.size(); ++i)
+      out[d].h2eDotMax = std::max(out[d].h2eDotMax, std::fabs(h2eDot.flat(i)));
+    std::printf("\ndigest tangent, direction %zu: the RDM build at h2e_dot (max |h2e_dot| = "
+                "%.3e)\n",
+                d, out[d].h2eDotMax);
+    // f3ac_dot / f3ca_dot: the build is linear in h2e at a fixed CI vector.
+    // Its dm3 reads no integral and is not used.
+    const RdmBuildResult dot = buildRdmsDevice(opt, ci, norb, nelecA, nelecB, h2eDot, res);
+    const EnergyTangentResult t = energiesTangentDevice(
+        ints, dm1, dm2, dm3, f3ac, f3ca, dm1Zero, dm2Zero, dm3Zero, dot.f3ac, dot.f3ca,
+        /*epsDot=*/nullptr, res);
+    out[d].classes = t.energyDots;
+    out[d].total = t.totalDot;
+  }
+  return out;
+}
+
+void printScDigestTangentTable(const ScFullRotationResult& full,
+                               const std::vector<ScDigestTangent>& digest) {
+  check(full.dirs.size() == digest.size(),
+        "printScDigestTangentTable: the two answers are for different direction lists");
+  std::printf(
+      "\nEdot(kappa) in its two terms, per direction (#88)\n"
+      "  frozen       the tangent above: integral half + eps, f3ac/f3ca held fixed\n"
+      "  digest       the f3ac/f3ca digests' own response: the RDM build at h2e_dot,\n"
+      "               through the classes' H side (energiesTangentDevice)\n"
+      "  Edot         frozen + digest: the exact directional derivative at fixed CI\n");
+  std::printf("%-5s %22s %22s %22s %12s\n", "dir", "frozen", "digest", "Edot", "max|h2e_dot|");
+  for (std::size_t d = 0; d < digest.size(); ++d) {
+    const double frozen = full.dirs[d].tangent;
+    std::printf("%-5zu %22.14e %22.14e %22.14e %12.3e\n", d, frozen, digest[d].total,
+                frozen + digest[d].total, digest[d].h2eDotMax);
+  }
+}
+
 bool printScRotationTable(const ScRotationResult& r, double atol) {
   std::printf(
       "\nThe active-rotation source term Y_act (Park Eq. 26), per direction\n"
