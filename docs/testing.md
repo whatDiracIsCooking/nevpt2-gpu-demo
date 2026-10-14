@@ -378,14 +378,14 @@ blocks and the full-MO-range `h`, `h^eff` and generalized Fock that a rotation
 leaving the active space needs. Only a case with a sidecar can run it, which
 is why the three are these three.
 
-**What moves now, and the one thing that still does not.** The functional is
+**What moves now.** The functional is
 the SC total as a function of every stored MO-integral array *and* of the
 orbital-energy vectors `e_core` / `e_virt`, with `dm1`/`dm2`/`dm3` fixed (the
 derivative's own definition). The orbital energies were one of the two gaps
 the active block left: they are the generalized Fock's diagonals, and `f` plus
 the inventory's restricted rows is exactly what their response needs
 ([`gradient-theory.md`](gradient-theory.md), §3.1's second structural fact).
-What is still held fixed is the `f3ac`/`f3ca` digests' own `h2e` dependence —
+What the integral halves still hold fixed is the `f3ac`/`f3ca` digests' own `h2e` dependence —
 present on the blocks `h2e` moves under (active-active and the two mixed
 blocks with an active index) and **absent by construction from the core-core
 and virtual-virtual ones**, where no `h2e` index and no orbital energy moves
@@ -393,11 +393,13 @@ at all. So the two blocks Park Eqs. 56-57 read are an exact derivative.
 `gradient.cppm`, "The full source term Y_xy", says it where the code is, and
 records that the forward route to the digests (they are linear in `h2e`, so
 `buildRdmsDevice` at the dotted `h2e` *is* their tangent) costs one digest
-rebuild per direction while reverse mode still needs a transpose kernel this
-tree does not have. #88 built that forward route: the same entries now print
-the digests' term beside the duality and gate a sixth check on it — "The
-digests' orbital response, forward mode" below has its numbers; the table
-here is the five checks the duality half was measured with.
+rebuild per direction, and that reverse mode needs that contraction's
+transpose. #88 built the forward route and #89 the transpose: the same
+entries now gate a sixth check on the digests' term and, beside the integral
+halves' duality, the **full** one — `<kappa, Y>` with the transpose's term
+against the exact `Edot` — "The digests' orbital response, forward mode" and
+"… reverse mode" below have their numbers; the table here is the five checks
+the duality half was measured with.
 
 **Five checks, and the gate is their conjunction.** Measured on an RTX 3080
 (CUDA, Release, `--tiles 3`):
@@ -610,6 +612,13 @@ set to 1e-18 in a scratch build — below every CAS(8,8) and LiF gap above —
 the CAS(8,8) and LiF entries fail on that line (`FAILED -- the kernels'
 nondeterminism has grown`) and CAS(4,4)'s, whose gaps are 1e-27, still
 passes: the gate fires, and on the cases that give it its teeth.
+
+**#89's transpose kernels do not touch it.** They are one thread per output
+element with no atomic (`src/rdm/f3_transpose.cu`), so they add no run-to-run
+variation of their own, and the digests' term they feed is kept out of the
+integral halves check 3 compares. The envelope was therefore neither
+re-measured nor widened; every `--kappa-full` run since, on both cards, stayed
+inside it ("The digests' orbital response, reverse mode").
 
 ## The PC tangent against a finite difference
 
@@ -1194,10 +1203,17 @@ differ only through the source terms), and prints both beside `grad_num`.
 SC only: the GPU has no PC source terms (#74). The gate is the same 1e-6 per
 component, for the reason "The tolerance, and why it is not 1e-7" gives.
 
-**The GPU-sourced gradient fails, on every case, by four to six decades —
-and the failure is entirely the one dependence the device's functional is
-documented to hold fixed** ([`gradients.md`](gradients.md), §1, §6): the
-`f3ac`/`f3ca` digests in `Y`. #73 measured it beside a second one, the
+**Since #89 the GPU-sourced gradient passes** — within 1e-6 of `grad_num` on
+LiF, acrolein and N2 CAS(4,4), and componentwise the PySCF-sourced one's to
+well inside that, without `--localise` — because `Y` now carries the digests'
+response through their transpose ([`gradients.md`](gradients.md), §6). The
+numbers are "The digests' orbital response, reverse mode" below. **What
+follows in this section is the record it supersedes**, kept as it was
+measured: why the gradient failed before, and which omission cost what.
+
+**Until #89 the GPU-sourced gradient failed, on every case, by four to six
+decades — and the failure was entirely the one dependence the device's
+functional was documented to hold fixed**: the `f3ac`/`f3ca` digests in `Y`. #73 measured it beside a second one, the
 orbital energies held fixed in `y`; #87 put their response into both modes
 (§5.5), and **the GPU's `y` is now PySCF's exact one** to PySCF's own
 finite-difference truncation, on all four cases. With the digests put back
@@ -1226,8 +1242,10 @@ uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
 
 ### The verdict, and which term costs what
 
-#87's runs, `--source both` with no `--localise` (N2 CAS(4,4)'s `grad_num`
-from `nevpt2_numgrad.py --npz`, as acrolein's):
+#87's runs — **superseded by #89**, whose dumps carry the digests' term and
+pass; kept as the record of what that term was worth — `--source both` with
+no `--localise` (N2 CAS(4,4)'s `grad_num` from `nevpt2_numgrad.py --npz`, as
+acrolein's):
 
 | | LiF CAS(4,6) | acrolein CAS(6,5) | N2 CAS(4,4) |
 |---|---|---|---|
@@ -1354,15 +1372,14 @@ both CI-stationarity ones. The nuclear ladders and the projection of `z` pass,
 as they should: the solve and the contraction are right, only their input is
 not.
 
-**What would close it**, not in this tree: `Y`'s digest term needs the
-4-RDM contraction's transpose ([`gradients.md`](gradients.md), §6). `y`'s
+**What closed it.** `Y`'s digest term is the 4-RDM contraction's transpose
+([`gradients.md`](gradients.md), §6), in tree since #89; `y`'s
 orbital-energy term, the other half of this section when #73 wrote it, is
-#87's `dm1` coefficient ([`gradients.md`](gradients.md), §5.5), and the
-attribution row above is what says it closed. The dump and `--source both`
-remain the seam the digest term would be checked through: the `--localise`
-`Y` columns would become the exact ones. Its **forward** half is already
-checked through the same dump, direction by direction — "The digests'
-orbital response, forward mode" below.
+#87's `dm1` coefficient ([`gradients.md`](gradients.md), §5.5). The dump and
+`--source both` were the seam both were checked through, and the `Y` blocks
+above that were the digests' — `--localise`'s columns — are now matched by
+the dump against the **exact** derivatives, to PySCF's truncation: "The
+digests' orbital response, reverse mode" below.
 
 ### What it costs, and what is a ctest entry
 
@@ -1565,6 +1582,130 @@ tier passed, and are clean under all four tools (seconds per entry):
 `asan` passed all six too (dump entries 4.1 / 25.8 / 3.9 s), no ASan or LSan
 report.
 
+## The digests' orbital response, reverse mode
+
+#89 puts the term "The digests' orbital response, forward mode" computes
+into `Y` itself: `scDigestAdjointDevice` runs the slab walk's RDM sweep for
+`dE/d(f3ac)` / `dE/d(f3ca)` and hands them to `buildDigestAdjointDevice`, the
+f3 path's **transpose** with respect to `h2e` — tiled, `L2` re-produced per
+tile, the 4-RDM never formed ([`gradients.md`](gradients.md), §6). Its result
+`hbar = dE/d(h2e)` through the digests is paired with every direction's
+`h2e_dot` and added to `<kappa, Y>` as a term of its own. Four things hold it:
+
+- **the full duality, on the card**: `<kappa, Y>` with the transpose's term
+  against the exact `Edot` — the frozen-digest tangent plus #88's rebuilt
+  digests' term — on `--kappa-full`'s four seeded full directions, gated at
+  1e-7 beside the integral halves' duality; the dump gates the same across
+  the file it writes (its six directions' exact `Edot` against
+  `sum kappa.Y` off the written matrix); and along check 6's active
+  direction the reverse term against the forward one;
+- **the transpose itself, in the unit tier**: `RdmDigestAdjointTests`
+  (`test/rdm/rdm_tangent_tests.cpp`, `gpu`) — `<hbar, h2e_dot>` against
+  `<G, f3(h2e_dot)>` from the plain build, per order and both together, at
+  CAS(4,4) and CAS(8,8) (1e-12 relative to the products' magnitudes); every
+  one of CAS(4,4)'s 256 `hbar` elements against the build at a basis
+  integral; and one answer at 1, 2, 3 and 5 tiles and every forward digest;
+- **the independent provider, on the card**: `--source-oracle` against
+  PySCF's exact `Y`, with `kKnownGaps` empty ("The SC source terms against
+  PySCF's, on a card");
+- **the milestone's claim, offline**: a nuclear gradient built from a fresh
+  dump against `grad_num`, and componentwise against the PySCF-sourced one,
+  **without** `--localise`.
+
+### The full duality
+
+Max `|<kappa, Y> − Edot|` over the directions, both terms of each side in
+(Release, `--tiles 3`, the default digest of each backend):
+
+| | N2 CAS(4,4) | N2 CAS(8,8) | LiF CAS(4,6) | acrolein CAS(6,5) |
+|---|---:|---:|---:|---:|
+| `--kappa-full`, 4 full directions, RTX 3080 | 3.2e-14 | 7.5e-15 | 1.8e-14 | — |
+| `--kappa-full`, 4 full directions, RX 9060 XT | 5.3e-14 | 7.9e-15 | 2.4e-14 | — |
+| dump check 4, 6 directions, RTX 3080 | 1.3e-14 | — | 2.1e-14 | 4.6e-13 |
+| check 6's direction, reverse vs forward term, RTX 3080 | 7.6e-30 ³ | 9.6e-16 | 5.1e-15 | — |
+| the same, RX 9060 XT | 1.7e-29 ³ | 1.1e-15 | 1.8e-15 | — |
+| the intra-space directions' reverse term | 0.0 | 0.0 | 0.0 | — |
+
+³ CAS(4,4)'s check-6 direction is the symmetry zero of "The on-card checks"
+above: both terms are ~1e-17. Acrolein has no `--kappa-full` run: its
+sidecar is gitignored, so it was dumped (with its sidecar regenerated out of
+tree) and not checked by the entry. Every `--kappa-full` run above also kept
+the recorded self-variation envelope ("The kernels' same-run
+self-variation"), which the transpose's term is not in.
+
+### The GPU-sourced nuclear gradient
+
+Fresh dumps (RTX 3080, preset `default`, Release, `--tiles 3`, the default
+digest; acrolein's sidecar regenerated out of tree with `generate_golden.py
+--gradgold --out`, its `grad_num` by `nevpt2_numgrad.py`, N2's by
+`nevpt2_numgrad.py --no-write --npz`), then `nevpt2_grad.py --case <case>
+--source both --source-path <dump>` with no `--localise`, single-threaded
+Python, PySCF 2.14.0:
+
+| | LiF CAS(4,6) | acrolein CAS(6,5) | N2 CAS(4,4) |
+|---|---|---|---|
+| components compared | 6 | 16 (in-plane) | 6 |
+| **GPU-sourced**: max \|g − grad_num\| | **8.5e-9 — PASS** | **6.6e-8 — PASS** | **1.4e-8 — PASS** |
+| PySCF-sourced, same sweep: max \|g − grad_num\| | 8.3e-9 — PASS | 6.5e-8 — PASS | 4.4e-8 — PASS |
+| max \|GPU-sourced − PySCF-sourced\| | 1.5e-10 | 4.3e-9 | 2.9e-8 |
+| … the GPU's `Y` alone (with PySCF's `y`) | 1.4e-10 | 4.3e-9 | 2.6e-8 |
+| … the GPU's `y` alone (with PySCF's `Y`) | 1.2e-11 | 7.9e-11 | 3.1e-9 |
+| the dump vs PySCF's exact `A`, worst block | 6.4e-9 (core–virt) | 1.7e-8 (core–virt) | 2.0e-7 (core–virt) |
+| residual-independent checks | 11 of 11 | 11 of 11 | 11 of 11 |
+| `--source both` wall | 90 s | 1290 s | 24 s |
+| #87's GPU-sourced, for the record (digests held fixed) | 7.55e-3 — FAIL | 6.34e-1 — FAIL | 9.78e-2 — FAIL |
+
+The `Y` attribution row fell four to eight decades, to the PySCF-sourced
+gradient's own distance from `grad_num` or below; what is left of
+GPU-against-PySCF is PySCF's finite-difference truncation, whose largest
+block — N2's core–virt (1, 9) — is the pair "The source terms,
+componentwise" already records as not differenced cleanly at the committed
+step. The blocks that were the digests' are now matched to the exact
+derivative: acrolein's core–act_O 6.5e-9 (was 4.0e-1), act_O–act_V 1.4e-10
+(was 2.2e-1), act_O–virt 3.7e-9 (was 5.6e-1), act_V–virt 1.0e-10 (was
+2.8e-2); LiF's and N2's are the oracle table's. The orbital-stationarity
+ladders, the two that failed in #87's runs, hold on all three.
+
+### The negative control
+
+The transpose's term dropped from `<kappa, Y>` in a scratch patch
+(`p.adjoint = p.integral + p.eps;` in `scFullRotationDevice`, never
+committed), rebuilt (RTX 3080, `default`), N2 CAS(4,4) and LiF:
+
+- `--kappa-full` **FAILS** on both, on the full duality line — the four
+  directions miss by exactly the digests' term, 1.7e-3 … 1.6e-2 (N2 CAS(4,4))
+  and 2.9e-3 … 4.6e-2 (LiF) — while the integral halves' duality still passes:
+  "adjoint vs tangent (integral halves), every direction within 1e-07: ok";
+- `--source-oracle` **FAILS** on both, on exactly the blocks `kKnownGaps`
+  used to hold: "blocks out of place: act_O-virt, act_V-virt" (N2 CAS(4,4))
+  and "act_O-act_V, act_O-virt, act_V-virt" (LiF);
+- the dump **FAILS** its check 4 on both, and the provider gate — the
+  nuclear gradient from that dump, `--source both` — **FAILS**: max \|g − grad_num\| = 7.55e-3 (LiF) and 9.78e-2 (N2 CAS(4,4)) — #87's GPU-sourced figures to the digit — with both orbital-stationarity ladders failing (9 of 11), while the PySCF-sourced gradient on the same sweep passes as before (8.3e-9, 4.4e-8).
+
+### What is a ctest entry, and the sanitizers
+
+Every on-card check above is inside an existing entry's PASS line:
+`nevpt2_sc_pseudodensity_kappa_full_<case>` (the full duality, check 6's
+reverse term, the intra-space zeros), `_dump_<case>` (check 4, now the full
+duality) and `_oracle_<case>` (no known gap). The transpose's unit suite is
+`rdm_tangent_tests`' `RdmDigestAdjointTests`, `gpu`, 0.70 s. The gradient
+against `grad_num` stays the manual offline gate it was ("Why there is no
+ctest entry for it"). Walls, RTX 3080 / RX 9060 XT (`ctest`, Release):
+
+| entry | CAS(4,4) | CAS(8,8) | LiF |
+|---|---|---|---|
+| `kappa_full` | 1.11 s / 2.21 s | 17.30 s / 48.11 s | 2.16 s / 18.29 s |
+| `dump` | 1.39 s / 2.42 s | 23.93 s / 34.82 s | 2.56 s / 7.93 s |
+| `oracle` | 1.34 s / 2.31 s | — | 2.32 s / 5.60 s |
+
+**Under the sanitizers**, the `unit` tier carries `RdmDigestAdjointTests`
+into every preset (CUDA: `asan`, `ubsan`, `compute-sanitizer` memcheck and
+initcheck; HIP: `hip-asan`, `hip-ubsan`), each preset's own tier passing —
+`asan` 195/195, `ubsan` 195/195, memcheck 186/186, initcheck 183/183, `hip-asan` 193/193, `hip-ubsan` 193/193, with `RdmDigestAdjointTests` at 1.21 / 1.04 / 14.18 / 7.83 / 15.84 / 14.62 s. The eight non-`small` entries above were also run by name in each
+CUDA preset's build, as #88's were (`ctest --test-dir build-<preset> -R
+'nevpt2_sc_pseudodensity_(kappa_full|dump|oracle)_'`, with the presets'
+`ASAN_OPTIONS` / `LSAN_OPTIONS` / `UBSAN_OPTIONS`): all eight pass under all four tools, no ASan, LSan, UBSan or compute-sanitizer report. Seconds per entry, `kappa_full` CAS(4,4) / CAS(8,8) / LiF, `dump` the same, `oracle` CAS(4,4) / LiF: `asan` 18.0 / 20.4 / 3.6, 4.2 / 26.0 / 4.0, 4.0 / 3.6; `ubsan` 3.5 / 19.6 / 3.3, 3.2 / 25.2 / 3.4, 3.0 / 3.1; memcheck 12.3 / 475.1 / 42.3, 17.7 / 734.0 / 60.5, 17.2 / 55.8; initcheck 9.1 / 156.7 / 17.0, 11.9 / 257.1 / 24.5, 11.4 / 22.6. The HIP presets ran their own tiers only (the unit suite above in each), not these entries by name.
+
 ## The SC source terms against PySCF's, on a card
 
 `nevpt2_sc_pseudodensity --source-oracle golden/<case>.srcgold` (#92) is the
@@ -1585,28 +1726,27 @@ the offline `--source both`; this is that comparison with PySCF's side
 committed, so a regression in a correct block, or a fix that lands, shows up
 on the next `fast` run.
 
-**The known gaps are pinned, not hidden.** `Y` still holds the `f3ac`/`f3ca`
-digests fixed ([`gradients.md`](gradients.md), §6), so some blocks are known
-wrong. `kKnownGaps` in `apps/sc_pseudodensity/source_oracle.cppm` is the
-**one** list of them; a block on it must still disagree by **more** than the
-tolerance and every other block must agree **within** it. So the entry fails
-when a correct block breaks, and fails when a fix lands without the list
-being updated — the way #64's envelope pins the exchange non-collapse. The
-list today:
+**The known gaps are pinned, not hidden — and there are none.**
+`kKnownGaps` in `apps/sc_pseudodensity/source_oracle.cppm` is the **one** list
+of blocks the device is known to get wrong; a block on it must still disagree
+by **more** than the tolerance and every other block must agree **within**
+it. So the entry fails when a correct block breaks, and fails when a fix
+lands without the list being updated — the way #64's envelope pins the
+exchange non-collapse. **The list is empty since #89**, so every block of
+both oracles is held to agree. What it held until then, kept as the record:
 
-| oracle | known gaps (must stay off) | held to agree |
+| oracle | known gaps until #89 | `P y` |
 |---|---|---|
-| N2 CAS(4,4) | act_O–virt, act_V–virt | core–core, core–act_O, core–act_V, core–virt, act_O–act_V, virt–virt, `P y` |
-| LiF CAS(4,6) | act_O–act_V, act_O–virt, act_V–virt | core–core, core–act_O, core–act_V, core–virt, virt–virt, `P y` |
+| N2 CAS(4,4) | act_O–virt, act_V–virt — the blocks `Y`, holding the `f3ac`/`f3ca` digests fixed, got wrong | off since #87 |
+| LiF CAS(4,6) | act_O–act_V, act_O–virt, act_V–virt — the same | off since #87 |
 
-`P y` is on neither: #87 put the orbital energies' response into `y`, and it
-left the list with that PR. N2's act_O–act_V and both cases' core–act blocks
-are zero by symmetry on **both** sides (exactly 0.0 here), so they are held to
-agree; on N2 CAS(8,8) and acrolein core–act is a gap, but neither has an
-oracle (their `P y` quotients cost hours, and acrolein's sidecar is
-gitignored). #89 empties the list. An oracle with no entry in
-`kClassifiedOracles` is refused as a configuration error, not read as
-"everything must agree", and a list entry naming no block fails the run.
+N2's act_O–act_V and both cases' core–act blocks are zero by symmetry on
+**both** sides (exactly 0.0 here), so they were held to agree throughout; on
+N2 CAS(8,8) and acrolein core–act was a gap too, but neither has an oracle
+(their `P y` quotients cost hours, and acrolein's sidecar is gitignored). An
+oracle with no entry in `kClassifiedOracles` is refused as a configuration
+error, not read as "everything must agree", and a list entry naming no block
+fails the run.
 
 ### The tolerance, measured from the step ladders
 
@@ -1653,23 +1793,27 @@ are byte-identical to them.
 
 ### What the entries measure
 
-At the committed step, on the RTX 3080 (preset `default`, `--tiles 3`, the
-default digest), max \|GPU − PySCF\| per block — the #73 table's figures
-again, to the digit, now from a ctest entry:
+At the committed step, max \|GPU − PySCF\| per block — since #89, on the RTX
+3080 (preset `default`) and the RX 9060 XT (preset `hip`), Release, `--tiles
+3`, the default digest, which agree to the four digits shown; the former
+gaps' #92 values (the #73 table's, to the digit) beside them:
 
 | block | N2 CAS(4,4) | LiF CAS(4,6) |
 |---|---:|---:|
 | core–core | 5.3e-11 | 1.2e-10 |
 | core–act_O / core–act_V | 0 / 0 | 0 / 0 |
 | core–virt | 2.0e-7 | 6.4e-9 |
-| act_O–act_V | 1.8e-12 | **1.4e-1** (gap) |
-| act_O–virt | **2.9e-1** (gap) | **5.5e-1** (gap) |
-| act_V–virt | **1.1e-2** (gap) | **5.9e-2** (gap) |
+| act_O–act_V | 1.8e-12 | 2.4e-10 (was **1.4e-1**, gap) |
+| act_O–virt | 9.2e-10 (was **2.9e-1**, gap) | 6.5e-10 (was **5.5e-1**, gap) |
+| act_V–virt | 5.8e-11 (was **1.1e-2**, gap) | 3.4e-10 (was **5.9e-2**, gap) |
 | virt–virt | 4.7e-11 | 2.5e-10 |
 | `P y` | 9.0e-9 (12 det.) | 5.7e-10 (225 det.) |
 
-ctest clocks the two entries at 1.4 s and 2.3 s (the `Y` probe is 378 and
-253 basis directions). Not `small`, for the dump's reason: under the
+The former gaps now sit inside the blocks that always agreed: the worst block
+of either oracle is still N2's core–virt, PySCF's own truncation ("The
+tolerance, measured from the step ladders"), so the tolerance needs no
+change. ctest clocks the two entries at 1.34 s and 2.32 s on the RTX 3080, 2.31 s and 5.60 s on the RX 9060 XT (the `Y` probe is 378
+and 253 basis directions). Not `small`, for the dump's reason: under the
 sanitizer tier the probe count would dominate.
 
 **Negative controls, run once (#92; scratch patches, not committed),** on the
@@ -1682,7 +1826,8 @@ RTX 3080, both entries each time:
 | the same substitution, act_O–virt taken off `kKnownGaps` | PASS, 8 agree / 1 gap | PASS, 7 agree / 2 gaps |
 
 So the entry fails in both directions the issue asks for, and goes green
-only when the list moves with the fix.
+only when the list moves with the fix. #89 emptied it in the same change
+that put the transpose into `Y`.
 
 ## Residual-independent checks of the gradient path
 

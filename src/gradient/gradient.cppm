@@ -206,11 +206,12 @@ ScGradientResult scPseudodensityDevice(const NevptIntegralsDevice& ints, const D
 //     which this derivative holds fixed;
 //   * the f3ac/f3ca digests -- NOT a property of the exact derivative, but
 //     of this functional: the digests are h2e contracted with the 4-RDM, so
-//     the exact dE/dkappa carries a term through them, and recovering it in
-//     reverse mode needs that contraction's TRANSPOSE (the 4-RDM against a
-//     6-index conjugate density), a kernel this tree does not have. Both
-//     directions here therefore differentiate the energy stage's own
-//     functional, with the digests among its fixed inputs;
+//     the exact dE/dkappa carries a term through them, which reverse mode
+//     recovers through that contraction's TRANSPOSE (the 4-RDM against a
+//     6-index conjugate density; scDigestAdjointDevice, #89) -- read by the
+//     FULL entry points below, not by this one. Both directions here
+//     differentiate the energy stage's own functional, with the digests
+//     among its fixed inputs;
 //   * the orbital energies e_core/e_virt -- likewise this functional's, and
 //     in the exact derivative they move too, through the active density
 //     inside the generalized Fock matrix: that needs the (xa|cc) and (xa|vv)
@@ -334,20 +335,22 @@ Result<Tensor> scActiveRotationMatrix(const NevptIntegralsDevice& ints, const De
 //     same trick that makes a Dyall block's tangent its own `make_*` at the
 //     dotted integrals.
 //
-// AND THE ONE GAP THAT REMAINS, named where it bites: the `f3ac`/`f3ca`
-// digests are still held fixed, so the derivative is exact except for the
-// 4-RDM digests' own `h2e` dependence. That dependence lives on the blocks
-// `h2e` moves under -- the active-active and the two mixed blocks with an
-// active index -- and is EXACTLY ABSENT from the core-core and
-// virtual-virtual blocks (no core or virtual index enters `h2e`), which is
-// why `scPseudocanonicalMultipliers` below divides an exact numerator. The
-// forward route to it is one digest rebuild per direction (the digests are
-// linear in `h2e`, so `buildRdmsDevice` at the dotted `h2e` IS their
-// tangent) -- scDigestRotationTangentDevice below, which reports it as a
-// term of its own (#88); reverse mode still needs that contraction's
-// transpose, a kernel this tree does not have. Both modes here differentiate
-// the same functional either way, so the duality stays exact (docs/testing.md,
-// "The full orbital source term").
+// AND THE DIGESTS, the last dependence the integral half holds fixed: the
+// `f3ac`/`f3ca` digests' own `h2e` dependence. It lives on the blocks `h2e`
+// moves under -- the active-active and the two mixed blocks with an active
+// index -- and is EXACTLY ABSENT from the core-core and virtual-virtual
+// blocks (no core or virtual index enters `h2e`), which is why
+// `scPseudocanonicalMultipliers` below divides an exact numerator. Forward,
+// it is one digest rebuild per direction (the digests are linear in `h2e`, so
+// `buildRdmsDevice` at the dotted `h2e` IS their tangent) --
+// scDigestRotationTangentDevice below (#88). Reverse, it is that
+// contraction's transpose, run once (scDigestAdjointDevice, #89): handed in
+// as `digestAdjoint`, it makes `adjoint` the EXACT <kappa, Y> at fixed CI.
+// It is kept out of the integral halves, so their duality stays the
+// like-for-like one it always was, and the FULL duality -- `adjoint` against
+// the frozen-digest tangent plus the forward digests' term -- is a second,
+// equally exact one (docs/testing.md, "The full orbital source term" and
+// "The digests' orbital response, reverse mode").
 //
 // THE INTEGRAL HALF IS BIT-FOR-BIT THE ACTIVE BLOCK'S when `kappa` is
 // active-restricted, by construction and not by luck: the intra-active part
@@ -391,15 +394,25 @@ struct GeneralIntegralsDevice {
 // the active block's for an active-restricted kappa. `eps` is the
 // orbital-energy response, which is ONE contraction (R_t against Deltadot_t)
 // shared by both modes, so it is reported once and added to both.
+//
+// `digest` is the f3ac/f3ca digests' own term in REVERSE mode (#89):
+// <hbar, h2e_dot(kappa)>, with hbar = dE/d(h2e) through the digests
+// (scDigestAdjointDevice) -- zero, and `hasDigest` false, when the caller
+// handed no hbar and so asked for the frozen-digest functional. It is in
+// `adjoint` and NOT in `tangent`: forward mode's matching term is
+// scDigestRotationTangentDevice's, a separate call, so the full duality is
+// `adjoint` against `tangent + ScDigestTangent::total`.
 struct ScFullRotationPairing {
   double ext = 0.0;              // sum_blocks <D, Xdot>
   double act = 0.0;              // sum_G <M_G, Gdot>
   double integral = 0.0;         // ext + act
   double eps = 0.0;              // sum_t R_t Deltadot_t
-  double adjoint = 0.0;          // <kappa, Y> = integral + eps
+  double digest = 0.0;           // <hbar, h2e_dot>: the digests' term (#89)
+  double adjoint = 0.0;          // <kappa, Y> = integral + eps + digest
   double tangentIntegral = 0.0;  // Edot's integral half, P.Ndot + Q.Hdot
-  double tangent = 0.0;          // tangentIntegral + eps
+  double tangent = 0.0;          // tangentIntegral + eps (the frozen-digest tangent)
   bool hasTangent = false;
+  bool hasDigest = false;
 };
 
 struct ScFullRotationResult {
@@ -416,6 +429,12 @@ struct ScFullRotationResult {
 // reads whole blocks (a slab would need the sidecar's arrays sliced along a
 // batch axis too), and a sidecar exists only for cases small enough not to
 // need tiling anyway (docs/reference-data.md, "The gradient sidecar").
+//
+// `digestAdjoint` is hbar = dE/d(h2e) through the digests
+// (scDigestAdjointDevice, #89). Non-null, `adjoint` is the EXACT <kappa, Y>
+// at fixed CI -- the digests' term paired with the very h2e_dot the Dyall
+// blocks read; null, it is the frozen-digest functional's, as before #89.
+// Either way the integral halves the duality gate reads are unchanged.
 Result<ScFullRotationResult> scFullRotationDevice(const NevptIntegralsDevice& ints,
                                                   const GeneralIntegralsDevice& gen,
                                                   const DeviceTensor& dm1,
@@ -423,6 +442,7 @@ Result<ScFullRotationResult> scFullRotationDevice(const NevptIntegralsDevice& in
                                                   const DeviceTensor& dm3,
                                                   const DeviceTensor& f3ac,
                                                   const DeviceTensor& f3ca,
+                                                  const DeviceTensor* digestAdjoint,
                                                   const std::vector<ScRotationRequest>& dirs,
                                                   const DeviceResources& res);
 
@@ -436,11 +456,13 @@ Result<ScFullRotationResult> scFullRotationDevice(const NevptIntegralsDevice& in
 // gives: the directly contractible part of the pairing is symmetric in
 // (x, y) and so invisible to an antisymmetric kappa, and everything that is
 // left is a map INTO the integrals. A caller that wants only Park Eqs. 56-57
-// needs the core-core and virtual-virtual pairs alone.
+// needs the core-core and virtual-virtual pairs alone. `digestAdjoint` as
+// scFullRotationDevice's: non-null, Y carries the digests' response (#89).
 Result<Tensor> scFullRotationMatrix(const NevptIntegralsDevice& ints,
                                     const GeneralIntegralsDevice& gen, const DeviceTensor& dm1,
                                     const DeviceTensor& dm2, const DeviceTensor& dm3,
                                     const DeviceTensor& f3ac, const DeviceTensor& f3ca,
+                                    const DeviceTensor* digestAdjoint,
                                     const std::vector<std::pair<int64_t, int64_t>>& pairs,
                                     int64_t chunk, const DeviceResources& res);
 
@@ -505,10 +527,10 @@ bool printScFullRotationTable(const ScFullRotationResult& r, double atol);
 // moves, and the orbital energies -- which no digest reaches -- are held.
 //
 // Reported as ITS OWN TERM beside the frozen-digest tangent rather than folded
-// into it, so the forward/reverse duality keeps comparing like with like and
-// stays exact: reverse mode needs this contraction's transpose, which is
-// later work (docs/gradients.md, Sec. 6). What validates it is outside the
-// pair: PySCF's exact directional derivative minus its frozen-digest one
+// into it, so the integral halves' duality keeps comparing like with like;
+// reverse mode's matching term is scDigestAdjointDevice's (#89, below), and
+// the two meet in the FULL duality. What validates this one independently is
+// outside the pair: PySCF's exact directional derivative minus its frozen-digest one
 // (reference_data/nevpt2_grad.py --edot-check, reading the directions and
 // this term out of a `.gradsrc`), and on the card a finite difference of the
 // energy with only the digests rebuilt (apps/sc_pseudodensity/'s
@@ -536,9 +558,37 @@ Result<std::vector<ScDigestTangent>> scDigestRotationTangentDevice(
 
 // Prints Edot(kappa) in its two terms -- the frozen-digest tangent, the
 // digest term -- and their sum, one line per direction. `full` and `digest`
-// are the answers for the same direction list, in the same order.
-void printScDigestTangentTable(const ScFullRotationResult& full,
-                               const std::vector<ScDigestTangent>& digest);
+// are the answers for the same direction list, in the same order. Where
+// `full` carries the reverse-mode digest term too (#89), each line adds it
+// and the FULL duality, |<kappa, Y> - Edot|, and the return is whether every
+// such line is within `atol`; true when none carries it.
+bool printScDigestTangentTable(const ScFullRotationResult& full,
+                               const std::vector<ScDigestTangent>& digest, double atol);
+
+// --- the digests' orbital response, reverse mode (#89) -----------------------
+//
+// The reverse half of the term above: hbar = dE/d(h2e) THROUGH THE DIGESTS,
+// the n_act^4 tensor whose pairing with h2e_dot(kappa) is that term, so that
+// Y -- probed basis direction by basis direction -- carries it.
+//
+// Two steps, both already their own checked pieces: the slab walk's RDM sweep
+// (nevpt2.gradient:rdm_adjoint, the one scCiSourceDevice runs) leaves
+// G_ac = dE/d(f3ac) and G_ca = dE/d(f3ca), and the build's transpose
+// (nevpt2.rdm_build's buildDigestAdjointDevice: the 4-RDM against a six-index
+// conjugate density, tiled, the 4-RDM never formed) takes them back onto
+// h2e. Since the digests are linear in h2e at a fixed CI vector,
+//
+//   <hbar, h2e_dot(kappa)> == sum_k Q_k Hdot_k |_{f3 -> f3_dot(kappa)}
+//
+// -- scDigestRotationTangentDevice's term, to round-off, for every kappa: the
+// full duality `--kappa-full` gates. `opt` supplies the tile count alone (the
+// transpose has one route, whichever digest built the RDMs); `ci` is the
+// state, `nelecA`/`nelecB` its strings. Everything on res.stream().
+DeviceTensor scDigestAdjointDevice(const RdmBuildOptions& opt, const Tensor& ci, int64_t nelecA,
+                                   int64_t nelecB, const NevptIntegralsDevice& ints,
+                                   const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                   const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                   const DeviceTensor& f3ca, const DeviceResources& res);
 
 // Prints the per-class table -- the amplitude energy against `energies`'
 // (nevpt2.energy's own answer for the same state) and against the golden

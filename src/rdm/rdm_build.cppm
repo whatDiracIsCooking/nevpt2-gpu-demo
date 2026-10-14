@@ -121,6 +121,32 @@ RdmBuildResult buildRdmTangentsDevice(const RdmBuildOptions& opt, const Tensor& 
                                       int64_t nelecB, const Tensor& h2e,
                                       const DeviceResources& res);
 
+// The TRANSPOSE of the build's f3 path with respect to the integrals (#89):
+// given G_ac = dE/d(f3ac) and G_ca = dE/d(f3ca) at the state `ci` (whose
+// plain build left `dm3`), the physicist-ordered (n_act,)^4 tensor
+//
+//   hbar[pqrs] = sum_o < G_o, d f3_o / d h2e[pqrs] >,
+//
+// i.e. dE/d(h2e) through the digests alone. At a fixed CI vector f3_o is
+// LINEAR in h2e (consume, digest, fdm2 and the wedge each carry one integral
+// factor), so for ANY h2e_dot
+//
+//   < hbar, h2e_dot > == < G_ac, f3ac(h2e_dot) > + < G_ca, f3ca(h2e_dot) >
+//
+// with f3(h2e_dot) the plain build run at h2e_dot -- #88's forward digest
+// tangent is exactly the right-hand side, and this is what lets reverse mode
+// (nevpt2.gradient) carry the same term into Y. Tiled like the plain build,
+// re-producing L2 per tile, so the 4-RDM never exists (the :adjoint partition
+// has the steps and the kernels, f3_transpose.cu). Of `opt` only nTiles is
+// read: the transpose has one route on both backends, whichever digest built
+// the G it is handed. Every allocation, launch and BLAS call is on
+// res.stream(), which is synchronized before this returns; the --profile
+// spans land in profile::kRdmBuild, each labelled `*_adj`.
+DeviceTensor buildDigestAdjointDevice(const RdmBuildOptions& opt, const Tensor& ci,
+                                      int64_t norb, int64_t nelecA, int64_t nelecB,
+                                      const DeviceTensor& dm3, const DeviceTensor& f3acBar,
+                                      const DeviceTensor& f3caBar, const DeviceResources& res);
+
 // --rdm-tangent: the tangent build's self-check, which both demos run on the
 // result of their own build. Every output is homogeneous of degree 2 in the CI
 // vector, so Euler's identity makes the tangent along the state itself exactly

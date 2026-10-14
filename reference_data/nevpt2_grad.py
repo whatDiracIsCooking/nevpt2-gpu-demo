@@ -260,16 +260,16 @@ an antisymmetric ``kappa`` and a normalised ``c`` define: ``Y_xy - Y_yx``, and
     CI vector's own shape), the ``ci`` they were taken at, the state's
     ``ncore``/``nact``/``nvirt`` and ``e_corr``. It is in the **golden's**
     active basis, and is carried into section 2.6's on read.
-    **It is not yet the derivative this gradient needs, and the reason is
-    known**: the device's ``Y`` holds the ``f3ac``/``f3ca`` digests fixed
-    (docs/gradients.md, section 6). The device has their term in forward mode
-    only (#88): a dump since carries seeded directions with ``Edot`` in its
-    two terms, which ``--edot-check`` holds against PySCF's exact derivative
-    (:func:`check_edot`). Its ``y`` held ``e_core``/``e_virt``
-    fixed too until #87 (:func:`pyscf_ci_source` says why that matters); a
-    dump written since carries their response. What the gradient comes out
-    at with it, and the attribution: docs/testing.md, "The GPU as the
-    source-term provider".
+    **It is the exact derivative this gradient needs**, in a dump written
+    since #89: the device's ``Y`` carries the ``f3ac``/``f3ca`` digests'
+    response through their transpose (docs/gradients.md, section 6), and its
+    ``y`` the orbital energies' (#87; :func:`pyscf_ci_source` says why that
+    matters). An older dump held the digests fixed in ``Y`` and is not. A
+    dump also carries seeded directions with ``Edot`` in its two terms, which
+    ``--edot-check`` holds against PySCF's exact derivative
+    (:func:`check_edot`). What the gradient comes out at, and the record of
+    the omissions #73 measured: docs/testing.md, "The GPU as the source-term
+    provider".
 ``--source both --source-path PATH``
     the dump is the provider gated against ``grad_num``; PySCF's terms are
     computed as well, compared with it componentwise
@@ -284,9 +284,9 @@ an antisymmetric ``kappa`` and a normalised ``c`` define: ``Y_xy - Y_yx``, and
     every non-gauge ``kappa`` pair for ``Y``, and at fixed orbitals along
     every determinant direction **projected against the state** for ``y``
     (:func:`pyscf_ci_source` -- the projection is load-bearing, not tidiness).
-    Self-contained, which is what makes this file runnable today; it is also
-    the **exact** derivative, where the device's ``Y`` holds the
-    ``f3ac``/``f3ca`` digests fixed (docs/gradients.md, section 6).
+    Self-contained, which is what makes this file runnable with no card; it is
+    the **exact** derivative, as the device's has been since #89
+    (docs/gradients.md, section 6).
 
 THE GATE, AND WHY ITS TOLERANCE IS NOT 1e-7
 -------------------------------------------

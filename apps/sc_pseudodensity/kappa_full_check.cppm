@@ -9,13 +9,14 @@
 // WHAT IS BEING DIFFERENTIATED. The SC total as a function of every MO
 // integral array the energy stage reads AND of the orbital-energy vectors
 // `e_core` / `e_virt`, with the RDM side (dm1/dm2/dm3) fixed -- the
-// derivative's own definition -- and the `f3ac`/`f3ca` digests fixed, which is
-// the one gap the two MODES leave (nevpt2.gradient, "The full source term
-// Y_xy", names it). The orbital energies were the active-block work's other
+// derivative's own definition. The integral halves the duality compares hold
+// the `f3ac`/`f3ca` digests fixed as well (nevpt2.gradient, "The full source
+// term Y_xy"); the digests' own response is a term of its own in each mode --
+// forward, the rebuilt digests (#88, scDigestRotationTangentDevice), reverse,
+// their transpose (#89, scDigestAdjointDevice) -- and with it the FULL
+// duality, the exact <kappa, Y> against the exact Edot, is gated beside the
+// like-for-like one. The orbital energies were the active-block work's other
 // gap, and they move here: that is what the sidecar's generalized Fock is for.
-// The digests' own response is printed BESIDE the duality as a term of its own
-// (#88, scDigestRotationTangentDevice): the forward half of closing that gap,
-// kept out of the pair so the duality keeps comparing like with like.
 //
 // THE SIX CHECKS, in the order they print:
 //
@@ -30,12 +31,13 @@
 //      both read the same tangents, so a wrong one cancels between them.
 //   2  THE DUALITY, on four seeded FULL antisymmetric directions:
 //      <kappa, Y>'s integral half against the forward tangent's. Exact
-//      arithmetic, no step size, gated at this tree's 1e-7. Then, ungated
-//      here, the same four directions' Edot in its two terms -- the
-//      frozen-digest tangent and the digests' own term -- and their sum, the
-//      exact directional derivative at fixed CI. Its gate is an INDEPENDENT
-//      provider, PySCF's exact directional derivative, which no binary can
-//      reach: `--dump-source-terms` writes the directions and both terms, and
+//      arithmetic, no step size, gated at this tree's 1e-7. Then the FULL
+//      duality (#89), gated at the same 1e-7: the exact <kappa, Y> --
+//      integral half, orbital energies and the digests' transpose -- against
+//      the exact Edot, the frozen-digest tangent plus the rebuilt digests'
+//      term. The forward digests' term has an INDEPENDENT provider too,
+//      PySCF's exact directional derivative, which no binary can reach:
+//      `--dump-source-terms` writes the directions and both terms, and
 //      reference_data/nevpt2_grad.py --edot-check holds them against it
 //      (docs/testing.md, "The digests' orbital response, forward mode").
 //   3  THE ACTIVE BLOCK, BIT FOR BIT AS FAR AS THE KERNELS GO. The same
@@ -68,7 +70,8 @@
 //      The same two directions also assert two derived exactnesses: an
 //      intra-space rotation moves NO orbital energy (f is diagonal there),
 //      so the `eps` term must vanish, and it moves no active integral, so
-//      h2e_dot and with it the digests' term are EXACTLY zero (#88).
+//      h2e_dot and with it the digests' term are EXACTLY zero, forward (#88)
+//      and reverse (#89).
 //   5  PARK EQS. 56-57, the pseudocanonical multipliers, off the assembled
 //      Y: one division per core and per virtual pair. Those two blocks of Y
 //      are exact (neither the digests nor the orbital energies move under an
@@ -86,7 +89,9 @@
 //      check 4 is. An active rotation's h2e_dot is the intra-active action
 //      alone; the sidecar's general part of it, which a mixed rotation adds,
 //      is the promotion table check 1 pins, and the whole term is held to
-//      PySCF by the offline provider gate above.
+//      PySCF by the offline provider gate above. Beside it, the same term in
+//      reverse mode (#89) along the same direction, held to the forward one
+//      at 1e-7 -- exact arithmetic, as the full duality is.
 module;
 
 #include <cstdio>  // stdout: a macro, which `import std` does not carry
@@ -488,9 +493,16 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
     kappas.push_back(k);
     reqs.push_back(nevpt2::ScRotationRequest{std::move(k), /*tangent=*/true});
   }
+  // The digests' transpose (#89): hbar = dE/d(h2e) through f3ac/f3ca, once,
+  // and with it every pairing below is the EXACT <kappa, Y> at fixed CI.
+  const auto tAdj = std::chrono::steady_clock::now();
+  const nevpt2::DeviceTensor hbar = nevpt2::scDigestAdjointDevice(
+      rdmOpt, g.get("ci"), g.nelecA, g.nelecB, ints, dm1, dm2, dm3, f3ac, f3ca, res);
+  std::printf("  the digests' transpose hbar = dE/dh2e through f3ac/f3ca: %.2fs\n",
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - tAdj).count());
   const auto t0 = std::chrono::steady_clock::now();
   const nevpt2::ScFullRotationResult rot = NEVPT2_TRY(
-      nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, reqs, res));
+      nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, reqs, res));
   std::printf("  assembly + %zu full directions: %.2fs\n", kFullDirections,
               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
   const bool dual = nevpt2::printScFullRotationTable(rot, kFullRotTol);
@@ -498,20 +510,27 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
   std::printf("  adjoint vs tangent (integral halves), every direction within %.0e: %s\n",
               kFullRotTol, dual ? "ok" : "FAILED");
 
-  // The digests' own term along the same four directions (#88): printed
-  // beside the duality, not folded into it. Its gate is PySCF's exact
-  // directional derivative, offline (--dump-source-terms, then
-  // nevpt2_grad.py --edot-check); check 6 below is its on-card one.
+  // The digests' own term along the same four directions, forward (#88) and
+  // reverse (#89), and with them the FULL duality: <kappa, Y> -- integral
+  // half, orbital energies and the transpose's term -- against the exact
+  // Edot, frozen-digest tangent plus the rebuilt digests' term. Exact
+  // arithmetic again, gated at the same 1e-7. The forward term's independent
+  // gate is PySCF's exact directional derivative, offline (--dump-source-terms,
+  // then nevpt2_grad.py --edot-check); check 6 below is its on-card one.
   const auto tDig = std::chrono::steady_clock::now();
   const std::vector<nevpt2::ScDigestTangent> digest =
       NEVPT2_TRY(nevpt2::scDigestRotationTangentDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB,
                                                        ints, gen, dm1, dm2, dm3, f3ac, f3ca,
                                                        reqs, res));
-  nevpt2::printScDigestTangentTable(rot, digest);
-  std::printf("  the digests' term along %zu full directions: %.2fs (gated offline against "
-              "PySCF's exact Edot,\n  and on the card by check 6)\n",
+  const bool fullDual = nevpt2::printScDigestTangentTable(rot, digest, kFullRotTol);
+  ok = ok && fullDual;
+  std::printf("  the digests' term along %zu full directions: %.2fs (forward gated offline "
+              "against PySCF's exact Edot,\n  and on the card by check 6)\n",
               kFullDirections,
               std::chrono::duration<double>(std::chrono::steady_clock::now() - tDig).count());
+  std::printf("  FULL duality, <kappa, Y> (with the digests' transpose) vs exact Edot, every "
+              "direction within %.0e: %s\n",
+              kFullRotTol, fullDual ? "ok" : "FAILED");
 
   double worstE = 0.0;
   for (int c = 0; c < 8; ++c)
@@ -535,8 +554,9 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
       nevpt2::scActiveRotationDevice(ints, dm1, dm2, dm3, f3ac, f3ca, actReq, res));
   const std::vector<nevpt2::ScRotationRequest> embedded{
       nevpt2::ScRotationRequest{embedBlock(kAct, nc, nmo), /*tangent=*/true}};
-  const nevpt2::ScFullRotationResult viaFull = NEVPT2_TRY(
-      nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, embedded, res));
+  // No hbar: this compares integral halves, which the digests' term is not in.
+  const nevpt2::ScFullRotationResult viaFull = NEVPT2_TRY(nevpt2::scFullRotationDevice(
+      ints, gen, dm1, dm2, dm3, f3ac, f3ca, /*digestAdjoint=*/nullptr, embedded, res));
   const double adjointGap = std::fabs(viaFull.dirs[0].integral - actOnly.dirs[0].adjoint);
   const double tangentGap =
       std::fabs(viaFull.dirs[0].tangentIntegral - actOnly.dirs[0].tangent);
@@ -597,7 +617,7 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
     const std::vector<nevpt2::ScRotationRequest> one{nevpt2::ScRotationRequest{
         embedBlock(block, core ? 0 : nc + na, nmo), /*tangent=*/true}};
     const nevpt2::ScFullRotationResult r = NEVPT2_TRY(
-        nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, one, res));
+        nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, one, res));
     const bool epsZero = std::fabs(r.dirs[0].eps) < kEpsZeroTol;
     const bool dualHere = std::fabs(r.dirs[0].integral - r.dirs[0].tangentIntegral) <
                           kFullRotTol;
@@ -607,7 +627,9 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
         NEVPT2_TRY(nevpt2::scDigestRotationTangentDevice(rdmOpt, g.get("ci"), g.nelecA,
                                                          g.nelecB, ints, gen, dm1, dm2, dm3,
                                                          f3ac, f3ca, one, res));
-    const bool digestZero = dig0[0].total == 0.0 && dig0[0].h2eDotMax == 0.0;
+    // And in reverse mode (#89): hbar paired with that zero tensor.
+    const bool digestZero =
+        dig0[0].total == 0.0 && dig0[0].h2eDotMax == 0.0 && r.dirs[0].digest == 0.0;
     ok = ok && epsZero && dualHere && digestZero;
     std::printf("\n  %s-internal direction: <kappa, Y> = %.14e, adjoint vs tangent %.2e\n",
                 name, r.dirs[0].adjoint,
@@ -615,8 +637,9 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
     std::printf("  its orbital-energy response is zero by (O2): eps = %.2e (< %.0e: %s)\n",
                 r.dirs[0].eps, kEpsZeroTol, epsZero ? "ok" : "FAILED");
     std::printf("  it moves no active integral: max |h2e_dot| = %.1e, the digests' term = %.1e "
-                "(exactly 0: %s)\n",
-                dig0[0].h2eDotMax, dig0[0].total, digestZero ? "ok" : "FAILED");
+                "forward, %.1e reverse (exactly 0: %s)\n",
+                dig0[0].h2eDotMax, dig0[0].total, r.dirs[0].digest,
+                digestZero ? "ok" : "FAILED");
     const double scale = std::max(std::fabs(r.dirs[0].tangent), std::fabs(energies.total));
     ok = finiteDifferenceSweep(name, g, gg, core, block, r.dirs[0].tangent, scale, dm1, dm2,
                                dm3, f3ac, f3ca, res) &&
@@ -631,7 +654,7 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
     for (std::int64_t q = p + 1; q < nmo; ++q) pairs.emplace_back(p, q);
   const auto tY = std::chrono::steady_clock::now();
   const nevpt2::Tensor y = NEVPT2_TRY(nevpt2::scFullRotationMatrix(
-      ints, gen, dm1, dm2, dm3, f3ac, f3ca, pairs, kYChunk, res));
+      ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, pairs, kYChunk, res));
   double yMax = 0.0;
   for (const auto& [p, q] : pairs) yMax = std::max(yMax, std::fabs(y(p, q)));
   std::printf("\n  Y's inactive blocks: %zu basis directions in chunks of %lld, %.2fs, "
@@ -652,8 +675,8 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
   }
   const std::vector<nevpt2::ScRotationRequest> inactiveReq{
       nevpt2::ScRotationRequest{kInactive, /*tangent=*/false}};
-  const nevpt2::ScFullRotationResult rInactive = NEVPT2_TRY(
-      nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, inactiveReq, res));
+  const nevpt2::ScFullRotationResult rInactive = NEVPT2_TRY(nevpt2::scFullRotationDevice(
+      ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, inactiveReq, res));
   double fromMatrix = 0.0;
   for (std::int64_t p = 0; p < nmo; ++p)
     for (std::int64_t q = 0; q < nmo; ++q) fromMatrix += kInactive(p, q) * y(p, q);
@@ -689,10 +712,21 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
     return scTotalDigestsRotated(g, kAct, t, ints, dm1, dm2, dm3, rdmOpt, res);
   });
   ok = ok && digestFd;
+  // The same term in reverse mode (#89), along the same direction: the
+  // transpose's pairing against the rebuilt digests' tangent, exact arithmetic.
+  const nevpt2::ScFullRotationResult revAct = NEVPT2_TRY(nevpt2::scFullRotationDevice(
+      ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, actEmbedded, res));
+  const double revGap = std::fabs(revAct.dirs[0].digest - digAct[0].total);
+  const bool revOk = revGap < kFullRotTol;
+  ok = ok && revOk;
+  std::printf("  and in reverse mode, <hbar, h2e_dot> = %.14e, against the forward term "
+              "|delta| = %.2e (< %.0e: %s)\n",
+              revAct.dirs[0].digest, revGap, kFullRotTol, revOk ? "ok" : "FAILED");
 
   std::printf("\n%s: the full orbital source term's adjoint and tangent agree to %.0e on every "
-              "direction, the sidecar's promotion table holds to %.0e, the active block is "
-              "unchanged to the kernels' own reproducibility (itself inside its recorded "
+              "direction -- integral halves, and in full with the digests' transpose against "
+              "the exact Edot -- the sidecar's promotion table holds to %.0e, the active block "
+              "is unchanged to the kernels' own reproducibility (itself inside its recorded "
               "envelope), the two intra-space finite "
               "differences converge, Park Eqs. 56-57 are determined, and the digests' term "
               "converges onto its own finite difference and vanishes on the intra-space "

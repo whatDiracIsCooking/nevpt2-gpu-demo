@@ -47,6 +47,12 @@ add_gtest_suite_tests(
     Dm3TilingInvarianceTests
   REQUIRES_GPU)
 
+# RdmDigestAdjointTests rides in the same binary: the build's TRANSPOSE with
+# respect to h2e (the :adjoint partition, src/rdm/rdm_build_adjoint.cppm,
+# #89) against the plain build run at a direction -- linear in h2e, so the
+# pairing is exact -- and, at CAS(4,4), element by element against the build
+# at each of the 256 basis integrals.
+#
 # The TANGENT build (nevpt2.rdm_build's :tangent partition,
 # src/rdm/rdm_build_tangent.cppm): buildRdmTangentsDevice against a central
 # finite difference of buildRdmsDevice itself, on a seeded random state and a
@@ -70,5 +76,5 @@ add_gtest_executable(
 add_gtest_suite_tests(
   TARGET rdm_tangent_tests
   SUITES RdmTangentDifferenceTests RdmTangentRichardsonTests RdmTangentEulerTests
-    RdmTangentPathTests
+    RdmTangentPathTests RdmDigestAdjointTests
   REQUIRES_GPU)

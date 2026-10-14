@@ -16,6 +16,14 @@
 //                              --rdm-tangent checks at the sizes they run)
 //   RdmTangentPathTests        every digest / consume / tile count gives one
 //                              tangent
+//   RdmDigestAdjointTests      buildDigestAdjointDevice (the :adjoint
+//                              partition, #89) is the TRANSPOSE of the f3
+//                              path's h2e dependence: <hbar, h2e_dot> against
+//                              <G, f3(h2e_dot)> on random G and h2e_dot, per
+//                              order and both together, at every tile count
+//                              and digest; and element by element, every
+//                              hbar[pqrs] against the build at a basis h2e
+//                              (CAS(4,4), 256 builds)
 //
 // WHY TWO DIFFERENCE TESTS, and why the curved path. Every output of this
 // build is BILINEAR in the CI vector -- produce is linear, consume is linear,
@@ -380,6 +388,150 @@ TEST(RdmTangentPathTests, EveryDigestConsumeAndTileCountGivesTheSameTangent) {
       EXPECT_LT(maxDiff(got.t[k], ref.t[k]), tol) << kNames[k];
   }
   EXPECT_TRUE(shortLastTile) << "no tile count leaves a short last tile";
+}
+
+// --- RdmDigestAdjointTests -----------------------------------------------------
+//
+// At a fixed CI vector the build's f3 outputs are LINEAR in h2e, so the plain
+// build run at any h2e_dot IS the map L(h2e_dot) the adjoint transposes, and
+// for every G
+//
+//   <buildDigestAdjointDevice(G), h2e_dot> == <G_ac, f3ac(h2e_dot)> + <G_ca, f3ca(h2e_dot)>
+//
+// with no step size: two contractions of one bilinear form, summed in
+// different orders. The tolerance is relative to the sum of the products'
+// magnitudes, the scale the reassociation error is a fraction of.
+constexpr double kAdjointTol = 1e-12;
+
+// A seeded random tensor of `dims`, entries in [-1, 1).
+Tensor randomTensor(std::vector<int64_t> dims, std::uint64_t seed) {
+  Tensor t(std::move(dims));
+  std::mt19937_64 gen(seed);
+  std::uniform_real_distribution<double> dist(-1.0, 1.0);
+  for (int64_t i = 0; i < t.size(); ++i) t.flatRef(i) = dist(gen);
+  return t;
+}
+
+// sum_i a_i b_i, and sum_i |a_i b_i| beside it (the scale).
+std::pair<double, double> dotAndScale(const std::vector<double>& a, const std::vector<double>& b) {
+  EXPECT_EQ(a.size(), b.size());
+  double s = 0.0, m = 0.0;
+  for (std::size_t i = 0; i < std::min(a.size(), b.size()); ++i) {
+    s += a[i] * b[i];
+    m += std::abs(a[i] * b[i]);
+  }
+  return {s, m};
+}
+
+struct AdjointFixture {
+  Tensor ci, h2e, gac, gca;
+};
+
+AdjointFixture adjointFixture(const CasCase& c) {
+  const std::vector<int64_t> n6(6, c.norb);
+  return AdjointFixture{randomCi(c), randomH2e(c), randomTensor(n6, c.seed ^ 0xac'0001u),
+                        randomTensor(n6, c.seed ^ 0xca'0001u)};
+}
+
+// hbar for (gac, gca) at the state `ci`: dm3 out of the plain build (it reads
+// no integral, so any h2e gives it), then the transpose. Downloaded flat.
+std::vector<double> adjointOf(const CasCase& c, const AdjointFixture& f, const Tensor& gac,
+                              const Tensor& gca, const RdmBuildOptions& opt,
+                              const DeviceResources& res) {
+  const RdmBuildResult plain = buildRdmsDevice(opt, f.ci, c.norb, c.nelecA, c.nelecB, f.h2e, res);
+  const DeviceTensor dGac = uploadTensor(gac, res);
+  const DeviceTensor dGca = uploadTensor(gca, res);
+  const DeviceTensor hbar = buildDigestAdjointDevice(opt, f.ci, c.norb, c.nelecA, c.nelecB,
+                                                     plain.dm3, dGac, dGca, res);
+  return downloadTensor(hbar, res.stream()).data();
+}
+
+// <gac, f3ac(hdot)> + <gca, f3ca(hdot)>, and the scale.
+std::pair<double, double> forwardPairing(const CasCase& c, const AdjointFixture& f,
+                                         const Tensor& gac, const Tensor& gca, const Tensor& hdot,
+                                         const RdmBuildOptions& opt, const DeviceResources& res) {
+  const Built b = plainBuild(c, f.ci, hdot, opt, res);
+  const auto [ca, caScale] = dotAndScale(gca.data(), b.t[1]);
+  const auto [ac, acScale] = dotAndScale(gac.data(), b.t[2]);
+  return {ca + ac, caScale + acScale};
+}
+
+TEST(RdmDigestAdjointTests, PairsWithEveryIntegralDirectionAsTheBuildDoes) {
+  const DeviceResources* res = resourcesOrFail();
+  ASSERT_NE(res, nullptr);
+  for (const CasCase& c : cases()) {
+    SCOPED_TRACE(caseName(c));
+    const RdmBuildOptions opt = options(c.nTiles, /*blasDigest=*/false, /*consumeEmitted=*/false);
+    const AdjointFixture f = adjointFixture(c);
+    const Tensor zero(std::vector<int64_t>(6, c.norb));
+    const Tensor hdot = randomTensor({c.norb, c.norb, c.norb, c.norb}, c.seed ^ 0xd07'0001u);
+    // ca alone, ac alone, and both: a slot swapped between the orders would
+    // pass the sum and fail one of the halves.
+    struct Which {
+      const char* name;
+      const Tensor* gac;
+      const Tensor* gca;
+    };
+    for (const Which& w : {Which{"ca only", &zero, &f.gca}, Which{"ac only", &f.gac, &zero},
+                           Which{"both", &f.gac, &f.gca}}) {
+      SCOPED_TRACE(w.name);
+      const std::vector<double> hbar = adjointOf(c, f, *w.gac, *w.gca, opt, *res);
+      const auto [rev, revScale] = dotAndScale(hbar, hdot.data());
+      const auto [fwd, fwdScale] = forwardPairing(c, f, *w.gac, *w.gca, hdot, opt, *res);
+      EXPECT_GT(std::abs(fwd), 1e-3) << "a vacuous pairing";
+      EXPECT_LT(std::abs(rev - fwd), kAdjointTol * std::max(revScale, fwdScale))
+          << "<hbar, h2e_dot> = " << rev << " vs <G, f3(h2e_dot)> = " << fwd;
+    }
+  }
+}
+
+TEST(RdmDigestAdjointTests, EveryElementIsTheBuildAtABasisIntegral) {
+  const DeviceResources* res = resourcesOrFail();
+  ASSERT_NE(res, nullptr);
+  // CAS(4,4): n^4 = 256 basis integrals, one plain build each. What the
+  // pairing test cannot do -- name the element a mis-transcribed index lands
+  // on.
+  const CasCase c = cases().front();
+  const RdmBuildOptions opt = options(c.nTiles, /*blasDigest=*/false, /*consumeEmitted=*/false);
+  const AdjointFixture f = adjointFixture(c);
+  const std::vector<double> hbar = adjointOf(c, f, f.gac, f.gca, opt, *res);
+  const int64_t n4 = c.norb * c.norb * c.norb * c.norb;
+  ASSERT_EQ(static_cast<int64_t>(hbar.size()), n4);
+  double worst = 0.0, scale = 0.0;
+  int64_t worstAt = -1;
+  for (int64_t i = 0; i < n4; ++i) {
+    Tensor e({c.norb, c.norb, c.norb, c.norb});
+    e.flatRef(i) = 1.0;
+    const auto [fwd, fwdScale] = forwardPairing(c, f, f.gac, f.gca, e, opt, *res);
+    scale = std::max(scale, fwdScale);
+    if (std::abs(hbar[static_cast<std::size_t>(i)] - fwd) > worst) {
+      worst = std::abs(hbar[static_cast<std::size_t>(i)] - fwd);
+      worstAt = i;
+    }
+  }
+  EXPECT_LT(worst, kAdjointTol * std::max(1.0, scale)) << "worst element " << worstAt;
+}
+
+TEST(RdmDigestAdjointTests, EveryTileCountAndForwardDigestGivesOneTranspose) {
+  const DeviceResources* res = resourcesOrFail();
+  ASSERT_NE(res, nullptr);
+  // The transpose reads only the tile count; the forward digest/consume
+  // choices change only the dm3 it is handed (to round-off). 36 determinants
+  // at 5 tiles leave a short last one.
+  const CasCase c = cases().front();
+  const AdjointFixture f = adjointFixture(c);
+  const std::vector<double> ref =
+      adjointOf(c, f, f.gac, f.gca, options(1, false, false), *res);
+  double refMax = 0.0;
+  for (double x : ref) refMax = std::max(refMax, std::abs(x));
+  for (const auto& [tiles, blas, emitted] :
+       {std::tuple{2, false, false}, std::tuple{3, false, false}, std::tuple{5, false, false},
+        std::tuple{3, true, false}, std::tuple{5, true, true}}) {
+    SCOPED_TRACE(std::format("tiles={} blasDigest={} consumeEmitted={}", tiles, blas, emitted));
+    const std::vector<double> got = adjointOf(c, f, f.gac, f.gca, options(tiles, blas, emitted),
+                                              *res);
+    EXPECT_LT(maxDiff(got, ref), kSameFormTol * std::max(1.0, refMax));
+  }
 }
 
 }  // namespace nevpt2::test::rdm_tangent
