@@ -303,9 +303,12 @@ Result<ScFullRotationResult> scFullRotationDevice(const NevptIntegralsDevice& in
                                                   const DeviceTensor& dm3,
                                                   const DeviceTensor& f3ac,
                                                   const DeviceTensor& f3ca,
+                                                  const DeviceTensor* digestAdjoint,
                                                   const std::vector<ScRotationRequest>& dirs,
                                                   const DeviceResources& dr) {
   NEVPT2_TRY(checkGeneralShapes(ints, gen));
+  if (digestAdjoint != nullptr && digestAdjoint->dims != ints.h2e.dims)
+    return err_config("scFullRotationDevice: the digests' adjoint is not shaped like h2e");
   FullBlockSource src(ints);
   const ActiveIntegralsDevice ai = activeViewOf(ints);
   const ScRotation rot =
@@ -323,7 +326,13 @@ Result<ScFullRotationResult> scFullRotationDevice(const NevptIntegralsDevice& in
       p.tangentIntegral += c.rotTangent[d];
     }
     p.integral = p.ext + p.act;
-    p.adjoint = p.integral + p.eps;
+    // The digests' term (#89): hbar against the same h2e_dot the Dyall
+    // blocks read -- the intra-active action plus the sidecar's general part.
+    if (digestAdjoint != nullptr) {
+      p.digest = dotTensors(*digestAdjoint, rot.dirs[d].h2eDot, dr);
+      p.hasDigest = true;
+    }
+    p.adjoint = p.integral + p.eps + p.digest;
     p.tangent = p.tangentIntegral + p.eps;
     p.hasTangent = dirs[d].tangent;
   }
@@ -334,6 +343,7 @@ Result<Tensor> scFullRotationMatrix(const NevptIntegralsDevice& ints,
                                     const GeneralIntegralsDevice& gen, const DeviceTensor& dm1,
                                     const DeviceTensor& dm2, const DeviceTensor& dm3,
                                     const DeviceTensor& f3ac, const DeviceTensor& f3ca,
+                                    const DeviceTensor* digestAdjoint,
                                     const std::vector<std::pair<int64_t, int64_t>>& pairs,
                                     int64_t chunk, const DeviceResources& res) {
   const int64_t n = gen.nmo();
@@ -344,7 +354,8 @@ Result<Tensor> scFullRotationMatrix(const NevptIntegralsDevice& ints,
   const auto flush = [&]() -> Status {
     if (reqs.empty()) return {};
     const ScFullRotationResult r =
-        NEVPT2_TRY(scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, reqs, res));
+        NEVPT2_TRY(scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, digestAdjoint,
+                                        reqs, res));
     for (std::size_t k = 0; k < which.size(); ++k) {
       // <kappa, Y> = sum_pq kappa_pq Y_pq = 2 Y_pq for this direction.
       const double v = 0.5 * r.dirs[k].adjoint;
@@ -481,22 +492,57 @@ Result<std::vector<ScDigestTangent>> scDigestRotationTangentDevice(
   return out;
 }
 
-void printScDigestTangentTable(const ScFullRotationResult& full,
-                               const std::vector<ScDigestTangent>& digest) {
+bool printScDigestTangentTable(const ScFullRotationResult& full,
+                               const std::vector<ScDigestTangent>& digest, const double atol) {
   check(full.dirs.size() == digest.size(),
         "printScDigestTangentTable: the two answers are for different direction lists");
   std::printf(
-      "\nEdot(kappa) in its two terms, per direction (#88)\n"
+      "\nEdot(kappa) in its two terms, per direction (#88), and the full duality (#89)\n"
       "  frozen       the tangent above: integral half + eps, f3ac/f3ca held fixed\n"
       "  digest       the f3ac/f3ca digests' own response: the RDM build at h2e_dot,\n"
       "               through the classes' H side (energiesTangentDevice)\n"
-      "  Edot         frozen + digest: the exact directional derivative at fixed CI\n");
-  std::printf("%-5s %22s %22s %22s %12s\n", "dir", "frozen", "digest", "Edot", "max|h2e_dot|");
+      "  Edot         frozen + digest: the exact directional derivative at fixed CI\n"
+      "  rev digest   the same term in REVERSE mode: <hbar, h2e_dot>, hbar the digests'\n"
+      "               transpose (scDigestAdjointDevice) -- part of <kappa, Y>\n"
+      "  |full delta| <kappa, Y> (integral + eps + rev digest) against Edot\n");
+  std::printf("%-5s %22s %22s %22s %22s %12s %12s\n", "dir", "frozen", "digest", "Edot",
+              "rev digest", "|full delta|", "max|h2e_dot|");
+  bool ok = true;
   for (std::size_t d = 0; d < digest.size(); ++d) {
-    const double frozen = full.dirs[d].tangent;
-    std::printf("%-5zu %22.14e %22.14e %22.14e %12.3e\n", d, frozen, digest[d].total,
-                frozen + digest[d].total, digest[d].h2eDotMax);
+    const ScFullRotationPairing& p = full.dirs[d];
+    const double frozen = p.tangent;
+    const double edot = frozen + digest[d].total;
+    std::string rev = "-";
+    std::string gap = "-";
+    if (p.hasDigest) {
+      const double delta = std::fabs(p.adjoint - edot);
+      ok = ok && delta < atol;
+      rev = std::format("{:.14e}", p.digest);
+      gap = std::format("{:.2e}", delta);
+    }
+    std::printf("%-5zu %22.14e %22.14e %22.14e %22s %12s %12.3e\n", d, frozen, digest[d].total,
+                edot, rev.c_str(), gap.c_str(), digest[d].h2eDotMax);
   }
+  return ok;
+}
+
+// --- the digests' orbital response, reverse mode (#89) ------------------------
+
+DeviceTensor scDigestAdjointDevice(const RdmBuildOptions& opt, const Tensor& ci,
+                                   const int64_t nelecA, const int64_t nelecB,
+                                   const NevptIntegralsDevice& ints, const DeviceTensor& dm1,
+                                   const DeviceTensor& dm2, const DeviceTensor& dm3,
+                                   const DeviceTensor& f3ac, const DeviceTensor& f3ca,
+                                   const DeviceResources& res) {
+  const int64_t norb = dm1.dims[0];
+  FullBlockSource src(ints);
+  const ActiveIntegralsDevice ai = activeViewOf(ints);
+  // The walk and its RDM sweep, exactly as scCiSourceDevice runs them: of
+  // the five coefficient tensors only the two digests' are read here.
+  ScRdmAdjoint adj = ScRdmAdjoint::zeros(norb, res);
+  (void)assembleClasses(ai, src, /*batch=*/0, dm1, dm2, dm3, f3ac, f3ca, ScRotation{}, &adj,
+                        /*epsAdjoint=*/false, res);
+  return buildDigestAdjointDevice(opt, ci, norb, nelecA, nelecB, dm3, adj.f3ac, adj.f3ca, res);
 }
 
 bool printScRotationTable(const ScRotationResult& r, double atol) {

@@ -358,12 +358,14 @@ if(NEVPT2_BUILD_TESTING)
   # finite differences -- a core-internal and a virtual-internal rotation,
   # which are the only ones the stored blocks can displace -- and Park
   # Eqs. 56-57's pseudocanonical multipliers coming out determined -- and, for
-  # the f3ac/f3ca digests' own term (#88), printed beside the duality: an
-  # exact zero along the two intra-space rotations and a third finite
-  # difference, the energy with only the digests rebuilt along an active
-  # direction. Its PASS line is its own, so no entry can pass on another's
-  # output (docs/testing.md, "The full orbital source term" and "The digests'
-  # orbital response, forward mode").
+  # the f3ac/f3ca digests' own term, forward (#88) and reverse (#89): the FULL
+  # duality on the same four directions (the exact <kappa, Y>, the digests'
+  # transpose in it, against the exact Edot; 1e-7), an exact zero along the
+  # two intra-space rotations in both modes and a third finite difference, the
+  # energy with only the digests rebuilt along an active direction, with the
+  # reverse term held to it too. Its PASS line is its own, so no entry can
+  # pass on another's output (docs/testing.md, "The full orbital source term"
+  # and "The digests' orbital response, forward mode" / "reverse mode").
   #
   # LiF is here for the Eqs. 56-57 half: its four core orbital energies are all
   # distinct, the smallest gap 0.85 Eh against the 3.3e-3 Eh 1s pair in N2's
@@ -412,8 +414,9 @@ if(NEVPT2_BUILD_TESTING)
   # and --gradient-source entries' to check; this one checks that the probed
   # matrix IS the pairing (one seeded full direction, reassociation noise), that
   # y's walk ran on this state (its E_corr against energiesDevice, 1e-7), that
-  # each written Edot direction's frozen-digest tangent is <kappa, Y> off the
-  # written matrix (#88, 1e-7) and that the file reads back bit for bit. Its
+  # each written Edot direction's exact value -- frozen-digest tangent plus the
+  # digests' term -- is <kappa, Y> off the written matrix, which carries the
+  # digests' transpose (#89, 1e-7), and that the file reads back bit for bit. Its
   # PASS line is its own. The written Edot -- frozen-digest tangent plus the
   # digests' term -- against PySCF's exact directional derivative is
   # nevpt2_grad.py --edot-check, the same manual gate as below.
@@ -465,7 +468,8 @@ if(NEVPT2_BUILD_TESTING)
   # The known gaps are PINNED: a block on source_oracle.cppm's kKnownGaps list
   # must still disagree by more than the tolerance, every other block must
   # agree within it -- so the entry fails when a correct block breaks AND when
-  # a fix lands without the list being updated (#89 empties it). The tolerance
+  # a fix lands without the list being updated. The list is empty since #89:
+  # every block of both oracles is held to agree. The tolerance
   # is not 1e-7, because PySCF's side is a central difference: it is measured
   # from the step ladders, and docs/testing.md, "The SC source terms against
   # PySCF's, on a card" is its one home (read into the binary at configure

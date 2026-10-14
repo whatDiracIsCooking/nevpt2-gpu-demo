@@ -25,15 +25,14 @@
 //         exact directional derivative, the independent provider for the
 //         term no pair of modes here can check.
 //
-// AND WHAT THEY ARE NOT. Both are derivatives of the functional this tree
-// differentiates, which holds one thing fixed that the exact energy does not
-// (docs/gradients.md, sections 1 and 6): Y holds the f3ac/f3ca digests fixed
-// (the Edot directions carry that term beside it, forward mode only, #88).
-// y is the complete functional's: the orbital energies e_core/e_virt move
-// with the active density, read from the same sidecar Y is (#87). What the
-// remaining omission costs a nuclear gradient is measured, against PySCF's
-// exact source terms, in docs/testing.md, "The GPU as the source-term
-// provider".
+// AND WHAT THEY ARE. Both are the EXACT SC-NEVPT2 derivatives at the state
+// (docs/gradients.md, sections 1 and 6): Y carries the f3ac/f3ca digests'
+// response through their transpose (scDigestAdjointDevice, #89), and y the
+// orbital energies e_core/e_virt moving with the active density, read from
+// the same sidecar Y is (#87). Until #89, Y held the digests fixed; what that
+// cost a nuclear gradient, and what the gradient built from this dump comes
+// out at now, against PySCF's exact source terms and grad_num, is
+// docs/testing.md, "The GPU as the source-term provider".
 //
 // WHAT IS CHECKED HERE, since the derivatives themselves are checked
 // elsewhere: that what is written is what was computed, and that the matrix
@@ -49,10 +48,10 @@
 //      the golden's e_core / e_virt as h^eff_pp + <dm1, W_p>;
 //   3  the file read back (readGradSrc) and compared with what was written,
 //      exactly: the doubles are stored raw, so any difference is a bug;
-//   4  each direction's frozen-digest tangent against sum_pq kappa_pq Y_pq off
-//      the matrix being written -- the duality again, across the file's own
-//      members, so the edot_frozen the reader adds the digests' term to is
-//      the derivative the dumped Y pairs to.
+//   4  each direction's EXACT forward Edot -- edot_frozen + edot_digest --
+//      against sum_pq kappa_pq Y_pq off the matrix being written: the full
+//      duality (#89), across the file's own members, so the Y written is the
+//      derivative whose directional values the file also carries.
 //
 // Everything runs on the caller's one DeviceResources and its one stream.
 module;
@@ -126,7 +125,8 @@ nevpt2::Result<GpuSourceTerms> assembleSourceTerms(
     const nevpt2::EnergyResult& energies, const nevpt2::NevptIntegralsDevice& ints,
     const nevpt2::GeneralIntegralsDevice& gen, const nevpt2::DeviceTensor& dm1,
     const nevpt2::DeviceTensor& dm2, const nevpt2::DeviceTensor& dm3,
-    const nevpt2::DeviceTensor& f3ac, const nevpt2::DeviceTensor& f3ca, std::int64_t sigmaTiles,
+    const nevpt2::DeviceTensor& f3ac, const nevpt2::DeviceTensor& f3ca,
+    const nevpt2::DeviceTensor& hbar, std::int64_t sigmaTiles,
     const nevpt2::DeviceResources& res) {
   const std::int64_t nmo = gg.nmo;
   GpuSourceTerms out;
@@ -137,7 +137,7 @@ nevpt2::Result<GpuSourceTerms> assembleSourceTerms(
     for (std::int64_t q = p + 1; q < nmo; ++q) pairs.emplace_back(p, q);
   const auto tY = std::chrono::steady_clock::now();
   out.kappa = NEVPT2_TRY(nevpt2::scFullRotationMatrix(ints, gen, dm1, dm2, dm3, f3ac, f3ca,
-                                                      pairs, kDumpChunk, res));
+                                                      &hbar, pairs, kDumpChunk, res));
   double yMax = 0.0;
   for (std::int64_t i = 0; i < out.kappa.size(); ++i)
     yMax = std::max(yMax, std::fabs(out.kappa.flat(i)));
@@ -214,16 +214,19 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
               static_cast<long long>(nmo), static_cast<long long>(gg.ncore),
               static_cast<long long>(gg.nact), static_cast<long long>(gg.nvirt));
   const nevpt2::GeneralIntegralsDevice gen = uploadGeneral(gg, res);
+  // The digests' transpose (#89): Y and every pairing below carry their term.
+  const nevpt2::DeviceTensor hbar = nevpt2::scDigestAdjointDevice(
+      rdmOpt, g.get("ci"), g.nelecA, g.nelecB, ints, dm1, dm2, dm3, f3ac, f3ca, res);
   const GpuSourceTerms terms = NEVPT2_TRY(assembleSourceTerms(
-      g, gg, energies, ints, gen, dm1, dm2, dm3, f3ac, f3ca, rdmOpt.nTiles, res));
+      g, gg, energies, ints, gen, dm1, dm2, dm3, f3ac, f3ca, hbar, rdmOpt.nTiles, res));
   const nevpt2::Tensor& y = terms.kappa;
 
   // 1. the matrix against the direct pairing on one seeded full direction.
   const nevpt2::Tensor k = nevpt2::antisymmetricKappa(nmo, kDumpSeed);
   const std::vector<nevpt2::ScRotationRequest> req{
       nevpt2::ScRotationRequest{k, /*tangent=*/false}};
-  const nevpt2::ScFullRotationResult direct =
-      NEVPT2_TRY(nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, req, res));
+  const nevpt2::ScFullRotationResult direct = NEVPT2_TRY(
+      nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, req, res));
   double fromMatrix = 0.0;
   for (std::int64_t p = 0; p < nmo; ++p)
     for (std::int64_t q = 0; q < nmo; ++q) fromMatrix += k(p, q) * y(p, q);
@@ -245,26 +248,28 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
   std::vector<nevpt2::ScRotationRequest> edotReq;
   for (const nevpt2::Tensor& kd : kappas)
     edotReq.push_back(nevpt2::ScRotationRequest{kd, /*tangent=*/true});
-  const nevpt2::ScFullRotationResult frozen =
-      NEVPT2_TRY(nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, edotReq, res));
+  const nevpt2::ScFullRotationResult frozen = NEVPT2_TRY(
+      nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, edotReq, res));
   const std::vector<nevpt2::ScDigestTangent> digest =
       NEVPT2_TRY(nevpt2::scDigestRotationTangentDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB,
                                                        ints, gen, dm1, dm2, dm3, f3ac, f3ca,
                                                        edotReq, res));
-  nevpt2::printScDigestTangentTable(frozen, digest);
-  // 4. the frozen-digest tangent against the matrix being written.
-  bool edotOk = true;
+  const bool fullDual = nevpt2::printScDigestTangentTable(frozen, digest, kDumpEdotTol);
+  // 4. the EXACT forward Edot -- frozen-digest tangent plus the digests'
+  // term -- against the matrix being written, which carries the transpose's
+  // term (#89): the full duality, across the file's own members.
+  bool edotOk = fullDual;
   double edotGapMax = 0.0;
   for (std::size_t d = 0; d < kappas.size(); ++d) {
     double fromY = 0.0;
     for (std::int64_t p = 0; p < nmo; ++p)
       for (std::int64_t q = 0; q < nmo; ++q) fromY += kappas[d](p, q) * y(p, q);
-    const double gap = std::fabs(fromY - frozen.dirs[d].tangent);
+    const double gap = std::fabs(fromY - (frozen.dirs[d].tangent + digest[d].total));
     edotGapMax = std::max(edotGapMax, gap);
     edotOk = edotOk && gap <= kDumpEdotTol;
   }
-  std::printf("  4. the %zu directions' frozen-digest Edot vs sum kappa.Y off the matrix: max "
-              "|delta| = %.2e (<= %.0e: %s)\n",
+  std::printf("  4. the %zu directions' exact Edot (frozen + digest) vs sum kappa.Y off the "
+              "matrix: max |delta| = %.2e (<= %.0e: %s)\n",
               kappas.size(), edotGapMax, kDumpEdotTol, edotOk ? "ok" : "FAILED");
 
   // --- the file, and the file read back ----------------------------------------

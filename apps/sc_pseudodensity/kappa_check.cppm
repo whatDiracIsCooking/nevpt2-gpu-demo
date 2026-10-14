@@ -13,10 +13,11 @@
 // index rotated along an antisymmetric kappa, with the RDM-side inputs
 // (dm1/dm2/dm3 and the f3ac/f3ca digests) and the orbital energies held
 // fixed. That is the integral half of the chain rule; the two pieces it
-// leaves out (the digests' own h2e dependence, which reverse mode cannot
-// reach without the 4-RDM contraction's transpose, and the orbital energies'
+// leaves out (the digests' own h2e dependence, which reverse mode reaches
+// through the 4-RDM contraction's transpose, and the orbital energies'
 // response, which needs integral blocks the golden does not carry --
-// docs/gradient-theory.md, Sec. 1.3) belong to the core/virtual work.
+// docs/gradient-theory.md, Sec. 1.3) are --kappa-full's, out of the sidecar
+// (#88, #89, and the orbital energies' own work).
 //
 // THE THREE NUMBERS, per seeded direction:
 //

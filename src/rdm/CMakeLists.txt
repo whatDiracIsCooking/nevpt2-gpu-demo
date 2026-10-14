@@ -51,10 +51,14 @@ add_cxx_module_library(
 # rdm_build_tangent.cppm is the :tangent partition: the same pipeline run with
 # one copy of the CI vector replaced by a direction (buildRdmTangentsDevice,
 # and the --rdm-tangent self-check), which needs no kernel of its own.
+# rdm_build_adjoint.cppm is the :adjoint partition: the f3 path's TRANSPOSE
+# with respect to the integrals (buildDigestAdjointDevice, #89), over
+# f3_transpose.cu's kernels below.
 add_cxx_module_library(
   NAME nevpt2.rdm_build
   PRIMARY_INTERFACE rdm_build.cppm
   PARTITIONS rdm_build_staging.cppm rdm_build_blas.cppm rdm_build_tangent.cppm
+    rdm_build_adjoint.cppm
   IMPLEMENTATION rdm_build.cpp
   # device_tensor (re-exports nevpt2.tensor and nevpt2.device_resources): the result
   # is DeviceTensors.
@@ -115,6 +119,18 @@ add_device_library(
 )
 target_include_directories(nevpt2.rdm.f3_scatter.device PRIVATE ${NEVPT2_SRC_ROOT})
 
+# f3_transpose.cu -- the f3 digests' TRANSPOSE with respect to the integrals
+# (#89): the adjoints of the wedge, fdm2 and consume, which nevpt2.rdm_build's
+# :adjoint partition drives tile by tile (with one native-fp64 DGEMM per order
+# for the digest's own). One thread per output element, no atomic and no
+# shuffle, so backend-neutral; launched through parallel_for.
+add_device_library(
+  NAME nevpt2.rdm.f3_transpose.device
+  SOURCES f3_transpose.cu
+  LINK_PRIVATE wwr::extension::parallel_for nevpt2::common::device
+)
+target_include_directories(nevpt2.rdm.f3_transpose.device PRIVATE ${NEVPT2_SRC_ROOT})
+
 # sigma_vector.cu -- the 3-body and 4-body-contracted sigma-vector kernels: a
 # coefficient tensor over active indices contracted with the excited
 # wavefunctions it multiplies, one amplitude per determinant, so that the n^6 /
@@ -158,4 +174,5 @@ target_link_libraries(nevpt2.sigma_vector PRIVATE nevpt2.rdm.sigma_vector.device
 target_include_directories(nevpt2.rdm_build PRIVATE ${NEVPT2_SRC_ROOT})
 target_link_libraries(nevpt2.rdm_build PRIVATE nevpt2.rdm.kernels.device
   nevpt2.rdm.accumulate.device nevpt2.rdm.f3_digest.device
-  nevpt2.rdm.f3_scatter.device nevpt2.ozaki.device wwr::backend)
+  nevpt2.rdm.f3_scatter.device nevpt2.rdm.f3_transpose.device nevpt2.ozaki.device
+  wwr::backend)

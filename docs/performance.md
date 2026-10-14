@@ -497,6 +497,8 @@ with a clean out-of-memory **during the RDM build**, at the
 | CAS(10,10), `--rdm-tangent` | RTX 3080 | **2** (1 tile: out of memory) | `--tiles 3` |
 | CAS(10,12), `--rdm-tangent` | RTX 3080 | **25** (24 and 23: out of memory) | `--tiles 40` |
 | CAS(12,12), `--rdm-tangent` | RTX 3080 | **34** (33 and 32: out of memory) | `--tiles 40` |
+| CAS(10,10), the digests' transpose (#89) | RTX 3080 / RX 9060 XT | **1** / **1** | `--tiles 3` |
+| CAS(12,12), the digests' transpose (#89) | RTX 3080 / RX 9060 XT | **16** (15: out of memory) / **11 (10, 9 and 8: out of memory)** | `--tiles 40` |
 
 HIP's CAS(12,12) floor has not been measured. The per-tile working set
 (`R`, `L2`, `W`; the build prints it as `per-tile transition blocks`) is
@@ -523,6 +525,26 @@ the pool's used high-water after that build beside it:
 | CAS(12,12) `--tiles 34` (its floor) | 8028.4 MB | 8203.5 MB |
 | CAS(12,12) `--tiles 40` | 6824.0 MB | 6999.2 MB |
 | CAS(12,12) `--tiles 60` | 4549.4 MB | 4724.5 MB |
+
+**The digests' transpose (#89) has the plain build's per-tile working set.**
+`buildDigestAdjointDevice` (`nevpt2.rdm_build`'s `:adjoint` partition) holds
+the plain build's `R` and `L2` per tile and one `n^2`-by-width `Wbar` in
+`W`'s place — printed as `per-tile transition blocks (R, L2, Wbar)`, the same
+megabytes as the plain build's line at the same count — plus two `n^6`
+pre-wedge adjoints across the sweep (15.3 MB at CAS(10,10), 45.6 MB at
+CAS(12,12)). Its rows above were measured on 2026-10-14 with a scratch
+driver (a temporary GoogleTest case, never committed: a seeded random
+half-filled CAS(n,n) state and random `G_ac`/`G_ca`, the plain build at
+`--tiles 60` for `dm3`, then the transpose alone at the count under test),
+on the RTX 3080 with 0.67 GB of the card held by other processes and on the
+RX 9060 XT {hipheld}. Below the floor it fails like the plain build: a clean
+out-of-memory, at the `L2` allocation in `buildDigestAdjointDevice`. The
+pool's used high-water after it, RTX 3080: 1686.5 MB at CAS(10,10) `--tiles
+3` (4981.0 MB at 1 tile), 3546.7 MB at CAS(12,12) `--tiles 40` and 8682.1 MB
+at its floor. The binaries that run it today — those with a gradient
+sidecar, through `--kappa-full`, `--dump-source-terms` and `--source-oracle`
+— are N2 CAS(4,4), CAS(8,8), LiF CAS(4,6) and acrolein CAS(6,5), far below
+any floor at `--tiles 3`. What it costs is "The digests' transpose" below.
 
 **The digests' orbital tangent has no floor of its own.**
 `scDigestRotationTangentDevice` (`--kappa-full`, `--dump-source-terms`, #88)
@@ -558,6 +580,34 @@ in the CI vector): the largest relative gap is 2.2e-16 (`dm3_dot`) to
 The derivative itself is checked against a central finite difference of the
 plain build in the unit tier (docs/testing.md has the tier; the suites are
 `test/rdm/rdm_tangent_tests.cpp`).
+
+### The digests' transpose
+
+`buildDigestAdjointDevice` (#89; [`gradients.md`](gradients.md), §6) is the
+reverse half of the digests' orbital response: given `dE/d(f3ac)` and
+`dE/d(f3ca)`, it re-produces `L2` tile by tile, runs one native-fp64 DGEMM
+per order (`Wbar = Gt^T . L2`, the size of a digest GEMM) and three
+`f3_transpose.cu` kernels, one thread per output element. So it costs about
+one plain build's `produce` plus two digest-sized GEMMs, and the consume
+adjoint's plain loop (`n^5` per determinant, the forward consume's count, as
+a loop rather than a GEMM). On the scratch driver of "Tile floors" above, the
+transpose alone (Release, emitted produce):
+
+| case | RTX 3080 | RX 9060 XT |
+|---|---:|---:|
+| CAS(10,10) `--tiles 3` | 1.03 s | 1.38 s |
+| CAS(12,12) `--tiles 40` | 40.94 s | 83.44 s |
+| CAS(12,12) at its floor | 41.56 s (16 tiles) | 11 tiles run; its time not recorded |
+
+— within a few percent of the plain build at the same size and count
+(CAS(12,12) `--tiles 40`, 39.39 s, "Where the time goes"), and like it
+indifferent to the tile count. On the cases that run it, it is lost in the
+noise: 0.00–0.01 s per transpose in the dumps (RTX 3080), and with the slab
+walk that leaves `dE/d(f3)` (`scDigestAdjointDevice`) 0.01 s at N2 CAS(4,4),
+0.03 s at LiF and 0.16 s at N2 CAS(8,8) in `--kappa-full`. It runs once per
+binary invocation; every probe of `Y` then pairs `hbar` with that
+direction's `h2e_dot`, one `n^4` dot product. The ctest walls it moved are in
+[`testing.md`](testing.md), "The digests' orbital response, reverse mode".
 
 ### `--tiles` on the CI source term (`--gradient-source`)
 

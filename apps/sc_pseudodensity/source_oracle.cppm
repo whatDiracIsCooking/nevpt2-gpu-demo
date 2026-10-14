@@ -25,12 +25,13 @@
 // configure time (NEVPT2_SOURCE_ORACLE_TOL, apps/sc_pseudodensity/
 // CMakeLists.txt), as the self-variation envelope is.
 //
-// THE KNOWN GAPS ARE PINNED, NOT HIDDEN. The device's Y still holds the
-// f3ac/f3ca digests fixed (docs/gradients.md, section 6), so some blocks are
-// known wrong. kKnownGaps below is the ONE list of them. A block on it must
-// still DISAGREE by more than the tolerance and every other block must AGREE
-// within it, so the entry fails if a correct block breaks AND if a fix lands
-// without the list being updated (#89 empties it; #87 already took P y off).
+// THE KNOWN GAPS ARE PINNED, NOT HIDDEN. kKnownGaps below is the ONE list of
+// blocks the device is known to get wrong. A block on it must still DISAGREE
+// by more than the tolerance and every other block must AGREE within it, so
+// the entry fails if a correct block breaks AND if a fix lands without the
+// list being updated. It is EMPTY: #87 took P y off it, and #89 -- the
+// digests' transpose carried into Y (docs/gradients.md, section 6) -- took
+// off every Y block the f3ac/f3ca digests had kept on it.
 module;
 
 #include <cstdio>  // stdout: a macro, which `import std` does not carry
@@ -62,25 +63,18 @@ constexpr std::array<std::string_view, 4> kSpaceNames{"core", "act_O", "act_V", 
 constexpr std::string_view kCiBlock = "P y";
 
 // THE known-gap list: per committed oracle (its file name's stem), the blocks
-// the device is known to get wrong today, every one of them for the one
-// omission left -- Y holds the f3ac/f3ca digests fixed (docs/gradients.md,
-// section 6; docs/testing.md, "The GPU as the source-term provider"). Each
-// rotation that moves an active two-electron integral misses, unless symmetry
-// zeroes it on both sides: N2 CAS(4,4)'s act_O-act_V and both cases'
-// core-act blocks are such zeros, and are held to agree. `P y` is on no list
-// since #87. When #89 lands every list here is empty, and stays in the table
-// as an explicit "nothing is known wrong".
+// the device is known to get wrong today. EMPTY since #89, and kept as an
+// explicit "nothing is known wrong": every block of both oracles is held to
+// agree. Until then it held every Y block an active two-electron integral
+// moves under (N2 CAS(4,4): act_O-virt, act_V-virt; LiF: act_O-act_V,
+// act_O-virt, act_V-virt), for the one omission #89 closed -- Y held the
+// f3ac/f3ca digests fixed (docs/testing.md, "The GPU as the source-term
+// provider" keeps that record). `P y` left it with #87.
 struct KnownGap {
   std::string_view oracle;
   std::string_view block;
 };
-constexpr std::array kKnownGaps{
-    KnownGap{"n2_ccpvdz_cas44", "act_O-virt"},
-    KnownGap{"n2_ccpvdz_cas44", "act_V-virt"},
-    KnownGap{"lif_def2svp_cas46", "act_O-act_V"},
-    KnownGap{"lif_def2svp_cas46", "act_O-virt"},
-    KnownGap{"lif_def2svp_cas46", "act_V-virt"},
-};
+constexpr std::array<KnownGap, 0> kKnownGaps{};
 // The oracles that have a list at all -- one with no known gap is named here
 // too, so an oracle nobody has classified is refused rather than read as
 // "everything must agree".
@@ -132,7 +126,7 @@ nevpt2::Result<bool> checkSourceOracle(const nevpt2::GoldenFile& g,
                                        const nevpt2::DeviceTensor& dm3,
                                        const nevpt2::DeviceTensor& f3ac,
                                        const nevpt2::DeviceTensor& f3ca,
-                                       std::int64_t sigmaTiles,
+                                       const nevpt2::RdmBuildOptions& rdmOpt,
                                        const nevpt2::DeviceResources& res) {
   NEVPT2_TRY(gg.checkAgainst(g));
   NEVPT2_TRY(requireGradientArrays(gg));
@@ -157,8 +151,11 @@ nevpt2::Result<bool> checkSourceOracle(const nevpt2::GoldenFile& g,
               static_cast<long long>(nact), static_cast<long long>(nOcc),
               static_cast<long long>(o.nvirt), o.kappaStep, o.ciStep);
   const nevpt2::GeneralIntegralsDevice gen = uploadGeneral(gg, res);
-  const GpuSourceTerms terms = NEVPT2_TRY(
-      assembleSourceTerms(g, gg, energies, ints, gen, dm1, dm2, dm3, f3ac, f3ca, sigmaTiles, res));
+  // The digests' transpose (#89), so the Y compared is the exact one.
+  const nevpt2::DeviceTensor hbar = nevpt2::scDigestAdjointDevice(
+      rdmOpt, g.get("ci"), g.nelecA, g.nelecB, ints, dm1, dm2, dm3, f3ac, f3ca, res);
+  const GpuSourceTerms terms = NEVPT2_TRY(assembleSourceTerms(
+      g, gg, energies, ints, gen, dm1, dm2, dm3, f3ac, f3ca, hbar, rdmOpt.nTiles, res));
 
   // --- A = Y - Y^T, carried into the oracle's basis ----------------------------
   // Wf = 1 off the active block and W on it, so A' = Wf^T A Wf -- the
