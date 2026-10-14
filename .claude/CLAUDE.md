@@ -129,11 +129,17 @@ gate").
 **The gate is local and manual, and saying what you ran is the protocol:**
 
 ```bash
-devtools/cpp-tier.sh                    # CUDA, on a box with a card (runs both lints first)
-devtools/cross-backend-check.sh         # does the OTHER backend still compile (lints too)
+devtools/cpp-tier.sh                    # CUDA, on a box with a card (runs the four gates below first)
+devtools/cross-backend-check.sh         # does the OTHER backend still compile (the two lints too)
 devtools/stream-lint.sh --strict        # every GPU call on the one stream
 devtools/throw-lint.sh                  # no `throw` in src/ or apps/
+uv run python reference_data/golden_layout_check.py   # the golden layout contract + stray-reader scan
+uv run ruff check                       # the Python lint
 ```
+
+`cpp-tier.sh` runs all four as named phases before it configures, `--no-test`
+included, the last two through the locked uv environment: a missing or stale
+one **fails** the phase, never skips it.
 
 `src/` builds for both backends, so a CUDA-only spelling outside
 `src/cublas/cublas_emul.cpp` (or an nvcc-only construct in a kernel) breaks
