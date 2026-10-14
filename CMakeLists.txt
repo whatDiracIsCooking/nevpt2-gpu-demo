@@ -560,6 +560,13 @@ if(NEVPT2_BUILD_TESTING)
       set_tests_properties(nevpt2_sc_pseudodensity_dump_pc_${_case} PROPERTIES
         PASS_REGULAR_EXPRESSION
           "PASS: the GPU's PC source terms Y_xy and y_I were assembled, written to")
+      # CAS(8,8) is `slow`: its Y probe rebuilds every class's n^6 Dyall block
+      # per direction, minutes on the RX 9060 XT (docs/pc-nevpt2.md, "The
+      # source terms by reverse mode").
+      if(_case STREQUAL "n2_ccpvdz_cas88")
+        set_tests_properties(nevpt2_sc_pseudodensity_dump_pc_${_case} PROPERTIES
+                             LABELS "gpu;slow")
+      endif()
     endif()
     unset(_pc_dump_gold)
   endforeach()
