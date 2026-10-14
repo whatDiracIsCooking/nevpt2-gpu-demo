@@ -47,6 +47,13 @@
 // on the recorded known-gap list must still miss it. The partition
 // :source_oracle is where that lives, and the list; it prints its own PASS
 // line.
+//
+// AND WITH --pc, BOTH OF THOSE ARE PC-NEVPT2'S (#74): --dump-source-terms and
+// --source-oracle assemble the PC source terms -- nevpt2.gradient's PC reverse
+// mode -- instead of SC's, against the PC energy (pcEnergiesDevice, itself held
+// to the golden's block2 e_pc_total) and, for the oracle, a PC `.srcgold`.
+// --pc means nothing to the identities or --kappa-act / --kappa-full, which
+// are SC's, and nevpt2.cli refuses it there.
 
 // A module unit, so each binary is apps/<app>/{main.cppm,CMakeLists.txt}.
 // Nothing imports it. main() is written plainly: clang attaches main to the
@@ -80,9 +87,10 @@ int main(int argc, char** argv) {
 
   // Every flag, the common ones and this binary's own, and every check that
   // spans them (nevpt2.cli's parseArgs). A flag this binary does not
-  // implement -- --pc (there is no PC pseudodensity assembly), --profile,
-  // --rdm-tangent -- is refused as Unsupported rather than ignored; a bad
-  // value or combination is a config Error. Reported once, here.
+  // implement -- --profile, --rdm-tangent -- is refused as Unsupported rather
+  // than ignored; a bad value or combination (--pc with anything but
+  // --dump-source-terms or --source-oracle) is a config Error. Reported once,
+  // here.
   nevpt2::Result<nevpt2::cli::Options> parsed =
       nevpt2::cli::parseArgs(nevpt2::cli::Binary::ScPseudodensity, args);
   if (!parsed) {
@@ -120,6 +128,15 @@ int main(int argc, char** argv) {
   if (const nevpt2::Status st = g.checkNdet(ndet); !st) {
     nevpt2::report(st.error());
     return 1;
+  }
+  // --pc: the state must carry block2's PC answer, which is also the
+  // generator's word that its PC metric is gapped (docs/reference-data.md,
+  // "PC fields") -- a PC derivative is never taken where the energy is not.
+  if (opt.pc) {
+    if (const nevpt2::Status st = g.require({"pc_class_energies", "e_pc_total"}); !st) {
+      nevpt2::report(st.error());
+      return 1;
+    }
   }
 
   std::print("=== SC-NEVPT2 pseudodensities ({}/C++): CAS({},{})  ncore={}  n_det={} ===\n",
@@ -167,6 +184,28 @@ int main(int argc, char** argv) {
   const nevpt2::EnergyResult energies =
       nevpt2::energiesDevice(dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, *res);
 
+  // --pc (#74): the PC energy the PC source terms differentiate, held to the
+  // golden's block2 total first -- a state the PC stage disagrees on, or
+  // refuses a class of, has no PC derivative to write or compare.
+  double energyTotal = energies.total;
+  if (opt.pc) {
+    std::printf("computing the PC-NEVPT2 class energies on the GPU...\n");
+    nevpt2::Result<nevpt2::PcEnergyResult> pc =
+        nevpt2::pcEnergiesDevice(dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, *res);
+    if (!pc) {
+      nevpt2::report(pc.error());
+      return 1;
+    }
+    if (!nevpt2::printPcReport(*pc, g.get("pc_class_energies"), g.get("e_pc_total").flat(0),
+                               1e-7)) {
+      std::printf("FAIL: the PC energy stage does not reproduce the golden on this state, so "
+                  "there is no PC source term to take\n");
+      return 1;
+    }
+    energyTotal = 0.0;
+    for (const nevpt2::PcClassResult& c : pc->classes) energyTotal += c.energy;
+  }
+
   // --kappa-full and --dump-source-terms read the gradient sidecar beside the
   // golden -- the path derived from the golden's unless --gradgold gave one.
   // A missing or malformed sidecar is the user's input, reported once here.
@@ -198,8 +237,8 @@ int main(int argc, char** argv) {
     }
     const nevpt2::GradGoldFile gg = *std::move(sidecar);
     const nevpt2::Result<bool> ok =
-        dumpSourceTerms(g, gg, energies, dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca,
-                        opt.rdm, dumpPath, *res);
+        dumpSourceTerms(g, gg, opt.pc, energyTotal, dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac,
+                        rdm.f3ca, opt.rdm, dumpPath, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;
@@ -222,8 +261,8 @@ int main(int argc, char** argv) {
     }
     const nevpt2::GradGoldFile gg = *std::move(sidecar);
     const nevpt2::Result<bool> ok =
-        checkSourceOracle(g, gg, oraclePath, energies, dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac,
-                          rdm.f3ca, opt.rdm, *res);
+        checkSourceOracle(g, gg, oraclePath, opt.pc, energyTotal, dInts, dDm1, dDm2, rdm.dm3,
+                          rdm.f3ac, rdm.f3ca, opt.rdm, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

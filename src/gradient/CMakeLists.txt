@@ -1,5 +1,5 @@
 # The gradient work: the SC half's amplitudes, multipliers, pseudodensities
-# and CI source term, and the PC half's tangent check. ALL LEAVES -- nothing
+# and CI source term, the PC half's source terms (#74) and its tangent check. ALL LEAVES -- nothing
 # else in src/ imports any of these modules. apps/sc_pseudodensity/ and
 # apps/pc_tangent/ drive most of it; nevpt2_demo links nevpt2::gradient for
 # --gradient-source, the CI source term's forward-reverse duality check.
@@ -61,9 +61,10 @@ add_cxx_module_library(
 # rotation needs, which :rotation builds on), :rotation
 # (gradient_rotation.cppm, the rotation machinery), :terms (the generic
 # term/derivative machinery), :sc_classes (the eight classes), :rdm_adjoint
-# (the chain rule from the metric / Dyall blocks down to the five RDMs) and
-# :ci_source (Park Eq. 48's sigma assembly). PARTITIONS is in dependency
-# order.
+# (the chain rule from the metric / Dyall blocks down to the five RDMs),
+# :ci_source (Park Eq. 48's sigma assembly) and :pc_classes (PC-NEVPT2's
+# reverse mode, #74: the PC solve's adjoint over SC's own rotation machinery
+# and block sweeps). PARTITIONS is in dependency order.
 #
 # nevpt2::sigma_vector is PUBLIC: scCiSourceDevice takes its
 # SigmaVectorOptions, and the CI source term IS its three sigma entry points
@@ -77,6 +78,7 @@ add_cxx_module_library(
   PRIMARY_INTERFACE gradient.cppm
   PARTITIONS gradient_general.cppm gradient_rotation.cppm gradient_terms.cppm
              gradient_sc_classes.cppm gradient_rdm_adjoint.cppm gradient_ci_source.cppm
+             gradient_pc_classes.cppm
   IMPLEMENTATION gradient.cpp
   LINK_PUBLIC nevpt2::energy nevpt2::sc_amplitudes nevpt2::gradient_plan
               nevpt2::sigma_vector nevpt2::rdm_build

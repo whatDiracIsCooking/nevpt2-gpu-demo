@@ -58,6 +58,17 @@
 //      builds, which is why it is bounded by kJacobianMaxDet rather than run
 //      at every size.
 //
+// WITH --pc (#74) THE SAME THREE CHECKS HOLD PC-NEVPT2'S y. The reverse side
+// is nevpt2.gradient's pcCiSourceDevice -- the PC solve's adjoint, swept
+// through SC's own block adjoints to the same five coefficient tensors and
+// the same sigma assembly -- and the forward side nevpt2.energy's
+// pcTangentsDevice, the tangent of that solve (both with the orbital
+// energies' response when the sidecar is given). A class the gap or
+// denominator check refuses is refused by both and FAILS the run, named in
+// the per-class table: neither side has a number for it, and none is made up.
+// The PC tangent's own finite difference is nevpt2_pc_tangent's, the one-time
+// license this duality inherits, as --sc-tangent's is for SC.
+//
 // Everything runs on the caller's one DeviceResources: every tangent build,
 // every energy and every sigma launch is issued on its stream, and every
 // device tensor here is freed (on that stream) when it goes out of scope.
@@ -337,6 +348,167 @@ nevpt2::Result<bool> checkCiSource(const nevpt2::GoldenFile& g,
 
   std::printf("\n%s: the CI source term and the forward tangent agree to %.0e "
               "(worst |<u,y> - Edot(u)| = %.3e), %s\n",
+              ok ? "PASS" : "FAIL", kCiSourceTol, worst, functional);
+  return ok;
+}
+
+// --- PC-NEVPT2 (#74) -------------------------------------------------------------
+
+// Edot_pc(u): pcTangentsDevice along `u` -- the same RDM tangents as
+// ciSourceTangentAlong -- summed over the classes. A class the PC solve
+// refuses comes back as nullopt: there is no derivative to compare.
+nevpt2::Result<std::optional<double>> pcCiSourceTangentAlong(
+    const nevpt2::HostDm12Builder& builder, const nevpt2::Tensor& ci, const nevpt2::Tensor& u,
+    const nevpt2::RdmBuildOptions& rdmOpt, const nevpt2::Tensor& h2e,
+    const nevpt2::NevptIntegralsDevice& ints, const nevpt2::DeviceTensor& dDm1,
+    const nevpt2::DeviceTensor& dDm2, const nevpt2::RdmBuildResult& rdm,
+    const nevpt2::OrbitalEnergyResponse* eps, const nevpt2::DeviceResources& res) {
+  const nevpt2::HostDm12 dot = builder.dm12Dot(ci, u);
+  const nevpt2::DeviceTensor dDm1Dot = nevpt2::uploadTensor(dot.dm1, res);
+  const nevpt2::DeviceTensor dDm2Dot = nevpt2::uploadTensor(dot.dm2, res);
+  const nevpt2::RdmBuildResult rdmDot = nevpt2::buildRdmTangentsDevice(
+      rdmOpt, ci, u, builder.norb(), builder.nelecA(), builder.nelecB(), h2e, res);
+  const std::optional<nevpt2::OrbitalEnergyDot> epsDot =
+      eps ? std::optional(nevpt2::orbitalEnergyDot(*eps, dot.dm1)) : std::nullopt;
+  const nevpt2::PcTangentResult t = NEVPT2_TRY(nevpt2::pcTangentsDevice(
+      ints, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1Dot, dDm2Dot, rdmDot.dm3, rdmDot.f3ac,
+      rdmDot.f3ca, epsDot ? &*epsDot : nullptr, res));
+  double total = 0.0;
+  for (const nevpt2::PcClassTangent& c : t.classes) {
+    if (c.result.status != nevpt2::PcStatus::Done) return std::optional<double>{};
+    total += c.edot;
+  }
+  return std::optional<double>{total};
+}
+
+// --gradient-source --pc: checkCiSource's three checks for PC-NEVPT2's y,
+// against the golden's block2 PC energy (whose total the adjoint's own walk
+// must reproduce, 1e-7) and the PC forward tangent. Same tolerance, same
+// directions, same Jacobian bound, same functional switch.
+nevpt2::Result<bool> checkPcCiSource(const nevpt2::GoldenFile& g,
+                                     const nevpt2::RdmBuildOptions& rdmOpt,
+                                     const nevpt2::NevptIntegralsDevice& ints,
+                                     const nevpt2::RdmBuildResult& baseRdm,
+                                     const std::string& gradgoldPath,
+                                     const nevpt2::DeviceResources& res) {
+  nevpt2::Result<nevpt2::HostDm12Builder> builder =
+      nevpt2::HostDm12Builder::create(g.ncas, g.nelecA, g.nelecB);
+  if (!builder) return std::unexpected(builder.error());
+  const nevpt2::Tensor& ci = g.get("ci");
+  const nevpt2::Tensor& h2e = g.get("h2e");
+
+  std::printf("\n--gradient-source --pc: the PC-NEVPT2 y_I = dE_pc/dc_I against the PC forward "
+              "tangent (#74)\n");
+  std::optional<nevpt2::OrbitalEnergyResponse> epsResponse;
+  if (!gradgoldPath.empty())
+    epsResponse = NEVPT2_TRY(loadOrbitalEnergyResponse(g, gradgoldPath));
+  const nevpt2::OrbitalEnergyResponse* eps = epsResponse ? &*epsResponse : nullptr;
+  const char* const functional =
+      eps ? "the orbital energies moving with the active density"
+          : "the orbital energies held fixed (no --gradgold)";
+  std::printf("  functional: %s\n", functional);
+
+  const nevpt2::HostDm12 base = builder->dm12(ci);
+  const nevpt2::DeviceTensor dDm1 = nevpt2::uploadTensor(base.dm1, res);
+  const nevpt2::DeviceTensor dDm2 = nevpt2::uploadTensor(base.dm2, res);
+  const nevpt2::RdmBuildResult& rdm = baseRdm;
+
+  nevpt2::SigmaVectorOptions sigmaOpt;
+  sigmaOpt.nTiles = rdmOpt.nTiles;
+  const auto t0 = std::chrono::steady_clock::now();
+  const nevpt2::PcCiSourceResult src = NEVPT2_TRY(nevpt2::pcCiSourceDevice(
+      ints, ci, g.nelecA, g.nelecB, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, sigmaOpt, eps, res));
+  const double ySeconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("  the PC classes as the adjoint's walk solved them:\n");
+  nevpt2::printPcGradientClasses(src.walk);
+  if (!src.ok) {
+    std::printf("\nFAIL: the PC CI source term is REFUSED on this state -- %s -- so there is "
+                "no derivative to hold against the forward tangent (which refuses the same "
+                "class)\n",
+                src.walk.refusals().c_str());
+    return false;
+  }
+  double yNorm = 0.0;
+  for (std::int64_t i = 0; i < src.y.size(); ++i) yNorm += src.y.flat(i) * src.y.flat(i);
+  std::printf("  y built in %.2fs (sigma tiles=%lld, ndet=%lld); |y| = %.8f\n", ySeconds,
+              static_cast<long long>(sigmaOpt.nTiles), static_cast<long long>(src.y.size()),
+              std::sqrt(yNorm));
+
+  bool ok = true;
+  {
+    // The walk's PC total against block2's: the state this y differentiates.
+    const double ref = g.get("e_pc_total").flat(0);
+    const double d = std::fabs(src.walk.total - ref);
+    ok = ok && d < kCiSourceTol;
+    std::printf("  the walk y rides on: E_corr(PC) %.10f vs the golden's block2 %.10f  "
+                "|delta| = %.2e\n",
+                src.walk.total, ref, d);
+  }
+
+  std::printf("\n  <u, y> against Edot_pc(u), for several seeded directions and for the state\n");
+  std::printf("  %-18s %18s %18s %11s %11s\n", "direction", "<u, y>", "Edot(u)", "|delta|",
+              "relative");
+  double worst = 0.0;
+  bool refused = false;
+  const auto compare = [&](const std::string& what, const nevpt2::Tensor& u) -> nevpt2::Status {
+    const double dotY = ciSourceDot(u, src.y);
+    const std::optional<double> edot = NEVPT2_TRY(pcCiSourceTangentAlong(
+        *builder, ci, u, rdmOpt, h2e, ints, dDm1, dDm2, rdm, eps, res));
+    if (!edot) {
+      refused = true;
+      ok = false;
+      std::printf("  %-18s %18.12f %18s\n", what.c_str(), dotY, "REFUSED");
+      return {};
+    }
+    const double d = std::fabs(dotY - *edot);
+    worst = std::max(worst, d);
+    ok = ok && d < kCiSourceTol;
+    std::printf("  %-18s %18.12f %18.12f %11.2e %11.2e\n", what.c_str(), dotY, *edot, d,
+                d / std::max(1e-30, std::fabs(*edot)));
+    return {};
+  };
+  for (const std::uint64_t seed : kCiSourceSeeds)
+    NEVPT2_TRY(compare(std::format("seed 0x{:x}", seed), ciSourceDirection(ci, seed)));
+  NEVPT2_TRY(compare("the state itself", ci));
+
+  const std::int64_t ndet = src.y.size();
+  if (ndet <= kJacobianMaxDet) {
+    std::printf("\n  the FULL Jacobian: y_I against Edot_pc(e_I) for all %lld determinants\n",
+                static_cast<long long>(ndet));
+    double jWorst = 0.0, yMax = 0.0;
+    std::int64_t jAt = 0;
+    for (std::int64_t I = 0; I < ndet; ++I) {
+      const nevpt2::Tensor e = ciSourceUnit(src.y.dims(), I);
+      const std::optional<double> edot = NEVPT2_TRY(pcCiSourceTangentAlong(
+          *builder, ci, e, rdmOpt, h2e, ints, dDm1, dDm2, rdm, eps, res));
+      if (!edot) {
+        refused = true;
+        ok = false;
+        continue;
+      }
+      const double d = std::fabs(src.y.flat(I) - *edot);
+      yMax = std::max(yMax, std::fabs(src.y.flat(I)));
+      if (d > jWorst) {
+        jWorst = d;
+        jAt = I;
+      }
+      ok = ok && d < kCiSourceTol;
+    }
+    worst = std::max(worst, jWorst);
+    std::printf("  worst column: |y_I - Edot(e_I)| = %.3e at I = %lld "
+                "(max |y_I| over the vector = %.8f)\n",
+                jWorst, static_cast<long long>(jAt), yMax);
+  } else {
+    std::printf("\n  the full Jacobian is skipped: ndet = %lld is above %lld, and it costs one "
+                "forward tangent per determinant\n",
+                static_cast<long long>(ndet), static_cast<long long>(kJacobianMaxDet));
+  }
+  if (refused)
+    std::printf("  a forward tangent was REFUSED by the PC solve: no number was compared there\n");
+
+  std::printf("\n%s: the PC CI source term and the PC forward tangent agree to %.0e "
+              "(worst |<u,y> - Edot_pc(u)| = %.3e), %s\n",
               ok ? "PASS" : "FAIL", kCiSourceTol, worst, functional);
   return ok;
 }

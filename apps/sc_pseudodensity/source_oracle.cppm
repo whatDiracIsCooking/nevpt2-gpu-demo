@@ -13,10 +13,12 @@
 // (source_compare.cppm: what is compared, the tolerances, and THE known-gap
 // list, kKnownGaps -- EMPTY since #89).
 //
-// SC ONLY. The terms this binary assembles differentiate the SC energy, so a
-// PC oracle (`*_pc.srcgold`, "NEVPT2P1", #95) is refused as a configuration
-// error rather than compared: until #74 there are no GPU PC terms to hold to
-// it, and #74 adds that entry against the same comparison.
+// EITHER SCHEME, AND THE RUN SAYS WHICH. With --pc (#74) the terms assembled
+// are PC-NEVPT2's (:source_dump's assembleSourceTerms, the PC solve's
+// adjoint) and the oracle must be a PC one (`*_pc.srcgold`, "NEVPT2P1", #95:
+// block2's exact PC source terms); without it, SC's against an SC oracle. A
+// mismatch either way is a configuration error, never a comparison of one
+// scheme's terms with the other's.
 module;
 
 #include <cstdio>  // stdout: a macro, which `import std` does not carry
@@ -43,8 +45,8 @@ import :source_dump;
 // classification, is an Error the caller reports once.
 nevpt2::Result<bool> checkSourceOracle(const nevpt2::GoldenFile& g,
                                        const nevpt2::GradGoldFile& gg,
-                                       const std::string& oraclePath,
-                                       const nevpt2::EnergyResult& energies,
+                                       const std::string& oraclePath, const bool pc,
+                                       const double energyTotal,
                                        const nevpt2::NevptIntegralsDevice& ints,
                                        const nevpt2::DeviceTensor& dm1,
                                        const nevpt2::DeviceTensor& dm2,
@@ -57,17 +59,19 @@ nevpt2::Result<bool> checkSourceOracle(const nevpt2::GoldenFile& g,
   NEVPT2_TRY(requireGradientArrays(gg));
   std::printf("source-term oracle: %s\n", oraclePath.c_str());
   const nevpt2::SrcGoldFile o = NEVPT2_TRY(nevpt2::loadSrcGold(oraclePath));
-  if (o.scheme != nevpt2::SourceScheme::Sc)
+  const nevpt2::SourceScheme want = pc ? nevpt2::SourceScheme::Pc : nevpt2::SourceScheme::Sc;
+  if (o.scheme != want)
     return nevpt2::err_config(std::format(
-        "--source-oracle: {} is a {} oracle, and this binary assembles the SC source terms -- "
-        "there are no GPU PC source terms to compare with it until #74",
-        oraclePath, nevpt2::sourceSchemeName(o.scheme)));
+        "--source-oracle: {} is a {} oracle, and this run assembles the {} source terms -- {}",
+        oraclePath, nevpt2::sourceSchemeName(o.scheme), nevpt2::sourceSchemeName(want),
+        pc ? "drop --pc for an SC oracle" : "pass --pc for a PC oracle"));
   NEVPT2_TRY(o.checkAgainst(g, gg));
   const std::string stem = nevpt2::sourceOracleStem(oraclePath);
   const std::vector<std::string_view> gaps = NEVPT2_TRY(nevpt2::knownSourceGaps(stem));
   const double tol = nevpt2::sourceOracleTol(o.scheme);
 
-  std::printf("\n--source-oracle: the GPU's Y_xy and y_I against PySCF's exact ones (#92)\n");
+  std::printf("\n--source-oracle: the GPU's %s Y_xy and y_I against %s exact ones (#92%s)\n",
+              pc ? "PC" : "SC", pc ? "block2's" : "PySCF's", pc ? ", #95, #74" : "");
   std::printf("  partition: n_mo = %lld = %lld core + %lld active (%lld act_O) + %lld virtual; "
               "PySCF's steps: kappa %.6g, CI %.6g\n",
               static_cast<long long>(o.nmo), static_cast<long long>(o.ncore),
@@ -75,10 +79,13 @@ nevpt2::Result<bool> checkSourceOracle(const nevpt2::GoldenFile& g,
               static_cast<long long>(o.nvirt), o.kappaStep, o.ciStep);
   const nevpt2::GeneralIntegralsDevice gen = uploadGeneral(gg, res);
   // The digests' transpose (#89), so the Y compared is the exact one.
-  const nevpt2::DeviceTensor hbar = nevpt2::scDigestAdjointDevice(
-      rdmOpt, g.get("ci"), g.nelecA, g.nelecB, ints, dm1, dm2, dm3, f3ac, f3ca, res);
+  const nevpt2::DeviceTensor hbar =
+      pc ? NEVPT2_TRY(nevpt2::pcDigestAdjointDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB,
+                                                    ints, dm1, dm2, dm3, f3ac, f3ca, res))
+         : nevpt2::scDigestAdjointDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB, ints, dm1,
+                                         dm2, dm3, f3ac, f3ca, res);
   const GpuSourceTerms terms = NEVPT2_TRY(assembleSourceTerms(
-      g, gg, energies, ints, gen, dm1, dm2, dm3, f3ac, f3ca, hbar, rdmOpt.nTiles, res));
+      g, gg, pc, energyTotal, ints, gen, dm1, dm2, dm3, f3ac, f3ca, hbar, rdmOpt.nTiles, res));
 
   double cy = 0.0;
   const nevpt2::Tensor a = nevpt2::oracleBasisA(o, terms.kappa);
@@ -86,9 +93,9 @@ nevpt2::Result<bool> checkSourceOracle(const nevpt2::GoldenFile& g,
   const nevpt2::SourceComparison cmp = nevpt2::compareSourceTerms(o, a, py, gaps, tol);
 
   // --- the verdict, block by block ------------------------------------------------
-  std::printf("\n  per block, max over its pairs (Eh; tolerance %.0e, docs/testing.md, \"The SC "
-              "source terms against PySCF's, on a card\"):\n",
-              tol);
+  std::printf("\n  per block, max over its pairs (Eh; tolerance %.0e, docs/testing.md, \"%s\"):\n",
+              tol,
+              pc ? "The PC source terms' oracle" : "The SC source terms against PySCF's, on a card");
   std::printf("    %-12s %6s %12s %12s %11s  %-12s %s\n", "block", "pairs", "max|ref|",
               "max|GPU|", "max|delta|", "expected", "verdict");
   for (const nevpt2::SourceBlockRow& r : cmp.rows) {
@@ -109,14 +116,16 @@ nevpt2::Result<bool> checkSourceOracle(const nevpt2::GoldenFile& g,
     for (const std::string& x : v) s += (s.empty() ? "" : ", ") + x;
     return s.empty() ? std::string("none") : s;
   };
+  const char* const scheme = pc ? "PC" : "SC";
+  const char* const provider = pc ? "block2's" : "PySCF's";
   if (ok)
-    std::printf("\nPASS: the GPU's SC source terms against PySCF's committed ones, %s: %zu "
+    std::printf("\nPASS: the GPU's %s source terms against %s committed ones, %s: %zu "
                 "blocks agree within %.0e, and the %zu known gaps still disagree (%s)\n",
-                stem.c_str(), cmp.agreed.size(), tol, cmp.stillGaps.size(),
+                scheme, provider, stem.c_str(), cmp.agreed.size(), tol, cmp.stillGaps.size(),
                 join(cmp.stillGaps).c_str());
   else
-    std::printf("\nFAIL: the GPU's SC source terms against PySCF's committed ones, %s: %s\n",
-                stem.c_str(),
+    std::printf("\nFAIL: the GPU's %s source terms against %s committed ones, %s: %s\n",
+                scheme, provider, stem.c_str(),
                 cmp.failures.empty() ? "y's walk or the orbital energies it reads did not check out"
                                      : ("blocks out of place: " + join(cmp.failures)).c_str());
   return ok;

@@ -36,7 +36,12 @@
 //                                own rotated basis and fixes the state's sign
 //                                against this
 //   ncore, nact, nvirt  0-d i8   the partition, checked against the state
-//   e_corr        0-d f8         the SC total the terms differentiate
+//   e_corr        0-d f8         the total the terms differentiate (SC's, or
+//                                PC's in a PC dump)
+//   pc            0-d i8         1 in a PC-NEVPT2 dump (#74:
+//                                --dump-source-terms --pc), ABSENT in an SC
+//                                one; the reader refuses a dump of the other
+//                                scheme
 //
 // and, as a set of three or not at all, the forward Edot(kappa) along seeded
 // directions (#88) -- what nevpt2_grad.py --edot-check holds against PySCF's
@@ -72,6 +77,9 @@ struct GradSrc {
   int64_t nact = 0;
   int64_t nvirt = 0;
   double eCorr = 0.0;
+  // PC-NEVPT2's source terms rather than SC's (#74): written as the `pc`
+  // member (= 1) and only then, so an SC dump has no such member.
+  bool pc = false;
   // The forward Edot(kappa) along seeded directions (#88): all three empty
   // (default-constructed) for a dump without them, else (n_dir, n_mo, n_mo),
   // (n_dir) and (n_dir).

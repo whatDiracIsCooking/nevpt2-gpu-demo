@@ -526,6 +526,60 @@ std::vector<double> sirDelta(int64_t b0, int64_t b1, int64_t ncore, const Tensor
   return d;
 }
 
+// --- PC's Delta vectors, in the PC classes' own tuple order (#74) -------------
+//
+// PC walks three classes in a different tuple order from SC's term lists --
+// over the RAW (unsymmetrized) tuples, with the external index of the slab
+// first -- so the PC adjoint's R_t lines up with these. Sr, Si, Srs and Sij
+// share SC's order and use srDelta / siDelta / srsDelta / sijDelta above.
+
+// PC Sijr: Delta_t = eps_r - eps_j - eps_i over (r in slab, j, i), every
+// ORDERED core pair (energy_pc_classes.cppm's pc_Sijr).
+std::vector<double> pcSijrDelta(int64_t b0, int64_t b1, int64_t ncore, const Tensor& ec,
+                                const Tensor& ev) {
+  std::vector<double> d;
+  d.reserve(static_cast<std::size_t>((b1 - b0) * ncore * ncore));
+  for (int64_t r = b0; r < b1; ++r)
+    for (int64_t j = 0; j < ncore; ++j)
+      for (int64_t i = 0; i < ncore; ++i) d.push_back(ev(r) - ec(j) - ec(i));
+  return d;
+}
+
+// PC Srsi: Delta_t = eps_r + eps_s - eps_i over (r in slab, s, i), every
+// ORDERED virtual pair (pc_Srsi).
+std::vector<double> pcSrsiDelta(int64_t b0, int64_t b1, int64_t nvirt, int64_t ncore,
+                                const Tensor& ec, const Tensor& ev) {
+  std::vector<double> d;
+  d.reserve(static_cast<std::size_t>((b1 - b0) * nvirt * ncore));
+  for (int64_t r = b0; r < b1; ++r)
+    for (int64_t ss = 0; ss < nvirt; ++ss)
+      for (int64_t i = 0; i < ncore; ++i) d.push_back(ev(r) + ev(ss) - ec(i));
+  return d;
+}
+
+// PC Sir: Delta_t = eps_r - eps_i over (r in slab, i) -- the slab's own order,
+// virtual first (pc_Sir), where SC's sirDelta runs core first.
+std::vector<double> pcSirDelta(int64_t b0, int64_t b1, int64_t ncore, const Tensor& ec,
+                               const Tensor& ev) {
+  std::vector<double> d;
+  d.reserve(static_cast<std::size_t>((b1 - b0) * ncore));
+  for (int64_t r = b0; r < b1; ++r)
+    for (int64_t i = 0; i < ncore; ++i) d.push_back(ev(r) - ec(i));
+  return d;
+}
+
+// PC Sijr's exchange partner within one slab of (nr, ncore, ncore) tuples:
+// (r, j, i) -> (r, i, j), as flat tuple indices -- an involution, and the map
+// pcAdjointPair / pcRotationTangentPair read the exchange row through.
+std::vector<int64_t> pcSijrPartner(int64_t nr, int64_t ncore) {
+  std::vector<int64_t> p(static_cast<std::size_t>(nr * ncore * ncore));
+  for (int64_t r = 0; r < nr; ++r)
+    for (int64_t j = 0; j < ncore; ++j)
+      for (int64_t i = 0; i < ncore; ++i)
+        p[static_cast<std::size_t>((r * ncore + j) * ncore + i)] = (r * ncore + i) * ncore + j;
+  return p;
+}
+
 // --- the two symmetrized classes' multipliers --------------------------------
 
 // The symmetrization and triangular packing of nevpt2.energy's energy_Sijr,

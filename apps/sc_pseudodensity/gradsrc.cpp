@@ -59,6 +59,9 @@ Status writeGradSrc(const std::string& path, const GradSrc& src) {
       intMember("nvirt", src.nvirt),
       scalarMember("e_corr", src.eCorr),
   };
+  // Only a PC dump carries the marker (#74), so an SC dump's bytes are what
+  // they were before it existed.
+  if (src.pc) members.push_back(intMember("pc", 1));
   if (src.hasDirections()) {
     members.push_back(floatMember("edot_kappa", src.edotKappa));
     members.push_back(floatMember("edot_frozen", src.edotFrozen));
@@ -127,10 +130,17 @@ Result<GradSrc> readGradSrc(const std::string& path) {
     return err_io(std::format("{}: kappa_source is not ({}, {})", where, nmo, nmo));
   if (src.ciSource.dims() != src.ci.dims())
     return err_io(std::format("{}: ci_source and ci are not the same shape", where));
-  // The forward Edot(kappa) directions (#88): all three members or none.
   const auto has = [&](std::string_view name) {
     return std::ranges::find(members, name, &NpyMember::name) != members.end();
   };
+  // The scheme (#74): `pc` = 1 for a PC dump, absent for an SC one.
+  if (has("pc")) {
+    const int64_t pc = NEVPT2_TRY(intScalar(members, "pc", where));
+    if (pc != 1)
+      return err_io(std::format("{}: 'pc' is {}, and a dump writes it only as 1", where, pc));
+    src.pc = true;
+  }
+  // The forward Edot(kappa) directions (#88): all three members or none.
   const int present = int{has("edot_kappa")} + int{has("edot_frozen")} + int{has("edot_digest")};
   if (present != 0 && present != 3)
     return err_io(std::format(

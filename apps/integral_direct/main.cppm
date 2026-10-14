@@ -242,6 +242,18 @@ int main(int argc, char** argv) {
   // class energies it is handed are nevpt2.energy's own answer for the same
   // state, which is the cheapest check that the pseudodensity walk y rides on
   // is undisturbed.
+  if (gradientSourceArg && opt.pc) {
+    // #74: PC-NEVPT2's y against the PC forward tangent.
+    const nevpt2::Result<bool> ok =
+        checkPcCiSource(g, opt.rdm, dInts, rdm, parsedOpts.gradgoldPath, *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
+
   if (gradientSourceArg) {
     const nevpt2::EnergyResult base =
         nevpt2::energiesDevice(dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, *res);

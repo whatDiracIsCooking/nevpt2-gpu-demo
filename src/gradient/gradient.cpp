@@ -17,6 +17,7 @@ import :rdm_adjoint;  // the block -> RDM chain rule the CI source needs
 import :rotation;
 import :sc_classes;
 import :terms;
+import :pc_classes;   // PC-NEVPT2's reverse mode (#74)
 
 namespace nevpt2 {
 
@@ -624,6 +625,222 @@ bool printScGradientReport(const ScGradientResult& g, const EnergyResult& energi
       "matches nevpt2.energy to %.0e and the golden to 1e-07\n",
       ok ? "PASS" : "FAIL", idtol, atol);
   return ok;
+}
+
+// --- PC-NEVPT2's reverse mode (#74) -------------------------------------------
+
+std::string PcGradientResult::refusals() const {
+  std::string out;
+  for (std::size_t c = 0; c < classes.size(); ++c) {
+    const PcClassResult& r = classes[c].result;
+    if (r.status == PcStatus::Done) continue;
+    out += std::format("{}{} ({})", out.empty() ? "" : ", ", CLASSES[c],
+                       r.status == PcStatus::Refused ? r.why : std::string("not computed"));
+  }
+  return out;
+}
+
+void printPcGradientClasses(const PcGradientResult& r) {
+  std::printf("  %-6s %-8s %18s  %s\n", "class", "status", "PC energy (Ha)", "S's gap / why");
+  for (std::size_t c = 0; c < r.classes.size(); ++c) {
+    const PcClassResult& k = r.classes[c].result;
+    const std::string gap =
+        k.hasSpectrum ? std::format("{:.1e}", k.spectrum.gap) : std::string("-");
+    if (k.status == PcStatus::Done)
+      std::printf("  %-6s %-8s %18.10f  %s\n", CLASSES[c].c_str(), "done", k.energy, gap.c_str());
+    else
+      std::printf("  %-6s %-8s %18s  %s -- %s\n", CLASSES[c].c_str(), "REFUSED", "-", gap.c_str(),
+                  k.status == PcStatus::Refused ? k.why.c_str() : "not computed");
+  }
+  std::printf("  E_corr (PC, the adjoint's own walk) = %.10f Ha%s\n", r.total,
+              r.allDone() ? "" : "  (NOT a PC energy: a class was refused)");
+}
+
+Result<PcCiSourceResult> pcCiSourceDevice(const NevptIntegralsDevice& ints, const Tensor& ci,
+                                          const int64_t nelecA, const int64_t nelecB,
+                                          const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                          const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                          const DeviceTensor& f3ca,
+                                          const SigmaVectorOptions& sigma,
+                                          const OrbitalEnergyResponse* eps,
+                                          const DeviceResources& dr) {
+  const wwrStream_t s = dr.stream();
+  const int64_t norb = dm1.dims[0];
+  FullBlockSource src(ints);
+  const ActiveIntegralsDevice ai = activeViewOf(ints);
+  // The five Eq. 48 coefficient tensors, PC's: accumulated over the classes
+  // by the same per-block sweeps SC's are (n^2 + n^4 + 3 n^6 doubles).
+  ScRdmAdjoint adj = ScRdmAdjoint::zeros(norb, dr);
+  PcCiSourceResult out;
+  out.walk = NEVPT2_TRY(assemblePcClasses(ai, src, /*batch=*/0, dm1, dm2, dm3, f3ac, f3ca,
+                                          ScRotation{}, &adj, /*epsAdjoint=*/eps != nullptr, dr));
+  out.ok = out.walk.allDone();
+  // A refused class has no derivative: y is NOT formed (never a sum with a
+  // zero in it), and the caller reads the refusal off `walk`.
+  if (!out.ok) return out;
+
+  Tensor g1 = downloadTensor(adj.dm1, s);
+  if (eps != nullptr) {
+    out.orbitalEnergiesMove = true;
+    out.dEdCore.assign(static_cast<std::size_t>(eps->core.dim(2)), 0.0);
+    out.dEdVirt.assign(static_cast<std::size_t>(eps->virt.dim(2)), 0.0);
+    for (const PcClassGradient& c : out.walk.classes) {
+      check(c.dEdCore.size() == out.dEdCore.size() && c.dEdVirt.size() == out.dEdVirt.size(),
+            "pcCiSourceDevice: a class's dE/de does not match the orbital-energy response");
+      for (std::size_t i = 0; i < c.dEdCore.size(); ++i) out.dEdCore[i] += c.dEdCore[i];
+      for (std::size_t r = 0; r < c.dEdVirt.size(); ++r) out.dEdVirt[r] += c.dEdVirt[r];
+    }
+    ciSourceAddInto(orbitalEnergyDm1Coefficient(*eps, out.dEdCore, out.dEdVirt), g1);
+  }
+  const Tensor g2 = downloadTensor(adj.dm2, s);
+  const Tensor g3 = downloadTensor(adj.dm3, s);
+  const Tensor gac = downloadTensor(adj.f3ac, s);
+  const Tensor gca = downloadTensor(adj.f3ca, s);
+  const Tensor h2e = downloadTensor(ai.h2e, s);
+  out.y = ciSourceVector(sigma, ci, norb, nelecA, nelecB, g1, g2, g3, gac, gca, h2e, dr);
+  return out;
+}
+
+Result<PcFullRotationResult> pcFullRotationDevice(
+    const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen, const DeviceTensor& dm1,
+    const DeviceTensor& dm2, const DeviceTensor& dm3, const DeviceTensor& f3ac,
+    const DeviceTensor& f3ca, const DeviceTensor* digestAdjoint,
+    const std::vector<ScRotationRequest>& dirs, const DeviceResources& dr) {
+  NEVPT2_TRY(checkGeneralShapes(ints, gen));
+  if (digestAdjoint != nullptr && digestAdjoint->dims != ints.h2e.dims)
+    return err_config("pcFullRotationDevice: the digests' adjoint is not shaped like h2e");
+  FullBlockSource src(ints);
+  const ActiveIntegralsDevice ai = activeViewOf(ints);
+  const ScRotation rot = NEVPT2_TRY(makeGeneralRotation(dirs, ai.h1e, ai.h2e, gen, dm1, dr));
+  PcFullRotationResult out;
+  out.walk = NEVPT2_TRY(assemblePcClasses(ai, src, /*batch=*/0, dm1, dm2, dm3, f3ac, f3ca, rot,
+                                          /*adj=*/nullptr, /*epsAdjoint=*/false, dr));
+  out.ok = out.walk.allDone();
+  if (!out.ok) return out;
+  out.dirs.assign(dirs.size(), ScFullRotationPairing{});
+  for (std::size_t d = 0; d < dirs.size(); ++d) {
+    ScFullRotationPairing& p = out.dirs[d];
+    for (const PcClassGradient& c : out.walk.classes) {
+      p.ext += c.rotExt[d];
+      p.act += c.rotAct[d];
+      p.eps += c.rotEps[d];
+      p.tangentIntegral += c.rotTangent[d];
+    }
+    p.integral = p.ext + p.act;
+    if (digestAdjoint != nullptr) {
+      p.digest = dotTensors(*digestAdjoint, rot.dirs[d].h2eDot, dr);
+      p.hasDigest = true;
+    }
+    p.adjoint = p.integral + p.eps + p.digest;
+    p.tangent = p.tangentIntegral + p.eps;
+    p.hasTangent = dirs[d].tangent;
+  }
+  return out;
+}
+
+Result<Tensor> pcFullRotationMatrix(const NevptIntegralsDevice& ints,
+                                    const GeneralIntegralsDevice& gen, const DeviceTensor& dm1,
+                                    const DeviceTensor& dm2, const DeviceTensor& dm3,
+                                    const DeviceTensor& f3ac, const DeviceTensor& f3ca,
+                                    const DeviceTensor* digestAdjoint,
+                                    const std::vector<std::pair<int64_t, int64_t>>& pairs,
+                                    int64_t chunk, const DeviceResources& res) {
+  const int64_t n = gen.nmo();
+  if (chunk < 1) return err_config("pcFullRotationMatrix: chunk must be at least 1");
+  Tensor y({n, n});
+  std::vector<ScRotationRequest> reqs;
+  std::vector<std::pair<int64_t, int64_t>> which;
+  const auto flush = [&]() -> Status {
+    if (reqs.empty()) return {};
+    const PcFullRotationResult r = NEVPT2_TRY(pcFullRotationDevice(
+        ints, gen, dm1, dm2, dm3, f3ac, f3ca, digestAdjoint, reqs, res));
+    if (!r.ok)
+      return err_numerical(std::format(
+          "the PC orbital source term has no value: {} refused by the solve the energy runs "
+          "(docs/pc-nevpt2.md, \"The singular-metric convention\")",
+          r.walk.refusals()));
+    for (std::size_t k = 0; k < which.size(); ++k) {
+      // <kappa, Y> = sum_pq kappa_pq Y_pq = 2 Y_pq for this direction.
+      const double v = 0.5 * r.dirs[k].adjoint;
+      y(which[k].first, which[k].second) = v;
+      y(which[k].second, which[k].first) = -v;
+    }
+    reqs.clear();
+    which.clear();
+    return {};
+  };
+  for (const auto& [p, q] : pairs) {
+    if (p < 0 || q < 0 || p >= n || q >= n || p == q)
+      return err_config(std::format(
+          "pcFullRotationMatrix: ({}, {}) is not a pair of distinct orbitals of {}", p, q, n));
+    Tensor k({n, n});
+    k(p, q) = 1.0;
+    k(q, p) = -1.0;
+    reqs.push_back(ScRotationRequest{std::move(k), /*tangent=*/false});
+    which.emplace_back(p, q);
+    if (std::ssize(reqs) == chunk) NEVPT2_TRY(flush());
+  }
+  NEVPT2_TRY(flush());
+  return y;
+}
+
+Result<DeviceTensor> pcDigestAdjointDevice(const RdmBuildOptions& opt, const Tensor& ci,
+                                           const int64_t nelecA, const int64_t nelecB,
+                                           const NevptIntegralsDevice& ints,
+                                           const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                           const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                           const DeviceTensor& f3ca, const DeviceResources& res) {
+  const int64_t norb = dm1.dims[0];
+  FullBlockSource src(ints);
+  const ActiveIntegralsDevice ai = activeViewOf(ints);
+  ScRdmAdjoint adj = ScRdmAdjoint::zeros(norb, res);
+  const PcGradientResult walk =
+      NEVPT2_TRY(assemblePcClasses(ai, src, /*batch=*/0, dm1, dm2, dm3, f3ac, f3ca, ScRotation{},
+                                   &adj, /*epsAdjoint=*/false, res));
+  if (!walk.allDone())
+    return err_numerical(std::format(
+        "the PC digests' adjoint has no value: {} refused by the solve the energy runs",
+        walk.refusals()));
+  return buildDigestAdjointDevice(opt, ci, norb, nelecA, nelecB, dm3, adj.f3ac, adj.f3ca, res);
+}
+
+Result<std::vector<ScDigestTangent>> pcDigestRotationTangentDevice(
+    const RdmBuildOptions& opt, const Tensor& ci, const int64_t nelecA, const int64_t nelecB,
+    const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen, const DeviceTensor& dm1,
+    const DeviceTensor& dm2, const DeviceTensor& dm3, const DeviceTensor& f3ac,
+    const DeviceTensor& f3ca, const std::vector<ScRotationRequest>& dirs,
+    const DeviceResources& res) {
+  check(!opt.cublas && !opt.ozaki && !opt.fusedDigest,
+        "pcDigestRotationTangentDevice runs the emitted or the native-fp64 BLAS digest "
+        "(cli refuses --cublas / --ozaki / --fused-digest with --dump-source-terms)");
+  NEVPT2_TRY(checkGeneralShapes(ints, gen));
+  const wwrStream_t s = res.stream();
+  const int64_t norb = dm1.dims[0];
+  const ActiveIntegralsDevice ai = activeViewOf(ints);
+  const ScRotation rot = NEVPT2_TRY(makeGeneralRotation(dirs, ai.h1e, ai.h2e, gen, dm1, res));
+  const DeviceTensor dm1Zero = DeviceTensor::zeros(dm1.dims, res);
+  const DeviceTensor dm2Zero = DeviceTensor::zeros(dm2.dims, res);
+  const DeviceTensor dm3Zero = DeviceTensor::zeros(dm3.dims, res);
+  std::vector<ScDigestTangent> out(dirs.size());
+  for (std::size_t d = 0; d < rot.dirs.size(); ++d) {
+    // downloadTensor synchronizes: the rotation's einsums are complete.
+    const Tensor h2eDot = downloadTensor(rot.dirs[d].h2eDot, s);
+    for (int64_t i = 0; i < h2eDot.size(); ++i)
+      out[d].h2eDotMax = std::max(out[d].h2eDotMax, std::fabs(h2eDot.flat(i)));
+    const RdmBuildResult dot = buildRdmsDevice(opt, ci, norb, nelecA, nelecB, h2eDot, res);
+    const PcTangentResult t = NEVPT2_TRY(pcTangentsDevice(
+        ints, dm1, dm2, dm3, f3ac, f3ca, dm1Zero, dm2Zero, dm3Zero, dot.f3ac, dot.f3ca,
+        /*epsDot=*/nullptr, res));
+    for (std::size_t c = 0; c < 8; ++c) {
+      if (t.classes[c].result.status != PcStatus::Done)
+        return err_numerical(std::format(
+            "the PC digests' tangent along direction {}: {} refused by the solve ({})", d,
+            CLASSES[c], t.classes[c].result.why));
+      out[d].classes[c] = t.classes[c].edot;
+      out[d].total += t.classes[c].edot;
+    }
+  }
+  return out;
 }
 
 }  // namespace nevpt2

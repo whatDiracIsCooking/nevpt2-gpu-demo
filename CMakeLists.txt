@@ -342,6 +342,39 @@ if(NEVPT2_BUILD_TESTING)
     unset(_ci_src_functional)
   endforeach()
 
+  # --- PC-NEVPT2's CI source term: --gradient-source --pc (#74) -------------------
+  #
+  # The same three checks for PC-NEVPT2's y_I (apps/integral_direct/
+  # gradient_source_check.cppm, checkPcCiSource): nevpt2.gradient's
+  # pcCiSourceDevice -- the PC solve's adjoint, swept through SC's own block
+  # adjoints and the same sigma assembly -- against nevpt2.energy's
+  # pcTangentsDevice, the solve's tangent, along four seeded directions and
+  # the state itself and, at CAS(4,4), column by column over the Jacobian.
+  # Exact arithmetic, 1e-7, both with the orbital energies' response read from
+  # the committed sidecar. The adjoint's own walk is held to the golden's block2
+  # e_pc_total too. The tangent's one-time license is nevpt2_pc_tangent's
+  # finite difference (below), as --sc-tangent's is SC's. Both `small`, so the
+  # sanitizer tier runs the PC adjoint's device work. What the duality cannot
+  # see -- a term both modes leave out -- is the oracle entry's job below.
+  foreach(_case cas44 cas88)
+    set(_pc_src_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.nevpt2gold")
+    set(_pc_src_side "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.gradgold")
+    if(NOT EXISTS "${_pc_src_side}")
+      message(FATAL_ERROR "nevpt2: committed gradient sidecar missing: ${_pc_src_side}")
+    endif()
+    _add_golden_test_with(nevpt2_demo nevpt2_gradient_source_pc_${_case}
+                          "${_pc_src_gold}" --tiles 3 --pc --gradient-source
+                          --gradgold "${_pc_src_side}")
+    if(TEST nevpt2_gradient_source_pc_${_case})
+      set_tests_properties(nevpt2_gradient_source_pc_${_case} PROPERTIES
+        PASS_REGULAR_EXPRESSION
+          "PASS: the PC CI source term and the PC forward tangent agree .*, the orbital energies moving with the active density"
+        LABELS "gpu;small")
+    endif()
+    unset(_pc_src_gold)
+    unset(_pc_src_side)
+  endforeach()
+
   # --- the FULL orbital source term, --kappa-full ---------------------------------
   #
   # nevpt2_sc_pseudodensity --kappa-full
@@ -495,6 +528,57 @@ if(NEVPT2_BUILD_TESTING)
     unset(_oracle_gold)
     unset(_oracle_file)
   endforeach()
+
+  # --- PC-NEVPT2's source terms, written and checked (#74) -----------------------
+  #
+  # nevpt2_sc_pseudodensity --pc --dump-source-terms: PC-NEVPT2's Y_xy and y_I
+  # by the PC solve's adjoint (nevpt2.gradient's PC reverse mode, with the
+  # f3ac/f3ca digests' transpose in Y and the orbital energies' response in
+  # y), written to a `.gradsrc` marked `pc` and read back; its gates are the
+  # SC dump's four plus a fifth -- the PC integral halves' duality, the adjoint
+  # pairing against the forward tangent along six seeded full directions
+  # (1e-7) -- with check 4 the FULL duality (the digests' transpose against the
+  # rebuilt digests' forward term). Not `small`, for the SC dump's reason.
+  #
+  # --pc --source-oracle: the same terms against block2's EXACT PC source
+  # terms, committed as golden/n2_ccpvdz_cas44_pc.srcgold (#95), block by
+  # block, with an EMPTY known-gap list and the PC oracle tolerance
+  # (docs/testing.md, "The PC source terms' oracle" -- its one home). The
+  # independent provider: what catches a term the adjoint and the tangent
+  # both leave out, which no duality can.
+  set(_nevpt2_pc_dump_dir "${CMAKE_CURRENT_BINARY_DIR}/gradsrc")
+  file(MAKE_DIRECTORY "${_nevpt2_pc_dump_dir}")
+  foreach(_case n2_ccpvdz_cas44 n2_ccpvdz_cas88)
+    set(_pc_dump_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.nevpt2gold")
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.gradgold")
+      message(FATAL_ERROR "nevpt2: committed gradient sidecar missing for ${_case}")
+    endif()
+    _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_dump_pc_${_case}
+                          "${_pc_dump_gold}" --tiles 3 --pc
+                          --dump-source-terms "${_nevpt2_pc_dump_dir}/${_case}_pc.gradsrc")
+    if(TEST nevpt2_sc_pseudodensity_dump_pc_${_case})
+      set_tests_properties(nevpt2_sc_pseudodensity_dump_pc_${_case} PROPERTIES
+        PASS_REGULAR_EXPRESSION
+          "PASS: the GPU's PC source terms Y_xy and y_I were assembled, written to")
+    endif()
+    unset(_pc_dump_gold)
+  endforeach()
+  unset(_nevpt2_pc_dump_dir)
+  foreach(_need "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44.gradgold"
+                "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_pc.srcgold")
+    if(NOT EXISTS "${_need}")
+      message(FATAL_ERROR "nevpt2: committed source-oracle input missing: ${_need}")
+    endif()
+  endforeach()
+  _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_oracle_pc_n2_ccpvdz_cas44
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44.nevpt2gold"
+                        --tiles 3 --pc --source-oracle
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_pc.srcgold")
+  if(TEST nevpt2_sc_pseudodensity_oracle_pc_n2_ccpvdz_cas44)
+    set_tests_properties(nevpt2_sc_pseudodensity_oracle_pc_n2_ccpvdz_cas44 PROPERTIES
+      PASS_REGULAR_EXPRESSION
+        "PASS: the GPU's PC source terms against block2's committed ones, n2_ccpvdz_cas44_pc:")
+  endif()
 
   # --- *_pc: PC-NEVPT2 ----------------------------------------------
   #
