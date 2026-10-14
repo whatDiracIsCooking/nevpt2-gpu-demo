@@ -3,7 +3,7 @@
 // (normToEnergy, PySCF's _norm_to_energy) and ITS DERIVATIVE
 // (normToEnergyDerivative, normToEnergyTangent -- the only calculus the
 // forward tangent of an SC class energy needs), the partially-contracted
-// finish (finishSingle, checkDenominator) and the PC TANGENT's per-tuple
+// finish (pcRankCut, finishSingle, checkDenominator) and the PC TANGENT's per-tuple
 // arithmetic (pcCoefficients, pcQuadForm, tangentSingle), with the PC result
 // types they all fill. No device, no BLAS, no solver: nevpt2.energy
 // re-exports this module, and its partitions (:sc_finish, :sc_tangent,
@@ -176,6 +176,14 @@ struct OrbitalEnergyDot {
 
 // --- PC ------------------------------------------------------------------------
 
+// S's cut, relative to its largest eigenvalue (docs/pc-nevpt2.md, "The
+// singular-metric convention"): two decades above the structural null modes'
+// noise, two below the first real mode on cc-pVTZ.
+inline constexpr double PC_TAU = 1e-13;
+// The smallest acceptable smallest-kept / largest-dropped ratio: the
+// generator's PC_MIN_GAP.
+inline constexpr double PC_MIN_GAP = 1e3;
+
 enum class PcStatus {
   NotYet,   // not computed (the initial value; every class is computed)
   Done,     // energy computed
@@ -209,6 +217,48 @@ struct PcClassTangent {
   PcClassResult result;
   double edot = 0.0;  // d/dh of result.energy along the caller's CI direction
 };
+
+// The cut and the gap check, on S's eigenvalues `s` in ASCENDING order (as
+// syevd returns them), so the dropped modes are a prefix: every s_k <=
+// PC_TAU * s_max is dropped, the rest are kept, and the class is refused
+// when S has no positive eigenvalue (!(s_max > 0): a NaN refuses too) or the
+// gap -- smallest kept / largest |dropped|, both relative to s_max, with
+// PC_TAU as the floor when nothing is dropped -- is below PC_MIN_GAP.
+//
+// The returned result has hasSpectrum set and its spectrum filled (d,
+// dropped, largestDropped, smallestKept, gap; only d when s_max refuses).
+// Its status is Refused, with `why`, or NotYet for an accepted cut: the solve
+// that called this still has m = d - spectrum.dropped kept modes to work
+// through, and marks the class Done itself. The rank decided here is what
+// the PC tangent (and adjoint) need locally constant (energy_pc_solve.cppm,
+// "the tangent of that solve"), which is the gap's whole job.
+PcClassResult pcRankCut(std::span<const double> s) {
+  PcClassResult r;
+  r.hasSpectrum = true;
+  PcSpectrum& sp = r.spectrum;
+  const int64_t d = std::ssize(s);
+  sp.d = d;
+  const double smax = d > 0 ? s[narrowTo<std::size_t>(d - 1)] : 0.0;
+  if (!(smax > 0.0)) {
+    r.status = PcStatus::Refused;
+    r.why = "S has no positive eigenvalue";
+    return r;
+  }
+  int64_t nd = 0;
+  while (nd < d && s[narrowTo<std::size_t>(nd)] <= PC_TAU * smax) ++nd;
+  sp.dropped = nd;
+  for (int64_t k = 0; k < nd; ++k)
+    sp.largestDropped =
+        std::max(sp.largestDropped, std::fabs(s[narrowTo<std::size_t>(k)]) / smax);
+  sp.smallestKept = s[narrowTo<std::size_t>(nd)] / smax;  // nd < d: s_max itself is kept
+  const double floor = nd > 0 ? sp.largestDropped : PC_TAU;
+  sp.gap = floor > 0.0 ? sp.smallestKept / floor : std::numeric_limits<double>::infinity();
+  if (sp.gap < PC_MIN_GAP) {
+    r.status = PcStatus::Refused;
+    r.why = std::format("S's gap {:.1e} < PC_MIN_GAP {:.0e}", sp.gap, PC_MIN_GAP);
+  }
+  return r;
+}
 
 // Marks `r` refused when a denominator is not positive (H_D must be positive
 // on the kept range; the measured floor is 0.83 Eh -- docs/pc-nevpt2.md,

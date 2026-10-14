@@ -436,7 +436,9 @@ dropped count, largest dropped, smallest kept, the ratio — and the class is
 (or `/ PC_TAU` when nothing was dropped). A non-positive denominator
 `lambda_k + Delta_t` refuses the class too, rather than dividing through a
 sign change. This is `generate_golden.py`'s `_check_pc_conditioning` rule
-applied to `S`.
+applied to `S`. The cut and the gap decision are `pcRankCut`
+(`nevpt2.energy_finish`), which `solveClass` calls on `S`'s downloaded
+eigenvalues and `test/energy_finish/` checks on hand spectra, card-free.
 
 It has a visible consequence in the golden set: **N2 CAS(12,12) has an
 ungapped metric** (a 1s orbital in the active space), so those files carry no

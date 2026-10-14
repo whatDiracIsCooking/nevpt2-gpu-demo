@@ -120,9 +120,7 @@ Result<ClassSolve> solveClass(const DeviceTensor& S, const DeviceTensor& K, cons
                               bool keepUt = false) {
   const wwrStream_t s = dr.stream();
   const int64_t d = S.dims[0];
-  ClassSolve cs;
-  cs.result.hasSpectrum = true;
-  cs.result.spectrum.d = d;
+  ClassSolve cs;  // cs.result is filled by pcRankCut, step 2
 
   // Only a quadratic form's symmetric part is defined; K is symmetric only to
   // the CI vector's convergence (docs/pc-nevpt2.md, "Symmetrisation").
@@ -135,27 +133,11 @@ Result<ClassSolve> solveClass(const DeviceTensor& S, const DeviceTensor& K, cons
   NEVPT2_TRY(syevd(Vt, sEig, name, dr));
   Tensor sh = downloadTensor(sEig, s);
 
-  // 2. The cut and the gap check. Ascending, so the dropped modes are a prefix.
-  const double smax = sh.flat(d - 1);
-  PcSpectrum& sp = cs.result.spectrum;
-  if (!(smax > 0.0)) {
-    cs.result.status = PcStatus::Refused;
-    cs.result.why = "S has no positive eigenvalue";
-    return cs;
-  }
-  int64_t nd = 0;
-  while (nd < d && sh.flat(nd) <= PC_TAU * smax) ++nd;
-  sp.dropped = nd;
-  for (int64_t k = 0; k < nd; ++k)
-    sp.largestDropped = std::max(sp.largestDropped, std::fabs(sh.flat(k)) / smax);
-  sp.smallestKept = sh.flat(nd) / smax;  // nd < d: s_max itself is always kept
-  const double floor = nd > 0 ? sp.largestDropped : PC_TAU;
-  sp.gap = floor > 0.0 ? sp.smallestKept / floor : std::numeric_limits<double>::infinity();
-  if (sp.gap < PC_MIN_GAP) {
-    cs.result.status = PcStatus::Refused;
-    cs.result.why = std::format("S's gap {:.1e} < PC_MIN_GAP {:.0e}", sp.gap, PC_MIN_GAP);
-    return cs;
-  }
+  // 2. The cut and the gap check: nevpt2.energy_finish's pcRankCut, unit-tested
+  // card-free. Ascending, so the dropped modes are a prefix of sh.
+  cs.result = pcRankCut(sh.data());
+  if (cs.result.status == PcStatus::Refused) return cs;
+  const int64_t nd = cs.result.spectrum.dropped;
   const int64_t m = d - nd;
 
   // X^T = s_kept^-1/2 V_kept^T, (m, d): the kept rows of Vt, each scaled.

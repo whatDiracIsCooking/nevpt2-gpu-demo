@@ -364,16 +364,9 @@ DeviceTensor make_a25(const DeviceTensor& h1e, const DeviceTensor& h2e, const De
 
 // --- PC-NEVPT2 (energy_pc.cpp) ----------------------------------------------
 
-// S's cut, relative to its largest eigenvalue (docs/pc-nevpt2.md, "The
-// singular-metric convention"): two decades above the structural null modes'
-// noise, two below the first real mode on cc-pVTZ.
-inline constexpr double PC_TAU = 1e-13;
-// The smallest acceptable smallest-kept / largest-dropped ratio: the
-// generator's PC_MIN_GAP.
-inline constexpr double PC_MIN_GAP = 1e3;
-
-// PcStatus, PcSpectrum and PcClassResult (one class's PC result) are
-// nevpt2.energy_finish's, re-exported above.
+// PC_TAU and PC_MIN_GAP (S's cut and the gap it must clear), PcStatus,
+// PcSpectrum, PcClassResult (one class's PC result) and pcRankCut (the cut
+// and gap decision itself) are nevpt2.energy_finish's, re-exported above.
 
 struct PcEnergyResult {
   std::array<PcClassResult, 8> classes;  // CLASSES order

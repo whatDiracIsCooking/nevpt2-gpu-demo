@@ -12,6 +12,13 @@
 //                          below NUMERICAL_ZERO adds to the norm, not the energy
 //   CheckDenominatorTests  records minDenominator; refuses a non-positive and
 //                          a NaN minimum (!(minDen > 0)), accepts a positive one
+//   PcRankCutTests         PC's rank decision (#94), the one piece of the PC
+//                          solve the tangent and adjoint stand on, on hand
+//                          spectra: nothing dropped (PC_TAU is the floor), a
+//                          clean null space, the cut relative to s_max, a gap
+//                          exactly at PC_MIN_GAP (accepted: strictly <) and
+//                          just below, s_max <= 0 / empty / NaN refused, a
+//                          negative dropped mode counted by |s_k|, and m == 1
 //   FinishSingleTests      E -= sum_t sum_k y[t,k]^2 / (lambda_k + Delta_t) on a
 //                          hand case, accumulating into e and tracking the
 //                          smallest denominator into minDen
@@ -199,6 +206,120 @@ TEST(CheckDenominatorTests, AcceptingLeavesTheStatusAlone) {
   checkDenominator(r, 1.0);
   EXPECT_EQ(r.status, PcStatus::NotYet);
   EXPECT_EQ(r.spectrum.minDenominator, 1.0);
+}
+
+// --- PcRankCutTests ------------------------------------------------------------------
+
+PcClassResult cut(std::vector<double> s) { return pcRankCut(s); }
+
+TEST(PcRankCutTests, NoDroppedModeUsesTauAsTheFloor) {
+  const PcClassResult r = cut({0.5, 1.0});
+  EXPECT_EQ(r.status, PcStatus::NotYet);  // accepted: the solve marks Done
+  EXPECT_TRUE(r.hasSpectrum);
+  EXPECT_TRUE(r.why.empty());
+  EXPECT_EQ(r.spectrum.d, 2);
+  EXPECT_EQ(r.spectrum.dropped, 0);
+  EXPECT_EQ(r.spectrum.largestDropped, 0.0);
+  EXPECT_EQ(r.spectrum.smallestKept, 0.5);
+  EXPECT_DOUBLE_EQ(r.spectrum.gap, 0.5 / PC_TAU);
+}
+
+TEST(PcRankCutTests, NoDroppedModeStillRefusesASmallKeptMode) {
+  // 2e-13 is above the cut, so kept -- but only 2 x PC_TAU above zero, and
+  // with nothing dropped that is the gap: 2 < PC_MIN_GAP.
+  const PcClassResult r = cut({2e-13, 1.0});
+  EXPECT_EQ(r.status, PcStatus::Refused);
+  EXPECT_EQ(r.spectrum.dropped, 0);
+  EXPECT_DOUBLE_EQ(r.spectrum.gap, 2.0);
+  EXPECT_EQ(r.why, "S's gap 2.0e+00 < PC_MIN_GAP 1e+03");
+}
+
+TEST(PcRankCutTests, ACleanStructuralNullSpaceIsDropped) {
+  // Two null modes at noise level (one each side of zero), two real ones.
+  const PcClassResult r = cut({-1e-16, 1e-16, 0.1, 1.0});
+  EXPECT_EQ(r.status, PcStatus::NotYet);
+  EXPECT_EQ(r.spectrum.d, 4);
+  EXPECT_EQ(r.spectrum.dropped, 2);
+  EXPECT_EQ(r.spectrum.largestDropped, 1e-16);
+  EXPECT_EQ(r.spectrum.smallestKept, 0.1);
+  EXPECT_DOUBLE_EQ(r.spectrum.gap, 1e15);
+}
+
+TEST(PcRankCutTests, TheCutIsRelativeToSMax) {
+  // The same spectrum scaled by 4: the same decision, the same ratios.
+  const PcClassResult r = cut({-4e-16, 4e-16, 0.4, 4.0});
+  EXPECT_EQ(r.status, PcStatus::NotYet);
+  EXPECT_EQ(r.spectrum.dropped, 2);
+  EXPECT_DOUBLE_EQ(r.spectrum.largestDropped, 1e-16);
+  EXPECT_DOUBLE_EQ(r.spectrum.smallestKept, 0.1);
+  // A mode exactly at PC_TAU * s_max is dropped (<=, not <).
+  const PcClassResult at = cut({PC_TAU * 4.0, 4.0});
+  EXPECT_EQ(at.spectrum.dropped, 1);
+}
+
+TEST(PcRankCutTests, AGapExactlyAtPcMinGapIsAccepted) {
+  // Powers of two, so the ratio is exactly 1000 in floating point: the
+  // refusal is gap < PC_MIN_GAP, strictly. x = 2^-50 ~ 8.9e-16 is under the
+  // cut (PC_TAU * s_max = 1e-13); 1000 x ~ 8.9e-13 is above it.
+  const double x = std::ldexp(1.0, -50);
+  const PcClassResult r = cut({x, 1000.0 * x, 1.0});
+  EXPECT_EQ(r.spectrum.dropped, 1);
+  EXPECT_EQ(r.spectrum.gap, PC_MIN_GAP);
+  EXPECT_EQ(r.status, PcStatus::NotYet) << r.why;
+}
+
+TEST(PcRankCutTests, AGapJustBelowPcMinGapIsRefused) {
+  const double x = std::ldexp(1.0, -50);
+  const PcClassResult r = cut({x, 999.0 * x, 1.0});
+  EXPECT_EQ(r.spectrum.gap, 999.0);
+  EXPECT_EQ(r.status, PcStatus::Refused);
+  EXPECT_EQ(r.why, "S's gap 1.0e+03 < PC_MIN_GAP 1e+03");
+}
+
+TEST(PcRankCutTests, NoPositiveEigenvalueIsRefused) {
+  for (const auto& s : {std::vector<double>{-1.0, 0.0}, std::vector<double>{-2.0, -1.0},
+                        std::vector<double>{}}) {
+    const PcClassResult r = cut(s);
+    EXPECT_EQ(r.status, PcStatus::Refused);
+    EXPECT_EQ(r.why, "S has no positive eigenvalue");
+    EXPECT_TRUE(r.hasSpectrum);
+    EXPECT_EQ(r.spectrum.d, std::ssize(s));
+    EXPECT_EQ(r.spectrum.dropped, 0);  // refused before the cut
+  }
+}
+
+TEST(PcRankCutTests, NaNSMaxIsRefused) {
+  // !(s_max > 0), not s_max <= 0: a NaN fails both comparisons and must
+  // still refuse.
+  const PcClassResult r = cut({0.1, std::numeric_limits<double>::quiet_NaN()});
+  EXPECT_EQ(r.status, PcStatus::Refused);
+  EXPECT_EQ(r.why, "S has no positive eigenvalue");
+}
+
+TEST(PcRankCutTests, ANegativeDroppedModeCountsByItsMagnitude) {
+  // largest |dropped| is 1e-15 (the negative one); without the fabs it would
+  // be 1e-17 and the gap 5e4, accepted. With it the gap is 500: refused.
+  const PcClassResult r = cut({-1e-15, 1e-17, 5e-13, 1.0});
+  EXPECT_EQ(r.spectrum.dropped, 2);
+  EXPECT_EQ(r.spectrum.largestDropped, 1e-15);
+  EXPECT_DOUBLE_EQ(r.spectrum.gap, 500.0);
+  EXPECT_EQ(r.status, PcStatus::Refused);
+}
+
+TEST(PcRankCutTests, OnlySMaxKeptGivesRankOne) {
+  const PcClassResult r = cut({1e-17, 2e-17, 3.0});
+  EXPECT_EQ(r.status, PcStatus::NotYet);
+  EXPECT_EQ(r.spectrum.dropped, 2);
+  EXPECT_EQ(r.spectrum.d - r.spectrum.dropped, 1);  // m == 1
+  EXPECT_EQ(r.spectrum.smallestKept, 1.0);
+  EXPECT_DOUBLE_EQ(r.spectrum.largestDropped, 2e-17 / 3.0);
+  EXPECT_DOUBLE_EQ(r.spectrum.gap, 1.5e17);
+}
+
+TEST(PcRankCutTests, LeavesTheDenominatorForCheckDenominator) {
+  const PcClassResult r = cut({0.5, 1.0});
+  EXPECT_EQ(r.spectrum.minDenominator, 0.0);
+  EXPECT_EQ(r.energy, 0.0);
 }
 
 // --- FinishSingleTests ---------------------------------------------------------------
