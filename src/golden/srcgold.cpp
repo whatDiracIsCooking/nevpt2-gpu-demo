@@ -1,8 +1,10 @@
-// loadSrcGold: the `*.srcgold` source-term oracle reader (#92). An
-// implementation unit of nevpt2.golden, so it shares the one byte-level cursor
-// and array parser with loadGolden and loadGradGold (`import :reader;`); the
-// formats differ only in their magic and their scalar header
-// (reference_data/golden_format.py's SRCGOLD_HEADERS is the layout).
+// loadSrcGold: the `*.srcgold` source-term oracle reader (#92), both
+// flavours (SC "NEVPT2S1", PC "NEVPT2P1", #95: one layout, the magic is the
+// scheme). An implementation unit of nevpt2.golden, so it shares the one
+// byte-level cursor and array parser with loadGolden and loadGradGold
+// (`import :reader;`); the formats differ only in their magic and their
+// scalar header (reference_data/golden_format.py's SRCGOLD_HEADERS is the
+// layout).
 module;
 
 #include "error_handling/error_macros.h"  // NEVPT2_TRY: a macro, which no import carries
@@ -13,6 +15,24 @@ import std;
 import :reader;
 
 namespace nevpt2 {
+
+std::string_view sourceSchemeName(SourceScheme scheme) {
+  return scheme == SourceScheme::Pc ? "PC" : "SC";
+}
+
+Result<std::string> srcGoldCase(const std::string& path, SourceScheme scheme) {
+  std::string stem = std::filesystem::path(path).filename().string();
+  static constexpr std::string_view kSuffix = ".srcgold";
+  if (stem.ends_with(kSuffix)) stem.resize(stem.size() - kSuffix.size());
+  if (scheme == SourceScheme::Pc) {
+    static constexpr std::string_view kPc = "_pc";
+    if (!stem.ends_with(kPc))
+      return err_io("source-term oracle: a PC oracle's name must end in '_pc.srcgold' -- " +
+                    path);
+    stem.resize(stem.size() - kPc.size());
+  }
+  return stem;
+}
 
 Status SrcGoldFile::checkAgainst(const GoldenFile& golden, const GradGoldFile& sidecar) const {
   if (nact != golden.ncas || ncore != golden.ncore || ndet != golden.ndet)
@@ -47,11 +67,14 @@ const Tensor& SrcGoldFile::get(const std::string& name) const {
 Result<SrcGoldFile> loadSrcGold(const std::string& path) {
   Reader r = NEVPT2_TRY(Reader::open(path, "source-term oracle"));
   const std::string magic = NEVPT2_TRY(r.str(8));
-  if (magic != "NEVPT2S1")
-    return err_io("source-term oracle: bad magic (got '" + magic +
-                  "', expected 'NEVPT2S1') -- " + path);
-
   SrcGoldFile s;
+  if (magic == "NEVPT2S1")
+    s.scheme = SourceScheme::Sc;
+  else if (magic == "NEVPT2P1")
+    s.scheme = SourceScheme::Pc;
+  else
+    return err_io("source-term oracle: bad magic (got '" + magic +
+                  "', expected 'NEVPT2S1' or 'NEVPT2P1') -- " + path);
   s.nmo = NEVPT2_TRY(r.i32());
   s.ncore = NEVPT2_TRY(r.i32());
   s.nact = NEVPT2_TRY(r.i32());

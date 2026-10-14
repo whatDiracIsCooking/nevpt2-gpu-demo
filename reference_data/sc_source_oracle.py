@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-r"""PySCF's **exact** SC-NEVPT2 source terms for one golden's state, written
-as a ``golden/<case>.srcgold`` -- the committed oracle
+r"""PySCF's **exact** SC-NEVPT2 source terms for one golden's state (with
+``--pc``, block2's PC-NEVPT2 ones: "THE PC FLAVOUR" below), written as a
+``golden/<case>.srcgold`` -- the committed oracle
 ``nevpt2_sc_pseudodensity --source-oracle`` holds the GPU's own source terms
 to, block by block, on a card (#92; docs/testing.md, "The SC source terms
 against PySCF's, on a card").
@@ -52,6 +53,34 @@ iterative, so a regenerated file is the committed one byte for byte
     uv run python reference_data/sc_source_oracle.py --case lif_def2svp_cas46
     # --out PATH writes elsewhere (the reproducibility check: cmp it)
 
+THE PC FLAVOUR (#95). ``--pc`` writes the same file for block2's
+**partially-contracted** energy instead -- ``golden/<case>_pc.srcgold``, magic
+``NEVPT2P1``, the same header and arrays -- out of ``nevpt2_grad.py --pc``'s
+own machinery: its rebuilt state with block2's PC energy (checked against the
+golden's ``e_pc_total``), :class:`nevpt2_grad.Functional` in PC mode, its
+``kappa_sweep`` and its ``pyscf_ci_source``, at two steps:
+
+``KAPPA_STEP`` (``2^-17``, #77's converged step), **not** ``KAPPA_STEP_PC``
+    ``KAPPA_STEP_PC`` (1e-4) is right for the *gradient*, which does not move
+    with it at the gate's scale, but this file is read per element, and the
+    PC step ladder puts 1e-4 1.5e-8 from converged in core-virt where
+    ``2^-17`` sits at the ladder's ~1e-9 floor (docs/testing.md, "The PC
+    source terms' oracle");
+``CI_STEP_PC`` (1e-7)
+    not a truncation choice: a per-determinant displacement is not a spin
+    eigenfunction, and above ``CI_STEP_PC`` it lifts the PC metric's null
+    modes past the lstsq cut (docs/testing.md, "The PC CI source term's step
+    is a first-order trap"). Below it the quotient is at round-off already.
+
+Every displaced CI vector is guarded -- the conditioning check and the rank
+against the reference state's -- and a run that trips either is refused
+rather than written. Only N2 CAS(4,4): LiF has no PC answer
+(docs/testing.md, "LiF has no PC gradient, and that is the answer"). It is
+what #74's GPU PC source terms will be held to; until then the comparator's
+host self-test reads it (docs/testing.md, "The PC source terms' oracle")::
+
+    uv run python reference_data/sc_source_oracle.py --case n2_ccpvdz_cas44 --pc
+
 Offline Python, never run by a build or a test.
 """
 
@@ -79,6 +108,11 @@ REPO = Path(__file__).resolve().parent.parent
 #: (docs/testing.md, "The GPU as the source-term provider").
 ORACLE_CASES = ("n2_ccpvdz_cas44", "lif_def2svp_cas46")
 
+#: The cases a PC ``.srcgold`` is committed for (#95): N2 CAS(4,4) alone.
+#: LiF has no PC answer to differentiate (its golden carries no PC fields),
+#: and acrolein is #74's manual gate (6.3 h).
+PC_ORACLE_CASES = ("n2_ccpvdz_cas44",)
+
 #: How far an off-sector element of ``T(W^T)`` may be from zero for the irrep
 #: sector to count as mapped onto a sector of the golden's basis. ``T`` is a
 #: polynomial in ``W``'s elements, so a symmetry-preserving ``W`` gives exact
@@ -100,17 +134,29 @@ def ci_rotation(st: ng.State, u: np.ndarray) -> np.ndarray:
     return out
 
 
-def build(case: str, *, kappa_step: float, ci_step: float) -> tuple[dict, dict]:
+def build(case: str, *, kappa_step: float, ci_step: float,
+          pc: bool = False) -> tuple[dict, dict]:
     spec = ng.CASES[case]
     t0 = time.perf_counter()
-    print(f"[{case}] building the golden's own CASCI-on-RHF state", flush=True)
-    st = ng.build_state(case, spec)
+    print(f"[{case}] building the golden's own CASCI-on-RHF state"
+          + (", with block2's PC energy" if pc else ""), flush=True)
+    st = ng.build_state(case, spec, pc=pc)
     golden_path = REPO / "golden" / f"{case}.nevpt2gold"
-    gold, garr = gf.read_golden(golden_path, want={"ci"})
+    gold, garr = gf.read_golden(golden_path, want={"ci", "e_pc_total"} if pc else {"ci"})
     d_casci, d_corr = st.e_casci - gold["e_casci"], st.e_corr - gold["e_nevpt2_total"]
     if max(abs(d_casci), abs(d_corr)) > ng.REF_STATE_TOL:
         raise SystemExit(f"the rebuilt state does not match {golden_path.name}: E_CASCI "
                          f"{d_casci:+.2e}, E_corr {d_corr:+.2e}")
+    if pc:
+        # The PC energy differentiated must be the golden's own PC answer.
+        if "e_pc_total" not in garr:
+            raise SystemExit(f"{golden_path.name} carries no e_pc_total: no PC reference")
+        d_pc = st.e_corr_pc - float(garr["e_pc_total"].ravel()[0])
+        if abs(d_pc) > ng.REF_STATE_TOL:
+            raise SystemExit(f"the rebuilt state's PC energy is {d_pc:+.2e} from "
+                             f"{golden_path.name}'s e_pc_total")
+        print(f"  E_corr(PC) = {st.e_corr_pc:.10f}, against the golden {d_pc:+.1e}; "
+              f"smallest lstsq gap {st.pc_gap:.1e}", flush=True)
     print(f"  n_mo = {st.nmo} = {st.ncore} core + {st.nact} active ({st.n_act_occ} act_O) "
           f"+ {st.nvirt} virtual; ndet = {st.ci.size}; against the golden dE_CASCI = "
           f"{d_casci:+.1e}, dE_corr = {d_corr:+.1e}", flush=True)
@@ -124,7 +170,7 @@ def build(case: str, *, kappa_step: float, ci_step: float) -> tuple[dict, dict]:
     if off > ng.DUMP_CI_TOL:
         raise SystemExit(f"the rebuilt CI vector is {off:.2e} from {golden_path.name}'s")
 
-    fn = ng.Functional(st)
+    fn = ng.Functional(st, pc=pc)
     # The order --source both runs them in: y first, then the sweep.
     t = time.perf_counter()
     y_state = ng.pyscf_ci_source(fn, st, step=ci_step).ravel()
@@ -136,6 +182,25 @@ def build(case: str, *, kappa_step: float, ci_step: float) -> tuple[dict, dict]:
     a_corr = np.asarray(sweep["A_corr"])
     print(f"  A over {len(ng.kappa_pairs(st))} non-gauge pairs, step {kappa_step:g}, "
           f"{sweep['seconds']:.0f}s; max |A| = {np.abs(a_corr).max():.6e}", flush=True)
+    if pc:
+        # Every displaced CI vector went through the guard (Functional.pc_energy
+        # runs it there), and none of them changed a PC block's rank: a step
+        # that lifts a null mode past the cut differentiates a different
+        # branch, and its numbers are not to be written.
+        led = ng.PC_GUARD
+        if led.displaced != led.displaced_guarded:
+            raise SystemExit(f"{led.displaced} displaced CI vectors, only "
+                             f"{led.displaced_guarded} guarded")
+        if led.rank_changed:
+            where, key, kept, ref = led.rank_changed[0]
+            raise SystemExit(
+                f"{len(led.rank_changed)} displaced CI vectors changed a PC block's rank "
+                f"(first: {where}, block {key}, smallest kept {kept:.1e} against the "
+                f"reference's {ref:.1e}) -- --ci-step {ci_step:g} is past CI_STEP_PC's "
+                "regime (docs/testing.md, \"The PC CI source term's step is a first-order "
+                "trap\")")
+        print(f"  PC guard: {led.displaced_guarded} displaced CI vectors guarded, none "
+              f"changed a block's rank; smallest gap {led.min_gap:.1e}", flush=True)
 
     # P y, carried back into the golden's determinant basis.
     w = np.asarray(st.act_rot)
@@ -161,7 +226,7 @@ def build(case: str, *, kappa_step: float, ci_step: float) -> tuple[dict, dict]:
 
     header = dict(nmo=st.nmo, ncore=st.ncore, nact=st.nact, nvirt=st.nvirt,
                   n_act_occ=st.n_act_occ, ndet=int(st.ci.size), kappa_step=kappa_step,
-                  ci_step=ci_step)
+                  ci_step=ci_step, scheme="pc" if pc else "sc")
     arrays = {"a_corr": a_corr, "act_rot": w, "py": py,
               "ci_mask": rows.astype(np.float64), "ci": ci_file.copy()}
     print(f"  {time.perf_counter() - t0:.0f}s in all", flush=True)
@@ -172,16 +237,28 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--case", required=True, choices=ORACLE_CASES)
+    ap.add_argument("--pc", action="store_true",
+                    help="block2's PC-NEVPT2 source terms instead of PySCF's SC ones "
+                         f"(#95; cases: {', '.join(PC_ORACLE_CASES)})")
     ap.add_argument("--out", type=Path, default=None,
-                    help="where to write (default: golden/<case>.srcgold)")
+                    help="where to write (default: golden/<case>.srcgold, or "
+                         "golden/<case>_pc.srcgold with --pc)")
     ap.add_argument("--kappa-step", type=float, default=ng.KAPPA_STEP,
-                    help=f"default nevpt2_grad.KAPPA_STEP = {ng.KAPPA_STEP:g}; only here so "
-                         "the step ladder in docs/testing.md can be rerun")
-    ap.add_argument("--ci-step", type=float, default=ng.CI_STEP,
-                    help=f"default nevpt2_grad.CI_STEP = {ng.CI_STEP:g}; likewise")
+                    help=f"default nevpt2_grad.KAPPA_STEP = {ng.KAPPA_STEP:g}, with --pc too "
+                         "(see the docstring); only here so the step ladders in "
+                         "docs/testing.md can be rerun")
+    ap.add_argument("--ci-step", type=float, default=None,
+                    help=f"default nevpt2_grad.CI_STEP = {ng.CI_STEP:g} (CI_STEP_PC = "
+                         f"{ng.CI_STEP_PC:g} with --pc); likewise")
     args = ap.parse_args()
-    header, arrays = build(args.case, kappa_step=args.kappa_step, ci_step=args.ci_step)
-    out = args.out if args.out is not None else REPO / "golden" / f"{args.case}.srcgold"
+    if args.pc and args.case not in PC_ORACLE_CASES:
+        ap.error(f"--pc: no PC oracle for {args.case} (cases: {', '.join(PC_ORACLE_CASES)})")
+    kappa_step = args.kappa_step
+    ci_step = args.ci_step if args.ci_step is not None else (
+        ng.CI_STEP_PC if args.pc else ng.CI_STEP)
+    header, arrays = build(args.case, kappa_step=kappa_step, ci_step=ci_step, pc=args.pc)
+    name = f"{args.case}_pc.srcgold" if args.pc else f"{args.case}.srcgold"
+    out = args.out if args.out is not None else REPO / "golden" / name
     gf.write_srcgold(out, header=header, arrays=arrays)
     back_header, back_arrays = gf.read_srcgold(out)
     if back_header != header or any(

@@ -1727,7 +1727,7 @@ committed, so a regression in a correct block, or a fix that lands, shows up
 on the next `fast` run.
 
 **The known gaps are pinned, not hidden — and there are none.**
-`kKnownGaps` in `apps/sc_pseudodensity/source_oracle.cppm` is the **one** list
+`kKnownGaps` in `apps/sc_pseudodensity/source_compare.cppm` is the **one** list
 of blocks the device is known to get wrong; a block on it must still disagree
 by **more** than the tolerance and every other block must agree **within**
 it. So the entry fails when a correct block breaks, and fails when a fix
@@ -1786,7 +1786,7 @@ difference cleanly at that step. So the gate is
 per element, absolute (Eh): five times the worst correct block at the
 committed step, and four decades below the smallest known gap. The row is
 this tolerance's one home: `apps/sc_pseudodensity/CMakeLists.txt` reads it at
-configure time into `NEVPT2_SOURCE_ORACLE_TOL`, as it reads the
+configure time into `NEVPT2_SOURCE_ORACLE_TOL` (on `nevpt2.source_compare`), as it reads the
 self-variation envelope, and the entries' comment cites this section. The
 2^-17 column is the committed files exactly: the ladder's own 2^-17 oracles
 are byte-identical to them.
@@ -1827,7 +1827,92 @@ RTX 3080, both entries each time:
 
 So the entry fails in both directions the issue asks for, and goes green
 only when the list moves with the fix. #89 emptied it in the same change
-that put the transpose into `Y`.
+that put the transpose into `Y`. Since #95 the comparison, the list and the
+tolerance live in `nevpt2.source_compare` (`apps/sc_pseudodensity/
+source_compare.cppm`), and `test/source_compare/` holds it to both oracles
+here, and the PC one below, with no card.
+
+## The PC source terms' oracle
+
+`golden/n2_ccpvdz_cas44_pc.srcgold` (#95) is the section above for
+**PC-NEVPT2**, committed ahead of #74's adjoint so that its GPU PC `Y_xy` and
+`y_I` land against an independent gate that already exists, rather than
+against their own forward/reverse duality — which is exactly what cannot see
+a term both modes leave out (#73). It is #92's file in its PC flavour (magic
+`NEVPT2P1`, the same header and arrays), written by `sc_source_oracle.py
+--pc` out of `nevpt2_grad.py --pc`'s own machinery: block2's PC energy on the
+rebuilt state (checked against the golden's `e_pc_total`), its
+`kappa_sweep` and its `pyscf_ci_source`, every displaced CI vector through
+the PC guard ([`reference-data.md`](reference-data.md), "The SC source-term
+oracle"). N2 CAS(4,4) only: LiF has no PC answer ("LiF has no PC gradient,
+and that is the answer"), and acrolein stays #74's manual gate.
+
+**Until #74 there is no GPU PC term to compare**, so there is no `gpu` entry
+yet. What is gated now is the comparison itself: `nevpt2.source_compare`
+(`apps/sc_pseudodensity/source_compare.cppm`) holds the comparator, the
+known-gap list and both tolerances, and the unit suite
+`test/source_compare/` runs every committed oracle, SC and PC, through it
+with no card — the oracle against itself passes with all nine rows compared,
+and a copy with **one** block moved by ten tolerances fails naming that block
+and nothing else, for every block of every oracle (`P y` included), while half
+a tolerance still passes. The PC oracle is classified with an **empty**
+known-gap list (`kClassifiedOracles`), so #74's entry is held to every
+block from its first run; `nevpt2_sc_pseudodensity --source-oracle` refuses a
+PC oracle as a configuration error, because the terms it assembles are SC's.
+
+### The tolerance, measured from the PC step ladders
+
+As for SC, the oracle's side is a central difference. Unlike SC there is no
+GPU side to converge onto yet, so each ladder is read against its own rungs:
+`sc_source_oracle.py --pc --kappa-step h` (CI step held at `CI_STEP_PC`) and
+`--ci-step h` (kappa held), each written with `--out` to scratch. Offline
+Python, no card: single-threaded, about 150 s a file on the RX 9060 XT box's
+CPU. Max \|A(h) − A(2^-19)\| per block:
+
+| block | 2^-11 | 2^-13 | 1e-4 (`KAPPA_STEP_PC`) | 2^-15 | **2^-17 (committed)** | 2^-21 |
+|---|---:|---:|---:|---:|---:|---:|
+| core–virt | 3.5e-7 | 2.2e-8 | 1.5e-8 | 1.5e-9 | **1.0e-9** | 3.2e-9 |
+| act_O–virt | 8.5e-8 | 5.4e-9 | 3.6e-9 | 3.8e-10 | **1.0e-10** | 2.6e-10 |
+| core–core | 3.1e-8 | 2.0e-9 | 1.3e-9 | 2.8e-10 | **2.4e-10** | 1.6e-9 |
+| act_V–virt | 8.8e-9 | 5.5e-10 | 3.7e-10 | 4.1e-11 | **2.2e-11** | 9.5e-11 |
+| virt–virt | 8.5e-9 | 5.5e-10 | 3.8e-10 | 1.7e-10 | **1.1e-10** | 6.7e-10 |
+
+The blocks fall sixteen-fold per two halvings (`h²`) down to `2^-15`, sit at
+the quotient's ~1e-9 floor from `2^-17` (2^-17 against 2^-15 is 1.2e-9 in
+core–virt) and climb off it at `2^-21`. core–act_O and core–act_V are exactly
+0.0 at every rung, and act_O–act_V is zero by symmetry, at most 2.6e-10 of
+round-off. So the oracle is taken at **`2^-17`, #77's converged `KAPPA_STEP`,
+and not at `KAPPA_STEP_PC`**: 1e-4 is right for the PC *gradient*, which does
+not move with it at that gate's scale ("The step constants, measured"), but
+read per element it is still 1.5e-8 from converged.
+
+`P y`'s ladder is the PC CI trap's ("The PC CI source term's step is a
+first-order trap"): above `CI_STEP_PC` the run is refused (3e-7: the guard at
+a displaced CI vector, gap 1.9), and from it down the quotient is already at
+round-off, which grows as `1/h`. Max \|P y(h) − P y(h')\| over the 12
+determinants of the state's irrep:
+
+| | 1e-7 (**`CI_STEP_PC`, committed**) | 3e-8 | 1e-8 | 3e-9 |
+|---|---:|---:|---:|---:|
+| 1e-7 | 0 | 1.4e-9 | 4.3e-9 | 1.9e-8 |
+| 3e-8 | | 0 | 4.6e-9 | 1.9e-8 |
+| 1e-8 | | | 0 | 1.8e-8 |
+
+So the committed file is good to ~1e-9 in every `A` block and a few 1e-9 in
+`P y`: nothing in the oracle's own error forces the agreement looser than the
+project's 1e-7, and the gate is that:
+
+| | value |
+|---|---|
+| **the PC source-oracle tolerance** | **1e-7** |
+
+per element, absolute (Eh): twenty times the oracle's worst ladder spread at
+the committed steps. Its one home is this row: `apps/sc_pseudodensity/CMakeLists.txt`
+reads it at configure time into `NEVPT2_PC_SOURCE_ORACLE_TOL`, beside SC's.
+It is set before any GPU PC term exists, so #74's first entry measures the
+device against it; a difference above it is a finding about the device, and
+widening the row is a ratchet a human moves. The `2^-17` rung of the kappa
+ladder is the committed file byte for byte.
 
 ## Residual-independent checks of the gradient path
 

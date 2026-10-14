@@ -11,7 +11,8 @@
 //                  inventory a gradient reads plus the full-MO-range Fock
 //                  matrices and mo_coeff.
 //   loadSrcGold    `*.srcgold`: PySCF's exact SC source terms for a golden's
-//                  state, written by reference_data/sc_source_oracle.py (#92).
+//                  state, written by reference_data/sc_source_oracle.py (#92)
+//                  -- or, in its PC flavour, block2's PC ones (#95).
 //
 // They are two files and not one on purpose: the golden format is extensible
 // (magic + array count), but adding arrays would change every committed
@@ -164,13 +165,26 @@ struct GradGoldFile {
 [[nodiscard]] Result<GradGoldFile> loadGradGold(const std::string& path);
 
 // ---------------------------------------------------------------------------
-// The SC source-term oracle (`*.srcgold`).
+// The source-term oracle (`*.srcgold`), SC and PC.
 // ---------------------------------------------------------------------------
 
-// PySCF's exact SC-NEVPT2 source terms for one golden's state, written by
-// reference_data/sc_source_oracle.py (#92): what nevpt2_sc_pseudodensity
-// --source-oracle holds the GPU's Y_xy and y_I to (docs/testing.md, "The SC
-// source terms against PySCF's, on a card"). The script's docstring is the
+// Which correlation energy an oracle's arrays differentiate -- off its magic,
+// the one thing the two flavours' files differ in
+// (reference_data/golden_format.py's SRCGOLD_SCHEMES is the same two).
+enum class SourceScheme {
+  Sc,  // "NEVPT2S1": PySCF's strongly-contracted energy (#92)
+  Pc,  // "NEVPT2P1": block2's partially-contracted energy (#95)
+};
+
+// "SC" / "PC" -- the scheme as a report prints it.
+[[nodiscard]] std::string_view sourceSchemeName(SourceScheme scheme);
+
+// The exact SC-NEVPT2 (or, `Pc`, PC-NEVPT2) source terms for one golden's
+// state, written by reference_data/sc_source_oracle.py (#92; `--pc`, #95):
+// what nevpt2_sc_pseudodensity --source-oracle holds the GPU's Y_xy and y_I
+// to (docs/testing.md, "The SC source terms against PySCF's, on a card"), and
+// what #74's PC ones will be held to (docs/testing.md, "The PC source terms'
+// oracle"). One layout for both flavours. The script's docstring is the
 // reference for what each array means and which basis it is in:
 //
 //   a_corr   [nmo, nmo]    A_pq = dE_corr/dkappa_pq - (p <-> q) on every
@@ -182,6 +196,7 @@ struct GradGoldFile {
 //   ci_mask  [ndet]        1.0 on the determinants py is defined on, else 0.0
 //   ci       [ndet]        the golden's CI vector, as a fingerprint
 struct SrcGoldFile {
+  SourceScheme scheme = SourceScheme::Sc;
   // Stored as int32 (ndet as int64) in the file; held as int64_t.
   int64_t nmo = 0;
   int64_t ncore = 0;
@@ -206,9 +221,18 @@ struct SrcGoldFile {
 };
 
 // The parsed oracle, or an IO Error if it cannot be opened, ends early, has
-// the wrong magic ("NEVPT2S1"), carries a partition that does not add up or an
-// act_O count outside the active space, a malformed array header, bytes after
-// its last array, or does not carry the five arrays above at their shapes.
+// the wrong magic (neither "NEVPT2S1" nor "NEVPT2P1"), carries a partition
+// that does not add up or an act_O count outside the active space, a
+// malformed array header, bytes after its last array, or does not carry the
+// five arrays above at their shapes.
 [[nodiscard]] Result<SrcGoldFile> loadSrcGold(const std::string& path);
+
+// The case an oracle at `path` belongs to: its file name without the
+// directory and the `.srcgold` suffix, less the `_pc` a PC oracle's name ends
+// in -- golden/<case>_pc.srcgold sits beside the same <case>.nevpt2gold and
+// .gradgold as golden/<case>.srcgold (golden_format.srcgold_case is the
+// Python side). A PC oracle whose name lacks the `_pc` is an IO Error: its
+// name would claim an SC oracle's place.
+[[nodiscard]] Result<std::string> srcGoldCase(const std::string& path, SourceScheme scheme);
 
 }  // namespace nevpt2
