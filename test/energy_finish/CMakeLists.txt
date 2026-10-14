@@ -6,7 +6,8 @@
 # Richardson tables against a central difference of the finish itself -- and
 # normToEnergyDeltaDerivative / normToEnergyDeltaTangent, its derivative in
 # Delta, Park Eq. 38, for the orbital energies' response, #87), the
-# PC finish and denominator check (finishSingle, checkDenominator) and the PC
+# PC rank cut and gap decision (pcRankCut, #94), the PC finish and denominator
+# check (finishSingle, checkDenominator) and the PC
 # TANGENT's per-tuple arithmetic (pcCoefficients, pcQuadForm, tangentSingle).
 # Logic on hand cases, never an energy of a real state. No device, no kernel,
 # no golden: NOT REQUIRES_GPU, so these run on a box with no card visible.
@@ -17,7 +18,7 @@ add_gtest_executable(
 
 add_gtest_suite_tests(
   TARGET energy_finish_tests
-  SUITES ForBatchesTests NormToEnergyTests CheckDenominatorTests FinishSingleTests
+  SUITES ForBatchesTests NormToEnergyTests CheckDenominatorTests PcRankCutTests FinishSingleTests
          NormToEnergyDerivativeTests NormToEnergyTangentTests NormToEnergyDeltaTests
          PcCoefficientsTests PcQuadFormTests TangentSingleTests)
 
