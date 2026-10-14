@@ -1382,7 +1382,127 @@ not acrolein, whose sidecar is gitignored. `test/gradsrc/` holds the writer
 card-free: the round trip, the bytes through an independent zip/NPY parser,
 and the refusals. Everything after the dump — `--source both` — is offline
 Python and stays out of ctest for the three reasons "Why there is no ctest
-entry for it" gives.
+entry for it" gives; its componentwise half, with PySCF's side committed, is
+the next section's entry.
+
+## The SC source terms against PySCF's, on a card
+
+`nevpt2_sc_pseudodensity --source-oracle golden/<case>.srcgold` (#92) is the
+componentwise half of the section above made a `gpu` ctest entry:
+`nevpt2_sc_pseudodensity_oracle_n2_ccpvdz_cas44` and `…_lif_def2svp_cas46`.
+It assembles the dump's own `Y_xy` and `y_I` (the same code as
+`--dump-source-terms`), and compares them **block by block** with PySCF's
+exact source terms, computed once by `reference_data/sc_source_oracle.py` and
+committed ([`reference-data.md`](reference-data.md), "The SC source-term
+oracle"): `A = Y − Y^T` carried into the oracle's §2.6 basis, on every
+non-gauge pair, grouped into the eight blocks of core / act_O / act_V / virt,
+and `P y` on the state's irrep in the golden's own basis.
+
+It exists because **every other on-card check of these two terms compares the
+device with itself** — forward against reverse, at round-off — and a term
+both modes leave out cancels there. #73 found two that way, and only through
+the offline `--source both`; this is that comparison with PySCF's side
+committed, so a regression in a correct block, or a fix that lands, shows up
+on the next `fast` run.
+
+**The known gaps are pinned, not hidden.** `Y` still holds the `f3ac`/`f3ca`
+digests fixed ([`gradients.md`](gradients.md), §6), so some blocks are known
+wrong. `kKnownGaps` in `apps/sc_pseudodensity/source_oracle.cppm` is the
+**one** list of them; a block on it must still disagree by **more** than the
+tolerance and every other block must agree **within** it. So the entry fails
+when a correct block breaks, and fails when a fix lands without the list
+being updated — the way #64's envelope pins the exchange non-collapse. The
+list today:
+
+| oracle | known gaps (must stay off) | held to agree |
+|---|---|---|
+| N2 CAS(4,4) | act_O–virt, act_V–virt | core–core, core–act_O, core–act_V, core–virt, act_O–act_V, virt–virt, `P y` |
+| LiF CAS(4,6) | act_O–act_V, act_O–virt, act_V–virt | core–core, core–act_O, core–act_V, core–virt, virt–virt, `P y` |
+
+`P y` is on neither: #87 put the orbital energies' response into `y`, and it
+left the list with that PR. N2's act_O–act_V and both cases' core–act blocks
+are zero by symmetry on **both** sides (exactly 0.0 here), so they are held to
+agree; on N2 CAS(8,8) and acrolein core–act is a gap, but neither has an
+oracle (their `P y` quotients cost hours, and acrolein's sidecar is
+gitignored). #89 empties the list. An oracle with no entry in
+`kClassifiedOracles` is refused as a configuration error, not read as
+"everything must agree", and a list entry naming no block fails the run.
+
+### The tolerance, measured from the step ladders
+
+The tolerance cannot be 1e-7: PySCF's side is a central difference, and the
+agreement can be read only to its truncation. It is read off a ladder —
+`sc_source_oracle.py --kappa-step h --ci-step h --out …` at five steps,
+each scratch oracle compared with the same GPU terms by the same binary
+(RTX 3080, preset `default`, Release, `--tiles 3`, the default digest).
+Max \|GPU − PySCF\| per block:
+
+| block | 2^-13 | 2^-15 | **2^-17 (committed)** | 2^-19 | 2^-21 |
+|---|---:|---:|---:|---:|---:|
+| N2 core–virt | 5.4e-6 | 1.3e-6 | **2.0e-7** | 1.4e-8 | 3.2e-9 |
+| N2 `P y` | 2.3e-6 | 1.4e-7 | **9.0e-9** | 6.4e-10 | 1.9e-9 |
+| N2 core–core / virt–virt (worst) | 1.9e-9 | 1.2e-10 | **5.3e-11** | 2.6e-10 | 1.6e-9 |
+| N2 act_O–act_V | 1.6e-12 | 5.9e-12 | **1.8e-12** | 5.8e-11 | 1.7e-10 |
+| LiF core–virt | 3.4e-7 | 3.8e-8 | **6.4e-9** | 1.8e-9 | 6.1e-9 |
+| LiF `P y` | 5.4e-9 | 4.2e-10 | **5.7e-10** | 2.2e-9 | 8.5e-9 |
+| LiF core–core / virt–virt (worst) | 6.2e-10 | 9.7e-11 | **2.5e-10** | 1.7e-9 | 7.1e-9 |
+| smallest known gap (N2 act_V–virt) | 1.08e-2 | 1.08e-2 | **1.08e-2** | 1.08e-2 | 1.08e-2 |
+
+The correct blocks converge **onto the GPU** as PySCF's step shrinks, down to
+the quotient's round-off floor, which they reach at 2^-19 and climb off at
+2^-21: N2's `P y` sixteen-fold per two halvings (`h²`) from the first rung,
+N2's core–virt more slowly at the coarse rungs (4x, then 6.5x, then 14x — the
+same pair, (1, 9), whose ladder "The source terms, componentwise" records)
+and LiF's already near the floor. The gaps do not move in the third digit at
+any step, because they are not truncation. The worst
+correct block at the committed step is N2's core–virt, at 2.0e-7: the pair
+"The source terms, componentwise" above already names as the one N2 does not
+difference cleanly at that step. So the gate is
+
+| | value |
+|---|---|
+| **the source-oracle tolerance** | **1e-6** |
+
+per element, absolute (Eh): five times the worst correct block at the
+committed step, and four decades below the smallest known gap. The row is
+this tolerance's one home: `apps/sc_pseudodensity/CMakeLists.txt` reads it at
+configure time into `NEVPT2_SOURCE_ORACLE_TOL`, as it reads the
+self-variation envelope, and the entries' comment cites this section. The
+2^-17 column is the committed files exactly: the ladder's own 2^-17 oracles
+are byte-identical to them.
+
+### What the entries measure
+
+At the committed step, on the RTX 3080 (preset `default`, `--tiles 3`, the
+default digest), max \|GPU − PySCF\| per block — the #73 table's figures
+again, to the digit, now from a ctest entry:
+
+| block | N2 CAS(4,4) | LiF CAS(4,6) |
+|---|---:|---:|
+| core–core | 5.3e-11 | 1.2e-10 |
+| core–act_O / core–act_V | 0 / 0 | 0 / 0 |
+| core–virt | 2.0e-7 | 6.4e-9 |
+| act_O–act_V | 1.8e-12 | **1.4e-1** (gap) |
+| act_O–virt | **2.9e-1** (gap) | **5.5e-1** (gap) |
+| act_V–virt | **1.1e-2** (gap) | **5.9e-2** (gap) |
+| virt–virt | 4.7e-11 | 2.5e-10 |
+| `P y` | 9.0e-9 (12 det.) | 5.7e-10 (225 det.) |
+
+ctest clocks the two entries at 1.4 s and 2.3 s (the `Y` probe is 378 and
+253 basis directions). Not `small`, for the dump's reason: under the
+sanitizer tier the probe count would dominate.
+
+**Negative controls, run once (#92; scratch patches, not committed),** on the
+RTX 3080, both entries each time:
+
+| patch | N2 CAS(4,4) | LiF CAS(4,6) |
+|---|---|---|
+| the GPU's core–virt sign flipped (a correct block broken) | **FAIL**: core–virt 1.1e-1, "a block that agreed no longer does" | **FAIL**: core–virt 1.0e-1 |
+| act_O–virt "fixed" by substituting PySCF's value, list unchanged | **FAIL**: act_O–virt 0, "now AGREES — take it off kKnownGaps" | **FAIL**: the same |
+| the same substitution, act_O–virt taken off `kKnownGaps` | PASS, 8 agree / 1 gap | PASS, 7 agree / 2 gaps |
+
+So the entry fails in both directions the issue asks for, and goes green
+only when the list moves with the fix.
 
 ## Residual-independent checks of the gradient path
 

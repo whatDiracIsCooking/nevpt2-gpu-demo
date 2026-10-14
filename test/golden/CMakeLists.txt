@@ -45,21 +45,28 @@ unset(_golden_cas44_casscf)
 # "The file format").
 file(GLOB _contract_goldens CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/golden/*.nevpt2gold")
 file(GLOB _contract_gradgolds CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/golden/*.gradgold")
+# And the SC source-term oracles (#92; loadSrcGold), each held to the golden
+# and gradient sidecar beside it.
+file(GLOB _contract_srcgolds CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/golden/*.srcgold")
 list(SORT _contract_goldens)
 list(SORT _contract_gradgolds)
+list(SORT _contract_srcgolds)
 list(JOIN _contract_goldens "|" _contract_goldens)
 list(JOIN _contract_gradgolds "|" _contract_gradgolds)
+list(JOIN _contract_srcgolds "|" _contract_srcgolds)
 target_compile_definitions(
   golden_tests PRIVATE NEVPT2_TEST_COMMITTED_GOLDENS="${_contract_goldens}"
-                       NEVPT2_TEST_COMMITTED_GRADGOLDS="${_contract_gradgolds}")
+                       NEVPT2_TEST_COMMITTED_GRADGOLDS="${_contract_gradgolds}"
+                       NEVPT2_TEST_COMMITTED_SRCGOLDS="${_contract_srcgolds}")
 unset(_contract_goldens)
 unset(_contract_gradgolds)
+unset(_contract_srcgolds)
 
 add_gtest_suite_tests(
   TARGET golden_tests
   SUITES GoldenLoadErrorTests GoldenRequireTests GoldenReferenceKindTests
          GoldenReferenceKindGateTests GoldenCommittedCasscfTests GoldenCas44Tests
-         GoldenLayoutContractTests)
+         GoldenLayoutContractTests SrcGoldLoadErrorTests)
 
 # Host-only suites for the OTHER reader in nevpt2.golden: loadGradGold, the
 # `*.gradgold` gradient sidecar (docs/gradient-theory.md, section 3). Same

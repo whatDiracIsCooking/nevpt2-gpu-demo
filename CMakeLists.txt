@@ -443,6 +443,47 @@ if(NEVPT2_BUILD_TESTING)
   endforeach()
   unset(_nevpt2_dump_dir)
 
+  # --- the GPU's source terms against PySCF's: --source-oracle ------------------
+  #
+  # nevpt2_sc_pseudodensity --source-oracle (apps/sc_pseudodensity/
+  # source_oracle.cppm, #92): the dump's own Y_xy and y_I, compared BLOCK BY
+  # BLOCK with PySCF's exact source terms, committed as golden/<case>.srcgold
+  # (reference_data/sc_source_oracle.py; docs/reference-data.md, "The SC
+  # source-term oracle"). Every other check of those two terms compares the
+  # device with itself, so a term both its modes leave out cancels there; this
+  # one is independent, and it is the offline `nevpt2_grad.py --source both`
+  # comparison of #73 with PySCF's side committed rather than recomputed.
+  #
+  # The known gaps are PINNED: a block on source_oracle.cppm's kKnownGaps list
+  # must still disagree by more than the tolerance, every other block must
+  # agree within it -- so the entry fails when a correct block breaks AND when
+  # a fix lands without the list being updated (#89 empties it). The tolerance
+  # is not 1e-7, because PySCF's side is a central difference: it is measured
+  # from the step ladders, and docs/testing.md, "The SC source terms against
+  # PySCF's, on a card" is its one home (read into the binary at configure
+  # time). The PASS line is its own.
+  #
+  # Not `small`, for the dump's reason: Y is one basis direction per MO pair,
+  # each a full slab walk.
+  foreach(_case n2_ccpvdz_cas44 lif_def2svp_cas46)
+    set(_oracle_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.nevpt2gold")
+    set(_oracle_file "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.srcgold")
+    foreach(_need "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.gradgold" "${_oracle_file}")
+      if(NOT EXISTS "${_need}")
+        message(FATAL_ERROR "nevpt2: committed source-oracle input missing: ${_need}")
+      endif()
+    endforeach()
+    _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_oracle_${_case}
+                          "${_oracle_gold}" --tiles 3 --source-oracle "${_oracle_file}")
+    if(TEST nevpt2_sc_pseudodensity_oracle_${_case})
+      set_tests_properties(nevpt2_sc_pseudodensity_oracle_${_case} PROPERTIES
+        PASS_REGULAR_EXPRESSION
+          "PASS: the GPU's SC source terms against PySCF's committed ones, ${_case}:")
+    endif()
+    unset(_oracle_gold)
+    unset(_oracle_file)
+  endforeach()
+
   # --- *_pc: PC-NEVPT2 ----------------------------------------------
   #
   # The same RDM build as the SC entry at the same --tiles; the PC stage runs

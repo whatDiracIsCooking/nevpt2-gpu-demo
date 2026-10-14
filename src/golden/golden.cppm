@@ -10,6 +10,8 @@
 //                  golden, carrying the one-general-index MO-integral
 //                  inventory a gradient reads plus the full-MO-range Fock
 //                  matrices and mo_coeff.
+//   loadSrcGold    `*.srcgold`: PySCF's exact SC source terms for a golden's
+//                  state, written by reference_data/sc_source_oracle.py (#92).
 //
 // They are two files and not one on purpose: the golden format is extensible
 // (magic + array count), but adding arrays would change every committed
@@ -160,5 +162,53 @@ struct GradGoldFile {
 // array header (as loadGolden refuses one), has bytes after its last array, or
 // carries an `mo_coeff` whose shape is not [nao, nmo].
 [[nodiscard]] Result<GradGoldFile> loadGradGold(const std::string& path);
+
+// ---------------------------------------------------------------------------
+// The SC source-term oracle (`*.srcgold`).
+// ---------------------------------------------------------------------------
+
+// PySCF's exact SC-NEVPT2 source terms for one golden's state, written by
+// reference_data/sc_source_oracle.py (#92): what nevpt2_sc_pseudodensity
+// --source-oracle holds the GPU's Y_xy and y_I to (docs/testing.md, "The SC
+// source terms against PySCF's, on a card"). The script's docstring is the
+// reference for what each array means and which basis it is in:
+//
+//   a_corr   [nmo, nmo]    A_pq = dE_corr/dkappa_pq - (p <-> q) on every
+//                          non-gauge pair, in the basis whose active block is
+//                          the golden's rotated by act_rot (act_O = its first
+//                          nActOcc active orbitals); zero on the gauge pairs
+//   act_rot  [nact, nact]  that rotation, W: Y' = W^T Y W on the active block
+//   py       [ndet]        P y in the GOLDEN's determinant basis
+//   ci_mask  [ndet]        1.0 on the determinants py is defined on, else 0.0
+//   ci       [ndet]        the golden's CI vector, as a fingerprint
+struct SrcGoldFile {
+  // Stored as int32 (ndet as int64) in the file; held as int64_t.
+  int64_t nmo = 0;
+  int64_t ncore = 0;
+  int64_t nact = 0;
+  int64_t nvirt = 0;
+  int64_t nActOcc = 0;  // how many of the active orbitals are act_O
+  int64_t ndet = 0;
+  double kappaStep = 0.0;  // the steps PySCF's quotients were taken at
+  double ciStep = 0.0;
+  std::unordered_map<std::string, Tensor> arrays;
+
+  // An IO Error unless this oracle was written for `golden`'s state and
+  // `sidecar`'s partition: the same core, active space and n_mo, the same
+  // determinant count, and the golden's own CI vector, bit for bit (the
+  // generator copies it). Found by name beside a golden, so a mismatch is a
+  // plain user mistake.
+  [[nodiscard]] Status checkAgainst(const GoldenFile& golden, const GradGoldFile& sidecar) const;
+
+  // The array `name`; loadSrcGold has required all five, so a missing one is
+  // our bug (check).
+  const Tensor& get(const std::string& name) const;
+};
+
+// The parsed oracle, or an IO Error if it cannot be opened, ends early, has
+// the wrong magic ("NEVPT2S1"), carries a partition that does not add up or an
+// act_O count outside the active space, a malformed array header, bytes after
+// its last array, or does not carry the five arrays above at their shapes.
+[[nodiscard]] Result<SrcGoldFile> loadSrcGold(const std::string& path);
 
 }  // namespace nevpt2

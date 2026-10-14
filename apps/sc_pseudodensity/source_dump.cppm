@@ -89,6 +89,91 @@ double frobenius(const nevpt2::Tensor& t) {
   return std::sqrt(s);
 }
 
+// The GPU's two source terms for the golden's state, as --dump-source-terms
+// writes them and --source-oracle (:source_oracle) compares them: Y over every
+// MO pair, and y over every determinant with the orbital energies' response
+// (#87) out of the sidecar -- plus the two cheap checks that they were taken
+// on this state (check 2 above).
+struct GpuSourceTerms {
+  nevpt2::Tensor kappa;   // Y_xy, [n_mo, n_mo], in the golden's basis
+  nevpt2::Tensor ci;      // y_I, [n_det]
+  double walkGap = 0.0;   // |E_corr from y's walk - energiesDevice's|
+  double epsGap = 0.0;    // e_core / e_virt rebuilt from the sidecar, relative
+  bool walkOk = false;
+  bool epsOk = false;
+};
+
+// Assembles GpuSourceTerms. `gen` is the sidecar's uploaded general integrals
+// (uploadGeneral), which the caller keeps for whatever else it probes.
+nevpt2::Result<GpuSourceTerms> assembleSourceTerms(
+    const nevpt2::GoldenFile& g, const nevpt2::GradGoldFile& gg,
+    const nevpt2::EnergyResult& energies, const nevpt2::NevptIntegralsDevice& ints,
+    const nevpt2::GeneralIntegralsDevice& gen, const nevpt2::DeviceTensor& dm1,
+    const nevpt2::DeviceTensor& dm2, const nevpt2::DeviceTensor& dm3,
+    const nevpt2::DeviceTensor& f3ac, const nevpt2::DeviceTensor& f3ca, std::int64_t sigmaTiles,
+    const nevpt2::DeviceResources& res) {
+  const std::int64_t nmo = gg.nmo;
+  GpuSourceTerms out;
+
+  // --- Y over every pair ------------------------------------------------------
+  std::vector<std::pair<std::int64_t, std::int64_t>> pairs;
+  for (std::int64_t p = 0; p < nmo; ++p)
+    for (std::int64_t q = p + 1; q < nmo; ++q) pairs.emplace_back(p, q);
+  const auto tY = std::chrono::steady_clock::now();
+  out.kappa = NEVPT2_TRY(nevpt2::scFullRotationMatrix(ints, gen, dm1, dm2, dm3, f3ac, f3ca,
+                                                      pairs, kDumpChunk, res));
+  double yMax = 0.0;
+  for (std::int64_t i = 0; i < out.kappa.size(); ++i)
+    yMax = std::max(yMax, std::fabs(out.kappa.flat(i)));
+  std::printf("  Y: %zu basis directions in chunks of %lld, %.2fs; max|Y| = %.6e, |Y| = %.6e\n",
+              pairs.size(), static_cast<long long>(kDumpChunk),
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - tY).count(),
+              yMax, frobenius(out.kappa));
+
+  // --- y over every determinant ----------------------------------------------
+  const nevpt2::Tensor& ci = g.get("ci");
+  nevpt2::SigmaVectorOptions sigmaOpt;
+  sigmaOpt.nTiles = sigmaTiles;
+  // The orbital energies' response to the active density, out of the same
+  // sidecar: y is the complete functional's derivative (#87).
+  const nevpt2::OrbitalEnergyResponse eps =
+      nevpt2::orbitalEnergyResponse(gg.ncore, gg.nact, gg.nvirt, gg.get("g_xa_cc"),
+                                    gg.get("g_xc_ca"), gg.get("g_xa_vv"), gg.get("g_xv_va"));
+  const nevpt2::OrbitalEnergyDot rebuilt =
+      nevpt2::orbitalEnergiesFrom(eps, gg.get("heff"), g.get("dm1"));
+  double epsNum = 0.0, epsDen = 0.0;
+  for (const auto& [mine, gold] :
+       {std::pair{&rebuilt.core, &g.get("e_core")}, std::pair{&rebuilt.virt, &g.get("e_virt")}})
+    for (std::int64_t p = 0; p < gold->size(); ++p) {
+      epsNum += (mine->flat(p) - gold->flat(p)) * (mine->flat(p) - gold->flat(p));
+      epsDen += gold->flat(p) * gold->flat(p);
+    }
+  out.epsGap = std::sqrt(epsNum / std::max(epsDen, 1e-300));
+  out.epsOk = out.epsGap < kDumpEpsTol;
+  const auto tCi = std::chrono::steady_clock::now();
+  nevpt2::ScCiSourceResult ciSrc = nevpt2::scCiSourceDevice(
+      ints, ci, g.nelecA, g.nelecB, dm1, dm2, dm3, f3ac, f3ca, sigmaOpt, &eps, res);
+  double cy = 0.0;
+  for (std::int64_t i = 0; i < ci.size(); ++i) cy += ci.flat(i) * ciSrc.y.flat(i);
+  std::printf("  y: %lld determinants, %.2fs; |y| = %.10f, <c, y> = %.10f\n",
+              static_cast<long long>(ciSrc.y.size()),
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - tCi).count(),
+              frobenius(ciSrc.y), cy);
+
+  // The walk y rode on, against the energy stage.
+  out.walkGap = std::fabs(ciSrc.pseudodensities.total - energies.total);
+  out.walkOk = out.walkGap < kDumpWalkTol;
+  std::printf("  E_corr from y's walk %.10f vs energiesDevice %.10f, |delta| = %.2e "
+              "(< %.0e: %s)\n",
+              ciSrc.pseudodensities.total, energies.total, out.walkGap, kDumpWalkTol,
+              out.walkOk ? "ok" : "FAILED");
+  std::printf("  y carries the orbital energies' response: e_core / e_virt rebuilt as "
+              "h^eff_pp + <dm1, W_p> vs the golden's, %.2e relative (< %.0e: %s)\n",
+              out.epsGap, kDumpEpsTol, out.epsOk ? "ok" : "FAILED");
+  out.ci = std::move(ciSrc.y);
+  return out;
+}
+
 // Assembles Y and y for the golden's state, writes them to `path`, reads the
 // file back, and returns whether the three checks above hold. A sidecar that
 // does not describe this golden, or a file that cannot be written or read, is
@@ -112,20 +197,9 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
               static_cast<long long>(nmo), static_cast<long long>(gg.ncore),
               static_cast<long long>(gg.nact), static_cast<long long>(gg.nvirt));
   const nevpt2::GeneralIntegralsDevice gen = uploadGeneral(gg, res);
-
-  // --- Y over every pair ------------------------------------------------------
-  std::vector<std::pair<std::int64_t, std::int64_t>> pairs;
-  for (std::int64_t p = 0; p < nmo; ++p)
-    for (std::int64_t q = p + 1; q < nmo; ++q) pairs.emplace_back(p, q);
-  const auto tY = std::chrono::steady_clock::now();
-  const nevpt2::Tensor y = NEVPT2_TRY(nevpt2::scFullRotationMatrix(
-      ints, gen, dm1, dm2, dm3, f3ac, f3ca, pairs, kDumpChunk, res));
-  double yMax = 0.0;
-  for (std::int64_t i = 0; i < y.size(); ++i) yMax = std::max(yMax, std::fabs(y.flat(i)));
-  std::printf("  Y: %zu basis directions in chunks of %lld, %.2fs; max|Y| = %.6e, |Y| = %.6e\n",
-              pairs.size(), static_cast<long long>(kDumpChunk),
-              std::chrono::duration<double>(std::chrono::steady_clock::now() - tY).count(),
-              yMax, frobenius(y));
+  const GpuSourceTerms terms = NEVPT2_TRY(
+      assembleSourceTerms(g, gg, energies, ints, gen, dm1, dm2, dm3, f3ac, f3ca, sigmaTiles, res));
+  const nevpt2::Tensor& y = terms.kappa;
 
   // 1. the matrix against the direct pairing on one seeded full direction.
   const nevpt2::Tensor k = nevpt2::antisymmetricKappa(nmo, kDumpSeed);
@@ -144,52 +218,16 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
               fromMatrix, direct.dirs[0].adjoint, matrixGap, matrixTol,
               matrixOk ? "ok" : "FAILED");
 
-  // --- y over every determinant ----------------------------------------------
-  const nevpt2::Tensor& ci = g.get("ci");
-  nevpt2::SigmaVectorOptions sigmaOpt;
-  sigmaOpt.nTiles = sigmaTiles;
-  // The orbital energies' response to the active density, out of the same
-  // sidecar: y is the complete functional's derivative (#87).
-  const nevpt2::OrbitalEnergyResponse eps =
-      nevpt2::orbitalEnergyResponse(gg.ncore, gg.nact, gg.nvirt, gg.get("g_xa_cc"),
-                                    gg.get("g_xc_ca"), gg.get("g_xa_vv"), gg.get("g_xv_va"));
-  const nevpt2::OrbitalEnergyDot rebuilt =
-      nevpt2::orbitalEnergiesFrom(eps, gg.get("heff"), g.get("dm1"));
-  double epsNum = 0.0, epsDen = 0.0;
-  for (const auto& [mine, gold] :
-       {std::pair{&rebuilt.core, &g.get("e_core")}, std::pair{&rebuilt.virt, &g.get("e_virt")}})
-    for (std::int64_t p = 0; p < gold->size(); ++p) {
-      epsNum += (mine->flat(p) - gold->flat(p)) * (mine->flat(p) - gold->flat(p));
-      epsDen += gold->flat(p) * gold->flat(p);
-    }
-  const double epsGap = std::sqrt(epsNum / std::max(epsDen, 1e-300));
-  const bool epsOk = epsGap < kDumpEpsTol;
-  const auto tCi = std::chrono::steady_clock::now();
-  const nevpt2::ScCiSourceResult ciSrc = nevpt2::scCiSourceDevice(
-      ints, ci, g.nelecA, g.nelecB, dm1, dm2, dm3, f3ac, f3ca, sigmaOpt, &eps, res);
-  double cy = 0.0;
-  for (std::int64_t i = 0; i < ci.size(); ++i) cy += ci.flat(i) * ciSrc.y.flat(i);
-  std::printf("  y: %lld determinants, %.2fs; |y| = %.10f, <c, y> = %.10f\n",
-              static_cast<long long>(ciSrc.y.size()),
-              std::chrono::duration<double>(std::chrono::steady_clock::now() - tCi).count(),
-              frobenius(ciSrc.y), cy);
-
-  // 2. the walk y rode on, against the energy stage.
-  const double walkGap = std::fabs(ciSrc.pseudodensities.total - energies.total);
-  const bool walkOk = walkGap < kDumpWalkTol;
-  std::printf("  2. E_corr from y's walk %.10f vs energiesDevice %.10f, |delta| = %.2e "
-              "(< %.0e: %s)\n",
-              ciSrc.pseudodensities.total, energies.total, walkGap, kDumpWalkTol,
-              walkOk ? "ok" : "FAILED");
-  std::printf("     y carries the orbital energies' response: e_core / e_virt rebuilt as "
-              "h^eff_pp + <dm1, W_p> vs the golden's, %.2e relative (< %.0e: %s)\n",
-              epsGap, kDumpEpsTol, epsOk ? "ok" : "FAILED");
+  // 2. the walk y rode on, and the orbital energies it reads -- printed by
+  // assembleSourceTerms above.
+  const bool walkOk = terms.walkOk;
+  const bool epsOk = terms.epsOk;
 
   // --- the file, and the file read back ----------------------------------------
   nevpt2::GradSrc out;
   out.kappaSource = y;
-  out.ciSource = ciSrc.y;
-  out.ci = ci;
+  out.ciSource = terms.ci;
+  out.ci = g.get("ci");
   out.ncore = gg.ncore;
   out.nact = gg.nact;
   out.nvirt = gg.nvirt;

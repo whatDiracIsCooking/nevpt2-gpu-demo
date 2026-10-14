@@ -41,7 +41,10 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   nevpt2_sc_pseudodensity's because Y_xy needs the gradient
 //                   sidecar's full-MO-range arrays; nevpt2_demo computes y_I
 //                   too, but half a dump is not one.
-//   --gradgold      nevpt2_sc_pseudodensity (--kappa-full, --dump-source-terms)
+//                   --source-oracle is its too, for the same reason: it
+//                   compares the dump's two terms with a committed oracle.
+//   --gradgold      nevpt2_sc_pseudodensity (--kappa-full, --dump-source-terms,
+//                   --source-oracle)
 //                   and nevpt2_demo (--gradient-source, whose y_I and forward
 //                   tangent then carry the orbital energies' CI response,
 //                   #87): the two binaries that read the sidecar.
@@ -71,6 +74,7 @@ constexpr std::array kFlagTable{
     FlagSpec{"--kappa-full", "", kScPd},
     FlagSpec{"--gradgold", "path", kDemo | kScPd},
     FlagSpec{"--dump-source-terms", "path", kScPd},
+    FlagSpec{"--source-oracle", "path", kScPd},
     FlagSpec{"--fd-steps", "N", kPcTangent},
     FlagSpec{"--fd-start-pow", "N", kPcTangent},
 };
@@ -121,6 +125,8 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
     opt.gradgoldPath = std::string(args[++i]);
   } else if (a == "--dump-source-terms") {
     opt.dumpSourceTermsPath = std::string(args[++i]);
+  } else if (a == "--source-oracle") {
+    opt.sourceOraclePath = std::string(args[++i]);
   } else if (a == "--batch") {
     const Result<std::int64_t> v = parseInteger<std::int64_t>(a, args[++i]);
     if (!v) return std::unexpected(v.error());
@@ -189,10 +195,18 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
         return err_config(
             "--dump-source-terms writes the source terms --kappa-act and --kappa-full check; "
             "run one at a time");
-      if (!opt.gradgoldPath.empty() && !opt.kappaFull && opt.dumpSourceTermsPath.empty())
+      // --source-oracle CHECKS the dump's terms against a committed oracle:
+      // one job per run again.
+      if (!opt.sourceOraclePath.empty() &&
+          (opt.kappaAct || opt.kappaFull || !opt.dumpSourceTermsPath.empty()))
         return err_config(
-            "--gradgold is the sidecar --kappa-full and --dump-source-terms read; it does "
-            "nothing on its own");
+            "--source-oracle compares the source terms --dump-source-terms writes and "
+            "--kappa-act / --kappa-full check; run one at a time");
+      if (!opt.gradgoldPath.empty() && !opt.kappaFull && opt.dumpSourceTermsPath.empty() &&
+          opt.sourceOraclePath.empty())
+        return err_config(
+            "--gradgold is the sidecar --kappa-full, --dump-source-terms and --source-oracle "
+            "read; it does nothing on its own");
       return {};
     case Binary::PcTangent:
       if (opt.fdSteps < kMinFdSteps || opt.fdSteps > kMaxFdSteps)

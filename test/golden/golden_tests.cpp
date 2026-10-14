@@ -29,12 +29,17 @@
 //                         the layout contract's C++ half: every golden and
 //                         gradient sidecar in golden/, of both header
 //                         layouts, loads, with its array table found where
-//                         that file's header ends
+//                         that file's header ends; every source-term oracle
+//                         (*.srcgold, #92) loads and belongs to its golden
+//   SrcGoldLoadErrorTests loadSrcGold's refusals: a golden handed to it, a
+//                         truncated or over-long oracle, and an oracle held
+//                         to a golden it was not written for
 //
 // The malformed files are written to a per-test temp directory, removed in
 // TearDown. The committed goldens are only ever read; their paths come from
 // CMake (NEVPT2_TEST_GOLDEN_CAS44, NEVPT2_TEST_GOLDEN_CAS44_CASSCF,
-// NEVPT2_TEST_COMMITTED_GOLDENS, NEVPT2_TEST_COMMITTED_GRADGOLDS), not from
+// NEVPT2_TEST_COMMITTED_GOLDENS, NEVPT2_TEST_COMMITTED_GRADGOLDS,
+// NEVPT2_TEST_COMMITTED_SRCGOLDS), not from
 // this source.
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
@@ -50,8 +55,9 @@ import nevpt2.golden;
 #ifndef NEVPT2_TEST_GOLDEN_CAS44_CASSCF
 #error "NEVPT2_TEST_GOLDEN_CAS44_CASSCF must be defined by test/golden/CMakeLists.txt"
 #endif
-#if !defined(NEVPT2_TEST_COMMITTED_GOLDENS) || !defined(NEVPT2_TEST_COMMITTED_GRADGOLDS)
-#error "NEVPT2_TEST_COMMITTED_GOLDENS/_GRADGOLDS must be defined by test/golden/CMakeLists.txt"
+#if !defined(NEVPT2_TEST_COMMITTED_GOLDENS) || !defined(NEVPT2_TEST_COMMITTED_GRADGOLDS) || \
+    !defined(NEVPT2_TEST_COMMITTED_SRCGOLDS)
+#error "NEVPT2_TEST_COMMITTED_GOLDENS/_GRADGOLDS/_SRCGOLDS must be defined by test/golden/CMakeLists.txt"
 #endif
 
 // Not a module unit (gtest is a textual header), so no partition: the
@@ -579,6 +585,89 @@ TEST(GoldenLayoutContractTests, EveryCommittedGradientSidecarLoadsAgainstItsGold
     ASSERT_TRUE(golden.has_value()) << golden.error().message;
     EXPECT_TRUE(side->checkAgainst(*golden).has_value());
   }
+}
+
+// The golden and gradient sidecar beside an oracle path.
+std::filesystem::path besideOracle(const std::string& oracle, std::string_view ext) {
+  std::filesystem::path p(oracle);
+  p.replace_extension(ext);
+  return p;
+}
+
+TEST(GoldenLayoutContractTests, EveryCommittedSourceOracleLoadsAgainstItsGolden) {
+  const std::vector<std::string> paths = splitPaths(NEVPT2_TEST_COMMITTED_SRCGOLDS);
+  ASSERT_FALSE(paths.empty()) << "test/golden/CMakeLists.txt globbed no source-term oracle";
+  for (const std::string& path : paths) {
+    SCOPED_TRACE(path);
+    const Result<SrcGoldFile> o = loadSrcGold(path);
+    ASSERT_TRUE(o.has_value()) << o.error().message;
+    EXPECT_GT(o->kappaStep, 0.0);
+    EXPECT_GT(o->ciStep, 0.0);
+    const Result<GoldenFile> golden = loadGolden(besideOracle(path, ".nevpt2gold").string());
+    ASSERT_TRUE(golden.has_value()) << golden.error().message;
+    const Result<GradGoldFile> side = loadGradGold(besideOracle(path, ".gradgold").string());
+    ASSERT_TRUE(side.has_value()) << side.error().message;
+    const Status st = o->checkAgainst(*golden, *side);
+    EXPECT_TRUE(st.has_value()) << st.error().message;
+  }
+}
+
+// --- SrcGoldLoadErrorTests ----------------------------------------------------
+
+using SrcGoldLoadErrorTests = GoldenTempDir;
+
+std::string firstCommittedOracle() {
+  const std::vector<std::string> paths = splitPaths(NEVPT2_TEST_COMMITTED_SRCGOLDS);
+  return paths.empty() ? std::string() : paths.front();
+}
+
+void expectOracleIoError(const Result<SrcGoldFile>& r, std::string_view fragment) {
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().kind, ErrorKind::IO);
+  EXPECT_NE(r.error().message.find(fragment), std::string::npos) << r.error().message;
+}
+
+TEST_F(SrcGoldLoadErrorTests, AGoldenIsNotAnOracle) {
+  expectOracleIoError(loadSrcGold(std::string(kGoldenCas44)), "expected 'NEVPT2S1'");
+}
+
+TEST_F(SrcGoldLoadErrorTests, TruncatedAndOverlongOraclesAreIoErrors) {
+  const std::string oracle = firstCommittedOracle();
+  ASSERT_FALSE(oracle.empty());
+  const std::string bytes = readAll(oracle);
+  ASSERT_GT(bytes.size(), 40u);
+  expectOracleIoError(loadSrcGold(write("trunc_header.srcgold", bytes.substr(0, 20))),
+                      "unexpected EOF");
+  expectOracleIoError(loadSrcGold(write("trunc_tail.srcgold", bytes.substr(0, bytes.size() - 1))),
+                      "source-term oracle");
+  expectOracleIoError(loadSrcGold(write("trailing.srcgold", bytes + '\0')),
+                      "1 bytes after the last");
+}
+
+TEST_F(SrcGoldLoadErrorTests, AnOracleForAnotherStateIsRefused) {
+  const std::string oracle = firstCommittedOracle();
+  ASSERT_FALSE(oracle.empty());
+  Result<SrcGoldFile> o = loadSrcGold(oracle);
+  ASSERT_TRUE(o.has_value()) << o.error().message;
+  Result<GoldenFile> golden = loadGolden(besideOracle(oracle, ".nevpt2gold").string());
+  ASSERT_TRUE(golden.has_value()) << golden.error().message;
+  const Result<GradGoldFile> side = loadGradGold(besideOracle(oracle, ".gradgold").string());
+  ASSERT_TRUE(side.has_value()) << side.error().message;
+  // One CI coefficient moved by one ulp: a different state, bit for bit.
+  Tensor& ci = golden->arrays.at("ci");
+  ci.flatRef(0) = std::nextafter(ci.flat(0), 2.0);
+  const Status st = o->checkAgainst(*golden, *side);
+  ASSERT_FALSE(st.has_value());
+  EXPECT_EQ(st.error().kind, ErrorKind::IO);
+  EXPECT_NE(st.error().message.find("its ci differs from the golden's at determinant 0"),
+            std::string::npos)
+      << st.error().message;
+  // And a golden of another active space.
+  golden->ncas += 1;
+  const Status st2 = o->checkAgainst(*golden, *side);
+  ASSERT_FALSE(st2.has_value());
+  EXPECT_NE(st2.error().message.find("do not describe the same state"), std::string::npos)
+      << st2.error().message;
 }
 
 }  // namespace nevpt2::test::golden

@@ -25,15 +25,18 @@ different times, the last by luck (issue #71). Since then there is one parser,
    ``nevpt2_numgrad.read_golden_pc_total``, ``block2_pc_probe.read_golden``,
    ``pyscf_contract_time.read_golden``) must return the same header and the
    same arrays. Each ``golden/*.gradgold`` and ``golden/*.mogold`` likewise,
-   through its reader and back through its writer, byte for byte.
+   through its reader and back through its writer, byte for byte -- and each
+   ``golden/*.srcgold`` source-term oracle (#92) through
+   ``golden_format.read_srcgold`` / ``write_srcgold``, held to the golden
+   beside it (partition, determinant count and CI vector, bit for bit).
 3. **The writer as it is now.** A golden written by the current
    ``generate_golden.write_golden`` (both reference kinds) is read back by
    every reader, so a field added to the writer and not to the readers fails
    even before any file is regenerated.
 
 The C++ half is ``test/golden``'s ``GoldenLayoutContractTests``, which loads
-every committed golden and sidecar with ``loadGolden`` / ``loadGradGold`` in
-the unit tier. This half is offline Python (it imports PySCF and block2 through
+every committed golden and sidecar with ``loadGolden`` / ``loadGradGold`` /
+``loadSrcGold`` in the unit tier. This half is offline Python (it imports PySCF and block2 through
 the scripts it checks), so like the gradient comparison it is a manual gate
 and registers no ctest entry (docs/testing.md, "The golden layout contract")::
 
@@ -249,6 +252,34 @@ def committed_sidecars(fail: Failures, tmp: Path) -> None:
         out.unlink()
         print(f"  {path.name}: {len(fields)} fields, {len(arrays)} arrays", flush=True)
 
+    oracles = sorted(GOLDEN.glob("*.srcgold"))
+    fail.check(bool(oracles), "no committed *.srcgold was read, so that layout is untested")
+    for path in oracles:
+        r = fail.run(f"{path.name}: golden_format.read_srcgold", gf.read_srcgold, path)
+        if r is None:
+            continue
+        header, arrays = r
+        out = tmp / path.name
+        gf.write_srcgold(out, header=header, arrays=arrays)
+        fail.check(out.read_bytes() == path.read_bytes(),
+                   f"{path.name}: golden_format.write_srcgold does not reproduce it")
+        out.unlink()
+        twin = path.with_suffix(".nevpt2gold")
+        fail.check(twin.exists(), f"{path.name}: no golden beside it")
+        if twin.exists():
+            g, ga = gf.read_golden(twin, want={"ci"})
+            fail.check((header["nact"], header["ncore"], header["ndet"])
+                       == (g["ncas"], g["ncore"], g["ndet"]),
+                       f"{path.name}: its partition is not its golden's")
+            fail.check("ci" in arrays and np.array_equal(arrays["ci"], ga["ci"].ravel()),
+                       f"{path.name}: its ci is not its golden's, bit for bit")
+        side = path.with_suffix(".gradgold")
+        if side.exists():
+            s, _ = gf.read_gradgold(side)
+            fail.check((header["nmo"], header["nvirt"]) == (s["nmo"], s["nvirt"]),
+                       f"{path.name}: its n_mo is not its gradient sidecar's")
+        print(f"  {path.name}: {len(arrays)} arrays", flush=True)
+
 
 def fresh_writer(fail: Failures, tmp: Path) -> None:
     """A small golden from the writer as it is now, both kinds, through every
@@ -307,7 +338,8 @@ def main() -> int:
         for item in fail.items:
             print(f"  {item}")
         return 1
-    print("PASS: every golden, gradient sidecar and MO sidecar round-trips through "
+    print("PASS: every golden, gradient sidecar, MO sidecar and source-term oracle "
+          "round-trips through "
           f"every reader, layouts {sorted(m.decode() for m in layouts)}")
     return 0
 

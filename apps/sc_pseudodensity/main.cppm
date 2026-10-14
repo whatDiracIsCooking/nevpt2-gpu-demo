@@ -38,6 +38,13 @@
 // (#73). The partition :source_dump is where that lives; its PASS line says
 // the file was written and read back unchanged. The writer is nevpt2.gradsrc,
 // beside this file: the library computes, the binary decides to write.
+//
+// WITH --source-oracle PATH IT COMPARES THEM, block by block, with PySCF's
+// exact source terms committed as a `.srcgold` beside the golden (#92): the
+// blocks that agree must stay within the measured tolerance, and the blocks
+// on the recorded known-gap list must still miss it. The partition
+// :source_oracle is where that lives, and the list; it prints its own PASS
+// line.
 
 // A module unit, so each binary is apps/<app>/{main.cppm,CMakeLists.txt}.
 // Nothing imports it. main() is written plainly: clang attaches main to the
@@ -55,6 +62,8 @@ export import :kappa_check;
 export import :kappa_full_check;
 // --dump-source-terms: Y_xy and y_I written to a .gradsrc, and read back.
 export import :source_dump;
+// --source-oracle: the same two terms against PySCF's committed ones.
+export import :source_oracle;
 
 import std;
 // nevpt2.cli: every flag this binary takes, and the ones it refuses.
@@ -83,6 +92,7 @@ int main(int argc, char** argv) {
   const bool kappaActArg = parsedOpts.kappaAct;
   const bool kappaFullArg = parsedOpts.kappaFull;
   const std::string& dumpPath = parsedOpts.dumpSourceTermsPath;
+  const std::string& oraclePath = parsedOpts.sourceOraclePath;
   std::string gradgoldPath = parsedOpts.gradgoldPath;
 
   // A missing, unreadable or malformed golden file -- or one without an array
@@ -188,6 +198,30 @@ int main(int argc, char** argv) {
     const nevpt2::Result<bool> ok =
         dumpSourceTerms(g, gg, energies, dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca,
                         opt.rdm.nTiles, dumpPath, *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
+
+  // --source-oracle: the same two terms against PySCF's exact ones
+  // (:source_oracle). CASCI-on-RHF only, as the dump is.
+  if (!oraclePath.empty()) {
+    if (const nevpt2::Status st = g.requireCasciReference("--source-oracle"); !st) {
+      nevpt2::report(st.error());
+      return 1;
+    }
+    nevpt2::Result<nevpt2::GradGoldFile> sidecar = loadSidecar();
+    if (!sidecar) {
+      nevpt2::report(sidecar.error());
+      return 1;
+    }
+    const nevpt2::GradGoldFile gg = *std::move(sidecar);
+    const nevpt2::Result<bool> ok =
+        checkSourceOracle(g, gg, oraclePath, energies, dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac,
+                          rdm.f3ca, opt.rdm.nTiles, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

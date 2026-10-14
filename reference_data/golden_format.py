@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 r"""The one Python reader (and the byte-level writer) of the three binary
 formats in ``golden/``: the ``*.nevpt2gold`` golden, the ``*.gradgold``
-gradient sidecar and the ``*.mogold`` MO sidecar.
+gradient sidecar and the ``*.mogold`` MO sidecar -- and of the
+``*.srcgold`` source-term oracle, which ends in the same array section.
 
 Every reader in ``reference_data/`` goes through this module; none parses a
 header, or seeks to an offset, of its own. The scalar header of each format is
 written down **once**, as a field table keyed by magic (:data:`GOLDEN_HEADERS`,
-:data:`GRADGOLD_HEADERS`, :data:`MO_SIDECAR_HEADERS`), and both directions are
+:data:`GRADGOLD_HEADERS`, :data:`MO_SIDECAR_HEADERS`,
+:data:`SRCGOLD_HEADERS`), and both directions are
 driven by that table: :func:`pack_header` writes it, :func:`_read_header`
 reads it, and where the array table begins is wherever the header read stopped
 (``f.tell()``) -- derived, never known. A header change is therefore an edit to
@@ -68,6 +70,12 @@ GRADGOLD_MAGIC = b"NEVPT2D1"
 #: Magic bytes identifying an MO sidecar (``*.mogold``).
 MO_SIDECAR_MAGIC = b"NEVPT2M1"
 
+#: Magic bytes identifying an SC source-term oracle (``*.srcgold``): PySCF's
+#: exact SC-NEVPT2 source terms for one golden's state, which
+#: ``nevpt2_sc_pseudodensity --source-oracle`` holds the GPU's to (#92;
+#: ``sc_source_oracle.py`` writes it).
+SRCGOLD_MAGIC = b"NEVPT2S1"
+
 #: A golden's state fields, common to both layouts: ``struct`` codes, all
 #: little-endian with no padding.
 _GOLDEN_STATE = (
@@ -96,6 +104,17 @@ MO_SIDECAR_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
     MO_SIDECAR_MAGIC: tuple(
         (n, "i") for n in ("nao", "nmo", "ncore", "ncas", "nelec_a", "nelec_b")
     ) + (("e_casscf", "d"),),
+}
+
+#: THE source-term oracle's scalar header: the orbital-space partition, with
+#: the RHF split of the active space (docs/gradient-theory.md, section 2.6:
+#: the first ``n_act_occ`` active orbitals of the basis ``a_corr`` is written
+#: in are act_O), the determinant count, and the two difference-quotient
+#: steps the arrays were taken at.
+SRCGOLD_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
+    SRCGOLD_MAGIC: tuple(
+        (n, "i") for n in ("nmo", "ncore", "nact", "nvirt", "n_act_occ")
+    ) + (("ndet", "q"), ("kappa_step", "d"), ("ci_step", "d")),
 }
 
 #: No array the generator writes has more than a handful of axes; a rank past
@@ -292,6 +311,27 @@ def read_mo_sidecar(path) -> tuple[dict, dict[str, str], dict[str, np.ndarray]]:
         fields = _read_text_fields(f, path)
         arrays = _read_arrays(f, path, None)
     return header, fields, arrays
+
+
+def write_srcgold(path, *, header: dict, arrays: dict[str, np.ndarray]) -> None:
+    """Write a source-term oracle (``*.srcgold``): the ``NEVPT2S1`` magic, the
+    :data:`SRCGOLD_HEADERS` scalar header from ``header``, then the named-array
+    section every format here ends with. :func:`read_srcgold` reads it back
+    into the same ``(header, arrays)``."""
+    with open(path, "wb") as f:
+        f.write(pack_header(SRCGOLD_HEADERS, SRCGOLD_MAGIC, header))
+        write_arrays(f, arrays)
+
+
+def read_srcgold(path) -> tuple[dict, dict[str, np.ndarray]]:
+    """``(header, arrays)`` from a source-term oracle. ``header`` holds exactly
+    the :data:`SRCGOLD_HEADERS` fields, so :func:`write_srcgold` writes the
+    same file back."""
+    with open(path, "rb") as f:
+        header = _read_header(f, path, SRCGOLD_HEADERS, "source-term oracle")
+        del header["magic"]
+        arrays = _read_arrays(f, path, None)
+    return header, arrays
 
 
 def main(argv: list[str]) -> int:
