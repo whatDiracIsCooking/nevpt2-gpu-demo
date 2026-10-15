@@ -483,40 +483,81 @@ re-tiling. The failures come in two kinds, and they mean different things:
 
 ### Tile floors
 
-The fewest tiles that run, with about 1 GB of the card held by other
-processes (an idle card was not measured). Below the floor the run fails
-with a clean out-of-memory **during the RDM build**, at the
-`allocDeviceBuffer` call in `buildRdmsDevice`:
+The fewest tiles that run. The RTX 3080 (10 GB) rows were measured with
+about 1 GB of the card held by other processes (an idle card was not
+measured there). The RX 9060 XT (16 GB) rows of #110 were measured on an
+idle card: 57 MiB of 16304 MiB in use before every probe (`rocm-smi
+--showmeminfo vram`), so ~16.2 GB free. The larger card, not anything in the
+build, is why its floors sit below the RTX 3080's. Below the floor the run
+fails with a clean out-of-memory **during the RDM build**, at the
+`allocDeviceBuffer` call in `buildRdmsDevice` (on HIP, its `L2` allocation,
+`hipErrorOutOfMemory`):
 
 | case | card | floor | recommended |
 |---|---|---:|---:|
-| CAS(10,10), every variant | both | not measured; equal splits of 2 and 1 tiles pass on the RTX 3080 | `--tiles 3` (see "Why CAS(10,10) needs tiling") |
+| CAS(10,10), every variant | RTX 3080 | not measured; equal splits of 2 and 1 tiles pass | `--tiles 3` (see "Why CAS(10,10) needs tiling") |
+| CAS(10,10), every variant the HIP build runs | RX 9060 XT | **1** (there is no lower count; 1 and 2 both pass every variant) | `--tiles 3` (see "Why CAS(10,10) needs tiling") |
 | CAS(12,12), emitted or BLAS | RTX 3080 | **17** (16 and 15: out of memory) | `--tiles 40` |
+| CAS(12,12), BLAS (the HIP default) or `--digest-emitted` | RX 9060 XT | **9** (8 and 7: out of memory) | `--tiles 40` |
 | CAS(12,12), `--cublas` | RTX 3080 | 17, but it declines there | `--tiles 80` (see `--cublas` above) |
 | CAS(10,12), default digest, SC or `--pc` | RTX 3080 / RX 9060 XT | 14 / 7 | `--tiles 40` |
-| CAS(10,10), `--rdm-tangent` | RTX 3080 | **2** (1 tile: out of memory) | `--tiles 3` |
-| CAS(10,12), `--rdm-tangent` | RTX 3080 | **25** (24 and 23: out of memory) | `--tiles 40` |
-| CAS(12,12), `--rdm-tangent` | RTX 3080 | **34** (33 and 32: out of memory) | `--tiles 40` |
+| CAS(10,10), `--rdm-tangent` | RTX 3080 / RX 9060 XT | **2** (1 tile: out of memory) / **1** | `--tiles 3` |
+| CAS(10,12), `--rdm-tangent` | RTX 3080 / RX 9060 XT | **25** (24 and 23: out of memory) / **13** (12 and 11: out of memory) | `--tiles 40` |
+| CAS(12,12), `--rdm-tangent` | RTX 3080 / RX 9060 XT | **34** (33 and 32: out of memory) / **18** (17 and 16: out of memory) | `--tiles 40` |
 | CAS(10,10), the digests' transpose (#89) | RTX 3080 / RX 9060 XT | **1** / **1** | `--tiles 3` |
 | CAS(12,12), the digests' transpose (#89) | RTX 3080 / RX 9060 XT | **16** (15: out of memory) / **11 (10, 9 and 8: out of memory)** | `--tiles 40` |
 
-HIP's CAS(12,12) floor has not been measured. The per-tile working set
-(`R`, `L2`, `W`; the build prints it as `per-tile transition blocks`) is
-3423.7 MB at CAS(12,12) `--tiles 40` and 1647 MB at CAS(10,10) `--tiles 3`.
-`--ozaki` adds its digit planes on top (see above).
+The per-tile working set (`R`, `L2`, `W`; the build prints it as
+`per-tile transition blocks`) is 3423.7 MB at CAS(12,12) `--tiles 40` and
+1647 MB at CAS(10,10) `--tiles 3`. `--ozaki` adds its digit planes on top
+(see above).
+
+**The RX 9060 XT rows (#110)** were measured 2026-10-15 on the `hip` preset
+(Release), one run per count, each alone on the card. CAS(12,12):
+`nevpt2_demo --golden golden/n2_ccpvdz_cas1212.nevpt2gold --tiles T` with the
+HIP default (BLAS) digest at 11, 10 and 9 (pass) and 8 and 7 (out of memory),
+and with `--digest-emitted` at 9 (pass) and 8 (out of memory). At the floor
+the per-tile working set is 15216.2 MB and the pool's used high-water
+15316.5 MB; at 8 tiles the `L2` request alone no longer fits the card, so the
+run fails within a second. CAS(10,10), at `--tiles 1` and `--tiles 2`, every
+variant the HIP build runs: `nevpt2_demo` on `n2_ccpvdz_cas1010` with no
+digest flag, `--digest-emitted`, `--consume-emitted`, `--ozaki`,
+`--fused-digest` and `--pc`; `nevpt2_df_demo` on `n2_ccpvdz_cas1010_df` with
+`--check-blocks` and with `--pc`, and on `n2_ccpvtz_cas1010_df` with `--batch
+5 --pc` and `--batch 5 --pc --ozaki`. Every one passes. At one tile the
+per-tile working set is 4941.9 MB (4990.3 MB with `--fused-digest`) and the
+pool's used high-water about 4974 MB (5037.2 MB fused; 9872.8 MB with
+`--ozaki`'s digit planes). `--cublas` cannot run on the RX 9060 XT (a HIP
+binary rejects the flag; see "The cuBLAS fixed-point-emulation digest"), so
+it has no row there. No probe corrupted device memory; but there is no count
+below 1 to under-provision, and the auto-sized unequal split that corrupted
+it on the RTX 3080 ("Why CAS(10,10) needs tiling") is not reachable through
+`--tiles`, so that hazard is neither reproduced nor ruled out on HIP.
+
+On the RX 9060 XT the plain CAS(12,12) floor (9) is below the 11 recorded for
+the digests' transpose, though the two share a per-tile working set (below).
+The transpose's figure came from a scratch driver whose other device buffers,
+and whatever else the card held then, were not recorded; this measurement
+does not explain the gap.
 
 **The `--rdm-tangent` floors are the tangent build's own** (the three rows
 above, measured 2026-10-11 on the RTX 3080 with the CUDA defaults — emitted
 digest, BLAS consume — through `nevpt2_demo --rdm-tangent`, with 1.3–1.6 GB
-of the card held by other processes, i.e. ~8.6 GB free). The tangent holds
+of the card held by other processes, i.e. ~8.6 GB free; and 2026-10-15 on the
+RX 9060 XT with the HIP defaults — BLAS digest, BLAS consume — through the
+same `nevpt2_demo --golden <case> --tiles T --rdm-tangent`, on the idle card
+described above). The tangent holds
 two `L2` and two `R` blocks per tile against the plain build's one each, so
 its working set is a little over twice as large and the floors are roughly
-twice the plain ones: 2 against 1 at CAS(10,10), 25 against 14 at
-CAS(10,12), 34 against 17 at CAS(12,12). Below the floor the failure is the
+twice the plain ones: on the RTX 3080 2 against 1 at CAS(10,10), 25 against
+14 at CAS(10,12), 34 against 17 at CAS(12,12); on the RX 9060 XT 1 against 1,
+13 against 7 and 18 against 9. Below the floor the failure is the
 same clean out-of-memory, at one of the two `L2` allocations in
-`buildRdmTangentsDevice` rather than in `buildRdmsDevice`. Its per-tile
+`buildRdmTangentsDevice` rather than in `buildRdmsDevice` (on the RX 9060 XT
+the second, `dL2u`, `hipErrorOutOfMemory`, after the plain build has
+passed). Its per-tile
 working set (printed as `per-tile transition blocks (R x2, L2 x2, W)`), with
-the pool's used high-water after that build beside it:
+the pool's used high-water after that build beside it, RTX 3080:
 
 | case | per-tile | pool used |
 |---|---:|---:|
@@ -525,6 +566,14 @@ the pool's used high-water after that build beside it:
 | CAS(12,12) `--tiles 34` (its floor) | 8028.4 MB | 8203.5 MB |
 | CAS(12,12) `--tiles 40` | 6824.0 MB | 6999.2 MB |
 | CAS(12,12) `--tiles 60` | 4549.4 MB | 4724.5 MB |
+
+and RX 9060 XT, at its floors:
+
+| case | per-tile | pool used |
+|---|---:|---:|
+| CAS(10,10) `--tiles 1` (its floor) | 9835.3 MB | 9890.3 MB |
+| CAS(10,12) `--tiles 13` (its floor) | 15426.3 MB | 15597.6 MB |
+| CAS(12,12) `--tiles 18` (its floor) | 15164.1 MB | 15339.3 MB |
 
 **The digests' transpose (#89) has the plain build's per-tile working set.**
 `buildDigestAdjointDevice` (`nevpt2.rdm_build`'s `:adjoint` partition) holds
@@ -537,7 +586,7 @@ driver (a temporary GoogleTest case, never committed: a seeded random
 half-filled CAS(n,n) state and random `G_ac`/`G_ca`, the plain build at
 `--tiles 60` for `dm3`, then the transpose alone at the count under test),
 on the RTX 3080 with 0.67 GB of the card held by other processes and on the
-RX 9060 XT {hipheld}. Below the floor it fails like the plain build: a clean
+RX 9060 XT with the memory held by other processes not recorded. Below the floor it fails like the plain build: a clean
 out-of-memory, at the `L2` allocation in `buildDigestAdjointDevice`. The
 pool's used high-water after it, RTX 3080: 1686.5 MB at CAS(10,10) `--tiles
 3` (4981.0 MB at 1 tile), 3546.7 MB at CAS(12,12) `--tiles 40` and 8682.1 MB
