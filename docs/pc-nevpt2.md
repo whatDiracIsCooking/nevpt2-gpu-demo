@@ -799,6 +799,36 @@ the orbital energies' response in `y`, and the act–virt rows the digests'
 transpose in `Y` — the two terms the amendment is about; the negative
 controls below show each failing here when dropped.
 
+**Acrolein CAS(6,5), directionally (#105).** Acrolein's full PC oracle would
+cost hours to generate, so its PC terms are held to a **directional** one,
+`golden/acrolein_def2svp_cas65_pc_dir.srcgold`: two seeded directions per
+block and three CI directions, block2's derivative along each, generated in
+under ten minutes (testing.md, "The directional source-term oracle", which has
+the format's reasons, the ladders, the tolerance — 2e-8 — and the budget).
+`nevpt2_sc_pseudodensity_oracle_dir_pc_acrolein_def2svp_cas65` (`gpu;slow`;
+registered where acrolein's gitignored sidecar has been regenerated), max
+\|GPU − block2\| per block over its directions:
+
+| block | RTX 3080 | RX 9060 XT |
+|---|---:|---:|
+| core–core | 8.7e-11 | 8.7e-11 |
+| core–act_O | 3.4e-10 | 2.3e-10 |
+| core–act_V | 4.4e-11 | 4.8e-10 |
+| core–virt | 4.8e-10 | 4.9e-10 |
+| act_O–act_V | 7.2e-10 | 3.8e-9 |
+| act_O–virt | 1.0e-9 | 7.7e-10 |
+| act_V–virt | 1.1e-9 | 1.0e-9 |
+| virt–virt | 1.3e-10 | 1.3e-10 |
+| `P y` (3 directions) | 4.9e-10 | 4.2e-10 |
+
+Unlike N2's, the two cards differ here in the third decade below the
+tolerance: act_O–act_V by 3e-9 and core–act_V by 4e-10. Each card is
+self-consistent run to run (three reruns on the RX 9060 XT agree to the
+digits shown), and the cards
+run different default digests (emitted on CUDA, BLAS on HIP); which part of
+`Y`'s 2,850 basis directions carries the difference was not separated. Both
+are at least five times inside the tolerance.
+
 ### The nuclear gradient from the GPU's terms
 
 `nevpt2_grad.py --pc --source both --source-path <dump> --grad-num <npz>`,
@@ -839,25 +869,35 @@ pieces are laddered one by one. The rest held throughout, the PC guard's
 ledger included (88 of 88 displaced CI vectors guarded, rank unchanged at
 every one).
 
-**Acrolein: open findings, not resolved here.** Four of its eleven
-residual-independent checks fail, all on ladder run length: `y` linearity,
+**Acrolein: the `P y` finding is resolved, by #105; the run-length
+failures stay on record.** At #74 four of acrolein's eleven
+residual-independent checks failed, all on ladder run length: `y` linearity,
 seed 70 (1 fourfold halving, Richardson − ref 1.2e-10) and seed 2026 (2,
 6.3e-10); CI stationarity, seed 70 (1, 1.2e-10) and seed 2026 (2, 6.1e-10).
-The other seven hold, the PC guard at 168 of 168 displaced CI vectors with no
+The other seven held, the PC guard at 168 of 168 displaced CI vectors with no
 rank change. The checks run once per invocation, on the GPU-sourced solve; no
-PySCF-sourced acrolein PC run of them was made. Separately, the dump's `P y`
-differs from PySCF's by 6.5e-7 at `CI_STEP_PC` (1e-7), and by 1.9e-6, 3.3e-6
-and 1.3e-5 at 5e-8, 2.5e-8 and 1e-8; that attribution row puts 9.2e-8 of the
-gradient's GPU-vs-PySCF difference on `y`. A hypothesis, not a conclusion:
-both are block2's PC energy reaching its round-off at small CI steps on this
-state (the failing ladders difference block2's `E_corr`, and the `P y`
-difference grows as `1/h`). #104 supports it without settling it, and did
-not re-run acrolein. Acrolein's `y`-linearity round-off rungs put each `E_corr(PC)`
-evaluation's noise at ~100–400 ulp, against N2's one, so #104's
-stationarity fix does not reach those two. #105 re-checks acrolein
-([`testing.md`](testing.md), "PC's CI-direction ladders, measured"). These ladders were never run for acrolein PC
-before #74 ([`testing.md`](testing.md), "What the committed cases come out
-at").
+PySCF-sourced acrolein PC run of them was made, and #105 did not re-run them.
+Separately, the dump's `P y` differed from PySCF's by 6.5e-7 at `CI_STEP_PC`
+(1e-7), and by 1.9e-6, 3.3e-6 and 1.3e-5 at 5e-8, 2.5e-8 and 1e-8; that
+attribution row put 9.2e-8 of the gradient's GPU-vs-PySCF difference on `y`.
+
+**That difference was the oracle's, not the device's.** #105's directional
+oracle differences block2's `E_corr` along spin-adapted CI directions, which
+the PC guard accepts at a step some 2,400 times `CI_STEP_PC` (`2^-12`; [`testing.md`](testing.md), "The directional source-term oracle"),
+and there the GPU's `P y` agrees with block2's to **4.2e-10 on the RX 9060 XT
+and 4.9e-10 on the RTX 3080**, every one of the three directions. The
+per-determinant quotient's 6.5e-7 was block2's round-off — ~100–400 ulp of
+`E_corr(PC)` per evaluation on this state, against N2's one ([`testing.md`](testing.md),
+"PC's CI-direction ladders, measured") — divided by a 1e-7 step, which is
+also why it grew as `1/h`. The two failing `y`-linearity ladders and the two
+CI-stationarity ones difference that same noisy functional, which is #103's
+hypothesis for them; they are unchanged, an offline diagnostic and not a gate.
+**The acrolein PC regression gate is now the directional ctest entry**
+(`nevpt2_sc_pseudodensity_oracle_dir_pc_acrolein_def2svp_cas65`), every
+block within the PC directional tolerance on both cards, the known-gap list
+empty. The offline `--source both` run above (24616 s) and acrolein's full-`A`
+oracle sweep (#74's 21,136 s scratch run) are **optional diagnostics**, kept
+as the record, never gates.
 
 **`CI_STEP_PC` and the guard.** No finite difference enters the device side.
 The ones beside it are `nevpt2_pc_tangent`'s (symmetry-sector directions, the

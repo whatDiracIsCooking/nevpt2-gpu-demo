@@ -82,13 +82,29 @@ SRCGOLD_MAGIC = b"NEVPT2S1"
 #: differentiate, so an SC comparison can never read a PC oracle as its own.
 SRCGOLD_MAGIC_PC = b"NEVPT2P1"
 
-#: A source-term oracle's scheme, by magic: what :func:`read_srcgold` reports
-#: as ``header["scheme"]`` and :func:`write_srcgold` picks the magic from
-#: (``src/golden/golden.cppm``'s ``SourceScheme`` is the same two).
-SRCGOLD_SCHEMES = {SRCGOLD_MAGIC: "sc", SRCGOLD_MAGIC_PC: "pc"}
+#: The DIRECTIONAL flavour of each (#105): the same scalar header, but in
+#: place of every element of ``A`` and ``P y`` the file holds seeded
+#: directions, each inside one block, and the oracle's converged derivative
+#: along each (``sc_source_oracle.py --directional``; its docstring has the
+#: arrays). The magic says which of the four kinds a file is, so no reader
+#: guesses it from the array names.
+SRCGOLD_MAGIC_DIR = b"NEVPT2SD"
+SRCGOLD_MAGIC_PC_DIR = b"NEVPT2PD"
 
-#: ``SRCGOLD_SCHEMES`` inverted: the magic a writer takes.
-SRCGOLD_MAGIC_FOR = {scheme: magic for magic, scheme in SRCGOLD_SCHEMES.items()}
+#: A source-term oracle's ``(scheme, flavour)``, by magic: what
+#: :func:`read_srcgold` reports as ``header["scheme"]`` /
+#: ``header["flavour"]`` and :func:`write_srcgold` picks the magic from
+#: (``src/golden/golden.cppm``'s ``SourceScheme`` / ``SourceFlavour`` are the
+#: same pairs).
+SRCGOLD_KINDS = {
+    SRCGOLD_MAGIC: ("sc", "full"),
+    SRCGOLD_MAGIC_PC: ("pc", "full"),
+    SRCGOLD_MAGIC_DIR: ("sc", "directional"),
+    SRCGOLD_MAGIC_PC_DIR: ("pc", "directional"),
+}
+
+#: ``SRCGOLD_KINDS`` inverted: the magic a writer takes for ``(scheme, flavour)``.
+SRCGOLD_MAGIC_FOR = {kind: magic for magic, kind in SRCGOLD_KINDS.items()}
 
 #: A golden's state fields, common to both layouts: ``struct`` codes, all
 #: little-endian with no padding.
@@ -124,13 +140,14 @@ MO_SIDECAR_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
 #: the RHF split of the active space (docs/gradient-theory.md, section 2.6:
 #: the first ``n_act_occ`` active orbitals of the basis ``a_corr`` is written
 #: in are act_O), the determinant count, and the two difference-quotient
-#: steps the arrays were taken at. The SC and PC flavours share it.
+#: steps the arrays were taken at. All four kinds share it; in the directional
+#: flavour the two steps are the COARSE rung of the Richardson pair each
+#: stored value is extrapolated from.
 _SRCGOLD_LAYOUT = tuple(
     (n, "i") for n in ("nmo", "ncore", "nact", "nvirt", "n_act_occ")
 ) + (("ndet", "q"), ("kappa_step", "d"), ("ci_step", "d"))
 SRCGOLD_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
-    SRCGOLD_MAGIC: _SRCGOLD_LAYOUT,
-    SRCGOLD_MAGIC_PC: _SRCGOLD_LAYOUT,
+    magic: _SRCGOLD_LAYOUT for magic in SRCGOLD_KINDS
 }
 
 #: No array the generator writes has more than a handful of axes; a rank past
@@ -331,11 +348,12 @@ def read_mo_sidecar(path) -> tuple[dict, dict[str, str], dict[str, np.ndarray]]:
 
 def write_srcgold(path, *, header: dict, arrays: dict[str, np.ndarray]) -> None:
     """Write a source-term oracle (``*.srcgold``): the magic of
-    ``header["scheme"]`` (``"sc"``: ``NEVPT2S1``, ``"pc"``: ``NEVPT2P1``), the
-    :data:`SRCGOLD_HEADERS` scalar header from ``header``, then the named-array
-    section every format here ends with. :func:`read_srcgold` reads it back
-    into the same ``(header, arrays)``."""
-    magic = SRCGOLD_MAGIC_FOR[header["scheme"]]
+    ``(header["scheme"], header["flavour"])`` (:data:`SRCGOLD_KINDS`:
+    ``NEVPT2S1`` / ``NEVPT2P1`` full, ``NEVPT2SD`` / ``NEVPT2PD``
+    directional), the :data:`SRCGOLD_HEADERS` scalar header from ``header``,
+    then the named-array section every format here ends with.
+    :func:`read_srcgold` reads it back into the same ``(header, arrays)``."""
+    magic = SRCGOLD_MAGIC_FOR[(header["scheme"], header["flavour"])]
     with open(path, "wb") as f:
         f.write(pack_header(SRCGOLD_HEADERS, magic, header))
         write_arrays(f, arrays)
@@ -343,24 +361,38 @@ def write_srcgold(path, *, header: dict, arrays: dict[str, np.ndarray]) -> None:
 
 def read_srcgold(path) -> tuple[dict, dict[str, np.ndarray]]:
     """``(header, arrays)`` from a source-term oracle. ``header`` holds the
-    :data:`SRCGOLD_HEADERS` fields plus ``scheme`` (``"sc"`` or ``"pc"``, off
-    the magic), so :func:`write_srcgold` writes the same file back."""
+    :data:`SRCGOLD_HEADERS` fields plus ``scheme`` (``"sc"`` or ``"pc"``) and
+    ``flavour`` (``"full"`` or ``"directional"``), both off the magic, so
+    :func:`write_srcgold` writes the same file back."""
     with open(path, "rb") as f:
         header = _read_header(f, path, SRCGOLD_HEADERS, "source-term oracle")
-        header["scheme"] = SRCGOLD_SCHEMES[header.pop("magic")]
+        header["scheme"], header["flavour"] = SRCGOLD_KINDS[header.pop("magic")]
         arrays = _read_arrays(f, path, None)
     return header, arrays
 
 
-def srcgold_case(path, scheme: str) -> str:
-    """The case an oracle belongs to: its file name's stem, less the ``_pc``
-    suffix a PC oracle carries (``golden/<case>_pc.srcgold`` sits beside the
-    same ``<case>.nevpt2gold`` / ``.gradgold`` as the SC one). The C++ side
-    is ``srcGoldCase`` in ``src/golden/golden.cppm``."""
+def srcgold_name(case: str, scheme: str, flavour: str) -> str:
+    """The file name an oracle of ``case`` and this kind is committed under,
+    ``<case>[_pc][_dir].srcgold``; :func:`srcgold_case` inverts it."""
+    return (case + ("_pc" if scheme == "pc" else "")
+            + ("_dir" if flavour == "directional" else "") + ".srcgold")
+
+
+def srcgold_case(path, scheme: str, flavour: str = "full") -> str:
+    """The case an oracle belongs to: its file name's stem, less the ``_dir``
+    a directional oracle carries and then the ``_pc`` a PC one does
+    (``golden/<case>_pc_dir.srcgold`` sits beside the same
+    ``<case>.nevpt2gold`` / ``.gradgold`` as ``<case>.srcgold``). The C++
+    side is ``srcGoldCase`` in ``src/golden/golden.cppm``."""
     stem = Path(path).stem
+    if flavour == "directional":
+        if not stem.endswith("_dir"):
+            raise FormatError(f"{path}: a directional oracle's name must end in _dir.srcgold")
+        stem = stem[: -len("_dir")]
     if scheme == "pc":
         if not stem.endswith("_pc"):
-            raise FormatError(f"{path}: a PC oracle's name must end in _pc.srcgold")
+            want = "_pc_dir" if flavour == "directional" else "_pc"
+            raise FormatError(f"{path}: a PC oracle's name must end in {want}.srcgold")
         stem = stem[: -len("_pc")]
     return stem
 

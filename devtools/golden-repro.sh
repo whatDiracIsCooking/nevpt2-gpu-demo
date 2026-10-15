@@ -13,16 +13,18 @@
 # place that re-runs the promise, and the one place a byte comparison is right:
 # everywhere else compares against a tolerance.
 #
-# What it regenerates (twelve files, ten generator runs):
+# What it regenerates (fourteen files, twelve generator runs):
 #   generate_golden.py     n2_ccpvdz_cas44 / cas88 .nevpt2gold + .gradgold,
 #                          their _df twins, the two .mogold sidecars (a fresh
 #                          --casscf each) and the two *_casscf[_df] goldens
 #                          (--mo-from the COMMITTED sidecar, as
 #                          docs/reference-data.md's commands do, so a sidecar
 #                          that drifted fails as itself, not as its golden too)
-#   sc_source_oracle.py    n2_ccpvdz_cas44.srcgold and n2_ccpvdz_cas44_pc.srcgold
-#                          (both read golden/n2_ccpvdz_cas44.nevpt2gold, the
-#                          committed one, as their input)
+#   sc_source_oracle.py    n2_ccpvdz_cas44.srcgold and n2_ccpvdz_cas44_pc.srcgold,
+#                          and their directional twins (#105) *_dir.srcgold /
+#                          *_pc_dir.srcgold (all four read
+#                          golden/n2_ccpvdz_cas44.nevpt2gold, the committed
+#                          one, as their input)
 #
 # The comparison is `cmp` on the whole file, with ONE documented exception
 # (docs/reference-data.md, "Regenerating the golden file"): a committed CASCI
@@ -121,6 +123,10 @@ add_run cas44_src "n2_ccpvdz_cas44.srcgold" \
   "python $src --case n2_ccpvdz_cas44 --out $S/n2_ccpvdz_cas44.srcgold"
 add_run cas44_src_pc "n2_ccpvdz_cas44_pc.srcgold" \
   "python $src --case n2_ccpvdz_cas44 --pc --out $S/n2_ccpvdz_cas44_pc.srcgold"
+add_run cas44_src_dir "n2_ccpvdz_cas44_dir.srcgold" \
+  "python $src --case n2_ccpvdz_cas44 --directional --out $S/n2_ccpvdz_cas44_dir.srcgold"
+add_run cas44_src_pc_dir "n2_ccpvdz_cas44_pc_dir.srcgold" \
+  "python $src --case n2_ccpvdz_cas44 --directional --pc --out $S/n2_ccpvdz_cas44_pc_dir.srcgold"
 
 # --only: keep a run when any of its files matches.
 declare -a sel=()

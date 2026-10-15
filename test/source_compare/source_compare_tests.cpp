@@ -23,6 +23,18 @@
 //                               oracleBasisA, and a y built from its P y,
 //                               projected by projectOffState, pass -- the path
 //                               a GPU's terms take
+//   SourceCompareDirectionalTests
+//                               the same three properties for every committed
+//                               DIRECTIONAL oracle (#105): terms built to meet
+//                               its stored projections pass with all nine rows
+//                               compared, moving one block (or P y) along one
+//                               of its directions fails naming that block, a
+//                               block probed by fewer than two directions
+//                               fails, and a direction labelled with a block it
+//                               does not lie in is refused
+//
+// The first three suites read the FULL oracles; the directional ones have no
+// element to perturb, and are the fourth suite's.
 //
 // The committed oracles are only ever read; their paths come from CMake
 // (NEVPT2_TEST_COMMITTED_SRCGOLDS).
@@ -89,6 +101,7 @@ TEST(SourceCompareSelfTests, EveryCommittedOracleAgreesWithItself) {
   for (const std::string& path : paths) {
     SCOPED_TRACE(path);
     const SrcGoldFile o = load(path);
+    if (o.flavour != SourceFlavour::Full) continue;
     schemes.insert(o.scheme);
     const Terms t = ownTerms(o);
     const SourceComparison c =
@@ -111,6 +124,7 @@ TEST(SourceCompareSelfTests, ACopyWithOneBlockPerturbedFailsNamingIt) {
   for (const std::string& path : committedOracles()) {
     SCOPED_TRACE(path);
     const SrcGoldFile o = load(path);
+    if (o.flavour != SourceFlavour::Full) continue;
     const double tol = sourceOracleTol(o.scheme);
     const Terms own = ownTerms(o);
     const SourceComparison self = compareSourceTerms(o, own.a, own.py, {}, tol);
@@ -151,6 +165,7 @@ TEST(SourceCompareKnownGapTests, AGapIsPinnedBothWays) {
   for (const std::string& path : committedOracles()) {
     SCOPED_TRACE(path);
     const SrcGoldFile o = load(path);
+    if (o.flavour != SourceFlavour::Full) continue;
     const double tol = sourceOracleTol(o.scheme);
     const Terms own = ownTerms(o);
     const SourceComparison self = compareSourceTerms(o, own.a, own.py, {}, tol);
@@ -207,6 +222,7 @@ TEST(SourceCompareBasisTests, TermsCarriedFromTheGoldensBasisLandOnTheOracle) {
   for (const std::string& path : committedOracles()) {
     SCOPED_TRACE(path);
     const SrcGoldFile o = load(path);
+    if (o.flavour != SourceFlavour::Full) continue;
     const std::int64_t nmo = o.nmo, ncore = o.ncore, nact = o.nact;
     const Tensor& w = o.get("act_rot");
     const Tensor& aRef = o.get("a_corr");
@@ -241,6 +257,174 @@ TEST(SourceCompareBasisTests, TermsCarriedFromTheGoldensBasisLandOnTheOracle) {
 
     const SourceComparison c = compareSourceTerms(o, a, py, {}, sourceOracleTol(o.scheme));
     EXPECT_TRUE(c.ok) << join(c.failures);
+  }
+}
+
+// --- SourceCompareDirectionalTests ----------------------------------------------
+
+// The x of G x = b, G symmetric positive definite and small (a block's
+// directions, or the CI ones): Gaussian elimination, no pivoting needed.
+std::vector<double> solveSmall(std::vector<std::vector<double>> g, std::vector<double> b) {
+  const std::size_t n = b.size();
+  for (std::size_t k = 0; k < n; ++k)
+    for (std::size_t i = k + 1; i < n; ++i) {
+      const double f = g[i][k] / g[k][k];
+      for (std::size_t j = k; j < n; ++j) g[i][j] -= f * g[k][j];
+      b[i] -= f * b[k];
+    }
+  std::vector<double> x(n);
+  for (std::size_t i = n; i-- > 0;) {
+    double r = b[i];
+    for (std::size_t j = i + 1; j < n; ++j) r -= g[i][j] * x[j];
+    x[i] = r / g[i][i];
+  }
+  return x;
+}
+
+// Terms whose projections ARE a directional oracle's values: A (in the
+// oracle's basis) a combination of each block's own directions and P y one
+// of the CI directions, the coefficients solving each block's Gram system --
+// what a GPU that agrees with the oracle exactly would hand compareSourceOracle.
+Terms directionalTerms(const SrcGoldFile& o) {
+  const Tensor& dirs = o.get("kappa_dirs");
+  const Tensor& block = o.get("kappa_block");
+  const Tensor& val = o.get("kappa_val");
+  const std::int64_t nmo = o.nmo, nk = dirs.dims()[0];
+  const auto dotK = [&](std::int64_t a, std::int64_t b) {
+    double s = 0.0;
+    for (std::int64_t p = 0; p < nmo; ++p)
+      for (std::int64_t q = p + 1; q < nmo; ++q) s += dirs(a, p, q) * dirs(b, p, q);
+    return s;
+  };
+  Terms t{Tensor({nmo, nmo}), Tensor({o.ndet})};
+  for (int b = 0; b < 8; ++b) {
+    std::vector<std::int64_t> idx;
+    for (std::int64_t d = 0; d < nk; ++d)
+      if (block.flat(d) == b) idx.push_back(d);
+    if (idx.empty()) continue;
+    std::vector<std::vector<double>> g(idx.size(), std::vector<double>(idx.size()));
+    std::vector<double> rhs(idx.size());
+    for (std::size_t i = 0; i < idx.size(); ++i) {
+      rhs[i] = val.flat(idx[i]);
+      for (std::size_t j = 0; j < idx.size(); ++j) g[i][j] = dotK(idx[i], idx[j]);
+    }
+    const std::vector<double> c = solveSmall(g, rhs);
+    for (std::size_t i = 0; i < idx.size(); ++i)
+      for (std::int64_t p = 0; p < nmo; ++p)
+        for (std::int64_t q = 0; q < nmo; ++q) t.a(p, q) += c[i] * dirs(idx[i], p, q);
+  }
+  const Tensor& u = o.get("ci_dirs");
+  const Tensor& cval = o.get("ci_val");
+  const std::int64_t nc = u.dims()[0];
+  std::vector<std::vector<double>> g(static_cast<std::size_t>(nc),
+                                     std::vector<double>(static_cast<std::size_t>(nc)));
+  std::vector<double> rhs(static_cast<std::size_t>(nc));
+  for (std::int64_t i = 0; i < nc; ++i) {
+    rhs[static_cast<std::size_t>(i)] = cval.flat(i);
+    for (std::int64_t j = 0; j < nc; ++j) {
+      double s = 0.0;
+      for (std::int64_t k = 0; k < o.ndet; ++k) s += u(i, k) * u(j, k);
+      g[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = s;
+    }
+  }
+  const std::vector<double> c = solveSmall(g, rhs);
+  for (std::int64_t i = 0; i < nc; ++i)
+    for (std::int64_t k = 0; k < o.ndet; ++k)
+      t.py.flatRef(k) += c[static_cast<std::size_t>(i)] * u(i, k);
+  return t;
+}
+
+std::vector<SrcGoldFile> directionalOracles() {
+  std::vector<SrcGoldFile> out;
+  for (const std::string& path : committedOracles()) {
+    SrcGoldFile o = load(path);
+    if (o.flavour == SourceFlavour::Directional) out.push_back(std::move(o));
+  }
+  return out;
+}
+
+TEST(SourceCompareDirectionalTests, TermsMeetingTheStoredProjectionsPass) {
+  const std::vector<SrcGoldFile> oracles = directionalOracles();
+  ASSERT_FALSE(oracles.empty()) << "no committed directional oracle";
+  std::set<SourceScheme> schemes;
+  for (const SrcGoldFile& o : oracles) {
+    SCOPED_TRACE(std::format("{} n_mo {}", sourceSchemeName(o.scheme), o.nmo));
+    schemes.insert(o.scheme);
+    EXPECT_TRUE(checkDirectionBlocks(o).has_value());
+    const Terms t = directionalTerms(o);
+    const SourceComparison c = compareSourceOracle(o, t.a, t.py, {}, sourceOracleTol(o));
+    EXPECT_TRUE(c.ok) << "blocks out of place: " << join(c.failures);
+    EXPECT_TRUE(c.directional);
+    ASSERT_EQ(std::ssize(c.rows), 9) << "eight blocks of two spaces and P y";
+    for (const SourceBlockRow& r : c.rows) {
+      EXPECT_LT(r.maxDelta, 1e-3 * sourceOracleTol(o)) << r.name;
+      // Every block of these partitions has pairs, so every one is probed.
+      EXPECT_GE(r.n, kMinBlockDirections) << r.name;
+    }
+  }
+  EXPECT_TRUE(schemes.contains(SourceScheme::Sc)) << "no SC directional oracle";
+  EXPECT_TRUE(schemes.contains(SourceScheme::Pc)) << "no PC directional oracle";
+}
+
+TEST(SourceCompareDirectionalTests, OneBlockMovedAlongItsDirectionFailsNamingIt) {
+  for (const SrcGoldFile& o : directionalOracles()) {
+    SCOPED_TRACE(std::format("{} n_mo {}", sourceSchemeName(o.scheme), o.nmo));
+    const double tol = sourceOracleTol(o);
+    const Terms own = directionalTerms(o);
+    const SourceComparison self = compareSourceOracle(o, own.a, own.py, {}, tol);
+    const Tensor& dirs = o.get("kappa_dirs");
+    const Tensor& u = o.get("ci_dirs");
+    int exercised = 0;
+    for (const SourceBlockRow& r : self.rows) {
+      SCOPED_TRACE(r.name);
+      ASSERT_GT(r.n, 0);
+      // Along the direction this row's worst sits at, by `by`: that one
+      // projection moves by exactly `by` (a unit direction), the block's
+      // others by at most that, and no other block's at all.
+      const auto moved = [&](double by) {
+        Terms t = directionalTerms(o);
+        if (r.name == kSourceCiBlock) {
+          for (std::int64_t k = 0; k < o.ndet; ++k) t.py.flatRef(k) += by * u(r.atP, k);
+        } else {
+          for (std::int64_t p = 0; p < o.nmo; ++p)
+            for (std::int64_t q = 0; q < o.nmo; ++q) t.a(p, q) += by * dirs(r.atP, p, q);
+        }
+        return compareSourceOracle(o, t.a, t.py, {}, tol);
+      };
+      const SourceComparison c = moved(10.0 * tol);
+      EXPECT_FALSE(c.ok);
+      EXPECT_EQ(c.failures, std::vector<std::string>{r.name});
+      EXPECT_TRUE(moved(0.5 * tol).ok);
+      ++exercised;
+    }
+    EXPECT_EQ(exercised, 9);
+  }
+}
+
+TEST(SourceCompareDirectionalTests, AnUnderProbedOrMislabelledBlockIsCaught) {
+  for (SrcGoldFile o : directionalOracles()) {
+    SCOPED_TRACE(std::format("{} n_mo {}", sourceSchemeName(o.scheme), o.nmo));
+    const double tol = sourceOracleTol(o);
+    const Terms own = directionalTerms(o);
+    // Relabel direction 0 (core-core: every partition here has core pairs)
+    // as virt-virt: the support check refuses the file, and the comparison
+    // alone fails core-core for being probed by too few directions.
+    Tensor& block = o.arrays.at("kappa_block");
+    ASSERT_EQ(block.flat(0), 0.0);
+    block.flatRef(0) = 7.0;
+    const Status st = checkDirectionBlocks(o);
+    ASSERT_FALSE(st.has_value());
+    EXPECT_EQ(st.error().kind, ErrorKind::IO);
+    EXPECT_NE(st.error().message.find("kappa direction 0 is labelled virt-virt"),
+              std::string::npos)
+        << st.error().message;
+    const SourceComparison c = compareSourceOracle(o, own.a, own.py, {}, tol);
+    EXPECT_FALSE(c.ok);
+    ASSERT_FALSE(c.failures.empty());
+    EXPECT_EQ(c.failures.front(), "core-core");
+    EXPECT_NE(c.rows.front().verdict.find("only 1 direction(s) probe the block"),
+              std::string::npos)
+        << c.rows.front().verdict;
   }
 }
 

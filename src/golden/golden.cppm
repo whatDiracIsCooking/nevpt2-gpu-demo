@@ -12,7 +12,9 @@
 //                  matrices and mo_coeff.
 //   loadSrcGold    `*.srcgold`: PySCF's exact SC source terms for a golden's
 //                  state, written by reference_data/sc_source_oracle.py (#92)
-//                  -- or, in its PC flavour, block2's PC ones (#95).
+//                  -- or, in its PC flavour, block2's PC ones (#95); and
+//                  each in a directional flavour (#105): seeded directions
+//                  per block and the oracle's derivative along each.
 //
 // They are two files and not one on purpose: the golden format is extensible
 // (magic + array count), but adding arrays would change every committed
@@ -179,6 +181,17 @@ enum class SourceScheme {
 // "SC" / "PC" -- the scheme as a report prints it.
 [[nodiscard]] std::string_view sourceSchemeName(SourceScheme scheme);
 
+// What an oracle's arrays ARE, off its magic too (golden_format.py's
+// SRCGOLD_KINDS): every element of A and P y (#92, #95), or seeded
+// directions per block and the derivative along each (#105).
+enum class SourceFlavour {
+  Full,         // "NEVPT2S1" / "NEVPT2P1"
+  Directional,  // "NEVPT2SD" / "NEVPT2PD"
+};
+
+// "full" / "directional".
+[[nodiscard]] std::string_view sourceFlavourName(SourceFlavour flavour);
+
 // The exact SC-NEVPT2 (or, `Pc`, PC-NEVPT2) source terms for one golden's
 // state, written by reference_data/sc_source_oracle.py (#92; `--pc`, #95):
 // what nevpt2_sc_pseudodensity --source-oracle holds the GPU's Y_xy and y_I
@@ -195,8 +208,23 @@ enum class SourceScheme {
 //   py       [ndet]        P y in the GOLDEN's determinant basis
 //   ci_mask  [ndet]        1.0 on the determinants py is defined on, else 0.0
 //   ci       [ndet]        the golden's CI vector, as a fingerprint
+//
+// The DIRECTIONAL flavour (#105) keeps act_rot and ci and replaces the rest:
+//
+//   kappa_dirs   [nk, nmo, nmo]  seeded unit antisymmetric kappas, each over
+//                                one block's pairs, in a_corr's basis
+//   kappa_block  [nk]            which block (0..7, source_compare's row order)
+//   kappa_fd     [nk, L]         the central differences along each, at
+//                                h = kappaStep * 2^-i: the value's ladder
+//   kappa_val    [nk]            <kappa, A> = sum_{p<q} kappa_pq A_pq, the
+//                                Richardson value of the first two rungs
+//   ci_dirs      [nc, ndet]      seeded unit CI directions, orthogonal to ci,
+//                                in the GOLDEN's determinant basis
+//   ci_fd        [nc, Lc]        their ladders, from ciStep
+//   ci_val       [nc]            <u, P y>, likewise
 struct SrcGoldFile {
   SourceScheme scheme = SourceScheme::Sc;
+  SourceFlavour flavour = SourceFlavour::Full;
   // Stored as int32 (ndet as int64) in the file; held as int64_t.
   int64_t nmo = 0;
   int64_t ncore = 0;
@@ -204,35 +232,44 @@ struct SrcGoldFile {
   int64_t nvirt = 0;
   int64_t nActOcc = 0;  // how many of the active orbitals are act_O
   int64_t ndet = 0;
-  double kappaStep = 0.0;  // the steps PySCF's quotients were taken at
+  // The steps PySCF's quotients were taken at; in the directional flavour,
+  // the first (coarsest) rung of each ladder.
+  double kappaStep = 0.0;
   double ciStep = 0.0;
   std::unordered_map<std::string, Tensor> arrays;
 
-  // An IO Error unless this oracle was written for `golden`'s state and
-  // `sidecar`'s partition: the same core, active space and n_mo, the same
-  // determinant count, and the golden's own CI vector, bit for bit (the
-  // generator copies it). Found by name beside a golden, so a mismatch is a
-  // plain user mistake.
+  // An IO Error unless this oracle was written for `golden`'s state: the
+  // same core and active space, the same determinant count, and the golden's
+  // own CI vector, bit for bit (the generator copies it). Found by name
+  // beside a golden, so a mismatch is a plain user mistake.
+  [[nodiscard]] Status checkAgainstGolden(const GoldenFile& golden) const;
+
+  // checkAgainstGolden, and `sidecar`'s partition: the same n_mo.
   [[nodiscard]] Status checkAgainst(const GoldenFile& golden, const GradGoldFile& sidecar) const;
 
-  // The array `name`; loadSrcGold has required all five, so a missing one is
-  // our bug (check).
+  // The array `name`; loadSrcGold has required every array of the file's
+  // flavour, so asking for a missing one is our bug (check).
   const Tensor& get(const std::string& name) const;
 };
 
 // The parsed oracle, or an IO Error if it cannot be opened, ends early, has
-// the wrong magic (neither "NEVPT2S1" nor "NEVPT2P1"), carries a partition
-// that does not add up or an act_O count outside the active space, a
-// malformed array header, bytes after its last array, or does not carry the
-// five arrays above at their shapes.
+// the wrong magic (none of "NEVPT2S1", "NEVPT2P1", "NEVPT2SD", "NEVPT2PD"),
+// carries a partition that does not add up or an act_O count outside the
+// active space, a malformed array header, bytes after its last array, or does
+// not carry its flavour's arrays above at their shapes. A directional one is
+// also refused if a direction is not exactly antisymmetric, a block index is
+// not one of the eight, a ladder has fewer than two rungs, or a CI direction
+// is not orthogonal to ci (1e-10) -- the value would not mean what it says.
 [[nodiscard]] Result<SrcGoldFile> loadSrcGold(const std::string& path);
 
 // The case an oracle at `path` belongs to: its file name without the
-// directory and the `.srcgold` suffix, less the `_pc` a PC oracle's name ends
-// in -- golden/<case>_pc.srcgold sits beside the same <case>.nevpt2gold and
-// .gradgold as golden/<case>.srcgold (golden_format.srcgold_case is the
-// Python side). A PC oracle whose name lacks the `_pc` is an IO Error: its
-// name would claim an SC oracle's place.
-[[nodiscard]] Result<std::string> srcGoldCase(const std::string& path, SourceScheme scheme);
+// directory and the `.srcgold` suffix, less the `_dir` a directional
+// oracle's name ends in and then the `_pc` a PC one's does --
+// golden/<case>[_pc][_dir].srcgold all sit beside the same <case>.nevpt2gold
+// and .gradgold (golden_format.srcgold_case is the Python side). A name
+// lacking its kind's suffix is an IO Error: it would claim another oracle's
+// place.
+[[nodiscard]] Result<std::string> srcGoldCase(const std::string& path, SourceScheme scheme,
+                                              SourceFlavour flavour = SourceFlavour::Full);
 
 }  // namespace nevpt2

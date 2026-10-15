@@ -28,9 +28,10 @@ different times, the last by luck (issue #71). Since then there is one parser,
    through its reader and back through its writer, byte for byte -- and each
    ``golden/*.srcgold`` source-term oracle (#92) through
    ``golden_format.read_srcgold`` / ``write_srcgold``, held to the golden
-   beside it (partition, determinant count and CI vector, bit for bit); both
-   flavours, ``NEVPT2S1`` (SC) and ``NEVPT2P1`` (PC, #95, named
-   ``<case>_pc.srcgold``), must be present.
+   beside it (partition, determinant count and CI vector, bit for bit); all
+   four kinds, ``NEVPT2S1`` (SC) and ``NEVPT2P1`` (PC, #95, named
+   ``<case>_pc.srcgold``) and their directional flavours ``NEVPT2SD`` /
+   ``NEVPT2PD`` (#105, ``<case>[_pc]_dir.srcgold``), must be present.
 3. **The writer as it is now.** A golden written by the current
    ``generate_golden.write_golden`` (both reference kinds) is read back by
    every reader, so a field added to the writer and not to the readers fails
@@ -256,22 +257,23 @@ def committed_sidecars(fail: Failures, tmp: Path) -> None:
 
     oracles = sorted(GOLDEN.glob("*.srcgold"))
     fail.check(bool(oracles), "no committed *.srcgold was read, so that layout is untested")
-    schemes: set[str] = set()
+    kinds: set[tuple[str, str]] = set()
     for path in oracles:
         r = fail.run(f"{path.name}: golden_format.read_srcgold", gf.read_srcgold, path)
         if r is None:
             continue
         header, arrays = r
-        schemes.add(header["scheme"])
+        kinds.add((header["scheme"], header["flavour"]))
         out = tmp / path.name
         gf.write_srcgold(out, header=header, arrays=arrays)
         fail.check(out.read_bytes() == path.read_bytes(),
                    f"{path.name}: golden_format.write_srcgold does not reproduce it")
         out.unlink()
-        # A PC oracle, <case>_pc.srcgold, sits beside the same <case>.* as the
+        # A PC oracle, <case>_pc.srcgold, and a directional one,
+        # <case>[_pc]_dir.srcgold (#105), sit beside the same <case>.* as the
         # SC one.
         case = fail.run(f"{path.name}: golden_format.srcgold_case", gf.srcgold_case, path,
-                        header["scheme"])
+                        header["scheme"], header["flavour"])
         if case is None:
             continue
         twin = path.with_name(f"{case}.nevpt2gold")
@@ -288,10 +290,12 @@ def committed_sidecars(fail: Failures, tmp: Path) -> None:
             s, _ = gf.read_gradgold(side)
             fail.check((header["nmo"], header["nvirt"]) == (s["nmo"], s["nvirt"]),
                        f"{path.name}: its n_mo is not its gradient sidecar's")
-        print(f"  {path.name}: {header['scheme'].upper()}, {len(arrays)} arrays", flush=True)
-    for scheme in gf.SRCGOLD_MAGIC_FOR:
-        fail.check(scheme in schemes,
-                   f"no committed {scheme.upper()} *.srcgold was read, so that flavour is untested")
+        print(f"  {path.name}: {header['scheme'].upper()} {header['flavour']}, "
+              f"{len(arrays)} arrays", flush=True)
+    for scheme, flavour in gf.SRCGOLD_MAGIC_FOR:
+        fail.check((scheme, flavour) in kinds,
+                   f"no committed {scheme.upper()} {flavour} *.srcgold was read, so that "
+                   "kind is untested")
 
 
 def fresh_writer(fail: Failures, tmp: Path) -> None:

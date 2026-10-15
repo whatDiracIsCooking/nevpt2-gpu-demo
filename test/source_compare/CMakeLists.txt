@@ -24,4 +24,5 @@ unset(_source_compare_oracles)
 
 add_gtest_suite_tests(
   TARGET source_compare_tests
-  SUITES SourceCompareSelfTests SourceCompareKnownGapTests SourceCompareBasisTests)
+  SUITES SourceCompareSelfTests SourceCompareKnownGapTests SourceCompareBasisTests
+         SourceCompareDirectionalTests)

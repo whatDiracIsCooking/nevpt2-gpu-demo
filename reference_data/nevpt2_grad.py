@@ -2551,10 +2551,19 @@ def ci_check_direction(g: Gradients, seed: int) -> np.ndarray:
       A one-electron one lifts it only as ``h^4``, under the cut below
       ``2^-10`` (:data:`CI_LADDER_PC`), and :func:`_pc_guard`'s rank check
       holds the ladder to that."""
-    st = g.st
+    return ci_direction(g.st, seed, pc=g.pc, h1_act=g._h1_act, g_act=g._g_act,
+                        allowed=g.allowed)
+
+
+def ci_direction(st: State, seed: int, *, pc: bool, h1_act: np.ndarray, g_act: np.ndarray,
+                 allowed: np.ndarray) -> np.ndarray:
+    """:func:`ci_check_direction`'s direction from its parts: the state, the
+    active Hamiltonian's integrals (``h1_act``, ``g_act``: SC's generator
+    reads them) and the irrep mask. Also what ``sc_source_oracle.py
+    --directional`` draws its CI directions from (#105)."""
     n = st.nact
     rng = np.random.default_rng(seed)
-    if g.pc:
+    if pc:
         dm1 = np.asarray(fci.direct_spin1.make_rdm1(st.ci, n, st.nelecas))
         w = rng.uniform(-1.0, 1.0, (n, n)) * (np.abs(dm1) > 1e-12 * np.abs(dm1).max())
         u = np.asarray(fci.direct_spin1.contract_1e(w + w.T, st.ci, n, st.nelecas)).ravel()
@@ -2565,10 +2574,10 @@ def ci_check_direction(g: Gradients, seed: int) -> np.ndarray:
         r2 = r2 + r2.transpose(1, 0, 2, 3)
         r2 = r2 + r2.transpose(0, 1, 3, 2)
         r2 = r2 + r2.transpose(2, 3, 0, 1)
-        op = fci.direct_spin1.absorb_h1e(np.asarray(g._h1_act) * r1,
-                                         np.asarray(g._g_act) * r2, n, st.nelecas, 0.5)
+        op = fci.direct_spin1.absorb_h1e(np.asarray(h1_act) * r1,
+                                         np.asarray(g_act) * r2, n, st.nelecas, 0.5)
         u = np.asarray(fci.direct_spin1.contract_2e(op, st.ci, n, st.nelecas)).ravel()
-    u = u * g.allowed
+    u = u * allowed
     c = st.ci.ravel()
     u = u - float(c @ u) * c
     norm = float(np.linalg.norm(u))

@@ -30,14 +30,19 @@
 //                         gradient sidecar in golden/, of both header
 //                         layouts, loads, with its array table found where
 //                         that file's header ends; every source-term oracle
-//                         (*.srcgold, #92), of both flavours (SC "NEVPT2S1",
-//                         PC "NEVPT2P1" as <case>_pc.srcgold, #95), loads
-//                         and belongs to its golden
+//                         (*.srcgold, #92), of all four kinds (SC "NEVPT2S1",
+//                         PC "NEVPT2P1" as <case>_pc.srcgold, #95, and their
+//                         directional flavours "NEVPT2SD" / "NEVPT2PD" as
+//                         <case>[_pc]_dir.srcgold, #105), loads and belongs
+//                         to its golden (and to its gradient sidecar, where
+//                         that is on disk: acrolein's is gitignored)
 //   SrcGoldLoadErrorTests loadSrcGold's refusals: a golden handed to it, a
 //                         truncated or over-long oracle, and an oracle held
 //                         to a golden it was not written for; the magic is
-//                         what sets the scheme, and srcGoldCase refuses a PC
-//                         oracle not named <case>_pc
+//                         what sets the scheme and the flavour, a directional
+//                         oracle with a direction that is not antisymmetric is
+//                         refused, and srcGoldCase refuses an oracle not
+//                         named for its kind
 //
 // The malformed files are written to a per-test temp directory, removed in
 // TearDown. The committed goldens are only ever read; their paths come from
@@ -592,10 +597,10 @@ TEST(GoldenLayoutContractTests, EveryCommittedGradientSidecarLoadsAgainstItsGold
 }
 
 // The golden and gradient sidecar beside an oracle path: <case>.<ext>, where
-// a PC oracle is <case>_pc.srcgold (srcGoldCase).
+// an oracle is <case>[_pc][_dir].srcgold (srcGoldCase).
 std::filesystem::path besideOracle(const std::string& oracle, SourceScheme scheme,
-                                   std::string_view ext) {
-  const Result<std::string> c = srcGoldCase(oracle, scheme);
+                                   SourceFlavour flavour, std::string_view ext) {
+  const Result<std::string> c = srcGoldCase(oracle, scheme, flavour);
   EXPECT_TRUE(c.has_value()) << c.error().message;
   return std::filesystem::path(oracle).parent_path() /
          (c.value_or("") + std::string(ext));
@@ -604,35 +609,53 @@ std::filesystem::path besideOracle(const std::string& oracle, SourceScheme schem
 TEST(GoldenLayoutContractTests, EveryCommittedSourceOracleLoadsAgainstItsGolden) {
   const std::vector<std::string> paths = splitPaths(NEVPT2_TEST_COMMITTED_SRCGOLDS);
   ASSERT_FALSE(paths.empty()) << "test/golden/CMakeLists.txt globbed no source-term oracle";
-  std::map<SourceScheme, int> perScheme;
+  std::map<std::pair<SourceScheme, SourceFlavour>, int> perKind;
+  int withSidecar = 0;
   for (const std::string& path : paths) {
     SCOPED_TRACE(path);
     const Result<SrcGoldFile> o = loadSrcGold(path);
     ASSERT_TRUE(o.has_value()) << o.error().message;
-    ++perScheme[o->scheme];
+    ++perKind[{o->scheme, o->flavour}];
     EXPECT_GT(o->kappaStep, 0.0);
     EXPECT_GT(o->ciStep, 0.0);
     const Result<GoldenFile> golden =
-        loadGolden(besideOracle(path, o->scheme, ".nevpt2gold").string());
+        loadGolden(besideOracle(path, o->scheme, o->flavour, ".nevpt2gold").string());
     ASSERT_TRUE(golden.has_value()) << golden.error().message;
-    const Result<GradGoldFile> side =
-        loadGradGold(besideOracle(path, o->scheme, ".gradgold").string());
+    const Status mine = o->checkAgainstGolden(*golden);
+    EXPECT_TRUE(mine.has_value()) << mine.error().message;
+    // Acrolein's 57 MB sidecar is gitignored (docs/reference-data.md, "The
+    // gradient sidecar"): held to it when it has been regenerated.
+    const std::filesystem::path sidePath = besideOracle(path, o->scheme, o->flavour, ".gradgold");
+    if (!std::filesystem::exists(sidePath)) continue;
+    const Result<GradGoldFile> side = loadGradGold(sidePath.string());
     ASSERT_TRUE(side.has_value()) << side.error().message;
     const Status st = o->checkAgainst(*golden, *side);
     EXPECT_TRUE(st.has_value()) << st.error().message;
+    ++withSidecar;
   }
-  // Both flavours on disk, or this suite is not testing what it claims to.
-  EXPECT_GT(perScheme[SourceScheme::Sc], 0) << "no committed SC (NEVPT2S1) oracle was loaded";
-  EXPECT_GT(perScheme[SourceScheme::Pc], 0) << "no committed PC (NEVPT2P1) oracle was loaded";
+  // All four kinds on disk, or this suite is not testing what it claims to.
+  for (const SourceScheme sch : {SourceScheme::Sc, SourceScheme::Pc})
+    for (const SourceFlavour fl : {SourceFlavour::Full, SourceFlavour::Directional})
+      EXPECT_GT((perKind[{sch, fl}]), 0)
+          << "no committed " << sourceSchemeName(sch) << " " << sourceFlavourName(fl)
+          << " oracle was loaded";
+  EXPECT_GT(withSidecar, 0) << "no oracle was held to its gradient sidecar";
 }
 
 // --- SrcGoldLoadErrorTests ----------------------------------------------------
 
 using SrcGoldLoadErrorTests = GoldenTempDir;
 
-std::string firstCommittedOracle() {
-  const std::vector<std::string> paths = splitPaths(NEVPT2_TEST_COMMITTED_SRCGOLDS);
-  return paths.empty() ? std::string() : paths.front();
+// The first committed oracle of `flavour` whose gradient sidecar is
+// committed too (acrolein's is not), or "".
+std::string firstCommittedOracle(SourceFlavour flavour = SourceFlavour::Full) {
+  for (const std::string& path : splitPaths(NEVPT2_TEST_COMMITTED_SRCGOLDS)) {
+    const Result<SrcGoldFile> o = loadSrcGold(path);
+    if (!o || o->flavour != flavour) continue;
+    if (std::filesystem::exists(besideOracle(path, o->scheme, o->flavour, ".gradgold")))
+      return path;
+  }
+  return {};
 }
 
 void expectOracleIoError(const Result<SrcGoldFile>& r, std::string_view fragment) {
@@ -680,7 +703,68 @@ TEST_F(SrcGoldLoadErrorTests, TheMagicIsTheScheme) {
   EXPECT_EQ(flipped->get("a_corr").data(), sc->get("a_corr").data());
   bytes.replace(0, 8, "NEVPT2X1");
   expectOracleIoError(loadSrcGold(write("third.srcgold", bytes)),
-                      "expected 'NEVPT2S1' or 'NEVPT2P1'");
+                      "expected 'NEVPT2S1', 'NEVPT2P1', 'NEVPT2SD' or 'NEVPT2PD'");
+}
+
+TEST_F(SrcGoldLoadErrorTests, TheMagicIsTheFlavourToo) {
+  // A directional oracle's bytes under its scheme's other directional magic
+  // load with the scheme flipped and every array unchanged; under a FULL
+  // magic they are refused, naming the array a full oracle needs.
+  const std::string oracle = firstCommittedOracle(SourceFlavour::Directional);
+  ASSERT_FALSE(oracle.empty());
+  const Result<SrcGoldFile> o = loadSrcGold(oracle);
+  ASSERT_TRUE(o.has_value()) << o.error().message;
+  EXPECT_EQ(o->flavour, SourceFlavour::Directional);
+  std::string bytes = readAll(oracle);
+  const bool wasPc = std::string_view(bytes.data(), 8) == "NEVPT2PD";
+  bytes.replace(0, 8, wasPc ? "NEVPT2SD" : "NEVPT2PD");
+  const Result<SrcGoldFile> flipped = loadSrcGold(write("flipped_dir.srcgold", bytes));
+  ASSERT_TRUE(flipped.has_value()) << flipped.error().message;
+  EXPECT_EQ(flipped->scheme, wasPc ? SourceScheme::Sc : SourceScheme::Pc);
+  EXPECT_EQ(flipped->flavour, SourceFlavour::Directional);
+  EXPECT_EQ(flipped->get("kappa_val").data(), o->get("kappa_val").data());
+  bytes.replace(0, 8, "NEVPT2S1");
+  expectOracleIoError(loadSrcGold(write("full_magic.srcgold", bytes)),
+                      "missing required array 'a_corr'");
+}
+
+TEST_F(SrcGoldLoadErrorTests, ADirectionThatIsNotAntisymmetricIsRefused) {
+  const std::string oracle = firstCommittedOracle(SourceFlavour::Directional);
+  ASSERT_FALSE(oracle.empty());
+  std::string bytes = readAll(oracle);
+  // The array section names each array before its rank, its extents and its
+  // data: kappa_dirs[0, 0, 1] is the second double after the three extents.
+  const std::string name = "kappa_dirs";
+  const std::size_t at = bytes.find(name);
+  ASSERT_NE(at, std::string::npos);
+  const std::size_t data = at + name.size() + 4 + 3 * 8;
+  double v = 0.0;
+  std::memcpy(&v, bytes.data() + data + 8, sizeof v);
+  v += 1.0;  // (0, 1) no longer the negative of (1, 0)
+  std::memcpy(bytes.data() + data + 8, &v, sizeof v);
+  expectOracleIoError(loadSrcGold(write("asym.srcgold", bytes)),
+                      "kappa direction 0 is not antisymmetric at (0, 1)");
+}
+
+TEST_F(SrcGoldLoadErrorTests, ADirectionalOracleIsNamedForItsCase) {
+  const Result<std::string> pc = srcGoldCase("/x/golden/acrolein_def2svp_cas65_pc_dir.srcgold",
+                                             SourceScheme::Pc, SourceFlavour::Directional);
+  ASSERT_TRUE(pc.has_value()) << pc.error().message;
+  EXPECT_EQ(*pc, "acrolein_def2svp_cas65");
+  const Result<std::string> sc = srcGoldCase("/x/golden/acrolein_def2svp_cas65_dir.srcgold",
+                                             SourceScheme::Sc, SourceFlavour::Directional);
+  ASSERT_TRUE(sc.has_value()) << sc.error().message;
+  EXPECT_EQ(*sc, "acrolein_def2svp_cas65");
+  const Result<std::string> noDir = srcGoldCase("/x/golden/n2_ccpvdz_cas44.srcgold",
+                                                SourceScheme::Sc, SourceFlavour::Directional);
+  ASSERT_FALSE(noDir.has_value());
+  EXPECT_NE(noDir.error().message.find("must end in '_dir.srcgold'"), std::string::npos)
+      << noDir.error().message;
+  const Result<std::string> noPc = srcGoldCase("/x/golden/n2_ccpvdz_cas44_dir.srcgold",
+                                               SourceScheme::Pc, SourceFlavour::Directional);
+  ASSERT_FALSE(noPc.has_value());
+  EXPECT_NE(noPc.error().message.find("must end in '_pc_dir.srcgold'"), std::string::npos)
+      << noPc.error().message;
 }
 
 TEST_F(SrcGoldLoadErrorTests, APcOracleIsNamedForItsCase) {
@@ -707,10 +791,10 @@ TEST_F(SrcGoldLoadErrorTests, AnOracleForAnotherStateIsRefused) {
   Result<SrcGoldFile> o = loadSrcGold(oracle);
   ASSERT_TRUE(o.has_value()) << o.error().message;
   Result<GoldenFile> golden =
-      loadGolden(besideOracle(oracle, o->scheme, ".nevpt2gold").string());
+      loadGolden(besideOracle(oracle, o->scheme, o->flavour, ".nevpt2gold").string());
   ASSERT_TRUE(golden.has_value()) << golden.error().message;
   const Result<GradGoldFile> side =
-      loadGradGold(besideOracle(oracle, o->scheme, ".gradgold").string());
+      loadGradGold(besideOracle(oracle, o->scheme, o->flavour, ".gradgold").string());
   ASSERT_TRUE(side.has_value()) << side.error().message;
   // One CI coefficient moved by one ulp: a different state, bit for bit.
   Tensor& ci = golden->arrays.at("ci");

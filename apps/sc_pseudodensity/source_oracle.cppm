@@ -66,17 +66,22 @@ nevpt2::Result<bool> checkSourceOracle(const nevpt2::GoldenFile& g,
         oraclePath, nevpt2::sourceSchemeName(o.scheme), nevpt2::sourceSchemeName(want),
         pc ? "drop --pc for an SC oracle" : "pass --pc for a PC oracle"));
   NEVPT2_TRY(o.checkAgainst(g, gg));
+  NEVPT2_TRY(nevpt2::checkDirectionBlocks(o));
+  const bool directional = o.flavour == nevpt2::SourceFlavour::Directional;
   const std::string stem = nevpt2::sourceOracleStem(oraclePath);
   const std::vector<std::string_view> gaps = NEVPT2_TRY(nevpt2::knownSourceGaps(stem));
-  const double tol = nevpt2::sourceOracleTol(o.scheme);
+  const double tol = nevpt2::sourceOracleTol(o);
 
-  std::printf("\n--source-oracle: the GPU's %s Y_xy and y_I against %s exact ones (#92%s)\n",
-              pc ? "PC" : "SC", pc ? "block2's" : "PySCF's", pc ? ", #95, #74" : "");
+  std::printf("\n--source-oracle: the GPU's %s Y_xy and y_I against %s exact ones (#92%s%s)%s\n",
+              pc ? "PC" : "SC", pc ? "block2's" : "PySCF's", pc ? ", #95, #74" : "",
+              directional ? ", #105" : "",
+              directional ? ", projected onto the oracle's seeded directions per block" : "");
   std::printf("  partition: n_mo = %lld = %lld core + %lld active (%lld act_O) + %lld virtual; "
-              "PySCF's steps: kappa %.6g, CI %.6g\n",
+              "PySCF's steps: kappa %.6g, CI %.6g%s\n",
               static_cast<long long>(o.nmo), static_cast<long long>(o.ncore),
               static_cast<long long>(o.nact), static_cast<long long>(o.nActOcc),
-              static_cast<long long>(o.nvirt), o.kappaStep, o.ciStep);
+              static_cast<long long>(o.nvirt), o.kappaStep, o.ciStep,
+              directional ? " (each ladder's first rung; Richardson of the first two)" : "");
   const nevpt2::GeneralIntegralsDevice gen = uploadGeneral(gg, res);
   // The digests' transpose (#89), so the Y compared is the exact one.
   const nevpt2::DeviceTensor hbar =
@@ -90,17 +95,22 @@ nevpt2::Result<bool> checkSourceOracle(const nevpt2::GoldenFile& g,
   double cy = 0.0;
   const nevpt2::Tensor a = nevpt2::oracleBasisA(o, terms.kappa);
   const nevpt2::Tensor py = nevpt2::projectOffState(g.get("ci"), terms.ci, cy);
-  const nevpt2::SourceComparison cmp = nevpt2::compareSourceTerms(o, a, py, gaps, tol);
+  const nevpt2::SourceComparison cmp = nevpt2::compareSourceOracle(o, a, py, gaps, tol);
 
   // --- the verdict, block by block ------------------------------------------------
-  std::printf("\n  per block, max over its pairs (Eh; tolerance %.0e, docs/testing.md, \"%s\"):\n",
-              tol,
-              pc ? "The PC source terms' oracle" : "The SC source terms against PySCF's, on a card");
-  std::printf("    %-12s %6s %12s %12s %11s  %-12s %s\n", "block", "pairs", "max|ref|",
+  std::printf("\n  per block, max over its %s (Eh; tolerance %.0e, docs/testing.md, \"%s\"):\n",
+              directional ? "directions" : "pairs", tol,
+              directional ? "The directional source-term oracle"
+              : pc        ? "The PC source terms' oracle"
+                          : "The SC source terms against PySCF's, on a card");
+  std::printf("    %-12s %6s %12s %12s %11s  %-12s %s\n", "block", directional ? "dirs" : "pairs",
+              "max|ref|",
               "max|GPU|", "max|delta|", "expected", "verdict");
   for (const nevpt2::SourceBlockRow& r : cmp.rows) {
     const std::string at =
-        r.atQ >= 0 ? std::format("({}, {})", r.atP, r.atQ) : std::format("det {}", r.atP);
+        cmp.directional ? std::format("direction {}", r.atP)
+        : r.atQ >= 0    ? std::format("({}, {})", r.atP, r.atQ)
+                        : std::format("det {}", r.atP);
     std::printf("    %-12s %6lld %12.4e %12.4e %11.3e  %-12s %s  at %s\n", r.name.c_str(),
                 static_cast<long long>(r.n), r.maxRef, r.maxGot, r.maxDelta,
                 r.knownGap ? "known gap" : "agree", r.verdict.c_str(), at.c_str());
