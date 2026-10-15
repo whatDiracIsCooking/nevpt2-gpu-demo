@@ -66,14 +66,18 @@ you try to run it on your own system.
   Lagrangian, so every derivative path refuses a CASSCF-orbital golden rather
   than differentiate a reference it does not cover, and no gradient sidecar is
   written for one.
-- **The gradient work is source terms, not a nuclear gradient.** The tree
-  differentiates the NEVPT2 energy with respect to the CI vector and (for the
-  active–active block) with respect to an orbital rotation, at one fixed
+- **On the GPU, the gradient work is source terms, not a nuclear gradient.**
+  The binaries differentiate the NEVPT2 energy with respect to the CI vector
+  and with respect to an orbital rotation (the active–active block, or the
+  whole orbital source term out of a `*.gradgold` sidecar), at one fixed
   geometry. The Z-vector solve, the derivative integrals and any derivative
-  with respect to a nuclear coordinate are not implemented; the only nuclear
-  gradient anywhere is a *numerical* one, written by an offline Python tool
-  (`reference_data/nevpt2_numgrad.py`) into a `*.gradgold` sidecar whose
-  `grad_num` arrays nothing in `src/` or `apps/` reads yet
+  with respect to a nuclear coordinate are not implemented in `src/` or
+  `apps/`. A nuclear gradient exists only in offline Python:
+  `reference_data/nevpt2_grad.py` solves the Z-vector equations and builds
+  an analytic one (from PySCF's source terms, or from the GPU's own, written
+  out by `nevpt2_sc_pseudodensity --dump-source-terms`), and
+  `reference_data/nevpt2_numgrad.py` writes a *numerical* one into a
+  sidecar's `grad_num`, which nothing in `src/` or `apps/` reads
   ([`docs/gradients.md`](docs/gradients.md)).
 - **It needs a GPU.** There is no CPU path.
 
@@ -154,7 +158,9 @@ The devcontainer below has all of this installed. Outside it you need:
 - **Network on the first configure** of any preset that has testing on. It
   fetches GoogleTest. The standalone `cmake -S src` build fetches nothing.
 - **`uv`**, for the offline Python tools only (`uv sync`, then
-  `generate_golden.py` and the rest). Python never runs in a build or a test.
+  `generate_golden.py` and the rest). Python never runs in a build or a
+  ctest entry; the local gate (`devtools/cpp-tier.sh`) runs its lint, the
+  golden layout check and the oracle's own tests through it.
 
 ### Devcontainer (optional)
 
@@ -362,8 +368,8 @@ How the layering works is [`docs/architecture.md`](docs/architecture.md),
 | `src/` | the library, one directory per component, both backends (per-file inventory: [`docs/architecture.md`](docs/architecture.md), §4) |
 | `apps/` | the binaries: `integral_direct/` → `nevpt2_demo`, `density_fit/` → `nevpt2_df_demo`, the two gradient checks `sc_pseudodensity/` and `pc_tangent/`, and `sanitizer_canary/` |
 | `test/` | the GoogleTest unit tier: host logic, never an energy |
-| `golden/` | the committed reference files, which are the oracle ([`docs/reference-data.md`](docs/reference-data.md)) |
-| `reference_data/` | the offline Python that generates them (PySCF, block2), and the CPU side of the head-to-head |
+| `golden/` | the committed reference files, which are the oracle, and their MO, gradient and source-term-oracle sidecars ([`docs/reference-data.md`](docs/reference-data.md)) |
+| `reference_data/` | the offline Python that generates them (PySCF, block2) and checks their format, the offline gradients (analytic and numerical), and the CPU side of the head-to-head ([`docs/reference-data.md`](docs/reference-data.md), "The files in `golden/` and `reference_data/`") |
 | `cmake/` | the build's macro layer and the sanitizer tier ([`cmake/README.md`](cmake/README.md)) |
 | `deps/WarpWraps` | git submodule: the backend-neutral GPU layer |
 | `docs/` | how it is built, how a number gets computed, what it costs, and how it is checked ([`docs/README.md`](docs/README.md) is the index) |
