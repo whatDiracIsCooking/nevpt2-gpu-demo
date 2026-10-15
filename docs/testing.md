@@ -1,9 +1,10 @@
 # Testing
 
 How this tree is checked: the two test tiers, why there is no CI, the local
-gate, the sanitizer tier — what each tool catches, what it cannot, and
-how the tier proves its own tools are on — and host code coverage. Every
-figure names its card.
+gate, the checks on the oracle itself (its pytest hand cases and the golden
+regeneration gate), the sanitizer tier — what each tool catches, what it
+cannot, and how the tier proves its own tools are on — and host code
+coverage. Every figure names its card.
 
 ## Two tiers
 
@@ -48,26 +49,33 @@ only compiles for the other backend says so.
 So the gate is local, and **saying what you ran is the whole protocol**:
 
 ```bash
-devtools/cpp-tier.sh                # CUDA, on a box with a card (runs the four gates below first)
+devtools/cpp-tier.sh                # CUDA, on a box with a card (runs the five gates below first)
 devtools/cross-backend-check.sh     # does the OTHER backend still compile (the two lints too)
 devtools/stream-lint.sh --strict    # every GPU call on the one stream; both scripts above run it
 devtools/throw-lint.sh              # no `throw` in src/, apps/ or test/; likewise
 uv run python reference_data/golden_layout_check.py   # "The golden layout contract", below; cpp-tier.sh runs it
 uv run ruff check                   # the Python lint (pyproject.toml's [tool.ruff]); likewise
+uv run pytest                       # "The oracle's own tests", below; likewise
+devtools/golden-repro.sh            # "The golden regeneration gate", below; MANUAL, minutes of CPU
 ```
 
-`cpp-tier.sh` runs the four as named phases (`stream-lint`, `throw-lint`,
-`golden-layout`, `ruff`) before it configures, and under `--no-test` too:
-none needs a card, and a `--no-test` run is often the only run a no-card
-change gets. A failing one fails the tier and is named in its summary line
-(`FAIL(rc=1) failed=golden-layout`). The two Python phases run through
-`uv run --frozen --no-sync` after `uv sync --frozen --check`, so a missing or
-stale environment (`/opt/venv` in every image, `.venv` on a host) **fails**
-the phase with `uv sync --frozen` as the fix, rather than skipping it: #84's
-stray reader reached `main` because the gate that would have caught it was
-one nobody ran. `cross-backend-check.sh` runs only the two lints: they read
-the one C++ tree it compiles for the other backend, while the Python phases
-are backend-independent and already ride every `cpp-tier.sh` run.
+`cpp-tier.sh` runs the five as named phases (`stream-lint`, `throw-lint`,
+`golden-layout`, `ruff`, `pytest`) before it configures, and under
+`--no-test` too: none needs a card, and a `--no-test` run is often the only
+run a no-card change gets. A failing one fails the tier and is named in its
+summary line (`FAIL(rc=1) failed=golden-layout`). The three Python phases
+run through `uv run --frozen --no-sync` after `uv sync --frozen --check`
+(`in_locked_env`, `devtools/lib.sh`), so a missing or stale environment
+(`/opt/venv` in every image, `.venv` on a host) **fails** the phase with
+`uv sync --frozen` as the fix, rather than skipping it: #84's stray reader
+reached `main` because the gate that would have caught it was one nobody
+ran. An image built before pytest entered the lock is such a stale
+environment — `uv sync --frozen` in the container, or a rebuild, clears it.
+`cross-backend-check.sh` runs only the two lints: they read the one C++ tree
+it compiles for the other backend, while the Python phases are
+backend-independent and already ride every `cpp-tier.sh` run.
+`golden-repro.sh` is not a phase at all ("The golden regeneration gate",
+below, says why).
 
 `cross-backend-check.sh` proves the other backend *compiles*, not that it is
 right: a numerical claim needs that backend's card. The `compile-cuda` /
@@ -115,6 +123,137 @@ misread: a non-ASCII array name) and on the "both layouts present" check; a
 field added to `write_golden` alone fails the three `G2` byte round trips and
 both freshly written goldens; a hand-rolled `f.seek(52)` added to a script
 fails the stray-parser scan.
+
+## The oracle's own tests
+
+Every claim here is checked against `golden/`, and `golden/` is produced and
+guarded by `reference_data/` — so the oracle's own logic gets tests:
+`reference_data/tests/`, run by `uv run pytest` (pytest is in the `dev`
+group; `pyproject.toml`'s `[tool.pytest.ini_options]` points it there). This
+reverses the earlier "no Python test suite" decision, for one reason: the
+format readers and the refusal guards are the one Python code whose silent
+regression would corrupt every later check. A guard loosened by accident
+still writes a golden, and every entry downstream then passes against it.
+
+What they are, all on synthetic inputs, no PySCF solve, no card, no network:
+
+- **`test_golden_format.py`** — every magic (`NEVPT2G2`, the `G1` golden,
+  `NEVPT2D1`, `NEVPT2M1`, `NEVPT2S1`/`NEVPT2P1`) written by its writer
+  (`write_golden`, `write_gradgold`, `write_mo_sidecar`, `write_srcgold`, or
+  `pack_header` + `write_arrays` for `G1`, which no writer produces any more)
+  and read back field for field and array for array, then rewritten byte for
+  byte; `G1` and `G2` differing only by the magic and `reference_kind`
+  (what `golden-repro.sh`'s header exception relies on). Refusals: the file
+  cut at **every** byte, trailing bytes, every reader handed every other
+  format, a garbage magic, rank `MAX_RANK` accepted and `MAX_RANK + 1`
+  refused, negative extents and counts, a name length past the end, a
+  non-ASCII name, an unknown `reference_kind`, `ci` against `ndet`, `want`
+  skipping an array **and still validating it**, and `generate_golden`'s
+  `--mo-from` reader's refusals. One quirk found and pinned rather than
+  changed: the writer cannot write a rank-0 array (`np.ascontiguousarray`
+  makes it shape `(1,)`, which is why `e_pc_total` is a one-element vector);
+  the reader accepts one.
+- **`test_refusal_guards.py`** — `_check_degeneracy` on a real N2/STO-3G
+  molecule (`gto.M` builds the symmetry orbitals; nothing is solved) with an
+  orthonormal symmetry-pure orbital set, so PySCF's own `label_orb_symm`
+  labels the irreps: same-irrep core and virtual pairs at 0.99 and 1.01 of
+  1e-4 Eh, a cross-irrep exact degeneracy and an active one accepted.
+  `_check_pc_conditioning` at 0.99 / 1.01 of 1e3 and naming the worst block,
+  and `_pc_cut_gap` on diagonal stacks whose singular values are exact.
+  `_check_gradient_invariants`: (O1) on each of its three off-blocks at
+  0.99 / 1.01 of 1e-5, (O2) on an off-diagonal and both diagonals at 0.9 /
+  1.1 of 1e-10, (O3) with an eigenvalue at the HOMO, just inside the gap,
+  and act_O one too many or too few.
+
+**The thresholds are written into the tests as numbers**, not read from the
+module: a test comparing against `DEGENERACY_TOL` would move with it.
+Moving a threshold therefore means editing the test in the same change.
+What the hand cases cannot reach without a solve: whether the generator
+hands the guards the right inputs (`_gradient_arrays`, `_block2_icmr`'s gap
+recording), `_check_casscf_stationary` (it evaluates a CASSCF orbital
+gradient), and `_block2_pc`'s block2-SC-equals-PySCF-SC gate (it runs both).
+Those stay with "The golden regeneration gate" below.
+
+It is the `pytest` phase of `cpp-tier.sh` ("No CI, and the local gate",
+above), after `ruff`. Measured: 119 tests, 1.4 s, no card (RTX 3080 box's
+CPU). Negative controls, run once in scratch and reverted: setting
+`DEGENERACY_TOL` to 1e-5 fails 4 tests (the pinned value and the three
+0.99e-4 refusals); leaving the constant alone and loosening the comparison
+inside `_check_degeneracy` to `DEGENERACY_TOL / 10` fails the same three
+refusals. With `UV_PROJECT_ENVIRONMENT` pointed at a venv built from the
+lock before pytest was added — what a container from an older image has —
+and again at a directory that does not exist, `cpp-tier.sh --no-test` fails
+all three Python phases at `uv sync --frozen --check` ("the locked Python
+environment is missing or stale … run `uv sync --frozen`"), summary
+`FAIL(rc=1) failed=golden-layout,ruff,pytest`; pytest is never run, so
+nothing skips.
+
+## The golden regeneration gate
+
+`devtools/golden-repro.sh` re-runs the promise CLAUDE.md makes — the
+generators are bit-reproducible, so a regenerated file that differs from the
+committed one means something changed — for every committed N2 CAS(4,4) /
+CAS(8,8) reference. Twelve files from ten generator runs, each with the
+generator's own settings (`--out` into a scratch directory is the only flag
+added):
+
+| files | run |
+|---|---|
+| `n2_ccpvdz_cas44.nevpt2gold`, `.gradgold`; `n2_ccpvdz_cas88.nevpt2gold`, `.gradgold` | `generate_golden.py --gradgold` |
+| `n2_ccpvdz_cas44_df.nevpt2gold`, `n2_ccpvdz_cas88_df.nevpt2gold` | `generate_golden.py --df` |
+| `n2_ccpvdz_cas44_casscf[_df].mogold` | `generate_golden.py --casscf --mo-out` (a fresh optimisation) |
+| `n2_ccpvdz_cas44_casscf[_df].nevpt2gold` | `generate_golden.py --mo-from` the **committed** sidecar, so a drifted sidecar fails as itself and not as its golden too |
+| `n2_ccpvdz_cas44.srcgold`, `n2_ccpvdz_cas44_pc.srcgold` | `sc_source_oracle.py [--pc]`, reading the committed golden |
+
+The comparison is `cmp` on the whole file — the one place in this tree a
+byte comparison is right. One exception, the documented one
+([`reference-data.md`](reference-data.md), "Regenerating the golden file"):
+a committed `NEVPT2G1` CASCI golden regenerates as `NEVPT2G2`, so for those
+four the state fields must be byte-identical, the new `reference_kind` must
+be `casci`, and everything from the array count on byte-identical, each
+file's header length read with `golden_format.py arrays-at`. It prints one
+`PASS:`/`FAIL:` line per file (naming it) and exits 0 only if all twelve
+reproduce. `--committed DIR` compares against a copy instead of `golden/`
+(the generator inputs stay `golden/`'s), `--only REGEX` narrows the set,
+`--out DIR` keeps the regenerated files and each run's log.
+
+**The `.srcgold` pair is in it** because the 30-minute budget the gradient
+milestone sets for any oracle regeneration holds with them: the SC one is
+seconds and the PC one about two and a half minutes, below. Each generator
+is single-threaded by its own import (`generate_golden` forces it, and
+`sc_source_oracle` imports `generate_golden` for exactly that), so `-j N`
+runs N of them at once without changing a byte; the default is `-j 1`.
+
+Measured (RTX 3080 box's CPU, 24 cores; no card used), all twelve `PASS:`:
+
+| run | wall |
+|---|---:|
+| default, `-j 1` (one generator at a time, each single-threaded) | 330 s (5 min 30 s) |
+| `-j 10` | 144 s |
+
+Per generator run (the `-j 1` run): `--casscf` sidecars 2–3 s,
+`n2_ccpvdz_cas44.srcgold` 9 s, the CAS(4,4) goldens 26–27 s, the CAS(8,8)
+ones 32–33 s, `n2_ccpvdz_cas44_pc.srcgold` 142 s — so `-j 10`'s wall is the
+PC oracle's alone. **Nothing is left out** of the N2 CAS(4,4)/CAS(8,8) set
+for cost: the whole set is 330 s against the 30-minute budget. The larger
+committed references are outside its scope, not left out for time; theirs,
+where measured, are in [`reference-data.md`](reference-data.md),
+"Regenerating the golden file", "The SC source-term oracle" and "The files
+in `golden/` and `reference_data/`".
+
+**A manual gate, not a `cpp-tier.sh` phase.** Even at `-j 10` it is minutes
+of CPU, two orders of magnitude over the other five gates together, and it
+can only fail when the generators, the lock or `golden/` change — so it is
+run like the sanitizer tier and `cross-backend-check.sh`: by whoever changes
+`reference_data/`, `pyproject.toml`/`uv.lock` or a small golden, and named
+in the PR. Negative controls, `--committed` at a scratch copy of `golden/`
+with one byte flipped: byte 300000 (array section) of
+`n2_ccpvdz_cas44_df.nevpt2gold`, run with `--only` over the two CAS(4,4)
+CASCI goldens, prints `PASS:` for the untouched `n2_ccpvdz_cas44` and
+`FAIL: n2_ccpvdz_cas44_df.nevpt2gold -- G1->G2: the arrays differ (… differ:
+char 299953 …)` — the offset past the 48-byte `G1` header — exit 1; byte
+1000 of `n2_ccpvdz_cas44.srcgold`, the whole-file `cmp` path, prints
+`FAIL: n2_ccpvdz_cas44.srcgold -- differs: … char 1001`, exit 1.
 
 ## The CASSCF-orbital entries
 

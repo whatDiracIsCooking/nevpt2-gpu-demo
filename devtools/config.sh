@@ -23,9 +23,9 @@
 # see CMAKE_PRESET / CTEST_PRESET below.
 #
 # What this project does NOT have, so the scripts carry no knob for it:
-# an install tier, and a pytest pre-push gate (there is no Python test suite
-# here -- the .py files are offline tools). If you find a script referencing
-# one, it is drift.
+# an install tier, and a pytest pre-push gate (the one Python suite,
+# reference_data/tests/, is a cpp-tier.sh phase, not a push gate). If you find
+# a script referencing one, it is drift.
 
 # --- identity -------------------------------------------------------------
 
@@ -218,11 +218,12 @@ BUILD_JOBS=${BUILD_JOBS:-}
 
 # --- tests ----------------------------------------------------------------
 
-# THERE IS NO PYTHON TEST SUITE. generate_golden.py and pyscf_contract_time.py
-# are offline tools, not tests, and nothing collects them. TEST_CMD is left
+# The one Python suite is reference_data/tests/ (the oracle's hand cases,
+# docs/testing.md, "The oracle's own tests"), and devtools/cpp-tier.sh runs it
+# as its `pytest` phase through the locked environment -- not through these
+# knobs. The real suite is still ctest (CTEST_PRESET above); TEST_CMD is left
 # pointing at pytest so a script that insists on one does something
-# recognisable rather than failing obscurely, but the real suite is ctest --
-# see CTEST_PRESET above.
+# recognisable.
 TEST_CMD=${TEST_CMD:-pytest}
 JOBS=${JOBS:-8}
 FAST_TEST_ARGS=${FAST_TEST_ARGS:-}
