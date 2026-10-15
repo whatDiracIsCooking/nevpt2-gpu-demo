@@ -2013,10 +2013,10 @@ column. Acrolein SC is gated against a fresh `nevpt2_numgrad.py --pc --npz`
 (its sidecar is gitignored). Acrolein PC's checks have **never been run**:
 its steps did not change either, so it was not re-run for #77, and it was not
 re-run for #70 — it is the 6.3 h pair above. #74 ran them for the first
-time, with the GPU's PC source terms: 7 of 11 hold, and the four CI-side
-ladders end on run length at block2's round-off rather than on a value
-([`pc-nevpt2.md`](pc-nevpt2.md), "The source terms by reverse mode", which
-also records N2 PC's one such ladder with the GPU's terms).
+time, with the GPU's PC source terms: 7 of 11 hold, the four CI-side ladders
+failing on run length — an open finding ([`pc-nevpt2.md`](pc-nevpt2.md), "The
+source terms by reverse mode", which also records N2 PC's one such ladder with
+the GPU's terms).
 
 **Two of these pass with little margin, and both are the ladders' own
 limits on N2, not the steps':**

@@ -811,14 +811,14 @@ RTX 3080. (#74 also fixed `--source both`'s PySCF-sourced solve, which had
 | | N2 CAS(4,4) | acrolein CAS(6,5) |
 |---|---:|---:|
 | components compared | 6 | 16 (in-plane) |
-| **GPU-sourced**: max \|g − grad_num\| | **1.9e-8 — PASS** | **6.2e-8 — PASS** |
-| PySCF-sourced, same sweep | 1.5e-8 — PASS | {{A_py}} |
-| max \|GPU-sourced − PySCF-sourced\| | 3.5e-9 | {{A_diff}} |
-| … the GPU's `Y` alone / `y` alone | 3.6e-9 / 7.1e-11 | {{A_attr}} |
-| the dump vs PySCF's `A` at `KAPPA_STEP_PC`, worst block | 1.5e-8 (core–virt) | {{A_blk}} |
-| the dump's `P y` vs PySCF's | 8.6e-10 | {{A_py2}} |
+| **GPU-sourced**: max \|g − grad_num\| | **1.9e-8 — PASS** | **6.0e-8 — PASS** |
+| PySCF-sourced, same sweep | 1.5e-8 — PASS | 8.3e-8 — PASS |
+| max \|GPU-sourced − PySCF-sourced\| | 3.5e-9 | 9.0e-8 |
+| … the GPU's `Y` alone / `y` alone | 3.6e-9 / 7.1e-11 | 2.1e-9 / 9.2e-8 |
+| the dump vs PySCF's `A` at `KAPPA_STEP_PC`, worst block | 1.5e-8 (core–virt) | 3.4e-8 (core–virt) |
+| the dump's `P y` vs PySCF's | 8.6e-10 | 6.5e-7 |
 | residual-independent checks | 10 of 11 (below) | 7 of 11 (below) |
-| `--source both` wall | 182 s | {{A_wall}} |
+| `--source both` wall | 182 s | 24616 s |
 
 The worst block is core–virt at `KAPPA_STEP_PC` = 1e-4, which "The PC source
 terms' oracle" measures 1.5e-8 from converged — PySCF's truncation, not the
@@ -836,18 +836,21 @@ edge the round-off rung lands on is luck. Seed 70 passes in both, and so do
 all other ten checks, the PC guard's ledger included (88 of 88 displaced CI
 vectors guarded on PySCF's side, rank unchanged at every one).
 
-**On acrolein four of them fail the same way, and the ladders are block2's,
-not the dump's.** Both `y`-linearity and both CI-stationarity checks end
-runs of one or two fourfold halvings: they ladder PySCF/block2's own `E_corr`
-along a seeded CI direction (only the reference they are compared with comes
-from the dump), and acrolein's PC energy reaches its round-off by `2^-14` —
-seed 70's `y` ladder changes by 1.6e-8, 4.0e-9, 3.4e-10, then 5.0e-10,
-2.8e-9. Their Richardson values agree with the GPU's `y` to 1.2e-10 / 6.3e-10
-and the slope with zero to 1.4e-10 / 6.5e-10, against the 1e-6 gate; the
-other seven hold, the guard's ledger at 64 of 64. These ladders were never run
-for acrolein PC before #74 ("What the committed cases come out at"
-in [`testing.md`](testing.md) records them as never run), and nothing here
-changes the rule.
+**Acrolein: open findings, not resolved here.** Four of its eleven
+residual-independent checks fail, all on ladder run length: `y` linearity,
+seed 70 (1 fourfold halving, Richardson − ref 1.2e-10) and seed 2026 (2,
+6.3e-10); CI stationarity, seed 70 (1, 1.2e-10) and seed 2026 (2, 6.1e-10).
+The other seven hold, the PC guard at 168 of 168 displaced CI vectors with no
+rank change. The checks run once per invocation, on the GPU-sourced solve; no
+PySCF-sourced acrolein PC run of them was made. Separately, the dump's `P y`
+differs from PySCF's by 6.5e-7 at `CI_STEP_PC` (1e-7), and by 1.9e-6, 3.3e-6
+and 1.3e-5 at 5e-8, 2.5e-8 and 1e-8; that attribution row puts 9.2e-8 of the
+gradient's GPU-vs-PySCF difference on `y`. A hypothesis, not a conclusion:
+both are block2's PC energy reaching its round-off at small CI steps on this
+state (the failing ladders difference block2's `E_corr`, and the `P y`
+difference grows as `1/h`). These ladders were never run for acrolein PC
+before #74 ([`testing.md`](testing.md), "What the committed cases come out
+at").
 
 **`CI_STEP_PC` and the guard.** No finite difference enters the device side.
 The ones beside it are `nevpt2_pc_tangent`'s (symmetry-sector directions, the
