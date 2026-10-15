@@ -27,12 +27,13 @@ respect to a nuclear coordinate.
 |---|---|
 | the SC energy's derivative w.r.t. the CI vector, `y_I = dE/dc_I` (Park Eq. 48) | **in tree**, both modes, checked against each other exactly (§5) — and, given the `*.gradgold` sidecar, of the **complete** functional, the orbital energies' response to the active density included (§5.5) |
 | the SC energy's pseudodensities (Park Eqs. 41–47) | **in tree**, checked by their own algebraic identities (§5.2) |
-| the PC energy's derivative w.r.t. the CI vector | **in tree** (§4.3), checked against a finite difference |
+| the PC energy's derivative w.r.t. the CI vector | **in tree, both modes**: forward (§4.3), checked against a finite difference, and reverse — `y_I = dE_pc/dc_I` by the PC solve's adjoint (§5.6, #74) — checked against it exactly, with the orbital energies' response in both, and against block2's committed derivative |
+| the PC orbital source term `Y_xy = dE_pc/dkappa_xy` | **in tree, both modes** (§6.1, #74): over the whole `kappa` space, the digests' transpose and the orbital energies' response in it, the adjoint against the PC forward tangent exactly, and against block2's committed `A` block by block |
 | the orbital source term `Y_xy = dE/dkappa_xy` (Park Eq. 26) | **in tree over the whole `kappa` space** — active–active, core–core, virtual–virtual and mixed — both modes, checked against each other exactly (§6), and **exact**: with the digests' term below in it, the full `<kappa, Y>` against the full forward `Edot(kappa)` holds to round-off too |
 | the digests' own orbital response, the `f3ac`/`f3ca` digests' `h2e` dependence | **in tree, both modes** (§6): forward, along any direction as a term of its own beside the frozen-digest tangent (#88) — checked against PySCF's exact directional derivative offline and a finite difference on the card; reverse, `Y` carrying it through the digests' **transpose**, a tiled kernel that never forms the 4-RDM (#89) — checked against the forward term exactly, and against PySCF's exact `Y` block by block on the card |
 | the RDMs' own derivatives w.r.t. the CI vector | **in tree**, host `dm1`/`dm2` and device `dm3`/`f3ac`/`f3ca` (§4.1) |
 | the pseudocanonical multipliers `z^c` (Park Eqs. 56–57) | **in tree**, divided out of `Y`'s two inactive blocks, refusing a degeneracy the division cannot resolve (§6) |
-| the GPU's `Y_xy` and `y_I` **written out**, for a nuclear gradient to be built from | **in tree**: `nevpt2_sc_pseudodensity --dump-source-terms PATH` writes both to a `.gradsrc` (§8), which `reference_data/nevpt2_grad.py --source dump` / `both` reads. A gradient built from it **is the SC-NEVPT2 nuclear gradient**: within the 1e-6 gate of `grad_num` on LiF, acrolein and N2 CAS(4,4), and componentwise PySCF-sourced's to well inside it ([`testing.md`](testing.md), "The GPU as the source-term provider", which keeps the #73 failure — `Y` holding the digests fixed — on record as superseded) |
+| the GPU's `Y_xy` and `y_I` **written out**, for a nuclear gradient to be built from | **in tree**, SC and (with `--pc`, #74) PC: `nevpt2_sc_pseudodensity --dump-source-terms PATH` writes both to a `.gradsrc` (§8), which `reference_data/nevpt2_grad.py --source dump` / `both` reads. A gradient built from it **is the SC-NEVPT2 nuclear gradient**: within the 1e-6 gate of `grad_num` on LiF, acrolein and N2 CAS(4,4), and componentwise PySCF-sourced's to well inside it ([`testing.md`](testing.md), "The GPU as the source-term provider", which keeps the #73 failure — `Y` holding the digests fixed — on record as superseded) |
 | the CI Z-vector equation, the selection-boundary multipliers, the CPHF solve | **not in tree** — **offline Python only**, `reference_data/nevpt2_grad.py`, a `pyscf.grad.lagrange.Gradients` subclass ([`reference-data.md`](reference-data.md), "The analytic gradient"). Deliberately offline: this repo's shape is "offline Python generates the reference, the C++ GPU demo reproduces it", and a PySCF solve inside the runtime would invert that. Derived in [`gradient-theory.md`](gradient-theory.md), §2; nothing in `src/` implements them |
 | derivative MO integrals — the one- and two-electron skeleton derivatives — and the nuclear-repulsion derivative | **not in tree**, and not in the reference data either |
 | a nuclear gradient, a geometry optimisation, or any derivative w.r.t. a coordinate | **not in tree** |
@@ -156,6 +157,7 @@ Dependency order; `src/gradient/`'s components are in
 | `nevpt2.kappa_rotation` (`src/gradient/`) | the orbital-rotation parameterisation: antisymmetric `kappa`, `exp(kappa)`, an array's active axes transformed. Host only | `test/gradient/`, card-free |
 | `nevpt2.gradient_plan` (`src/gradient/`) | `nevpt2.gradient`'s pure host arithmetic: the promotion table, the classes' `Delta` vectors and slab multipliers, `termHasActive`, the CI source term's host fold; and `longestFourfoldRun`, the step-ladder rule every finite-difference check of the gradient path gates on ([`testing.md`](testing.md), "Residual-independent checks of the gradient path"). Host only | `test/gradient_plan/`, card-free |
 | `nevpt2.gradient` (`src/gradient/`) | the SC pseudodensities, the orbital source term `Y_xy` over the whole `kappa` space, and `y_I = dE/dc_I` | `nevpt2_sc_pseudodensity` (identities, `--kappa-act` and `--kappa-full`), `nevpt2_demo --gradient-source` (duality) |
+| `nevpt2.gradient`'s `:pc_classes` partition | PC's reverse mode (#74): each PC class's solve differentiated through its own `S`, `K` and `S_1` (`pcClassMatrices`, `pcSolveClass`, exported from `nevpt2.energy` for this), giving `y_I`, `Y_xy`, the digests' adjoint and the PC rotation tangent (`pcCiSourceDevice`, `pcFullRotationDevice` / `Matrix`, `pcDigestAdjointDevice`, `pcDigestRotationTangentDevice`). Its per-tuple arithmetic is `nevpt2.energy_finish`'s `pcAdjoint*` / `pcRotationTangent*` | `nevpt2_demo --gradient-source --pc` (CI duality), `nevpt2_sc_pseudodensity --pc --dump-source-terms` (rotation dualities) and `--pc --source-oracle` (block2's `A`, `P y`); `test/energy_finish/` card-free; `test/pc_adjoint/` the refusals |
 | `nevpt2.pc_tangent` (`src/gradient/`) | the PC tangent's finite-difference check: the analytic tangent against re-solves at displaced states | `nevpt2_pc_tangent`; the gate itself in `test/pc_tangent/` |
 | `nevpt2.golden`'s `loadGradGold` | the `*.gradgold` sidecar reader — the one-general-index MO-integral arrays and full-MO-range Fock matrices the core, virtual and mixed blocks of `Y` read — and `checkAgainst`, which says a sidecar and a golden describe one state | `test/golden/gradgold_tests.cpp`, host-only; `--kappa-full` is the consumer |
 
@@ -269,6 +271,13 @@ reported as a zero derivative. A refusal at a *displaced* state, where the
 metric is a different matrix, is a numerical `Error` naming the step: the
 difference quotient would otherwise be formed from an energy that does not
 exist.
+
+**The orbital energies move here too, when asked** (#74): handed
+`epsDot`, every class adds `sum_t R_t Deltadot_t`, `R_t = dE_t/dDelta_t`
+read off the same solve — `c |g_t|^2` for a single coupling, `2 |g_u|^2 -
+g_u . g_v` for Sijr/Srsi's pair — and Sijrs its SC term, exactly as §5.5's SC
+tangent does. `nevpt2_pc_tangent`'s finite difference runs without it: it
+differences the energy at the golden's fixed orbital energies.
 
 **Euler holds for five classes here, against the SC tangent's three, and the
 two are consistent.** The extra pair is Si and Sir. What makes those affine on
@@ -443,6 +452,57 @@ A case with no sidecar cannot form `W` — the golden does not carry `(pp|ut)`
 for `p` outside the active space — so there both modes hold the orbital
 energies fixed, and `--gradient-source` prints which functional it
 differentiated.
+
+### 5.6 PC: the solve's adjoint (#74)
+
+PC's reverse mode is the tangent of §4.3 read the other way. Every PC class
+energy is a sum over its tuples of quadratic forms in the eigenbasis rows
+`y_t = U^T b_t` of the solve the energy ran, so for **any** perturbation of
+`S`, `K`, `S_1` and the integrals
+
+```
+  dE = sum_t ybar_t . (U^T db_t)  +  < U mgg U^T, dA_t >,     ybar_t = dE/dy_t
+```
+
+with `mgg` the `(m, m)` weight of the tuples' forms — `dA^+ = -A^+ dA A^+`
+again, so again no eigenvector or eigenvalue derivative. Everything the
+source terms need follows: `dE/dT` and `dE/dt_1` (the slab einsum's adjoint
+in its basis operand), `dE/dK = U sym(mgg) U^T`, `dE/dS = sym(U (dE/dT)^T)
++ U sym(sum_t Delta_t mgg_t) U^T`, `dE/dS_1 = U (dE/dt_1)^T`, and
+`R_t = dE/dDelta_t`. The per-tuple half is host arithmetic
+(`nevpt2.energy_finish`'s `pcAdjointSingle` / `pcAdjointPair`, unit-tested
+against an energy that inverts the full matrix), and Sijr's and Srsi's
+exchange rows are folded the way their two layouts store them.
+
+**No new sweep.** PC's `K` is a16 / a22 / a3 / k27 / a7 / a9 / a12 + a13 —
+SC's own Dyall blocks — and its `S` and `S_1` are permutations of the RDMs
+or of SC's hole-side metrics, so `dE/dK`, `dE/dS`, `dE/dS_1` go down to the
+five Eq. 48 coefficient tensors through §5.3's per-block adjoints unchanged,
+Sir's block patterns term by term with the same `adjointTerm`. From there
+`y_I` is §5.4's sigma assembly, and §5.5's orbital-energy response folds in
+the same way, `R_t` scattered by `deltaAdjointInto` through each PC class's
+own `Delta` (PC walks Sijr, Srsi and Sir in its own tuple order,
+`nevpt2.gradient_plan`'s `pcSijrDelta` / `pcSrsiDelta` / `pcSirDelta`).
+Sijrs is SC's class, here as in the energy.
+
+**Off the state's symmetry sector too.** `y_I` is read on determinant axes,
+which leave the sector, and there `S`'s kept range rotates at first order.
+That costs nothing: `S`'s dropped modes are linear dependencies among the
+operator strings, so `K` annihilates them as well, and the rotation's term
+`x^T K N (...)` vanishes. The lifted modes are second order — the reason a
+finite difference needs `CI_STEP_PC`'s small step (§7), not a term of the
+derivative.
+
+**Refused where the energy refuses.** A class the gap or denominator check
+refuses carries that `PcClassResult` out of every entry point; `y` is then
+not formed at all, and the digests' adjoint and the matrix of `Y` are
+Numerical Errors naming the class. Never a sum with a zero in it
+(`test/pc_adjoint/`).
+
+The gate is §2's duality against `pcTangentsDevice` with `epsDot` — four
+seeded directions, the state, and the Jacobian column by column at CAS(4,4)
+(`nevpt2_demo --gradient-source --pc`). It cannot see a term both modes
+leave out, so block2's exact `P y` stands beside it (§6.1).
 
 ## 6. The orbital source term
 
@@ -647,6 +707,32 @@ Park Eqs. 44–47's active-space pseudodensities are not on this path
 and are not completed into Eq. 35's RDM-conjugate form, which has no consumer
 until the full `Y` needs the RDM side too.
 
+### 6.1 PC's orbital source term (#74)
+
+Along a rotation at fixed CI only the integrals move — PC's `S` and `S_1`
+are RDM-only — so §5.6's identity gives the pairing
+
+```
+  <kappa, Y_pc> = sum_slabs <dE/dslab, slabdot>  +  <dE/dK, Kdot>
+                + sum_t R_t Deltadot_t           +  <hbar_pc, h2e_dot>
+```
+
+with every dotted operand SC's: the slab and one-electron tangents are
+:terms' `slabDots` (the promotion rule, §6), `Kdot` is the class's own `K`
+builder at the direction's dotted integrals with the digests zeroed
+(`pcClassMatrices` — "a Dyall block's tangent is its own builder"), the
+orbital energies' response is §6's, and `hbar_pc` is the digests' transpose
+(#89) fed PC's own `dE/d(f3ac)`, `dE/d(f3ca)` from Sr's a16 and Si's a22.
+The forward tangent along the same direction is computed from the same rows
+by separate per-tuple code (`pcRotationTangent*`: `ydot` from the dotted slab
+through `T`, `mK = U^T sym(Kdot) U`), plus the digests' forward term — the RDM
+build at `h2e_dot` through `pcTangentsDevice`. So PC has §6's two dualities:
+the integral halves', and the full one with both digests' terms; the dump
+gates both (§8). Neither can see an omission they share; block2's exact `A`,
+committed (`--pc --source-oracle`), and a nuclear gradient against `grad_num`
+can, and are held ([`pc-nevpt2.md`](pc-nevpt2.md), "The source terms by
+reverse mode"). Park Eqs. 56–57 stay offline, as for SC.
+
 ## 7. Where the path is differentiable
 
 Three conditions, each enforced in code rather than assumed.
@@ -665,7 +751,9 @@ constant and the measured spectra). The two extra terms of the general
 pseudo-inverse derivative drop because `b_t` lies in the kept range. So the
 tangent is valid **precisely on the states the energy stage already accepts,
 and only there**: a refused class is refused in the tangent, never given a
-zero derivative (§4.3), and `test/pc_tangent/` locks that in.
+zero derivative (§4.3), and `test/pc_tangent/` locks that in. The adjoint
+(§5.6, #74) rests on the same condition and refuses the same classes, by
+the gap and by the denominators alike (`test/pc_adjoint/`).
 
 **The CI direction must stay inside the state's symmetry sector, and the path
 must be the unit sphere.** A *random* CI direction raises the metric's rank at
@@ -725,18 +813,21 @@ its own, and each prints one `PASS:` line a ctest entry matches
 |---|---|
 | `nevpt2_demo --rdm-tangent`, `nevpt2_df_demo --rdm-tangent` | the tangent RDM build beside the plain one, checked against twice it |
 | `nevpt2_demo --sc-tangent` | the SC total's tangent: the norms' affine increment, Euler, and the one-time finite difference |
+| `nevpt2_demo --gradient-source --pc` | PC's `y_I` (§5.6) against `pcTangentsDevice`, the same three checks and the walk's PC total against block2's (#74) |
 | `nevpt2_demo --gradient-source` | `y_I = dE/dc_I` in reverse mode, gated on the duality against the forward tangent, plus the Jacobian where `ndet` allows. With `--gradgold PATH` both modes carry the orbital energies' response (§5.5) and the sidecar is first checked against the golden (its `h^eff` and `W` must rebuild `e_core` / `e_virt`); without it they hold the orbital energies fixed. The PASS line names which |
 | `nevpt2_sc_pseudodensity` | the Eqs. 40–47 identities for all eight classes |
 | `nevpt2_sc_pseudodensity --kappa-act` | the active–active orbital source term: adjoint against tangent, with a finite difference beside them |
 | `nevpt2_sc_pseudodensity --kappa-full` | the same over the whole `kappa` space, out of the `*.gradgold` sidecar (`--gradgold PATH` overrides the derived path): the duality, the sidecar's promotion table against the arrays it reads, the active block against `--kappa-act`'s own entry point, two intra-space finite differences, and Eqs. 56–57; and `Edot(kappa)` in its two terms — the frozen-digest tangent and the digests' own (§6) — with the **full** duality against `<kappa, Y>` carrying the digests' transpose (#89), the digests' term held to its own finite difference along an active direction (forward and reverse) and to an exact zero along the two intra-space ones |
 | `nevpt2_sc_pseudodensity --dump-source-terms PATH` | not a check of the derivatives but their **export**: `Y_xy` over every MO pair (`scFullRotationMatrix`, out of the sidecar as `--kappa-full` reads it) and `y_I` (`scCiSourceDevice`, with the orbital energies' response out of the same sidecar), written to `PATH` as a `.gradsrc` — a NumPy `.npz` holding `kappa_source`, `ci_source`, the `ci` they were taken at, the partition and `e_corr`, all in the golden's own basis, and (#88) `edot_kappa` / `edot_frozen` / `edot_digest`: seeded directions — `--kappa-full`'s four full ones, one purely active–virtual, one purely core–active — and `Edot` along each in its two terms — then read back. `Y` carries the digests' transpose (#89). Its gate is that the matrix is the pairing, that each direction's exact `Edot` (frozen + digest) is `<kappa, Y>` off the matrix written, that `y`'s walk ran on this state and that the file reads back bit for bit. `reference_data/nevpt2_grad.py --source dump` builds the SC-NEVPT2 nuclear gradient from it, carrying both terms into its own active basis; `--source both` puts that gradient beside PySCF's and `grad_num`; `--edot-check` holds the directions' `Edot` against PySCF's exact directional derivative |
 | `nevpt2_sc_pseudodensity --source-oracle PATH` | the dump's two terms checked against an **independent** provider: PySCF's exact `A = Y − Y^T` and `P y`, committed as `golden/<case>.srcgold` for N2 CAS(4,4) and LiF (`reference_data/sc_source_oracle.py`), compared block by block. Every block must meet the measured tolerance: `source_compare.cppm`'s `kKnownGaps`, which pinned the §6 digest omission's blocks until #89, is empty (docs/testing.md, "The SC source terms against PySCF's, on a card") |
+| `nevpt2_sc_pseudodensity --pc --dump-source-terms PATH` / `--pc --source-oracle PATH` | the same two jobs for PC-NEVPT2's `Y` and `y` (§5.6, §6.1, #74): the dump marked `pc`, its four checks plus a fifth — the PC integral halves' duality on the six directions — and the oracle against block2's `golden/n2_ccpvdz_cas44_pc.srcgold`. Both require the golden's PC fields and first hold the PC energy to them |
 | `nevpt2_pc_tangent` | the PC tangent: Euler, and a Richardson-verified central difference. `--fd-steps` and `--fd-start-pow` set the sweep |
 
 `--sc-tangent` and `--gradient-source` are the integral-direct demo's alone
 (the density-fitted demo has no second copy of the integral blocks to
 differentiate against), they are two different checks of the same derivative
-and so refuse each other, and neither has a `--pc` path.
+and so refuse each other; `--gradient-source` has a `--pc` path (#74),
+`--sc-tangent` none.
 
 **A flag a binary does not act on is refused, never ignored.** The gradient
 binaries used to parse `--rdm-tangent` and do nothing with it; now one table
@@ -786,4 +877,5 @@ the cases that carry one can run those.
 | the digests' orbital response in forward mode: the GPU's `Edot(kappa)` against PySCF's exact one, the ladders, the on-card checks and the negative control | [`testing.md`](testing.md), "The digests' orbital response, forward mode" |
 | the digests' orbital response in reverse mode: the full duality, the source oracle with no known gap, the GPU-sourced nuclear gradient and the negative control | [`testing.md`](testing.md), "The digests' orbital response, reverse mode" |
 | what the digests' transpose costs, and its tile floors | [`performance.md`](performance.md), "The digests' transpose", "Tile floors" |
+| PC's source terms by reverse mode: the dualities, block2's oracle, the PC nuclear gradient from the GPU's terms, the refusals and the negative controls | [`pc-nevpt2.md`](pc-nevpt2.md), "The source terms by reverse mode" |
 | the derivation this implements | [`gradient-theory.md`](gradient-theory.md) |

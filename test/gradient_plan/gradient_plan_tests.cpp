@@ -525,6 +525,57 @@ TEST(DeltaTests, EveryClassIsLinearAndHomogeneousInTheOrbitalEnergies) {
 
 // The triangle classes' lengths: nr * ncore (ncore + 1) / 2 and
 // nvirt (nvirt + 1) / 2 * ncore -- one entry per PERTURBER, not per tuple.
+// PC's own tuple orders (#74): every ORDERED pair, the slab's index first.
+TEST(DeltaTests, PcSijrRunsEveryOrderedCorePair) {
+  // r = b0 = 1 (eps 3); (j, i) = (0,0), (0,1), (1,0), (1,1).
+  EXPECT_EQ(pcSijrDelta(1, 2, 2, vec({-1, -2}), vec({5, 3})),
+            (std::vector<double>{5, 6, 6, 7}));
+}
+
+TEST(DeltaTests, PcSrsiRunsEveryOrderedVirtualPair) {
+  // r = 0 only; (s, i) over two virtuals and one core.
+  EXPECT_EQ(pcSrsiDelta(0, 1, 2, 1, vec({-1}), vec({1, 2})), (std::vector<double>{3, 4}));
+}
+
+TEST(DeltaTests, PcSirIsEpsRMinusEpsIVirtualFirst) {
+  EXPECT_EQ(pcSirDelta(1, 3, 2, vec({-1, -2}), vec({10, 20, 30})),
+            (std::vector<double>{21, 22, 31, 32}));
+}
+
+TEST(DeltaTests, PcClassesAreLinearAndHomogeneousToo) {
+  const Tensor ec1 = vec({-3, -5}), ev1 = vec({2, 4, 8});
+  const Tensor ec2 = vec({-1, 6}), ev2 = vec({3, -9, 5});
+  const Tensor ecSum = vec({-4, 1}), evSum = vec({5, -5, 13});
+  using Fn = std::function<std::vector<double>(const Tensor&, const Tensor&)>;
+  const std::vector<std::pair<const char*, Fn>> classes{
+      {"Sijr", [](const Tensor& ec, const Tensor& ev) { return pcSijrDelta(0, 3, 2, ec, ev); }},
+      {"Srsi", [](const Tensor& ec, const Tensor& ev) { return pcSrsiDelta(1, 3, 3, 2, ec, ev); }},
+      {"Sir", [](const Tensor& ec, const Tensor& ev) { return pcSirDelta(0, 3, 2, ec, ev); }},
+  };
+  for (const auto& [name, f] : classes) {
+    SCOPED_TRACE(name);
+    const std::vector<double> d1 = f(ec1, ev1), d2 = f(ec2, ev2), dSum = f(ecSum, evSum);
+    const std::vector<double> d0 = f(vec({0, 0}), vec({0, 0, 0}));
+    ASSERT_EQ(d1.size(), dSum.size());
+    for (std::size_t k = 0; k < d1.size(); ++k) {
+      EXPECT_EQ(d1[k] + d2[k], dSum[k]);
+      EXPECT_EQ(d0[k], 0.0);
+    }
+  }
+}
+
+TEST(DeltaTests, PcSijrPartnerSwapsJAndIAndIsAnInvolution) {
+  const std::vector<int64_t> p = pcSijrPartner(2, 3);
+  ASSERT_EQ(p.size(), 18u);
+  for (int64_t r = 0; r < 2; ++r)
+    for (int64_t j = 0; j < 3; ++j)
+      for (int64_t i = 0; i < 3; ++i) {
+        const int64_t t = (r * 3 + j) * 3 + i;
+        EXPECT_EQ(p[static_cast<std::size_t>(t)], (r * 3 + i) * 3 + j);
+        EXPECT_EQ(p[static_cast<std::size_t>(p[static_cast<std::size_t>(t)])], t);
+      }
+}
+
 TEST(DeltaTests, TriangleClassesHaveOneEntryPerPerturber) {
   const Tensor ec = vec({1, 2, 3, 4}), ev = vec({5, 6, 7});
   EXPECT_EQ(sijrDelta(3, 4, 0, ec, ev).size(), 3u * 10u);

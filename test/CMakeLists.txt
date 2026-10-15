@@ -54,6 +54,7 @@ add_subdirectory(utils)
 
 add_subdirectory(error_handling)
 add_subdirectory(pc_tangent)
+add_subdirectory(pc_adjoint)
 add_subdirectory(link_tables)
 add_subdirectory(rdm_plan)
 add_subdirectory(gradient_plan)

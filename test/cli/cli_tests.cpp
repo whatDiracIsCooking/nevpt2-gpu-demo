@@ -388,7 +388,7 @@ struct MatrixRow {
 };
 constexpr std::array kExpectedMatrix{
     MatrixRow{"--golden", "DFSP"},          MatrixRow{"--tiles", "DFSP"},
-    MatrixRow{"--pc", "DF"},                MatrixRow{"--profile", "DF"},
+    MatrixRow{"--pc", "DFS"},               MatrixRow{"--profile", "DF"},
     MatrixRow{"--rdm-tangent", "DF"},       MatrixRow{"--consume-emitted", "DFSP"},
     MatrixRow{"--blas-digest", "DFSP"},     MatrixRow{"--digest-emitted", "DFSP"},
     MatrixRow{"--fused-digest", "DFS"},     MatrixRow{"--cublas", "DFS"},
@@ -482,14 +482,19 @@ TEST(CliMatrixTests, RdmTangentIsRefusedByTheGradientBinaries) {
   }
 }
 
-TEST(CliMatrixTests, PcAndProfileAreTheDemosAlone) {
-  for (const std::string_view flag : {"--pc", "--profile"}) {
-    for (const Binary b : {Binary::ScPseudodensity, Binary::PcTangent}) {
-      const Result<Options> r = parse(b, {flag});
-      ASSERT_FALSE(r.has_value()) << binaryName(b) << " " << flag;
-      EXPECT_EQ(r.error().kind, ErrorKind::Unsupported);
-    }
+TEST(CliMatrixTests, ProfileIsTheDemosAloneAndPcTheirsAndTheSourceTerms) {
+  for (const Binary b : {Binary::ScPseudodensity, Binary::PcTangent}) {
+    const Result<Options> r = parse(b, {"--profile"});
+    ASSERT_FALSE(r.has_value()) << binaryName(b);
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported);
   }
+  // nevpt2_pc_tangent is PC throughout: --pc would change nothing there.
+  const Result<Options> r = parse(Binary::PcTangent, {"--pc"});
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().kind, ErrorKind::Unsupported);
+  // nevpt2_sc_pseudodensity takes it -- for its two source-term jobs alone
+  // (#74; CliScPseudodensityFlagTests has the combinations).
+  EXPECT_TRUE(implements(Binary::ScPseudodensity, "--pc"));
 }
 
 TEST(CliMatrixTests, PcTangentRefusesTheDigestsWithNoTangentPath) {
@@ -693,14 +698,23 @@ TEST(CliDemoFlagTests, EachCheckRefusesTheDigestsWithNoTangentPath) {
   }
 }
 
-TEST(CliDemoFlagTests, EachCheckRefusesPc) {
-  for (const std::string_view which : {"--sc-tangent", "--gradient-source"}) {
-    const Result<Options> r = parse(Binary::Demo, {which, "--pc"});
-    ASSERT_FALSE(r.has_value());
-    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
-    EXPECT_EQ(r.error().message,
-              std::format("{} differentiates the strongly-contracted energy; it has no --pc path",
-                          which));
+TEST(CliDemoFlagTests, ScTangentRefusesPcAndGradientSourceTakesIt) {
+  // --sc-tangent is the SC tangent's finite difference and nothing else...
+  const Result<Options> r = parse(Binary::Demo, {"--sc-tangent", "--pc"});
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+  EXPECT_EQ(r.error().message,
+            "--sc-tangent differentiates the strongly-contracted energy; it has no --pc path "
+            "(the PC tangent's finite difference is nevpt2_pc_tangent)");
+  // ...while --gradient-source --pc is the PC CI source term's duality (#74),
+  // with or without the sidecar.
+  for (const std::vector<std::string_view>& args :
+       {std::vector<std::string_view>{"--gradient-source", "--pc"},
+        std::vector<std::string_view>{"--gradient-source", "--pc", "--gradgold", "x.gradgold"}}) {
+    const Result<Options> ok = parse(Binary::Demo, args);
+    ASSERT_TRUE(ok.has_value()) << ok.error().message;
+    EXPECT_TRUE(ok->gradientSource);
+    EXPECT_TRUE(ok->common.pc);
   }
 }
 
@@ -831,6 +845,33 @@ TEST(CliScPseudodensityFlagTests, SourceOracleSetsItsPath) {
                                   {"--source-oracle", "x.srcgold", "--gradgold", "s.gradgold"});
   ASSERT_TRUE(g.has_value()) << g.error().message;
   EXPECT_EQ(g->gradgoldPath, "s.gradgold");
+}
+
+// --pc (#74): PC-NEVPT2's source terms, so only the two jobs that assemble
+// them take it; the identities and the two kappa checks are SC's.
+TEST(CliScPseudodensityFlagTests, PcIsTheSourceTermJobsAlone) {
+  for (const std::vector<std::string_view>& args :
+       {std::vector<std::string_view>{"--pc", "--dump-source-terms", "x.gradsrc"},
+        std::vector<std::string_view>{"--pc", "--source-oracle", "x_pc.srcgold"}}) {
+    const Result<Options> r = parse(Binary::ScPseudodensity, args);
+    ASSERT_TRUE(r.has_value()) << r.error().message;
+    EXPECT_TRUE(r->common.pc);
+  }
+  for (const std::vector<std::string_view>& args :
+       {std::vector<std::string_view>{"--pc"}, std::vector<std::string_view>{"--pc", "--kappa-act"},
+        std::vector<std::string_view>{"--pc", "--kappa-full"}}) {
+    const Result<Options> r = parse(Binary::ScPseudodensity, args);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(r.error().message,
+              "--pc makes --dump-source-terms and --source-oracle PC-NEVPT2's; the identities, "
+              "--kappa-act and --kappa-full are the SC energy's and have no --pc path");
+  }
+  // The dump builds the digests' tangent with --pc as without: exact digests.
+  const Result<Options> r =
+      parse(Binary::ScPseudodensity, {"--pc", "--dump-source-terms", "x.gradsrc", "--ozaki"});
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
 }
 
 TEST(CliScPseudodensityFlagTests, SourceOracleRefusesTheOtherJobs) {

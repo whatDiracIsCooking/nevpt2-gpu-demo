@@ -242,7 +242,7 @@ Result<PcTangentCheck> pcTangentFdCheck(const RdmBuildOptions& rdmOpt,
     std::printf("differentiating the PC-NEVPT2 solve along the CI direction...\n");
     const PcTangentResult tang = NEVPT2_TRY(
         pcTangentsDevice(ints, dm1, dm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dm1Dot, dm2Dot, rdmDot.dm3,
-                         rdmDot.f3ac, rdmDot.f3ca, res));
+                         rdmDot.f3ac, rdmDot.f3ca, /*epsDot=*/nullptr, res));
     out.classes = tang.classes;
     out.allDone = true;
     for (const PcClassTangent& c : out.classes) {
@@ -266,7 +266,7 @@ Result<PcTangentCheck> pcTangentFdCheck(const RdmBuildOptions& rdmOpt,
     const DeviceTensor f3caTwo = pcTangentScaled(rdm.f3ca, 2.0, res);
     const PcTangentResult euler = NEVPT2_TRY(
         pcTangentsDevice(ints, dm1, dm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dm1Two, dm2Two, dm3Two,
-                         f3acTwo, f3caTwo, res));
+                         f3acTwo, f3caTwo, /*epsDot=*/nullptr, res));
     for (int i = 0; i < 8; ++i) out.eulerEdot[i] = euler.classes[i].edot;
   }
 

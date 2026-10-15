@@ -2,10 +2,9 @@
 // terms, Y_xy and y_I, with a committed source-term oracle (`*.srcgold`, SC
 // #92 or PC #95), and THE known-gap list it gates on. Pure host arithmetic.
 //
-// WHY A LIBRARY. --source-oracle (:source_oracle) is the only caller today,
-// and it compares the SC terms. #74 adds the PC terms' entry against the same
-// comparison, so the comparison, the known-gap list and both tolerances live
-// here, apart from the device code that produces what is compared -- and the
+// WHY A LIBRARY. --source-oracle (:source_oracle) is the only caller, for
+// both schemes -- SC's terms, and with --pc PC's (#74) -- so the comparison,
+// the known-gap list and both tolerances live here, apart from the device code that produces what is compared -- and the
 // unit tier (test/source_compare/) reads every committed oracle through it
 // with no card: an oracle compared with itself passes, and a copy with one
 // block perturbed fails, naming the block. It sits under apps/ beside
@@ -82,8 +81,8 @@ struct KnownGap {
 // two-electron integral moves under -- N2 CAS(4,4): act_O-virt, act_V-virt;
 // LiF: act_O-act_V, act_O-virt, act_V-virt -- for the f3ac/f3ca digests Y held
 // fixed; docs/testing.md, "The GPU as the source-term provider" keeps that
-// record), and `P y` left it with #87. The PC oracle (#95) starts empty: #74's
-// GPU PC terms are held to every block of it from their first run.
+// record), and `P y` left it with #87. The PC oracle (#95) started empty, and
+// the GPU's PC terms (#74) met every block of it on their first run.
 inline constexpr std::array<KnownGap, 0> kKnownGaps{};
 
 // The oracles that have a classification at all -- one with no known gap is

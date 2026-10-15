@@ -424,9 +424,17 @@ struct PcTangentResult {
 //
 // Why this is legitimate -- and why a class the gap check refuses stays
 // refused -- is the module header above, "PC'S TANGENT DIFFERENTIATES THE
-// SOLVE". The integrals and orbital energies are held FIXED: this is the CI
-// half of the derivative, the source term the Z-vector work needs, not a
-// nuclear gradient.
+// SOLVE". The integrals are held FIXED: this is the CI half of the
+// derivative, the source term the Z-vector work needs, not a nuclear
+// gradient.
+//
+// THE ORBITAL ENERGIES ARE AN OPTIONAL INPUT (#74), as for
+// energiesTangentDevice (#87): handed their tangent `epsDot` (e_dot =
+// <dm1_dot, W>, nevpt2.gradient_plan's orbitalEnergyDot), every class adds
+// sum_t R_t Deltadot_t with R_t = dE_t/dDelta_t read off the same solve
+// (pcDeltaTangentSingle for the single-coupling classes, the same sum inline
+// for Sijr/Srsi), and Sijrs its SC Delta term; null holds them fixed at the
+// golden's.
 //
 // Everything runs on res.stream(), each class's intermediates drawn from
 // res's pool and freed when it returns, the eigensolves on res.solver() and
@@ -446,6 +454,7 @@ Result<PcTangentResult> pcTangentsDevice(const ActiveIntegralsDevice& active,
                                          const DeviceTensor& dm2Dot, const DeviceTensor& dm3Dot,
                                          const DeviceTensor& f3acDot,
                                          const DeviceTensor& f3caDot,
+                                         const OrbitalEnergyDot* epsDot,
                                          const DeviceResources& res);
 
 // The integral-direct entry point: full blocks, one slab each.
@@ -456,6 +465,73 @@ Result<PcTangentResult> pcTangentsDevice(const NevptIntegralsDevice& ints,
                                          const DeviceTensor& dm2Dot, const DeviceTensor& dm3Dot,
                                          const DeviceTensor& f3acDot,
                                          const DeviceTensor& f3caDot,
+                                         const OrbitalEnergyDot* epsDot,
                                          const DeviceResources& res);
+
+// --- one PC class's matrices and solve, for the adjoint (#74) -----------------
+//
+// nevpt2.gradient's PC reverse mode differentiates the SAME solve the energy
+// and the tangent run, so it needs the class's S, K and S_1 and the solve's
+// eigenbasis -- built here by the very functions pcTangentsDevice builds them
+// with (energy_pc_tangent.cppm's pcMatrices*, energy_pc_solve.cppm's
+// solveClass), not by a copy. Exported for that one caller.
+
+// The active-space RDMs a class's matrices are built from: non-owning, the
+// caller owns every tensor (dm1/dm2 its uploads, dm3/f3ac/f3ca the RDM
+// build's output -- energiesDevice's inputs).
+struct PcRdms {
+  const DeviceTensor* dm1 = nullptr;
+  const DeviceTensor* dm2 = nullptr;
+  const DeviceTensor* dm3 = nullptr;
+  const DeviceTensor* f3ac = nullptr;
+  const DeviceTensor* f3ca = nullptr;
+};
+
+// One class's three matrices, each in its natural PySCF index shape and
+// owning its buffer; `matS`/`matK`/`matS1` are the flattened (d, d) /
+// (d, n1) VIEWS the solve takes (reshapeView: no copy, valid only while this
+// struct lives). docs/pc-nevpt2.md, "Per class", has every class's layout.
+struct PcMatrices {
+  DeviceTensor S;
+  DeviceTensor K;
+  DeviceTensor S1;        // empty unless hasS1
+  int64_t d = 0;          // the flattened basis dimension
+  int64_t n1 = 0;         // S_1's column count (0 unless hasS1)
+  bool hasS1 = false;
+
+  DeviceTensor matS() const { return reshapeView(S, {d, d}); }
+  DeviceTensor matK() const { return reshapeView(K, {d, d}); }
+  DeviceTensor matS1() const { return reshapeView(S1, {d, n1}); }
+};
+
+// Class `cls` (CLASSES order; Sijrs, which has no active index, is not one
+// -- asking for it is our bug) built from `rdm` against the active integrals
+// `h1e` / `h2e`. Every matrix is AFFINE in the RDMs and K LINEAR in
+// (h1e, h2e) apart from Sr's and Si's f3ac/f3ca addends, so K at dotted
+// integrals with zero digests IS K's tangent along an orbital rotation at
+// fixed digests -- the use nevpt2.gradient makes of it.
+PcMatrices pcClassMatrices(int cls, const DeviceTensor& h1e, const DeviceTensor& h2e,
+                           const PcRdms& rdm, const DeviceResources& res);
+
+// One class's solve, kept for differentiating: solveClass's own output with
+// its eigenvectors. `result` is pcRankCut's verdict -- a class refused by the
+// gap is a value (status Refused, `why`), exactly as pcEnergiesDevice reports
+// it, and nothing else here is filled; otherwise `lambda` (m), `T` (d, m) =
+// S_sym U, `t1` (n1, m) = S_1^T U when the class has an S_1, and `Ut` (m, d)
+// = U^T. The denominator check is NOT made here: it needs the tuples'
+// Delta, which is the caller's slab walk.
+struct PcClassSolve {
+  PcClassResult result;
+  std::vector<double> lambda;
+  DeviceTensor T;
+  DeviceTensor t1;
+  DeviceTensor Ut;
+};
+
+// solveClass on `mx` (its S, K and, when it has one, S_1), named `name` in a
+// devInfo error. On res.stream(); an eigensolve's devInfo != 0 is the
+// Numerical Error pcEnergiesDevice returns for it.
+Result<PcClassSolve> pcSolveClass(const PcMatrices& mx, const char* name,
+                                  const DeviceResources& res);
 
 }  // namespace nevpt2

@@ -60,6 +60,28 @@
 //                          Edot -= 2 g . ydot - g^T (mK + Delta nS) g, on the
 //                          same hand case; a zero tangent gives exactly zero
 //
+//
+// THE PC ADJOINT'S PER-TUPLE ARITHMETIC (#74), held to an INDEPENDENT host
+// energy that inverts the full (m, m) matrix D_t = diag(lambda + Delta_t) +
+// h M by Gaussian elimination -- so nothing below re-derives the formula it
+// checks:
+//   PcAdjointTests         pcAdjointSingle / pcAdjointPair (both exchange
+//                          layouts): the energy, ybar = dE/dy and xbar =
+//                          dE/dx against central differences (exact: E is
+//                          quadratic in the rows), R = dE/dDelta and
+//                          <mgg, M> = dE/dh along a symmetric M against
+//                          Richardson-checked differences, mggDelta as the
+//                          Delta-weighted sum of the per-tuple weights, and a
+//                          partner-layout pair as the two-tensor one with the
+//                          exchange folded back
+//   PcRotationTangentTests pcRotationTangentSingle / Pair, the forward side's
+//                          own arithmetic: against a central difference of the
+//                          same independent energy along (ydot, mK), and
+//                          against the adjoint's ybar . ydot + <mgg, mK> -- the
+//                          host-level duality
+//   PcDeltaTangentTests    pcDeltaTangentSingle (the PC CI tangent's
+//                          orbital-energy term) is sum_t R_t Deltadot_t
+//
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
 // textual std #include before any import.
 #include <gtest/gtest.h>
@@ -746,6 +768,348 @@ TEST(TangentSingleTests, EmptySlabChangesNothing) {
   EXPECT_EQ(e, -3.0);
   EXPECT_EQ(edot, 7.0);
   EXPECT_EQ(minDen, 0.9);
+}
+
+// --- the PC adjoint (#74) ---------------------------------------------------------
+
+// The independent reference: E for one slab, with the per-tuple (m, m) matrix
+// D_t = diag(lambda + delta_t) + h * mm, inverted by elimination. `x` empty: a
+// single-coupling class (factor f); `x` given: the pair form
+// -(2 y D^-1 y - y D^-1 x).
+std::vector<double> solveDense(std::vector<double> a, std::vector<double> b, std::size_t m) {
+  for (std::size_t c = 0; c < m; ++c) {
+    std::size_t piv = c;
+    for (std::size_t r = c + 1; r < m; ++r)
+      if (std::fabs(a[r * m + c]) > std::fabs(a[piv * m + c])) piv = r;
+    for (std::size_t k = 0; k < m; ++k) std::swap(a[c * m + k], a[piv * m + k]);
+    std::swap(b[c], b[piv]);
+    for (std::size_t r = c + 1; r < m; ++r) {
+      const double f = a[r * m + c] / a[c * m + c];
+      for (std::size_t k = c; k < m; ++k) a[r * m + k] -= f * a[c * m + k];
+      b[r] -= f * b[c];
+    }
+  }
+  std::vector<double> x(m);
+  for (std::size_t r = m; r-- > 0;) {
+    double v = b[r];
+    for (std::size_t k = r + 1; k < m; ++k) v -= a[r * m + k] * x[k];
+    x[r] = v / a[r * m + r];
+  }
+  return x;
+}
+
+double referenceEnergy(const std::vector<double>& y, const std::vector<double>& x,
+                       const std::vector<double>& lambda, const std::vector<double>& delta,
+                       double factor, const std::vector<double>& mm, double h) {
+  const std::size_t m = lambda.size(), nt = delta.size();
+  double e = 0.0;
+  for (std::size_t t = 0; t < nt; ++t) {
+    std::vector<double> a(m * m);
+    for (std::size_t k = 0; k < m; ++k)
+      for (std::size_t l = 0; l < m; ++l)
+        a[k * m + l] = (k == l ? lambda[k] + delta[t] : 0.0) + h * mm[k * m + l];
+    const std::vector<double> row(y.begin() + static_cast<std::ptrdiff_t>(t * m),
+                                  y.begin() + static_cast<std::ptrdiff_t>((t + 1) * m));
+    const std::vector<double> g = solveDense(a, row, m);
+    double yy = 0.0, yx = 0.0;
+    for (std::size_t k = 0; k < m; ++k) {
+      yy += g[k] * row[k];
+      if (!x.empty()) yx += g[k] * x[t * m + k];
+    }
+    e -= x.empty() ? factor * yy : 2.0 * yy - yx;
+  }
+  return e;
+}
+
+// A seeded case: nt tuples, m modes, positive denominators.
+struct PcCase {
+  std::size_t nt, m;
+  std::vector<double> y, x, lambda, delta, mm;
+};
+
+PcCase pcCase(std::size_t nt, std::size_t m, std::uint64_t seed) {
+  std::mt19937_64 gen(seed);
+  std::uniform_real_distribution<double> u(-1.0, 1.0);
+  PcCase c{nt, m, {}, {}, {}, {}, {}};
+  for (std::size_t i = 0; i < nt * m; ++i) c.y.push_back(u(gen));
+  for (std::size_t i = 0; i < nt * m; ++i) c.x.push_back(u(gen));
+  for (std::size_t k = 0; k < m; ++k) c.lambda.push_back(0.5 + 0.3 * static_cast<double>(k));
+  for (std::size_t t = 0; t < nt; ++t) c.delta.push_back(1.0 + 0.25 * u(gen));
+  c.mm.assign(m * m, 0.0);
+  for (std::size_t k = 0; k < m; ++k)
+    for (std::size_t l = k; l < m; ++l) c.mm[k * m + l] = c.mm[l * m + k] = u(gen);
+  return c;
+}
+
+Tensor rows(const std::vector<double>& v, std::size_t nt, std::size_t m) {
+  return Tensor::fromFlat({static_cast<int64_t>(nt), static_cast<int64_t>(m)}, v);
+}
+
+double frob(const std::vector<double>& a, const std::vector<double>& b) {
+  double s = 0.0;
+  for (std::size_t i = 0; i < a.size(); ++i) s += a[i] * b[i];
+  return s;
+}
+
+// The derivative of the reference energy in one input by a central
+// difference at h and h/2, Richardson-combined: the inputs other than y are
+// rational in the energy, so a single step would carry h^2 truncation.
+template <class F>
+double richardson(F&& f, double h) {
+  const double d1 = (f(h) - f(-h)) / (2.0 * h);
+  const double d2 = (f(h / 2) - f(-h / 2)) / h;
+  return (4.0 * d2 - d1) / 3.0;
+}
+
+constexpr double kPcAdjTol = 1e-9;
+
+TEST(PcAdjointTests, SingleEnergyYbarRAndWeights) {
+  const PcCase c = pcCase(3, 3, 0x7401u);
+  for (const double f : {1.0, 0.5}) {
+    SCOPED_TRACE(f);
+    std::vector<double> mgg(9, 0.0), mggD(9, 0.0);
+    double minDen = std::numeric_limits<double>::infinity();
+    const PcSlabAdjoint a =
+        pcAdjointSingle(rows(c.y, 3, 3), c.lambda, c.delta, f, mgg, mggD, minDen);
+    EXPECT_NEAR(a.energy, referenceEnergy(c.y, {}, c.lambda, c.delta, f, c.mm, 0.0), 1e-14);
+    EXPECT_TRUE(a.xbar.empty());
+    // ybar: E is quadratic in y, so the central difference is exact.
+    for (std::size_t i = 0; i < c.y.size(); ++i) {
+      std::vector<double> yp = c.y, ym = c.y;
+      yp[i] += 1e-3;
+      ym[i] -= 1e-3;
+      const double fd = (referenceEnergy(yp, {}, c.lambda, c.delta, f, c.mm, 0.0) -
+                         referenceEnergy(ym, {}, c.lambda, c.delta, f, c.mm, 0.0)) /
+                        2e-3;
+      EXPECT_NEAR(a.ybar[i], fd, kPcAdjTol) << "y[" << i << "]";
+    }
+    // R_t = dE/dDelta_t.
+    for (std::size_t t = 0; t < 3; ++t) {
+      const double fd = richardson(
+          [&](double h) {
+            std::vector<double> d = c.delta;
+            d[t] += h;
+            return referenceEnergy(c.y, {}, c.lambda, d, f, c.mm, 0.0);
+          },
+          1e-3);
+      EXPECT_NEAR(a.r[t], fd, 1e-8) << "R[" << t << "]";
+    }
+    // <mgg, M> = dE/dh along D + h M.
+    const double fdM = richardson(
+        [&](double h) { return referenceEnergy(c.y, {}, c.lambda, c.delta, f, c.mm, h); }, 1e-3);
+    EXPECT_NEAR(frob(mgg, c.mm), fdM, 1e-8);
+    EXPECT_EQ(minDen, *std::ranges::min_element(c.delta) + c.lambda[0]);
+  }
+}
+
+TEST(PcAdjointTests, WeightedByDeltaIsTheSumOfThePerTupleWeights) {
+  const PcCase c = pcCase(4, 2, 0x7402u);
+  std::vector<double> mgg(4, 0.0), mggD(4, 0.0), want(4, 0.0);
+  double minDen = std::numeric_limits<double>::infinity();
+  (void)pcAdjointSingle(rows(c.y, 4, 2), c.lambda, c.delta, 1.0, mgg, mggD, minDen);
+  for (std::size_t t = 0; t < 4; ++t) {
+    std::vector<double> one(4, 0.0), oneD(4, 0.0);
+    const std::vector<double> row(c.y.begin() + static_cast<std::ptrdiff_t>(2 * t),
+                                  c.y.begin() + static_cast<std::ptrdiff_t>(2 * t + 2));
+    (void)pcAdjointSingle(rows(row, 1, 2), c.lambda, {c.delta[t]}, 1.0, one, oneD, minDen);
+    for (std::size_t k = 0; k < 4; ++k) want[k] += c.delta[t] * one[k];
+  }
+  for (std::size_t k = 0; k < 4; ++k) EXPECT_NEAR(mggD[k], want[k], 1e-15);
+}
+
+TEST(PcAdjointTests, PairTwoTensorEnergyYbarXbarRAndWeights) {
+  const PcCase c = pcCase(3, 3, 0x7403u);
+  std::vector<double> mgg(9, 0.0), mggD(9, 0.0);
+  double minDen = std::numeric_limits<double>::infinity();
+  const Tensor x = rows(c.x, 3, 3);
+  const PcSlabAdjoint a =
+      pcAdjointPair(rows(c.y, 3, 3), &x, {}, c.lambda, c.delta, mgg, mggD, minDen);
+  EXPECT_NEAR(a.energy, referenceEnergy(c.y, c.x, c.lambda, c.delta, 1.0, c.mm, 0.0), 1e-14);
+  ASSERT_EQ(a.xbar.size(), c.x.size());
+  for (std::size_t i = 0; i < c.y.size(); ++i) {
+    std::vector<double> p = c.y, q = c.y;
+    p[i] += 1e-3;
+    q[i] -= 1e-3;
+    EXPECT_NEAR(a.ybar[i],
+                (referenceEnergy(p, c.x, c.lambda, c.delta, 1.0, c.mm, 0.0) -
+                 referenceEnergy(q, c.x, c.lambda, c.delta, 1.0, c.mm, 0.0)) /
+                    2e-3,
+                kPcAdjTol)
+        << "y[" << i << "]";
+    p = c.x;
+    q = c.x;
+    p[i] += 1e-3;
+    q[i] -= 1e-3;
+    EXPECT_NEAR(a.xbar[i],
+                (referenceEnergy(c.y, p, c.lambda, c.delta, 1.0, c.mm, 0.0) -
+                 referenceEnergy(c.y, q, c.lambda, c.delta, 1.0, c.mm, 0.0)) /
+                    2e-3,
+                kPcAdjTol)
+        << "x[" << i << "]";
+  }
+  for (std::size_t t = 0; t < 3; ++t) {
+    const double fd = richardson(
+        [&](double h) {
+          std::vector<double> d = c.delta;
+          d[t] += h;
+          return referenceEnergy(c.y, c.x, c.lambda, d, 1.0, c.mm, 0.0);
+        },
+        1e-3);
+    EXPECT_NEAR(a.r[t], fd, 1e-8) << "R[" << t << "]";
+  }
+  const double fdM = richardson(
+      [&](double h) { return referenceEnergy(c.y, c.x, c.lambda, c.delta, 1.0, c.mm, h); }, 1e-3);
+  // Only sym(mgg) is defined against a symmetric M; the caller takes sym.
+  EXPECT_NEAR(frob(mgg, c.mm), fdM, 1e-8);
+}
+
+TEST(PcAdjointTests, PairPartnerFoldsTheExchangeBackOntoY) {
+  // Four tuples, partner (0 1)(2 3) -- an involution, as Sijr's (j, i) swap.
+  const PcCase c = pcCase(4, 2, 0x7404u);
+  const std::vector<int64_t> partner{1, 0, 3, 2};
+  // The pair's Delta is the tuple's and its partner's alike; E as a function
+  // of y alone, x_t being y's partner row.
+  PcCase cc = c;
+  cc.delta = {c.delta[0], c.delta[0], c.delta[2], c.delta[2]};
+  const auto energyOfYcc = [&](const std::vector<double>& y) {
+    std::vector<double> x(y.size());
+    for (std::size_t t = 0; t < 4; ++t)
+      for (std::size_t k = 0; k < 2; ++k)
+        x[t * 2 + k] = y[static_cast<std::size_t>(partner[t]) * 2 + k];
+    return referenceEnergy(y, x, cc.lambda, cc.delta, 1.0, cc.mm, 0.0);
+  };
+  std::vector<double> mgg(4, 0.0), mggD(4, 0.0);
+  double minDen = std::numeric_limits<double>::infinity();
+  const PcSlabAdjoint a =
+      pcAdjointPair(rows(cc.y, 4, 2), nullptr, partner, cc.lambda, cc.delta, mgg, mggD, minDen);
+  EXPECT_TRUE(a.xbar.empty());
+  EXPECT_NEAR(a.energy, energyOfYcc(cc.y), 1e-14);
+  for (std::size_t i = 0; i < cc.y.size(); ++i) {
+    std::vector<double> p = cc.y, q = cc.y;
+    p[i] += 1e-3;
+    q[i] -= 1e-3;
+    EXPECT_NEAR(a.ybar[i], (energyOfYcc(p) - energyOfYcc(q)) / 2e-3, kPcAdjTol)
+        << "y[" << i << "]";
+  }
+  // And the same numbers as the two-tensor layout with x read off the partner.
+  std::vector<double> x(cc.y.size());
+  for (std::size_t t = 0; t < 4; ++t)
+    for (std::size_t k = 0; k < 2; ++k)
+      x[t * 2 + k] = cc.y[static_cast<std::size_t>(partner[t]) * 2 + k];
+  std::vector<double> mgg2(4, 0.0), mggD2(4, 0.0);
+  const Tensor xt = rows(x, 4, 2);
+  const PcSlabAdjoint b =
+      pcAdjointPair(rows(cc.y, 4, 2), &xt, {}, cc.lambda, cc.delta, mgg2, mggD2, minDen);
+  EXPECT_NEAR(a.energy, b.energy, 1e-15);
+  for (std::size_t t = 0; t < 4; ++t) {
+    EXPECT_NEAR(a.r[t], b.r[t], 1e-15);
+    for (std::size_t k = 0; k < 2; ++k)
+      EXPECT_NEAR(a.ybar[t * 2 + k],
+                  b.ybar[t * 2 + k] + b.xbar[static_cast<std::size_t>(partner[t]) * 2 + k],
+                  1e-14);
+  }
+  for (std::size_t k = 0; k < 4; ++k) EXPECT_NEAR(mgg[k], mgg2[k], 1e-15);
+}
+
+TEST(PcAdjointTests, AnEmptySlabIsNothing) {
+  std::vector<double> mgg(4, 0.0), mggD(4, 0.0);
+  double minDen = 0.7;
+  const PcSlabAdjoint a = pcAdjointSingle(Tensor::fromFlat({0, 2}, {}), {1.0, 2.0}, {}, 1.0, mgg,
+                                          mggD, minDen);
+  EXPECT_EQ(a.energy, 0.0);
+  EXPECT_TRUE(a.ybar.empty());
+  EXPECT_TRUE(a.r.empty());
+  EXPECT_EQ(minDen, 0.7);
+  for (const double w : mgg) EXPECT_EQ(w, 0.0);
+}
+
+// --- the forward rotation tangent, per tuple (#74) ------------------------------------
+
+TEST(PcRotationTangentTests, SingleIsTheDerivativeAlongYdotAndMk) {
+  const PcCase c = pcCase(3, 3, 0x7405u);
+  std::mt19937_64 gen(0x7406u);
+  std::uniform_real_distribution<double> u(-1.0, 1.0);
+  std::vector<double> ydot(9);
+  for (double& v : ydot) v = u(gen);
+  for (const double f : {1.0, 0.5}) {
+    SCOPED_TRACE(f);
+    const double edot =
+        pcRotationTangentSingle(rows(c.y, 3, 3), rows(ydot, 3, 3), c.lambda, c.delta, f, c.mm);
+    const double fd = richardson(
+        [&](double h) {
+          std::vector<double> y = c.y;
+          for (std::size_t i = 0; i < y.size(); ++i) y[i] += h * ydot[i];
+          return referenceEnergy(y, {}, c.lambda, c.delta, f, c.mm, h);
+        },
+        1e-3);
+    EXPECT_NEAR(edot, fd, 1e-8);
+    // The host-level duality: the adjoint's ybar . ydot + <mgg, mK>.
+    std::vector<double> mgg(9, 0.0), mggD(9, 0.0);
+    double minDen = std::numeric_limits<double>::infinity();
+    const PcSlabAdjoint a =
+        pcAdjointSingle(rows(c.y, 3, 3), c.lambda, c.delta, f, mgg, mggD, minDen);
+    EXPECT_NEAR(edot, frob(a.ybar, ydot) + frob(mgg, c.mm), 1e-14);
+  }
+}
+
+TEST(PcRotationTangentTests, PairBothLayoutsAreTheDerivative) {
+  const PcCase c = pcCase(4, 2, 0x7407u);
+  std::mt19937_64 gen(0x7408u);
+  std::uniform_real_distribution<double> u(-1.0, 1.0);
+  std::vector<double> ydot(8), xdot(8);
+  for (double& v : ydot) v = u(gen);
+  for (double& v : xdot) v = u(gen);
+  // Two tensors.
+  const Tensor x = rows(c.x, 4, 2), xd = rows(xdot, 4, 2);
+  const double edot = pcRotationTangentPair(rows(c.y, 4, 2), &x, rows(ydot, 4, 2), &xd, {},
+                                            c.lambda, c.delta, c.mm);
+  const double fd = richardson(
+      [&](double h) {
+        std::vector<double> y = c.y, xx = c.x;
+        for (std::size_t i = 0; i < y.size(); ++i) {
+          y[i] += h * ydot[i];
+          xx[i] += h * xdot[i];
+        }
+        return referenceEnergy(y, xx, c.lambda, c.delta, 1.0, c.mm, h);
+      },
+      1e-3);
+  EXPECT_NEAR(edot, fd, 1e-8);
+  std::vector<double> mgg(4, 0.0), mggD(4, 0.0);
+  double minDen = std::numeric_limits<double>::infinity();
+  const PcSlabAdjoint a =
+      pcAdjointPair(rows(c.y, 4, 2), &x, {}, c.lambda, c.delta, mgg, mggD, minDen);
+  EXPECT_NEAR(edot, frob(a.ybar, ydot) + frob(a.xbar, xdot) + frob(mgg, c.mm), 1e-14);
+
+  // Partner layout: x and xdot ARE y's and ydot's partner rows.
+  const std::vector<int64_t> partner{1, 0, 3, 2};
+  std::vector<double> delta = {c.delta[0], c.delta[0], c.delta[2], c.delta[2]};
+  std::vector<double> xp(8), xdp(8);
+  for (std::size_t t = 0; t < 4; ++t)
+    for (std::size_t k = 0; k < 2; ++k) {
+      xp[t * 2 + k] = c.y[static_cast<std::size_t>(partner[t]) * 2 + k];
+      xdp[t * 2 + k] = ydot[static_cast<std::size_t>(partner[t]) * 2 + k];
+    }
+  const Tensor xpt = rows(xp, 4, 2), xdpt = rows(xdp, 4, 2);
+  EXPECT_NEAR(pcRotationTangentPair(rows(c.y, 4, 2), nullptr, rows(ydot, 4, 2), nullptr, partner,
+                                    c.lambda, delta, c.mm),
+              pcRotationTangentPair(rows(c.y, 4, 2), &xpt, rows(ydot, 4, 2), &xdpt, {}, c.lambda,
+                                    delta, c.mm),
+              1e-15);
+}
+
+// --- the PC CI tangent's orbital-energy term (#74) --------------------------------------
+
+TEST(PcDeltaTangentTests, IsTheAdjointsROnDeltadot) {
+  const PcCase c = pcCase(3, 3, 0x7409u);
+  const std::vector<double> deltaDot{0.3, -1.2, 0.7};
+  for (const double f : {1.0, 0.5}) {
+    std::vector<double> mgg(9, 0.0), mggD(9, 0.0);
+    double minDen = std::numeric_limits<double>::infinity();
+    const PcSlabAdjoint a =
+        pcAdjointSingle(rows(c.y, 3, 3), c.lambda, c.delta, f, mgg, mggD, minDen);
+    EXPECT_NEAR(pcDeltaTangentSingle(rows(c.y, 3, 3), c.lambda, c.delta, deltaDot, f),
+                frob(a.r, deltaDot), 1e-15);
+  }
 }
 
 }  // namespace nevpt2::test::energy_finish

@@ -734,6 +734,178 @@ device RDM build and PC stage; the three sizes above run 10, 10 and 8 of
 them. At CAS(10,12) that is the 318s, nearly all of it RDM builds, which is
 why that entry is `slow` and takes `--fd-steps 3`.
 
+## The source terms by reverse mode
+
+#74 gives PC what SC has had since #73–#89: `y_I = dE_pc/dc_I` and
+`Y_xy = dE_pc/dkappa_xy` by the **adjoint of the PC solve**, with both of the
+dependences the #73 amendment names — the `f3ac`/`f3ca` digests in `Y`
+(their transpose, #89) and the orbital energies in `y` (#87) — and the forward
+modes they are held against. The derivation is
+[`gradients.md`](gradients.md), §5.6 and §6.1, and the module header of
+`src/gradient/gradient_pc_classes.cppm`; it rests on the singular-metric
+convention above exactly as the tangent does, so the adjoint exists where the
+energy accepts a class and is refused where it does not.
+
+Unless a row says otherwise: Release, `--tiles 3`, the default digest of each
+backend (emitted on the RTX 3080, preset `default`; native-fp64 BLAS on the
+RX 9060 XT, preset `hip`).
+
+### The dualities
+
+Both modes of each derivative are the device's own, so their agreement is
+exact arithmetic and the gate is the tree's 1e-7:
+
+| | N2 CAS(4,4) | N2 CAS(8,8) | acrolein CAS(6,5) |
+|---|---:|---:|---:|
+| CI: `<u, y>` vs `Edot_pc(u)`, 4 seeds + the state + (CAS(4,4)) all 36 Jacobian columns, worst, RTX 3080 | 1.0e-15 | 1.9e-11 | — |
+| the same, RX 9060 XT | 9.2e-16 | 3.6e-11 | — |
+| rotation, integral halves (dump check 5), 6 seeded full directions, worst, RTX 3080 | 6.9e-18 | 1.2e-14 | 2.6e-16 |
+| rotation, full duality with both digests' terms, worst, RTX 3080 | 6.1e-18 | 4.8e-10 | 3.7e-13 |
+| dump check 4 (exact `Edot` vs `sum kappa.Y` off the written matrix), RTX 3080 | 4.0e-17 | 6.9e-10 | 7.9e-13 |
+| the same, RX 9060 XT | 6.8e-17 | 4.4e-10 | — |
+
+The CI forward side is `pcTangentsDevice` with its `epsDot` (#74 added it),
+whose own license is the finite difference above ("The tangent with respect to
+the CI vector"); the rotation's forward side is new code
+(`pcRotationTangent*`), which is why the dump gates the integral halves too.
+The acrolein column is a dump with its sidecar regenerated out of tree (as
+#89's was), so not a ctest entry. CAS(8,8)'s larger figures are its
+conditioning, not a drift: its Sr and Si metrics keep modes down to ~1e-10
+relative ("The singular-metric convention"), so `U` carries `s^-1/2` of
+~1e5 into both modes' rounding — still three decades inside the gate.
+
+### block2's exact source terms, on a card
+
+`nevpt2_sc_pseudodensity --pc --source-oracle golden/n2_ccpvdz_cas44_pc.srcgold`
+(the `oracle_pc` entry), against the PC oracle tolerance (testing.md, "The PC
+source terms' oracle", 1e-7, the known-gap list empty). Max \|GPU − block2\|
+per block:
+
+| block | both cards |
+|---|---:|
+| core–core | 5.4e-11 |
+| core–act_O / core–act_V | 0 / 0 |
+| core–virt | 1.8e-10 |
+| act_O–act_V | 1.5e-11 |
+| act_O–virt | 2.2e-11 |
+| act_V–virt | 1.0e-11 |
+| virt–virt | 4.7e-11 |
+| `P y` (12 determinants) | 8.6e-10 |
+
+The two cards agree to every digit shown. Every block passes with two to
+three decades to spare: what is left is the
+oracle's own ladder spread ("The PC source terms' oracle"). The `P y` row is
+the orbital energies' response in `y`, and the act–virt rows the digests'
+transpose in `Y` — the two terms the amendment is about; the negative
+controls below show each failing here when dropped.
+
+### The nuclear gradient from the GPU's terms
+
+`nevpt2_grad.py --pc --source both --source-path <dump> --grad-num <npz>`,
+PC `grad_num` from `nevpt2_numgrad.py --pc --no-write --npz`, single-threaded
+Python on the RTX 3080 box, PySCF 2.14.0, block2 0.5.4; the dumps from the
+RTX 3080. (#74 also fixed `--source both`'s PySCF-sourced solve, which had
+`pc=False` written into it: harmless while `--pc` refused `both`, and wrong —
+2.2e-3 from `grad_num` at N2 — the first time it ran.)
+
+| | N2 CAS(4,4) | acrolein CAS(6,5) |
+|---|---:|---:|
+| components compared | 6 | 16 (in-plane) |
+| **GPU-sourced**: max \|g − grad_num\| | **1.9e-8 — PASS** | **6.0e-8 — PASS** |
+| PySCF-sourced, same sweep | 1.5e-8 — PASS | 8.3e-8 — PASS |
+| max \|GPU-sourced − PySCF-sourced\| | 3.5e-9 | 9.0e-8 |
+| … the GPU's `Y` alone / `y` alone | 3.6e-9 / 7.1e-11 | 2.1e-9 / 9.2e-8 |
+| the dump vs PySCF's `A` at `KAPPA_STEP_PC`, worst block | 1.5e-8 (core–virt) | 3.4e-8 (core–virt) |
+| the dump's `P y` vs PySCF's | 8.6e-10 | 6.5e-7 |
+| residual-independent checks | 10 of 11 (below) | 7 of 11 (below) |
+| `--source both` wall | 182 s | 24616 s |
+
+The worst block is core–virt at `KAPPA_STEP_PC` = 1e-4, which "The PC source
+terms' oracle" measures 1.5e-8 from converged — PySCF's truncation, not the
+device's: against the oracle's converged step the same block is 1.8e-10.
+
+**One residual-independent check fails on N2, on run length alone, and is
+recorded rather than worked around.** CI stationarity, seed 2026: the
+Lagrangian's slope along the seeded CI direction ladders 5.4e-10, 1.4e-10,
+3.4e-11, 9.1e-12 at `h = 2^-11 … 2^-14` and hits the quotient's round-off at
+`2^-15`, so the fourfold run is two halvings where the rule wants three; its
+Richardson value is 8.3e-13 from zero. The PySCF-sourced run of the same case
+passes the same check with three (ratio 3.92 at `2^-13`, and 8.0e-11 from
+zero): the truncation term itself is that small, and which side of the rule's
+edge the round-off rung lands on is luck. Seed 70 passes in both, and so do
+all other ten checks, the PC guard's ledger included (88 of 88 displaced CI
+vectors guarded on PySCF's side, rank unchanged at every one).
+
+**Acrolein: open findings, not resolved here.** Four of its eleven
+residual-independent checks fail, all on ladder run length: `y` linearity,
+seed 70 (1 fourfold halving, Richardson − ref 1.2e-10) and seed 2026 (2,
+6.3e-10); CI stationarity, seed 70 (1, 1.2e-10) and seed 2026 (2, 6.1e-10).
+The other seven hold, the PC guard at 168 of 168 displaced CI vectors with no
+rank change. The checks run once per invocation, on the GPU-sourced solve; no
+PySCF-sourced acrolein PC run of them was made. Separately, the dump's `P y`
+differs from PySCF's by 6.5e-7 at `CI_STEP_PC` (1e-7), and by 1.9e-6, 3.3e-6
+and 1.3e-5 at 5e-8, 2.5e-8 and 1e-8; that attribution row puts 9.2e-8 of the
+gradient's GPU-vs-PySCF difference on `y`. A hypothesis, not a conclusion:
+both are block2's PC energy reaching its round-off at small CI steps on this
+state (the failing ladders difference block2's `E_corr`, and the `P y`
+difference grows as `1/h`). These ladders were never run for acrolein PC
+before #74 ([`testing.md`](testing.md), "What the committed cases come out
+at").
+
+**`CI_STEP_PC` and the guard.** No finite difference enters the device side.
+The ones beside it are `nevpt2_pc_tangent`'s (symmetry-sector directions, the
+guard recorded at every displaced state) and PySCF's in `nevpt2_grad.py --pc`
+and `sc_source_oracle.py --pc`, at `CI_STEP_PC` with the guard and the rank
+check run at every displaced CI vector — the ledger line above.
+
+### Refusals
+
+`test/pc_adjoint/` (`gpu`): on N2 CAS(4,4)'s CI vector displaced off its
+symmetry sector, the adjoint reports exactly the PC energy's refusals, class
+by class with the reason, forms no `y`, and the digests' adjoint and the
+matrix of `Y` are Numerical Errors naming the class. Both kinds of refusal:
+displaced by 0.25 the denominators fail (Sr −19.3, Si −25.6, Sir −0.086 Eh);
+displaced by 1e-6 the gap does (Sr and Si 1.3, Sir 1.5, against
+`PC_MIN_GAP` 1e3). The forward tangent refuses the same classes, and the
+golden's own state is accepted with the walk at block2's `e_pc_total`.
+
+### Negative controls
+
+Scratch patches, never committed; RTX 3080, N2 CAS(4,4):
+
+| patch | dualities | block2's oracle | gradient vs `grad_num` |
+|---|---|---|---|
+| 1. the adjoint perturbed: `dE/dK`'s weight ×(1 + 1e-3), reverse only | **FAIL**: CI 1.5e-4; rotation halves 2.1e-6, check 4 2.1e-6 | **FAIL**: core–virt, act_O–virt, act_V–virt, `P y` | — |
+| 2. a shared omission in `Y`: the digests' term dropped from both modes | pass: halves 6.9e-18, check 4 1.1e-16 | **FAIL**: act_O–virt 1.5e-2, act_V–virt 3.8e-3 | **FAIL**: 7.5e-3 |
+| 3. a shared omission in `y`: the orbital energies' response dropped from both modes | pass: CI 2.0e-16 | **FAIL**: `P y` 3.2e-4 | **FAIL**: 1.6e-4 |
+
+Patches 2 and 3 are the amendment's point: an omission both modes share is
+invisible to every duality, and the independent provider — block2's committed
+terms on the card, `grad_num` offline — catches it. (`--source dump` for the
+two gradient rows; their residual-independent checks fail as well: 8 and 7 of
+11.)
+
+### What the entries cost, and the sanitizers
+
+ctest walls, RTX 3080 / RX 9060 XT: `nevpt2_gradient_source_pc_cas44` 0.88 /
+1.18 s, `_cas88` 2.59 / 24.3 s, `nevpt2_sc_pseudodensity_dump_pc_n2_ccpvdz_cas44`
+1.66 / 2.61 s, `_cas88` 29.9 / 394 s, `…_oracle_pc_n2_ccpvdz_cas44`
+1.53 / 2.44 s, `PcAdjointRefusalTests` 0.50 / 0.57 s. The two
+`gradient_source_pc` entries are `small`, so the sanitizer tier runs the PC
+adjoint's device work; `PcAdjointRefusalTests` rides in every preset's unit
+tier. The CAS(8,8)
+dump is labelled `slow`: its `Y` probe rebuilds every class's Dyall block per
+basis direction (236 s of its 394 s on the RX 9060 XT, 25 s on the RTX 3080).
+
+Each preset's own tier passes with the PC entries in it: `asan` 206/206,
+`ubsan` 206/206, `compute-sanitizer` memcheck 197/197 and initcheck 194/194
+(RTX 3080), `hip-asan` 204/204 and `hip-ubsan` 204/204 (RX 9060 XT). The two
+non-`small` CAS(4,4) entries (`dump_pc`, `oracle_pc`) were also run by name
+in each of the six builds, with the presets' sanitizer options: all pass, no
+report — seconds, dump / oracle: `asan` 5.6 / 5.0, `ubsan` 4.1 / 3.8,
+memcheck 21.1 / 19.5, initcheck 14.1 / 13.0, `hip-asan` 15.8 / 14.5,
+`hip-ubsan` 13.0 / 12.2.
+
 ## What is not supported
 
 - **N2 CAS(12,12)**, conventional or DF: its metric has no gap (see
@@ -747,4 +919,7 @@ why that entry is `slow` and takes `--fd-steps 3`.
   tangent is refused with it ("The tangent with respect to the CI vector").
 - **A CI direction that leaves the state's spin and spatial symmetry**: the
   metric gains rank there, so the pseudo-inverse is not differentiable along
-  it and the displaced state has no PC energy at all. Measured above.
+  it and the displaced state has no PC energy at all. Measured above. (The
+  *derivative* at the state along such a direction is defined, and the
+  source terms read it on every determinant axis: "The source terms by
+  reverse mode".)

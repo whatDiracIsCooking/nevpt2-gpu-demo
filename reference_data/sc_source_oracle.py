@@ -76,8 +76,9 @@ Every displaced CI vector is guarded -- the conditioning check and the rank
 against the reference state's -- and a run that trips either is refused
 rather than written. Only N2 CAS(4,4): LiF has no PC answer
 (docs/testing.md, "LiF has no PC gradient, and that is the answer"). It is
-what #74's GPU PC source terms will be held to; until then the comparator's
-host self-test reads it (docs/testing.md, "The PC source terms' oracle")::
+what the GPU's PC source terms (#74) are held to, on a card
+(``nevpt2_sc_pseudodensity --pc --source-oracle``), and the comparator's host
+self-test reads it too (docs/testing.md, "The PC source terms' oracle")::
 
     uv run python reference_data/sc_source_oracle.py --case n2_ccpvdz_cas44 --pc
 
@@ -110,7 +111,8 @@ ORACLE_CASES = ("n2_ccpvdz_cas44", "lif_def2svp_cas46")
 
 #: The cases a PC ``.srcgold`` is committed for (#95): N2 CAS(4,4) alone.
 #: LiF has no PC answer to differentiate (its golden carries no PC fields),
-#: and acrolein is #74's manual gate (6.3 h).
+#: and acrolein is the PC manual gate's (``nevpt2_grad.py --pc --source both``,
+#: hours; docs/pc-nevpt2.md, "The source terms by reverse mode").
 PC_ORACLE_CASES = ("n2_ccpvdz_cas44",)
 
 #: How far an off-sector element of ``T(W^T)`` may be from zero for the irrep

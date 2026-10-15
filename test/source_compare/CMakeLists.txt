@@ -4,8 +4,9 @@
 # with no card. The oracle compared with itself passes, a copy with one block
 # perturbed fails naming that block, the known-gap list's pinning works both
 # ways, and a Y carried through oracleBasisA lands back on the oracle's A.
-# Until #74 there are no GPU PC source terms, so this is the PC oracle's whole
-# gate (docs/testing.md, "The PC source terms' oracle"). No device: NOT
+# The GPU's PC source terms are held to the PC oracle on a card since #74
+# (nevpt2_sc_pseudodensity_oracle_pc_*); this is the comparator's own gate
+# (docs/testing.md, "The PC source terms' oracle"). No device: NOT
 # REQUIRES_GPU. Nothing here checks a derivative -- the oracle IS the
 # derivative, and it is only compared with itself.
 add_gtest_executable(

@@ -980,9 +980,10 @@ sum for SC, so the analytic run takes **150 s against 9.3 s** at N2 CAS(4,4)
 [`reference-data.md`](reference-data.md), "The analytic gradient", which keeps
 the two SC walls. Nothing is wrong with that — it is
 the price of a self-contained source term, and what the GPU's own dump was
-meant to replace — which it cannot yet, even for SC ("The GPU as the
-source-term provider", below), and for PC there is no device source term at
-all (#74).
+meant to replace — and since #89 (SC) and #74 (PC) it does: "The GPU as the
+source-term provider", below, and [`pc-nevpt2.md`](pc-nevpt2.md), "The source
+terms by reverse mode", where a PC gradient from the GPU's dump costs an
+E_CASCI-only sweep instead of this one.
 The numerical side is far cheaper and does both schemes in one pass: 494 s for
 acrolein's 96 displaced states and 35.9 s for N2's 36, SC and PC together.
 
@@ -1200,7 +1201,9 @@ writes the GPU's own `Y_xy` and `y_I` to a `.gradsrc`, and
 `nevpt2_grad.py --source both` builds the nuclear gradient from them, solves
 it a second time from PySCF's on the **same** `kappa` sweep (so the two can
 differ only through the source terms), and prints both beside `grad_num`.
-SC only: the GPU has no PC source terms (#74). The gate is the same 1e-6 per
+This section is SC's; PC's GPU-sourced gradient (#74, `--pc` on both
+programs) is [`pc-nevpt2.md`](pc-nevpt2.md), "The source terms by reverse
+mode". The gate is the same 1e-6 per
 component, for the reason "The tolerance, and why it is not 1e-7" gives.
 
 **Since #89 the GPU-sourced gradient passes** — within 1e-6 of `grad_num` on
@@ -1845,10 +1848,15 @@ rebuilt state (checked against the golden's `e_pc_total`), its
 `kappa_sweep` and its `pyscf_ci_source`, every displaced CI vector through
 the PC guard ([`reference-data.md`](reference-data.md), "The SC source-term
 oracle"). N2 CAS(4,4) only: LiF has no PC answer ("LiF has no PC gradient,
-and that is the answer"), and acrolein stays #74's manual gate.
+and that is the answer"), and acrolein stays the manual gate.
 
-**Until #74 there is no GPU PC term to compare**, so there is no `gpu` entry
-yet. What is gated now is the comparison itself: `nevpt2.source_compare`
+**Since #74 the GPU's PC terms are held to it on a card**:
+`nevpt2_sc_pseudodensity_oracle_pc_n2_ccpvdz_cas44` runs `--pc
+--source-oracle` against this file, every block held to agree within the
+tolerance below, and every block does on its first run — what it measures,
+on both cards, is [`pc-nevpt2.md`](pc-nevpt2.md), "The source terms by
+reverse mode", PC's one home. Beside it the comparison itself is gated:
+`nevpt2.source_compare`
 (`apps/sc_pseudodensity/source_compare.cppm`) holds the comparator, the
 known-gap list and both tolerances, and the unit suite
 `test/source_compare/` runs every committed oracle, SC and PC, through it
@@ -1856,9 +1864,9 @@ with no card — the oracle against itself passes with all nine rows compared,
 and a copy with **one** block moved by ten tolerances fails naming that block
 and nothing else, for every block of every oracle (`P y` included), while half
 a tolerance still passes. The PC oracle is classified with an **empty**
-known-gap list (`kClassifiedOracles`), so #74's entry is held to every
-block from its first run; `nevpt2_sc_pseudodensity --source-oracle` refuses a
-PC oracle as a configuration error, because the terms it assembles are SC's.
+known-gap list (`kClassifiedOracles`), so the PC entry is held to every
+block; `nevpt2_sc_pseudodensity --source-oracle` refuses an oracle of the
+other scheme than the run's (`--pc` or not) as a configuration error.
 
 ### The tolerance, measured from the PC step ladders
 
@@ -1909,9 +1917,10 @@ project's 1e-7, and the gate is that:
 per element, absolute (Eh): twenty times the oracle's worst ladder spread at
 the committed steps. Its one home is this row: `apps/sc_pseudodensity/CMakeLists.txt`
 reads it at configure time into `NEVPT2_PC_SOURCE_ORACLE_TOL`, beside SC's.
-It is set before any GPU PC term exists, so #74's first entry measures the
-device against it; a difference above it is a finding about the device, and
-widening the row is a ratchet a human moves. The `2^-17` rung of the kappa
+It was set before any GPU PC term existed, so #74's entry measured the
+device against it rather than the other way round; a difference above it is
+a finding about the device, and widening the row is a ratchet a human
+moves. The `2^-17` rung of the kappa
 ladder is the committed file byte for byte.
 
 ## Residual-independent checks of the gradient path
@@ -2003,7 +2012,11 @@ N2 PC's steps did not change, and its re-run reproduces every figure in its
 column. Acrolein SC is gated against a fresh `nevpt2_numgrad.py --pc --npz`
 (its sidecar is gitignored). Acrolein PC's checks have **never been run**:
 its steps did not change either, so it was not re-run for #77, and it was not
-re-run for #70 — it is the 6.3 h pair above.
+re-run for #70 — it is the 6.3 h pair above. #74 ran them for the first
+time, with the GPU's PC source terms: 7 of 11 hold, the four CI-side ladders
+failing on run length — an open finding ([`pc-nevpt2.md`](pc-nevpt2.md), "The
+source terms by reverse mode", which also records N2 PC's one such ladder with
+the GPU's terms).
 
 **Two of these pass with little margin, and both are the ladders' own
 limits on N2, not the steps':**

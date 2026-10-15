@@ -710,4 +710,140 @@ Tensor ciSourceVector(const SigmaVectorOptions& opt, const Tensor& ci, int64_t n
                       const Tensor& g3, const Tensor& gac, const Tensor& gca, const Tensor& h2e,
                       const DeviceResources& res);
 
+// --- PC-NEVPT2's reverse mode (#74) -------------------------------------------
+//
+// The PC source terms -- y_I = dE_pc/dc_I and Y_xy = dE_pc/dkappa_xy -- by the
+// adjoint of the PC solve, the counterpart of everything above for the
+// partially-contracted energy (nevpt2.energy's pcEnergiesDevice). The
+// derivation, and why the solve may be differentiated at all, is the
+// :pc_classes partition's header (it cites docs/pc-nevpt2.md, "The
+// singular-metric convention"): the adjoint is valid exactly where the energy
+// accepts a class, and A CLASS THE GAP OR DENOMINATOR CHECK REFUSES IS REFUSED
+// HERE TOO -- reported through its PcClassResult, never as a zero
+// contribution. Like SC's, these carry the digests' and the orbital energies'
+// dependences (the #73 amendment): y the orbital energies' response through
+// an OrbitalEnergyResponse, Y the f3ac/f3ca digests' transpose through
+// `digestAdjoint` (pcDigestAdjointDevice) and the orbital energies' response
+// through the sidecar. The forward modes they are held against are
+// nevpt2.energy's pcTangentsDevice (with its `epsDot`) along a CI direction,
+// and pcFullRotationDevice's own tangent plus pcDigestRotationTangentDevice
+// along a rotation.
+
+// One PC class's reverse-mode answer. `result` is the class's own solve's
+// (status, energy, spectrum): nothing else here means anything unless it is
+// Done. The rotation vectors parallel the request list, as ScClassGradient's;
+// dE/de is filled when the orbital energies' response was asked for.
+struct PcClassGradient {
+  PcClassResult result;
+  std::vector<double> rotExt{};      // sum_slabs <dE/dslab, slabdot>
+  std::vector<double> rotAct{};      // <dE/dK, Kdot>
+  std::vector<double> rotTangent{};  // the forward tangent's integral half
+  std::vector<double> rotEps{};      // sum_t R_t Deltadot_t, shared by both modes
+  std::vector<double> dEdCore{};
+  std::vector<double> dEdVirt{};
+};
+
+struct PcGradientResult {
+  std::array<PcClassGradient, 8> classes{};  // CLASSES order
+  double total = 0.0;                        // sum of the classes' energies
+
+  // Every class Done: what every consumer must check before reading a number.
+  bool allDone() const {
+    return std::ranges::all_of(
+        classes, [](const PcClassGradient& c) { return c.result.status == PcStatus::Done; });
+  }
+  // "Sr (S's gap 1.2e+00 < PC_MIN_GAP 1e+03), ..." -- the refused classes and
+  // why, for a report or an Error; empty when allDone().
+  std::string refusals() const;
+};
+
+// The PC CI source term. `ok` is allDone(): only then is `y` the derivative
+// (and filled); otherwise `walk` says which class was refused and why.
+struct PcCiSourceResult {
+  PcGradientResult walk;
+  bool ok = false;
+  Tensor y;  // (nstringsA, nstringsB), when ok
+  bool orbitalEnergiesMove = false;
+  std::vector<double> dEdCore{};
+  std::vector<double> dEdVirt{};
+};
+
+// y_I = dE_pc/dc_I: every class's solve differentiated down to the five RDM
+// coefficient tensors (the SC sweeps of nevpt2.gradient:rdm_adjoint, reused),
+// then the same sigma assembly as scCiSourceDevice (ciSourceVector). `eps`
+// non-null: the orbital energies move with the active density, R_t scattered
+// onto dE/de and folded onto dm1 through W, exactly as SC's (#87). An
+// eigensolve's devInfo != 0 is the Numerical Error pcEnergiesDevice returns.
+// Integral-direct, on res.stream(), every tensor from res's pool.
+Result<PcCiSourceResult> pcCiSourceDevice(const NevptIntegralsDevice& ints, const Tensor& ci,
+                                          int64_t nelecA, int64_t nelecB,
+                                          const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                          const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                          const DeviceTensor& f3ca,
+                                          const SigmaVectorOptions& sigma,
+                                          const OrbitalEnergyResponse* eps,
+                                          const DeviceResources& res);
+
+// One direction's PC answer over the full kappa space, summed over the eight
+// classes -- ScFullRotationPairing's fields, PC's numbers: `integral` and
+// `tangentIntegral` the two modes of the integral half (the pair the duality
+// reads), `eps` the orbital energies' share both carry, `digest` the reverse
+// digests' term (<hbar, h2e_dot>, zero unless `digestAdjoint` was handed in).
+// The FULL duality is `adjoint` against `tangent` plus
+// pcDigestRotationTangentDevice's term.
+struct PcFullRotationResult {
+  PcGradientResult walk;
+  bool ok = false;  // walk.allDone(): only then is `dirs` meaningful
+  std::vector<ScFullRotationPairing> dirs{};
+};
+
+// The PC pseudodensities paired with every direction (full (n_mo, n_mo)
+// antisymmetric kappas) and, for a direction that asks, the forward tangent
+// along it. Integral-direct only, as scFullRotationDevice (the general action
+// reads whole blocks). A malformed kappa or a sidecar that does not fit is
+// the caller's input: an Error.
+Result<PcFullRotationResult> pcFullRotationDevice(
+    const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen, const DeviceTensor& dm1,
+    const DeviceTensor& dm2, const DeviceTensor& dm3, const DeviceTensor& f3ac,
+    const DeviceTensor& f3ca, const DeviceTensor* digestAdjoint,
+    const std::vector<ScRotationRequest>& dirs, const DeviceResources& res);
+
+// Y_pc as a MATRIX on the requested pairs, by probing, exactly as
+// scFullRotationMatrix. A refused class is a Numerical Error naming it --
+// there is no place in a matrix for "this class has no derivative".
+Result<Tensor> pcFullRotationMatrix(const NevptIntegralsDevice& ints,
+                                    const GeneralIntegralsDevice& gen, const DeviceTensor& dm1,
+                                    const DeviceTensor& dm2, const DeviceTensor& dm3,
+                                    const DeviceTensor& f3ac, const DeviceTensor& f3ca,
+                                    const DeviceTensor* digestAdjoint,
+                                    const std::vector<std::pair<int64_t, int64_t>>& pairs,
+                                    int64_t chunk, const DeviceResources& res);
+
+// hbar = dE_pc/d(h2e) THROUGH THE DIGESTS: the PC sweep's dE/d(f3ac),
+// dE/d(f3ca) (Sr's a16 and Si's a22 read them) taken back onto h2e by
+// nevpt2.rdm_build's transpose -- scDigestAdjointDevice's two steps, PC's
+// first. A refused class is a Numerical Error naming it.
+Result<DeviceTensor> pcDigestAdjointDevice(const RdmBuildOptions& opt, const Tensor& ci,
+                                           int64_t nelecA, int64_t nelecB,
+                                           const NevptIntegralsDevice& ints,
+                                           const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                           const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                           const DeviceTensor& f3ca, const DeviceResources& res);
+
+// The digests' term in FORWARD mode along each direction: the RDM build at
+// h2e_dot(kappa) is (f3ac_dot, f3ca_dot), and pcTangentsDevice with every
+// other RDM tangent zero is the PC energy's response to it --
+// scDigestRotationTangentDevice's construction for PC. Exact digests only
+// (the caller's cli refuses the rest); a refused class is a Numerical Error.
+Result<std::vector<ScDigestTangent>> pcDigestRotationTangentDevice(
+    const RdmBuildOptions& opt, const Tensor& ci, int64_t nelecA, int64_t nelecB,
+    const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen, const DeviceTensor& dm1,
+    const DeviceTensor& dm2, const DeviceTensor& dm3, const DeviceTensor& f3ac,
+    const DeviceTensor& f3ca, const std::vector<ScRotationRequest>& dirs,
+    const DeviceResources& res);
+
+// The per-class PC table every PC source-term report prints: status (REFUSED
+// with its reason, or the energy), and the total.
+void printPcGradientClasses(const PcGradientResult& r);
+
 }  // namespace nevpt2

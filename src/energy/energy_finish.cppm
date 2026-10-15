@@ -359,4 +359,234 @@ void tangentSingle(const Tensor& y, const Tensor& ydot, const std::vector<double
   }
 }
 
+// sum_t R_t Deltadot_t over a single-coupling class's tuples (Sr, Si, Srs,
+// Sij, Sir), with R_t = dE_t/dDelta_t = factor |g_t|^2 -- E_t =
+// -factor sum_k y_tk^2 / (lambda_k + Delta_t) differentiated in its Delta
+// (#74). The orbital energies' half of the PC CI tangent, when they move with
+// the active density (`deltaDot` is the class's own Delta construction read
+// at the orbital energies' tangent); y is (nt, m), one row per tuple.
+double pcDeltaTangentSingle(const Tensor& y, const std::vector<double>& lambda,
+                            const std::vector<double>& delta,
+                            const std::vector<double>& deltaDot, double factor) {
+  const int64_t nt = std::ssize(delta), m = std::ssize(lambda);
+  check(y.size() == nt * m && std::ssize(deltaDot) == nt,
+        "pcDeltaTangentSingle: y must be (tuples, m) and deltaDot one per tuple");
+  double sum = 0.0;
+  for (int64_t t = 0; t < nt; ++t) {
+    double gg = 0.0;
+    for (int64_t k = 0; k < m; ++k) {
+      const double g = y.flat(t * m + k) / (lambda[narrowTo<std::size_t>(k)] +
+                                            delta[narrowTo<std::size_t>(t)]);
+      gg += g * g;
+    }
+    sum += factor * gg * deltaDot[narrowTo<std::size_t>(t)];
+  }
+  return sum;
+}
+
+// --- PC: the ADJOINT's per-tuple arithmetic (#74) -----------------------------
+//
+// Reverse mode of the same finish. Every PC class energy is a sum over its
+// tuples of quadratic forms in the eigenbasis rows y_t = U^T b_t,
+//
+//   single (Sr, Si, Srs, Sij, Sir)  E_t = -f y_t^T D_t^-1 y_t
+//   pair   (Sijr, Srsi)             E_t = -(2 y_t^T D_t^-1 y_t - y_t^T D_t^-1 x_t)
+//
+// with D_t = diag(lambda + Delta_t) and x_t the exchange row: the partner
+// tuple's y (Sijr: the (j, i)-swapped row of the same tensor) or the SrsiT
+// slab's row (Srsi: a second tensor, which IS the partner's y). With
+// g = D^-1 y, everything the adjoint needs comes out of the rows alone:
+//
+//   ybar_t  = dE/dy_t         the slab einsum's adjoint input: what the
+//                             external integrals' pseudodensity (dE/dslab)
+//                             and dE/dT, dE/dt_1 are contracted from
+//   r_t     = dE/dDelta_t     Park Eq. 38's R for PC: what dE/de_core /
+//                             dE/de_virt are scattered from
+//   mgg    += the (m, m) weight of the solve's Hamiltonian: dE through
+//             dA = U^T dA U is <mgg, U^T dA U> (row-major, NOT symmetrised --
+//             the caller takes sym), and mggDelta the same weighted by Delta_t
+//             (A = K + Delta S, so S's share of it)
+//
+// derived in nevpt2.gradient:pc_classes' header: dE = sum_t ybar_t . dy_t +
+// <mgg, U^T dA U> + ..., the solve differentiated, no eigenvector derivative.
+// The forward side's per-tuple arithmetic is tangentSingle / pcQuadForm above
+// and pcRotationTangent* below -- separate code, so a transcription error in
+// one does not cancel in the duality.
+struct PcSlabAdjoint {
+  double energy = 0.0;        // this slab's share of the class energy
+  std::vector<double> ybar;   // (nt * m): dE/dy, same layout as y
+  std::vector<double> xbar;   // (nt * m): dE/dx for a two-tensor pair; empty otherwise
+  std::vector<double> r;      // (nt): dE/dDelta_t
+};
+
+// One single-coupling slab: y (nt, m), factor f. `mgg` / `mggDelta` are (m, m)
+// row-major accumulators the caller owns (zero-filled once per class);
+// `minDen` is tracked as finishSingle does.
+PcSlabAdjoint pcAdjointSingle(const Tensor& y, const std::vector<double>& lambda,
+                              const std::vector<double>& delta, double factor,
+                              std::vector<double>& mgg, std::vector<double>& mggDelta,
+                              double& minDen) {
+  const int64_t nt = std::ssize(delta), m = std::ssize(lambda);
+  check(y.size() == nt * m && std::ssize(mgg) == m * m && std::ssize(mggDelta) == m * m,
+        "pcAdjointSingle: y must be (tuples, m) and the weights (m, m)");
+  PcSlabAdjoint out;
+  out.ybar.assign(narrowTo<std::size_t>(nt * m), 0.0);
+  out.r.assign(narrowTo<std::size_t>(nt), 0.0);
+  std::vector<double> g;
+  for (int64_t t = 0; t < nt; ++t) {
+    const std::span<const double> row(y.data().data() + t * m, narrowTo<std::size_t>(m));
+    const double dt = delta[narrowTo<std::size_t>(t)];
+    pcCoefficients(row, lambda, dt, g, minDen);
+    double gy = 0.0, gg = 0.0;
+    for (int64_t k = 0; k < m; ++k) {
+      const std::size_t uk = narrowTo<std::size_t>(k);
+      gy += g[uk] * row[uk];
+      gg += g[uk] * g[uk];
+      out.ybar[narrowTo<std::size_t>(t * m + k)] = -2.0 * factor * g[uk];
+    }
+    out.energy -= factor * gy;
+    out.r[narrowTo<std::size_t>(t)] = factor * gg;
+    for (int64_t k = 0; k < m; ++k) {
+      const double gk = factor * g[narrowTo<std::size_t>(k)];
+      if (gk == 0.0) continue;
+      for (int64_t l = 0; l < m; ++l) {
+        const double w = gk * g[narrowTo<std::size_t>(l)];
+        mgg[narrowTo<std::size_t>(k * m + l)] += w;
+        mggDelta[narrowTo<std::size_t>(k * m + l)] += dt * w;
+      }
+    }
+  }
+  return out;
+}
+
+// One two-coupling slab, E_t = -(2 y_t D^-1 y_t - y_t D^-1 x_t). The exchange
+// row x_t is either `x` (Srsi: a second (nt, m) tensor, whose adjoint comes
+// back in `xbar`) or, with `x` null, row partner[t] of `y` itself (Sijr:
+// partner swaps j and i, an involution within the slab) -- then x's adjoint is
+// folded back onto ybar's partner row and `xbar` stays empty, so ybar is the
+// derivative of the class energy as a function of y alone.
+PcSlabAdjoint pcAdjointPair(const Tensor& y, const Tensor* x, std::span<const int64_t> partner,
+                            const std::vector<double>& lambda, const std::vector<double>& delta,
+                            std::vector<double>& mgg, std::vector<double>& mggDelta,
+                            double& minDen) {
+  const int64_t nt = std::ssize(delta), m = std::ssize(lambda);
+  check(y.size() == nt * m && std::ssize(mgg) == m * m && std::ssize(mggDelta) == m * m,
+        "pcAdjointPair: y must be (tuples, m) and the weights (m, m)");
+  check(x != nullptr ? x->size() == nt * m : std::ssize(partner) == nt,
+        "pcAdjointPair: the exchange rows are a second (tuples, m) tensor or a partner map");
+  PcSlabAdjoint out;
+  out.ybar.assign(narrowTo<std::size_t>(nt * m), 0.0);
+  if (x != nullptr) out.xbar.assign(narrowTo<std::size_t>(nt * m), 0.0);
+  out.r.assign(narrowTo<std::size_t>(nt), 0.0);
+  std::vector<double> g, gx;
+  for (int64_t t = 0; t < nt; ++t) {
+    const int64_t pt = x != nullptr ? t : partner[narrowTo<std::size_t>(t)];
+    check(pt >= 0 && pt < nt, "pcAdjointPair: a partner outside the slab");
+    const std::span<const double> row(y.data().data() + t * m, narrowTo<std::size_t>(m));
+    const std::span<const double> xrow((x != nullptr ? *x : y).data().data() + pt * m,
+                                       narrowTo<std::size_t>(m));
+    const double dt = delta[narrowTo<std::size_t>(t)];
+    pcCoefficients(row, lambda, dt, g, minDen);
+    pcCoefficients(xrow, lambda, dt, gx, minDen);
+    double gy = 0.0, gxv = 0.0, gg = 0.0, ggx = 0.0;
+    for (int64_t k = 0; k < m; ++k) {
+      const std::size_t uk = narrowTo<std::size_t>(k);
+      gy += g[uk] * row[uk];
+      gxv += g[uk] * xrow[uk];
+      gg += g[uk] * g[uk];
+      ggx += g[uk] * gx[uk];
+      out.ybar[narrowTo<std::size_t>(t * m + k)] += -(4.0 * g[uk] - gx[uk]);
+      if (x != nullptr)
+        out.xbar[narrowTo<std::size_t>(t * m + k)] = g[uk];
+      else
+        out.ybar[narrowTo<std::size_t>(pt * m + k)] += g[uk];
+    }
+    out.energy -= 2.0 * gy - gxv;
+    out.r[narrowTo<std::size_t>(t)] = 2.0 * gg - ggx;
+    for (int64_t k = 0; k < m; ++k) {
+      const double gk = g[narrowTo<std::size_t>(k)];
+      if (gk == 0.0) continue;
+      for (int64_t l = 0; l < m; ++l) {
+        const double w = gk * (2.0 * g[narrowTo<std::size_t>(l)] - gx[narrowTo<std::size_t>(l)]);
+        mgg[narrowTo<std::size_t>(k * m + l)] += w;
+        mggDelta[narrowTo<std::size_t>(k * m + l)] += dt * w;
+      }
+    }
+  }
+  return out;
+}
+
+// --- PC: the FORWARD tangent along an orbital rotation, per tuple (#74) -------
+//
+// Along a rotation kappa at fixed CI vector only the integrals move: the slab
+// rows (T and t_1 fixed, the slab and the one-electron block dotted:
+// ydot = T^T xdot + t1^T h1dot) and the Dyall block K (mK = U^T sym(Kdot) U);
+// S and S_1 are RDM-only and do not move. These are the class finishes' tangents in that
+// setting -- tangentSingle / pcDotSijr's arithmetic with nS = 0 and a
+// factor -- taken from y and ydot directly, NOT from pcAdjoint*'s ybar, so the
+// rotation duality compares two computations. The orbital energies' share
+// (sum_t R_t Deltadot_t) is reported apart, as for SC (gradient.cppm, "The
+// full source term Y_xy").
+
+// sum_t [ -f (2 g_t . ydot_t - g_t^T mK g_t) ] over a single-coupling slab.
+double pcRotationTangentSingle(const Tensor& y, const Tensor& ydot,
+                               const std::vector<double>& lambda,
+                               const std::vector<double>& delta, double factor,
+                               const std::vector<double>& mK) {
+  const int64_t nt = std::ssize(delta), m = std::ssize(lambda);
+  check(y.size() == nt * m && ydot.size() == nt * m && std::ssize(mK) == m * m,
+        "pcRotationTangentSingle: y, ydot must be (tuples, m) and mK (m, m)");
+  const std::vector<double> zero(narrowTo<std::size_t>(m * m), 0.0);
+  std::vector<double> g;
+  double minDen = std::numeric_limits<double>::infinity(), edot = 0.0;
+  for (int64_t t = 0; t < nt; ++t) {
+    const std::span<const double> row(y.data().data() + t * m, narrowTo<std::size_t>(m));
+    const double dt = delta[narrowTo<std::size_t>(t)];
+    pcCoefficients(row, lambda, dt, g, minDen);
+    double dotTerm = 0.0;
+    for (int64_t k = 0; k < m; ++k) dotTerm += g[narrowTo<std::size_t>(k)] * ydot.flat(t * m + k);
+    edot -= factor * (2.0 * dotTerm - pcQuadForm(g, g, mK, zero, dt));
+  }
+  return edot;
+}
+
+// The same for a two-coupling slab (pcAdjointPair's two layouts): `x` /
+// `xdot` the exchange rows and their tangent, or both null with `partner`.
+double pcRotationTangentPair(const Tensor& y, const Tensor* x, const Tensor& ydot,
+                             const Tensor* xdot, std::span<const int64_t> partner,
+                             const std::vector<double>& lambda, const std::vector<double>& delta,
+                             const std::vector<double>& mK) {
+  const int64_t nt = std::ssize(delta), m = std::ssize(lambda);
+  check(y.size() == nt * m && ydot.size() == nt * m && std::ssize(mK) == m * m,
+        "pcRotationTangentPair: y, ydot must be (tuples, m) and mK (m, m)");
+  check((x != nullptr) == (xdot != nullptr) &&
+            (x != nullptr ? x->size() == nt * m && xdot->size() == nt * m
+                          : std::ssize(partner) == nt),
+        "pcRotationTangentPair: the exchange rows are a tensor pair or a partner map");
+  const std::vector<double> zero(narrowTo<std::size_t>(m * m), 0.0);
+  std::vector<double> gu, gv;
+  double minDen = std::numeric_limits<double>::infinity(), edot = 0.0;
+  for (int64_t t = 0; t < nt; ++t) {
+    const int64_t pt = x != nullptr ? t : partner[narrowTo<std::size_t>(t)];
+    const Tensor& xs = x != nullptr ? *x : y;
+    const Tensor& xds = xdot != nullptr ? *xdot : ydot;
+    const std::span<const double> yu(y.data().data() + t * m, narrowTo<std::size_t>(m));
+    const std::span<const double> yv(xs.data().data() + pt * m, narrowTo<std::size_t>(m));
+    const double dt = delta[narrowTo<std::size_t>(t)];
+    pcCoefficients(yu, lambda, dt, gu, minDen);
+    pcCoefficients(yv, lambda, dt, gv, minDen);
+    double duu = 0.0, duv = 0.0, dvu = 0.0;
+    for (int64_t k = 0; k < m; ++k) {
+      const std::size_t uk = narrowTo<std::size_t>(k);
+      duu += gu[uk] * ydot.flat(t * m + k);
+      duv += gu[uk] * xds.flat(pt * m + k);
+      dvu += gv[uk] * ydot.flat(t * m + k);
+    }
+    const double qUU = pcQuadForm(gu, gu, mK, zero, dt);
+    const double qUV = pcQuadForm(gu, gv, mK, zero, dt);
+    edot -= 2.0 * (2.0 * duu - qUU) - (duv + dvu - qUV);
+  }
+  return edot;
+}
+
 }  // namespace nevpt2

@@ -29,9 +29,12 @@ constexpr std::uint8_t kEvery = kDemo | kDfDemo | kScPd | kPcTangent;
 constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 
 // What implements what, and why a binary that does not refuses it:
-//   --pc            the demos only: nevpt2_sc_pseudodensity has no PC
-//                   pseudodensities, and nevpt2_pc_tangent is PC throughout,
-//                   so the switch would change nothing there.
+//   --pc            the demos, and nevpt2_sc_pseudodensity for its two
+//                   source-term jobs alone (--dump-source-terms and
+//                   --source-oracle write / compare PC-NEVPT2's with it, #74;
+//                   the identities and --kappa-act / --kappa-full are SC's,
+//                   so it is a config error there). nevpt2_pc_tangent is PC
+//                   throughout, so the switch would change nothing there.
 //   --profile       the demos only: nothing else prints a profile table.
 //   --rdm-tangent   the demos only: the gradient binaries run no Euler check of
 //                   the tangent RDM build beside their own (#38, #39).
@@ -53,7 +56,7 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 constexpr std::array kFlagTable{
     FlagSpec{"--golden", "path", kEvery},
     FlagSpec{"--tiles", "N", kEvery},
-    FlagSpec{"--pc", "", kDemos},
+    FlagSpec{"--pc", "", kDemos | kScPd},
     FlagSpec{"--profile", "", kDemos},
     FlagSpec{"--rdm-tangent", "", kDemos},
     FlagSpec{"--consume-emitted", "", kEvery},
@@ -172,9 +175,12 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
             "{} runs the tangent RDM build, which is the emitted digest or --blas-digest; "
             "not --cublas, --ozaki or --fused-digest",
             which));
-      if (c.pc)
-        return err_config(std::format(
-            "{} differentiates the strongly-contracted energy; it has no --pc path", which));
+      // --gradient-source --pc is the PC CI source term's duality (#74);
+      // --sc-tangent is the SC tangent's finite difference and nothing else.
+      if (c.pc && opt.scTangent)
+        return err_config(
+            "--sc-tangent differentiates the strongly-contracted energy; it has no --pc path "
+            "(the PC tangent's finite difference is nevpt2_pc_tangent)");
       // Each check prints its own report and returns before the profile tables
       // are printed, so --profile would be parsed and ignored.
       if (c.profile)
@@ -202,6 +208,12 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
         return err_config(
             "--source-oracle compares the source terms --dump-source-terms writes and "
             "--kappa-act / --kappa-full check; run one at a time");
+      // --pc picks PC-NEVPT2's source terms (#74): only the two jobs that
+      // assemble them take it.
+      if (c.pc && opt.dumpSourceTermsPath.empty() && opt.sourceOraclePath.empty())
+        return err_config(
+            "--pc makes --dump-source-terms and --source-oracle PC-NEVPT2's; the identities, "
+            "--kappa-act and --kappa-full are the SC energy's and have no --pc path");
       if (!opt.gradgoldPath.empty() && !opt.kappaFull && opt.dumpSourceTermsPath.empty() &&
           opt.sourceOraclePath.empty())
         return err_config(

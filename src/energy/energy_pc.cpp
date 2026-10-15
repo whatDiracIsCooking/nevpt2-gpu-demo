@@ -17,6 +17,7 @@ import :shared;
 import :pc_solve;
 import :pc_classes;
 import :pc_tangent;
+import :sc_tangent;  // tangent_Sijrs: PC's Sijrs IS SC's, Delta term included (#74)
 import nevpt2.profile;
 // The wwrsolverStatus_t error specializations, which make gpuCheck accept a
 // solver status (the calling unit imports them; nevpt2.wwr does not re-export them).
@@ -68,7 +69,9 @@ Result<PcTangentResult> pcTangentsDevice(const ActiveIntegralsDevice& ai, Integr
                                          const DeviceTensor& f3ac, const DeviceTensor& f3ca,
                                          const DeviceTensor& dm1Dot, const DeviceTensor& dm2Dot,
                                          const DeviceTensor& dm3Dot, const DeviceTensor& f3acDot,
-                                         const DeviceTensor& f3caDot, const DeviceResources& dr) {
+                                         const DeviceTensor& f3caDot,
+                                         const OrbitalEnergyDot* epsDot,
+                                         const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   // --profile: the tangent's einsums land in the energy table beside the
   // energy stage's, as the SC and PC stages' do.
@@ -90,19 +93,24 @@ Result<PcTangentResult> pcTangentsDevice(const ActiveIntegralsDevice& ai, Integr
   const PcRdms sum{&dm1Sum, &dm2Sum, &dm3Sum, &f3acSum, &f3caSum};
 
   PcTangentResult r;
-  r.classes[0] = NEVPT2_TRY(pcDotSr(ai, src, batch, ev, rdm, sum, dr));
-  r.classes[1] = NEVPT2_TRY(pcDotSi(ai, src, batch, ec, rdm, sum, dr));
+  r.classes[0] = NEVPT2_TRY(pcDotSr(ai, src, batch, ev, rdm, sum, epsDot, dr));
+  r.classes[1] = NEVPT2_TRY(pcDotSi(ai, src, batch, ec, rdm, sum, epsDot, dr));
   // Sijrs contracts no RDM (no active index at all), so its energy is the SC
-  // one -- the same function, not a copy -- and its tangent is EXACTLY zero,
-  // not a number too small to see.
+  // one -- the same function, not a copy -- and at fixed orbital energies its
+  // tangent is EXACTLY zero, not a number too small to see. With `epsDot` its
+  // Delta (four orbital energies) moves, and the SC tangent's own Sijrs term
+  // is the answer: PC's Sijrs IS SC's (#74).
   r.classes[2].result.status = PcStatus::Done;
-  r.classes[2].result.energy = energy_Sijrs(ai, src, batch, dr).second;
-  r.classes[2].edot = 0.0;
-  r.classes[3] = NEVPT2_TRY(pcDotSijr(ai, src, batch, ec, ev, rdm, sum, dr));
-  r.classes[4] = NEVPT2_TRY(pcDotSrsi(ai, src, batch, ec, ev, rdm, sum, dr));
-  r.classes[5] = NEVPT2_TRY(pcDotSrs(ai, src, batch, ev, rdm, sum, dr));
-  r.classes[6] = NEVPT2_TRY(pcDotSij(ai, src, batch, ec, rdm, sum, dr));
-  r.classes[7] = NEVPT2_TRY(pcDotSir(ai, src, batch, ec, ev, rdm, sum, dr));
+  {
+    const ScTangentSums sijrs = tangent_Sijrs(ai, src, batch, epsDot, dr);
+    r.classes[2].result.energy = sijrs.energy;
+    r.classes[2].edot = sijrs.energyDot;
+  }
+  r.classes[3] = NEVPT2_TRY(pcDotSijr(ai, src, batch, ec, ev, rdm, sum, epsDot, dr));
+  r.classes[4] = NEVPT2_TRY(pcDotSrsi(ai, src, batch, ec, ev, rdm, sum, epsDot, dr));
+  r.classes[5] = NEVPT2_TRY(pcDotSrs(ai, src, batch, ev, rdm, sum, epsDot, dr));
+  r.classes[6] = NEVPT2_TRY(pcDotSij(ai, src, batch, ec, rdm, sum, epsDot, dr));
+  r.classes[7] = NEVPT2_TRY(pcDotSir(ai, src, batch, ec, ev, rdm, sum, epsDot, dr));
   return r;
 }
 
@@ -113,6 +121,7 @@ Result<PcTangentResult> pcTangentsDevice(const NevptIntegralsDevice& ints,
                                          const DeviceTensor& dm2Dot, const DeviceTensor& dm3Dot,
                                          const DeviceTensor& f3acDot,
                                          const DeviceTensor& f3caDot,
+                                         const OrbitalEnergyDot* epsDot,
                                          const DeviceResources& res) {
   FullBlockSource src(ints);
   // Views: `ints` keeps owning everything.
@@ -120,7 +129,39 @@ Result<PcTangentResult> pcTangentsDevice(const NevptIntegralsDevice& ints,
                            ints.e_virt.view(),   ints.h1e_v_Sr.view(), ints.h1e_v_Si.view(),
                            ints.h1e_v_Sir.view()};
   return pcTangentsDevice(ai, src, /*batch=*/0, dm1, dm2, dm3, f3ac, f3ca, dm1Dot, dm2Dot,
-                          dm3Dot, f3acDot, f3caDot, res);
+                          dm3Dot, f3acDot, f3caDot, epsDot, res);
+}
+
+PcMatrices pcClassMatrices(const int cls, const DeviceTensor& h1e, const DeviceTensor& h2e,
+                           const PcRdms& rdm, const DeviceResources& res) {
+  // The class builders read the active integrals alone out of the bundle.
+  const ActiveIntegralsDevice ai{h1e.view(), h2e.view(), {}, {}, {}, {}, {}};
+  switch (cls) {
+    case 0: return pcMatricesSr(ai, rdm, res);
+    case 1: return pcMatricesSi(ai, rdm, res);
+    case 3: return pcMatricesSijr(ai, rdm, res);
+    case 4: return pcMatricesSrsi(ai, rdm, res);
+    case 5: return pcMatricesSrs(ai, rdm, res);
+    case 6: return pcMatricesSij(ai, rdm, res);
+    case 7: return pcMatricesSir(ai, rdm, res);
+    default: break;
+  }
+  check(false, std::format("pcClassMatrices: class {} has no PC matrices (Sijrs is SC's)", cls));
+  return {};
+}
+
+Result<PcClassSolve> pcSolveClass(const PcMatrices& mx, const char* name,
+                                  const DeviceResources& res) {
+  const DeviceTensor s1 = mx.hasS1 ? mx.matS1() : DeviceTensor();
+  ClassSolve cs = NEVPT2_TRY(solveClass(mx.matS(), mx.matK(), name, res,
+                                        mx.hasS1 ? &s1 : nullptr, /*keepUt=*/true));
+  PcClassSolve out;
+  out.result = std::move(cs.result);
+  out.lambda = std::move(cs.lambda);
+  out.T = std::move(cs.T);
+  out.t1 = std::move(cs.t1);
+  out.Ut = std::move(cs.Ut);
+  return out;
 }
 
 bool printPcReport(const PcEnergyResult& r, const Tensor& ref, double refTotal, double atol) {

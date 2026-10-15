@@ -51,34 +51,9 @@ namespace nevpt2 {
 
 // --- the RDM bundle and one class's matrices ----------------------------------
 
-// The active-space RDMs a class's matrices are built from: non-owning, the
-// caller (pcTangentsDevice) owns every tensor. dm1/dm2 are its uploads,
-// dm3/f3ac/f3ca the RDM build's own output -- exactly energiesDevice's
-// inputs.
-struct PcRdms {
-  const DeviceTensor* dm1 = nullptr;
-  const DeviceTensor* dm2 = nullptr;
-  const DeviceTensor* dm3 = nullptr;
-  const DeviceTensor* f3ac = nullptr;
-  const DeviceTensor* f3ca = nullptr;
-};
-
-// One class's three matrices, each in its natural PySCF index shape and
-// owning its buffer; `matS`/`matK`/`matS1` are the flattened (d, d) /
-// (d, n1) VIEWS solveClass and tangentClass take (reshapeView: no copy, and
-// valid only while this struct lives).
-struct PcMatrices {
-  DeviceTensor S;
-  DeviceTensor K;
-  DeviceTensor S1;        // empty unless hasS1
-  int64_t d = 0;          // the flattened basis dimension
-  int64_t n1 = 0;         // S_1's column count (0 unless hasS1)
-  bool hasS1 = false;
-
-  DeviceTensor matS() const { return reshapeView(S, {d, d}); }
-  DeviceTensor matK() const { return reshapeView(K, {d, d}); }
-  DeviceTensor matS1() const { return reshapeView(S1, {d, n1}); }
-};
+// PcRdms (the RDM bundle) and PcMatrices (one class's S, K, S_1) are
+// exported from energy.cppm (#74: nevpt2.gradient's PC adjoint builds the same
+// matrices through pcClassMatrices below).
 
 // x + y as a fresh tensor from the pool: the summed RDM bundle the tangent
 // matrices are built from (used by energy_pc.cpp's pcTangentsDevice). Same
@@ -259,11 +234,23 @@ PcMatrices pcMatricesSir(const ActiveIntegralsDevice& ai, const PcRdms& r,
 // and the same einsum against Tdot -- accumulating E and Edot together.
 // A class the solve refuses returns that refusal with edot untouched (0 and
 // meaningless, which `result.status` says).
+//
+// `epsDot` non-null (#74): the orbital energies move too, and each tuple adds
+// R_t Deltadot_t, Deltadot_t the class's own Delta read at epsDot.
+
+// `v[b0, b1)` as a vector, negated when `negate`: a Delta's one-index piece.
+std::vector<double> pcSlice(const Tensor& v, int64_t b0, int64_t b1, bool negate = false) {
+  std::vector<double> out(v.data().begin() + b0, v.data().begin() + b1);
+  if (negate)
+    for (double& x : out) x = -x;
+  return out;
+}
 
 // Sr: Delta = e_virt[r], factor 1.
 Result<PcClassTangent> pcDotSr(const ActiveIntegralsDevice& ai, IntegralSource& src,
                                int64_t batch, const Tensor& ev, const PcRdms& rdm,
-                               const PcRdms& sum, const DeviceResources& dr) {
+                               const PcRdms& sum, const OrbitalEnergyDot* epsDot,
+                               const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const int64_t n = rdm.dm2->dims[0];
   PcClassTangent out;
@@ -298,6 +285,8 @@ Result<PcClassTangent> pcDotSr(const ActiveIntegralsDevice& ai, IntegralSource& 
     const Tensor yd = downloadTensor(Yd, s);  // (nr, m)
     std::vector<double> delta(ev.data().begin() + b0, ev.data().begin() + b1);
     tangentSingle(y, yd, cs.lambda, delta, ct.mK, ct.nS, e, edot, minDen);
+    if (epsDot != nullptr)
+      edot += pcDeltaTangentSingle(y, cs.lambda, delta, pcSlice(epsDot->virt, b0, b1), 1.0);
   });
   out.result = cs.result;
   out.result.energy = e;
@@ -309,7 +298,8 @@ Result<PcClassTangent> pcDotSr(const ActiveIntegralsDevice& ai, IntegralSource& 
 // Si: Delta = -e_core[i], factor 1.
 Result<PcClassTangent> pcDotSi(const ActiveIntegralsDevice& ai, IntegralSource& src,
                                int64_t batch, const Tensor& ec, const PcRdms& rdm,
-                               const PcRdms& sum, const DeviceResources& dr) {
+                               const PcRdms& sum, const OrbitalEnergyDot* epsDot,
+                               const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const int64_t n = rdm.dm2->dims[0];
   PcClassTangent out;
@@ -345,6 +335,9 @@ Result<PcClassTangent> pcDotSi(const ActiveIntegralsDevice& ai, IntegralSource& 
     std::vector<double> delta(ec.data().begin() + b0, ec.data().begin() + b1);
     for (double& x : delta) x = -x;
     tangentSingle(y, yd, cs.lambda, delta, ct.mK, ct.nS, e, edot, minDen);
+    if (epsDot != nullptr)
+      edot += pcDeltaTangentSingle(y, cs.lambda, delta,
+                                   pcSlice(epsDot->core, b0, b1, /*negate=*/true), 1.0);
   });
   out.result = cs.result;
   out.result.energy = e;
@@ -361,7 +354,7 @@ Result<PcClassTangent> pcDotSi(const ActiveIntegralsDevice& ai, IntegralSource& 
 Result<PcClassTangent> pcDotSijr(const ActiveIntegralsDevice& ai, IntegralSource& src,
                                  int64_t batch, const Tensor& ec, const Tensor& ev,
                                  const PcRdms& rdm, const PcRdms& sum,
-                                 const DeviceResources& dr) {
+                                 const OrbitalEnergyDot* epsDot, const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   PcClassTangent out;
   ClassSolve cs;
@@ -403,7 +396,7 @@ Result<PcClassTangent> pcDotSijr(const ActiveIntegralsDevice& ai, IntegralSource
           const std::span<const double> ydv(yd.data().data() + offV, narrowTo<std::size_t>(m));
           pcCoefficients(yu, cs.lambda, delta, gu, minDen);
           pcCoefficients(yv, cs.lambda, delta, gv, minDen);
-          double uu = 0.0, uv = 0.0, duu = 0.0, duv = 0.0, dvu = 0.0;
+          double uu = 0.0, uv = 0.0, duu = 0.0, duv = 0.0, dvu = 0.0, guu = 0.0, guv = 0.0;
           for (int64_t k = 0; k < m; ++k) {
             const std::size_t uk = narrowTo<std::size_t>(k);
             uu += gu[uk] * yu[uk];
@@ -411,11 +404,17 @@ Result<PcClassTangent> pcDotSijr(const ActiveIntegralsDevice& ai, IntegralSource
             duu += gu[uk] * ydu[uk];
             duv += gu[uk] * ydv[uk];
             dvu += gv[uk] * ydu[uk];
+            guu += gu[uk] * gu[uk];
+            guv += gu[uk] * gv[uk];
           }
           e -= 2.0 * uu - uv;
           const double qUU = pcQuadForm(gu, gu, ct.mK, ct.nS, delta);
           const double qUV = pcQuadForm(gu, gv, ct.mK, ct.nS, delta);
           edot -= 2.0 * (2.0 * duu - qUU) - (duv + dvu - qUV);
+          // #74: dE_t/dDelta_t = 2 |g_u|^2 - g_u . g_v, against Deltadot_t.
+          if (epsDot != nullptr)
+            edot += (2.0 * guu - guv) * (epsDot->virt.flat(b0 + r) - epsDot->core.flat(j) -
+                                         epsDot->core.flat(i));
         }
   });
   out.result = cs.result;
@@ -430,7 +429,7 @@ Result<PcClassTangent> pcDotSijr(const ActiveIntegralsDevice& ai, IntegralSource
 Result<PcClassTangent> pcDotSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src,
                                  int64_t batch, const Tensor& ec, const Tensor& ev,
                                  const PcRdms& rdm, const PcRdms& sum,
-                                 const DeviceResources& dr) {
+                                 const OrbitalEnergyDot* epsDot, const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   PcClassTangent out;
   ClassSolve cs;
@@ -474,7 +473,7 @@ Result<PcClassTangent> pcDotSrsi(const ActiveIntegralsDevice& ai, IntegralSource
           const std::span<const double> ydv(ytd.data().data() + off, narrowTo<std::size_t>(m));
           pcCoefficients(yu, cs.lambda, delta, gu, minDen);
           pcCoefficients(yv, cs.lambda, delta, gv, minDen);
-          double uu = 0.0, uv = 0.0, duu = 0.0, duv = 0.0, dvu = 0.0;
+          double uu = 0.0, uv = 0.0, duu = 0.0, duv = 0.0, dvu = 0.0, guu = 0.0, guv = 0.0;
           for (int64_t k = 0; k < m; ++k) {
             const std::size_t uk = narrowTo<std::size_t>(k);
             uu += gu[uk] * yu[uk];
@@ -482,11 +481,17 @@ Result<PcClassTangent> pcDotSrsi(const ActiveIntegralsDevice& ai, IntegralSource
             duu += gu[uk] * ydu[uk];
             duv += gu[uk] * ydv[uk];
             dvu += gv[uk] * ydu[uk];
+            guu += gu[uk] * gu[uk];
+            guv += gu[uk] * gv[uk];
           }
           e -= 2.0 * uu - uv;
           const double qUU = pcQuadForm(gu, gu, ct.mK, ct.nS, delta);
           const double qUV = pcQuadForm(gu, gv, ct.mK, ct.nS, delta);
           edot -= 2.0 * (2.0 * duu - qUU) - (duv + dvu - qUV);
+          // #74: dE_t/dDelta_t = 2 |g_u|^2 - g_u . g_v, against Deltadot_t.
+          if (epsDot != nullptr)
+            edot += (2.0 * guu - guv) * (epsDot->virt.flat(b0 + r) + epsDot->virt.flat(ss) -
+                                         epsDot->core.flat(i));
         }
   });
   out.result = cs.result;
@@ -499,7 +504,8 @@ Result<PcClassTangent> pcDotSrsi(const ActiveIntegralsDevice& ai, IntegralSource
 // Srs: Delta = e_v[r] + e_v[s], factor 1/2 on every ordered (r, s).
 Result<PcClassTangent> pcDotSrs(const ActiveIntegralsDevice& ai, IntegralSource& src,
                                 int64_t batch, const Tensor& ev, const PcRdms& rdm,
-                                const PcRdms& sum, const DeviceResources& dr) {
+                                const PcRdms& sum, const OrbitalEnergyDot* epsDot,
+                                const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const int64_t n = rdm.dm1->dims[0], nv = std::ssize(ev);
   PcClassTangent out;
@@ -544,6 +550,12 @@ Result<PcClassTangent> pcDotSrs(const ActiveIntegralsDevice& ai, IntegralSource&
         }
         e -= 0.5 * norm;
         edot -= 0.5 * (2.0 * dotTerm - pcQuadForm(g, g, ct.mK, ct.nS, delta));
+        // #74: dE_t/dDelta_t = (1/2) |g|^2, against Deltadot_t.
+        if (epsDot != nullptr) {
+          double gg = 0.0;
+          for (const double gk : g) gg += gk * gk;
+          edot += 0.5 * gg * (epsDot->virt.flat(b0 + r) + epsDot->virt.flat(ss));
+        }
       }
   });
   out.result = cs.result;
@@ -556,7 +568,8 @@ Result<PcClassTangent> pcDotSrs(const ActiveIntegralsDevice& ai, IntegralSource&
 // Sij: Delta = -(e_c[i] + e_c[j]), factor 1/2 on every ordered (i, j).
 Result<PcClassTangent> pcDotSij(const ActiveIntegralsDevice& ai, IntegralSource& src,
                                 int64_t batch, const Tensor& ec, const PcRdms& rdm,
-                                const PcRdms& sum, const DeviceResources& dr) {
+                                const PcRdms& sum, const OrbitalEnergyDot* epsDot,
+                                const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const int64_t n = rdm.dm1->dims[0], nc = std::ssize(ec);
   PcClassTangent out;
@@ -601,6 +614,12 @@ Result<PcClassTangent> pcDotSij(const ActiveIntegralsDevice& ai, IntegralSource&
         }
         e -= 0.5 * norm;
         edot -= 0.5 * (2.0 * dotTerm - pcQuadForm(g, g, ct.mK, ct.nS, delta));
+        // #74: dE_t/dDelta_t = (1/2) |g|^2, against Deltadot_t.
+        if (epsDot != nullptr) {
+          double gg = 0.0;
+          for (const double gk : g) gg += gk * gk;
+          edot -= 0.5 * gg * (epsDot->core.flat(b0 + i) + epsDot->core.flat(j));
+        }
       }
   });
   out.result = cs.result;
@@ -614,7 +633,7 @@ Result<PcClassTangent> pcDotSij(const ActiveIntegralsDevice& ai, IntegralSource&
 Result<PcClassTangent> pcDotSir(const ActiveIntegralsDevice& ai, IntegralSource& src,
                                 int64_t batch, const Tensor& ec, const Tensor& ev,
                                 const PcRdms& rdm, const PcRdms& sum,
-                                const DeviceResources& dr) {
+                                const OrbitalEnergyDot* epsDot, const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const int64_t n = rdm.dm1->dims[0], nc = std::ssize(ec);
   const int64_t d = 2 * n * n;
@@ -672,6 +691,12 @@ Result<PcClassTangent> pcDotSir(const ActiveIntegralsDevice& ai, IntegralSource&
         }
         e -= norm;
         edot -= 2.0 * dotTerm - pcQuadForm(g, g, ct.mK, ct.nS, delta);
+        // #74: dE_t/dDelta_t = |g|^2, against Deltadot_t.
+        if (epsDot != nullptr) {
+          double gg = 0.0;
+          for (const double gk : g) gg += gk * gk;
+          edot += gg * (epsDot->virt.flat(b0 + r) - epsDot->core.flat(i));
+        }
       }
   });
   out.result = cs.result;

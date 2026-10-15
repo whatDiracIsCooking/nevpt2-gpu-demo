@@ -277,8 +277,10 @@ an antisymmetric ``kappa`` and a normalised ``c`` define: ``Y_xy - Y_yx``, and
     report carries both gradients beside ``grad_num`` and a difference can
     only come from the source terms. ``--localise`` adds PySCF's functional
     with the omissions #73 measured put back (:func:`localise_sources`);
-    ``--sources-only`` stops after the comparison. SC only: the GPU has no PC
-    source terms (#74).
+    ``--sources-only`` stops after the comparison. With ``--pc`` the dump
+    must be a PC one (``nevpt2_sc_pseudodensity --pc --dump-source-terms``,
+    #74, which marks it) and PySCF's side is block2's PC functional; the
+    ``--localise`` comparison is SC's alone.
 ``--source pyscf`` (the default)
     central differences of PySCF's own SC-NEVPT2 energy: at fixed CI along
     every non-gauge ``kappa`` pair for ``Y``, and at fixed orbitals along
@@ -1237,7 +1239,7 @@ class SourceTerms:
 DUMP_CI_TOL = 1e-8
 
 
-def load_source_terms(path: Path, st: State) -> SourceTerms:
+def load_source_terms(path: Path, st: State, *, pc: bool = False) -> SourceTerms:
     """A ``.gradsrc`` dump -- ``nevpt2_sc_pseudodensity --dump-source-terms``'s
     -- the GPU's ``Y_xy`` and ``y_I``, checked against the state they claim to
     belong to and carried into the basis this state is held in.
@@ -1254,7 +1256,11 @@ def load_source_terms(path: Path, st: State) -> SourceTerms:
     which is orthogonal, so ``y' = T(W) y`` -- the same transform the state
     took. The dump's own ``ci`` is the fingerprint: it must be the golden's
     vector up to a sign, and the sign is applied to ``y`` (``E`` is even in
-    ``c``, so ``y`` is odd)."""
+    ``c``, so ``y`` is odd).
+
+    **The scheme must be this run's** (#74): a PC dump carries ``pc`` = 1 and
+    an SC one no such member, and a dump of the other scheme is refused rather
+    than solved with -- its ``e_corr`` is then checked against the PC total."""
     with np.load(path) as z:
         for key in ("kappa_source", "ci_source", "ci"):
             if key not in z:
@@ -1269,6 +1275,14 @@ def load_source_terms(path: Path, st: State) -> SourceTerms:
         y_ci = np.asarray(z["ci_source"], dtype=float)
         ci_dump = np.asarray(z["ci"], dtype=float)
         e_corr = float(z["e_corr"]) if "e_corr" in z else None
+        dump_pc = bool(int(z["pc"])) if "pc" in z else False
+    if dump_pc != pc:
+        raise SystemExit(
+            f"{path} holds the GPU's {'PC' if dump_pc else 'SC'}-NEVPT2 source terms, and this "
+            f"run differentiates {'PC' if pc else 'SC'}-NEVPT2 -- "
+            + ("drop --pc" if dump_pc else "pass --pc, or dump with "
+               "nevpt2_sc_pseudodensity --pc --dump-source-terms")
+        )
     if y_mat.shape != (st.nmo, st.nmo):
         raise SystemExit(
             f"{path}: kappa_source is {y_mat.shape}, expected ({st.nmo}, {st.nmo})"
@@ -1286,9 +1300,11 @@ def load_source_terms(path: Path, st: State) -> SourceTerms:
             f"{path}: its CI vector is {off:.2e} from the golden's (allowed "
             f"{DUMP_CI_TOL:g}, after the sign): the dump is of a different state"
         )
-    if e_corr is not None and abs(e_corr - st.e_corr) > REF_STATE_TOL:
+    want = st.e_corr_pc if pc else st.e_corr
+    if e_corr is not None and abs(e_corr - want) > REF_STATE_TOL:
         raise SystemExit(
-            f"{path}: its E_corr is {e_corr - st.e_corr:+.2e} from the rebuilt state's"
+            f"{path}: its E_corr is {e_corr - want:+.2e} from the rebuilt state's"
+            + (" PC total" if pc else "")
         )
     w = np.eye(st.nmo)
     w[st.act, st.act] = st.act_rot
@@ -2995,16 +3011,21 @@ def run(args) -> dict:
 
     # --- the CI source term ----------------------------------------------
     both = args.source == "both"
-    if both and (args.casci_only or args.pc):
+    if both and args.casci_only:
         raise SystemExit(
-            "--source both compares the GPU's SC source terms with PySCF's; the GPU has "
-            "no PC ones (#74) and --casci-only has none at all"
+            "--source both compares the GPU's source terms with PySCF's; --casci-only has "
+            "none at all"
+        )
+    if args.localise and args.pc:
+        raise SystemExit(
+            "--localise puts #73's two SC omissions back into PySCF's SC functional; the PC "
+            "dump (#74) has no such omissions to localise"
         )
     print("\nsource terms (Park Eqs. 26-27)")
     t_src = time.perf_counter()
     src_pyscf = None
     if args.source_path is not None:
-        src = load_source_terms(args.source_path, st)
+        src = load_source_terms(args.source_path, st, pc=args.pc)
         print(f"  read from {args.source_path} and carried into section 2.6's basis: "
               f"max |Y - Y^T| = {np.abs(src.kappa).max():.6e}, "
               f"|y| = {np.linalg.norm(src.ci):.8f}")
@@ -3093,8 +3114,10 @@ def run(args) -> dict:
         # point -- a disagreement localises to Y and y, not to the solve.
         print("\nthe same solve with PySCF's source terms, on the same sweep")
         def solve_with(terms: SourceTerms) -> tuple[np.ndarray, dict]:
+            # The run's own scheme: the skeleton derivative the AO contraction
+            # takes is PC's for a PC run (#74), as the GPU-sourced solve's is.
             gx = Gradients(st, terms, with_corr=True, step=args.step,
-                           richardson=args.richardson, pc=False, kappa_step=args.kappa_step)
+                           richardson=args.richardson, pc=args.pc, kappa_step=args.kappa_step)
             gx.prepare(log=lambda *a: None, sweep=g.sweep)
             gx.solve_multipliers(log=lambda *a: None)
             return gx.kernel(), dict(gx.residuals)
@@ -3334,7 +3357,8 @@ def main() -> None:
                          "PySCF's terms are compared with it componentwise and "
                          "solved on the same sweep, so the report carries both "
                          "gradients beside grad_num (docs/testing.md, \"The GPU "
-                         "as the source-term provider\"). SC only")
+                         "as the source-term provider\"). With --pc the dump "
+                         "must be a PC one (#74)")
     ap.add_argument("--source-path", type=Path, default=None,
                     help="the .gradsrc dump --source dump / both reads")
     ap.add_argument("--sources-only", action="store_true",

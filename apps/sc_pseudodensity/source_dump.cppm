@@ -53,6 +53,18 @@
 //      duality (#89), across the file's own members, so the Y written is the
 //      derivative whose directional values the file also carries.
 //
+// WITH --pc (#74) IT WRITES PC-NEVPT2'S instead: Y and y by the PC solve's
+// adjoint (pcFullRotationMatrix, pcCiSourceDevice -- nevpt2.gradient's PC
+// reverse mode), each with the same two dependences the SC dump carries (the
+// digests' transpose in Y, pcDigestAdjointDevice; the orbital energies'
+// response in y), and the same four checks against the PC energy and the PC
+// forward modes. One check more, because the PC rotation tangent is new code
+// where SC's is --kappa-full's: 5, the INTEGRAL halves' duality on the same
+// seeded directions -- the adjoint pairing of the slab and Dyall-block
+// pseudodensities against the forward tangent from the same rows, 1e-7. A PC
+// class the gap or denominator check refuses has no derivative: the dump is
+// refused, naming it, and nothing is written.
+//
 // Everything runs on the caller's one DeviceResources and its one stream.
 module;
 
@@ -108,7 +120,10 @@ double frobenius(const nevpt2::Tensor& t) {
 // writes them and --source-oracle (:source_oracle) compares them: Y over every
 // MO pair, and y over every determinant with the orbital energies' response
 // (#87) out of the sidecar -- plus the two cheap checks that they were taken
-// on this state (check 2 above).
+// on this state (check 2 above). `pc` picks the scheme (#74): SC's terms, or
+// PC-NEVPT2's from the PC solve's adjoint, a refused class being an Error
+// that names it. `energyTotal` is the matching energy stage's total
+// (energiesDevice's, or pcEnergiesDevice's), what y's walk is held to.
 struct GpuSourceTerms {
   nevpt2::Tensor kappa;   // Y_xy, [n_mo, n_mo], in the golden's basis
   nevpt2::Tensor ci;      // y_I, [n_det]
@@ -121,8 +136,8 @@ struct GpuSourceTerms {
 // Assembles GpuSourceTerms. `gen` is the sidecar's uploaded general integrals
 // (uploadGeneral), which the caller keeps for whatever else it probes.
 nevpt2::Result<GpuSourceTerms> assembleSourceTerms(
-    const nevpt2::GoldenFile& g, const nevpt2::GradGoldFile& gg,
-    const nevpt2::EnergyResult& energies, const nevpt2::NevptIntegralsDevice& ints,
+    const nevpt2::GoldenFile& g, const nevpt2::GradGoldFile& gg, const bool pc,
+    const double energyTotal, const nevpt2::NevptIntegralsDevice& ints,
     const nevpt2::GeneralIntegralsDevice& gen, const nevpt2::DeviceTensor& dm1,
     const nevpt2::DeviceTensor& dm2, const nevpt2::DeviceTensor& dm3,
     const nevpt2::DeviceTensor& f3ac, const nevpt2::DeviceTensor& f3ca,
@@ -136,8 +151,10 @@ nevpt2::Result<GpuSourceTerms> assembleSourceTerms(
   for (std::int64_t p = 0; p < nmo; ++p)
     for (std::int64_t q = p + 1; q < nmo; ++q) pairs.emplace_back(p, q);
   const auto tY = std::chrono::steady_clock::now();
-  out.kappa = NEVPT2_TRY(nevpt2::scFullRotationMatrix(ints, gen, dm1, dm2, dm3, f3ac, f3ca,
-                                                      &hbar, pairs, kDumpChunk, res));
+  out.kappa = pc ? NEVPT2_TRY(nevpt2::pcFullRotationMatrix(ints, gen, dm1, dm2, dm3, f3ac, f3ca,
+                                                           &hbar, pairs, kDumpChunk, res))
+                 : NEVPT2_TRY(nevpt2::scFullRotationMatrix(ints, gen, dm1, dm2, dm3, f3ac, f3ca,
+                                                           &hbar, pairs, kDumpChunk, res));
   double yMax = 0.0;
   for (std::int64_t i = 0; i < out.kappa.size(); ++i)
     yMax = std::max(yMax, std::fabs(out.kappa.flat(i)));
@@ -167,26 +184,43 @@ nevpt2::Result<GpuSourceTerms> assembleSourceTerms(
   out.epsGap = std::sqrt(epsNum / std::max(epsDen, 1e-300));
   out.epsOk = out.epsGap < kDumpEpsTol;
   const auto tCi = std::chrono::steady_clock::now();
-  nevpt2::ScCiSourceResult ciSrc = nevpt2::scCiSourceDevice(
-      ints, ci, g.nelecA, g.nelecB, dm1, dm2, dm3, f3ac, f3ca, sigmaOpt, &eps, res);
+  nevpt2::Tensor yCi;
+  double walkTotal = 0.0;
+  if (pc) {
+    nevpt2::PcCiSourceResult ciSrc = NEVPT2_TRY(nevpt2::pcCiSourceDevice(
+        ints, ci, g.nelecA, g.nelecB, dm1, dm2, dm3, f3ac, f3ca, sigmaOpt, &eps, res));
+    nevpt2::printPcGradientClasses(ciSrc.walk);
+    if (!ciSrc.ok)
+      return nevpt2::err_numerical(std::format(
+          "the PC source terms have no value on this state: {} refused by the solve the "
+          "energy runs (docs/pc-nevpt2.md, \"The singular-metric convention\")",
+          ciSrc.walk.refusals()));
+    walkTotal = ciSrc.walk.total;
+    yCi = std::move(ciSrc.y);
+  } else {
+    nevpt2::ScCiSourceResult ciSrc = nevpt2::scCiSourceDevice(
+        ints, ci, g.nelecA, g.nelecB, dm1, dm2, dm3, f3ac, f3ca, sigmaOpt, &eps, res);
+    walkTotal = ciSrc.pseudodensities.total;
+    yCi = std::move(ciSrc.y);
+  }
   double cy = 0.0;
-  for (std::int64_t i = 0; i < ci.size(); ++i) cy += ci.flat(i) * ciSrc.y.flat(i);
+  for (std::int64_t i = 0; i < ci.size(); ++i) cy += ci.flat(i) * yCi.flat(i);
   std::printf("  y: %lld determinants, %.2fs; |y| = %.10f, <c, y> = %.10f\n",
-              static_cast<long long>(ciSrc.y.size()),
+              static_cast<long long>(yCi.size()),
               std::chrono::duration<double>(std::chrono::steady_clock::now() - tCi).count(),
-              frobenius(ciSrc.y), cy);
+              frobenius(yCi), cy);
 
   // The walk y rode on, against the energy stage.
-  out.walkGap = std::fabs(ciSrc.pseudodensities.total - energies.total);
+  out.walkGap = std::fabs(walkTotal - energyTotal);
   out.walkOk = out.walkGap < kDumpWalkTol;
-  std::printf("  E_corr from y's walk %.10f vs energiesDevice %.10f, |delta| = %.2e "
+  std::printf("  E_corr from y's walk %.10f vs %s %.10f, |delta| = %.2e "
               "(< %.0e: %s)\n",
-              ciSrc.pseudodensities.total, energies.total, out.walkGap, kDumpWalkTol,
-              out.walkOk ? "ok" : "FAILED");
+              walkTotal, pc ? "pcEnergiesDevice" : "energiesDevice", energyTotal, out.walkGap,
+              kDumpWalkTol, out.walkOk ? "ok" : "FAILED");
   std::printf("  y carries the orbital energies' response: e_core / e_virt rebuilt as "
               "h^eff_pp + <dm1, W_p> vs the golden's, %.2e relative (< %.0e: %s)\n",
               out.epsGap, kDumpEpsTol, out.epsOk ? "ok" : "FAILED");
-  out.ci = std::move(ciSrc.y);
+  out.ci = std::move(yCi);
   return out;
 }
 
@@ -195,7 +229,7 @@ nevpt2::Result<GpuSourceTerms> assembleSourceTerms(
 // does not describe this golden, or a file that cannot be written or read, is
 // an Error the caller reports once.
 nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::GradGoldFile& gg,
-                                     const nevpt2::EnergyResult& energies,
+                                     const bool pc, const double energyTotal,
                                      const nevpt2::NevptIntegralsDevice& ints,
                                      const nevpt2::DeviceTensor& dm1,
                                      const nevpt2::DeviceTensor& dm2,
@@ -208,25 +242,43 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
   NEVPT2_TRY(gg.checkAgainst(g));
   NEVPT2_TRY(requireGradientArrays(gg));
   const std::int64_t nmo = gg.nmo;
-  std::printf("\n--dump-source-terms: the GPU's Y_xy and y_I (Park Eqs. 26-27) -> %s\n",
-              path.c_str());
+  std::printf("\n--dump-source-terms: the GPU's %s Y_xy and y_I (Park Eqs. 26-27) -> %s\n",
+              pc ? "PC-NEVPT2" : "SC-NEVPT2", path.c_str());
   std::printf("  partition: n_mo = %lld = %lld core + %lld active + %lld virtual\n",
               static_cast<long long>(nmo), static_cast<long long>(gg.ncore),
               static_cast<long long>(gg.nact), static_cast<long long>(gg.nvirt));
   const nevpt2::GeneralIntegralsDevice gen = uploadGeneral(gg, res);
   // The digests' transpose (#89): Y and every pairing below carry their term.
-  const nevpt2::DeviceTensor hbar = nevpt2::scDigestAdjointDevice(
-      rdmOpt, g.get("ci"), g.nelecA, g.nelecB, ints, dm1, dm2, dm3, f3ac, f3ca, res);
+  const nevpt2::DeviceTensor hbar =
+      pc ? NEVPT2_TRY(nevpt2::pcDigestAdjointDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB,
+                                                    ints, dm1, dm2, dm3, f3ac, f3ca, res))
+         : nevpt2::scDigestAdjointDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB, ints, dm1,
+                                         dm2, dm3, f3ac, f3ca, res);
   const GpuSourceTerms terms = NEVPT2_TRY(assembleSourceTerms(
-      g, gg, energies, ints, gen, dm1, dm2, dm3, f3ac, f3ca, hbar, rdmOpt.nTiles, res));
+      g, gg, pc, energyTotal, ints, gen, dm1, dm2, dm3, f3ac, f3ca, hbar, rdmOpt.nTiles, res));
   const nevpt2::Tensor& y = terms.kappa;
+
+  // The scheme's full-rotation pairing: SC's or PC's (#74), the same fields.
+  const auto fullRotation =
+      [&](const std::vector<nevpt2::ScRotationRequest>& req) -> nevpt2::Result<
+                                                                  nevpt2::ScFullRotationResult> {
+    if (!pc)
+      return nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, req, res);
+    nevpt2::PcFullRotationResult r = NEVPT2_TRY(
+        nevpt2::pcFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, req, res));
+    if (!r.ok)
+      return nevpt2::err_numerical(
+          std::format("the PC orbital source term has no value: {} refused", r.walk.refusals()));
+    nevpt2::ScFullRotationResult out;
+    out.dirs = std::move(r.dirs);
+    return out;
+  };
 
   // 1. the matrix against the direct pairing on one seeded full direction.
   const nevpt2::Tensor k = nevpt2::antisymmetricKappa(nmo, kDumpSeed);
   const std::vector<nevpt2::ScRotationRequest> req{
       nevpt2::ScRotationRequest{k, /*tangent=*/false}};
-  const nevpt2::ScFullRotationResult direct = NEVPT2_TRY(
-      nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, req, res));
+  const nevpt2::ScFullRotationResult direct = NEVPT2_TRY(fullRotation(req));
   double fromMatrix = 0.0;
   for (std::int64_t p = 0; p < nmo; ++p)
     for (std::int64_t q = 0; q < nmo; ++q) fromMatrix += k(p, q) * y(p, q);
@@ -248,12 +300,23 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
   std::vector<nevpt2::ScRotationRequest> edotReq;
   for (const nevpt2::Tensor& kd : kappas)
     edotReq.push_back(nevpt2::ScRotationRequest{kd, /*tangent=*/true});
-  const nevpt2::ScFullRotationResult frozen = NEVPT2_TRY(
-      nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, edotReq, res));
+  const nevpt2::ScFullRotationResult frozen = NEVPT2_TRY(fullRotation(edotReq));
   const std::vector<nevpt2::ScDigestTangent> digest =
-      NEVPT2_TRY(nevpt2::scDigestRotationTangentDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB,
-                                                       ints, gen, dm1, dm2, dm3, f3ac, f3ca,
-                                                       edotReq, res));
+      pc ? NEVPT2_TRY(nevpt2::pcDigestRotationTangentDevice(rdmOpt, g.get("ci"), g.nelecA,
+                                                            g.nelecB, ints, gen, dm1, dm2, dm3,
+                                                            f3ac, f3ca, edotReq, res))
+         : NEVPT2_TRY(nevpt2::scDigestRotationTangentDevice(rdmOpt, g.get("ci"), g.nelecA,
+                                                            g.nelecB, ints, gen, dm1, dm2, dm3,
+                                                            f3ac, f3ca, edotReq, res));
+  // 5 (PC only, #74): the integral halves' own duality on the same directions --
+  // the PC rotation tangent is this dump's, where SC's is --kappa-full's.
+  bool halvesOk = true;
+  if (pc) {
+    halvesOk = nevpt2::printScFullRotationTable(frozen, kDumpEdotTol);
+    std::printf("  5. the PC integral halves, adjoint vs forward tangent, every direction "
+                "within %.0e: %s\n",
+                kDumpEdotTol, halvesOk ? "ok" : "FAILED");
+  }
   const bool fullDual = nevpt2::printScDigestTangentTable(frozen, digest, kDumpEdotTol);
   // 4. the EXACT forward Edot -- frozen-digest tangent plus the digests'
   // term -- against the matrix being written, which carries the transpose's
@@ -280,7 +343,8 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
   out.ncore = gg.ncore;
   out.nact = gg.nact;
   out.nvirt = gg.nvirt;
-  out.eCorr = energies.total;
+  out.eCorr = energyTotal;
+  out.pc = pc;
   const std::int64_t ndir = std::ssize(kappas);
   out.edotKappa = nevpt2::Tensor({ndir, nmo, nmo});
   out.edotFrozen = nevpt2::Tensor({ndir});
@@ -301,16 +365,23 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
                          back.nact == out.nact && back.nvirt == out.nvirt &&
                          std::bit_cast<std::uint64_t>(back.eCorr) ==
                              std::bit_cast<std::uint64_t>(out.eCorr) &&
+                         back.pc == out.pc &&
                          sameTensor(back.edotKappa, out.edotKappa) &&
                          sameTensor(back.edotFrozen, out.edotFrozen) &&
                          sameTensor(back.edotDigest, out.edotDigest);
   std::printf("  3. %s read back: %s\n", path.c_str(),
               roundTrip ? "every member identical, bit for bit" : "DIFFERS from what was written");
 
-  const bool ok = matrixOk && walkOk && epsOk && roundTrip && edotOk;
-  std::printf("\n%s: the GPU's source terms Y_xy and y_I were assembled, written to %s and "
-              "read back unchanged, with Edot(kappa) along %zu seeded directions in its "
-              "frozen-digest and digest terms\n",
-              ok ? "PASS" : "FAIL", path.c_str(), kappas.size());
+  const bool ok = matrixOk && walkOk && epsOk && roundTrip && edotOk && halvesOk;
+  if (pc)
+    std::printf("\n%s: the GPU's PC source terms Y_xy and y_I were assembled, written to %s and "
+                "read back unchanged; the adjoint and the forward tangent agree along %zu "
+                "seeded directions, integral halves and exact\n",
+                ok ? "PASS" : "FAIL", path.c_str(), kappas.size());
+  else
+    std::printf("\n%s: the GPU's source terms Y_xy and y_I were assembled, written to %s and "
+                "read back unchanged, with Edot(kappa) along %zu seeded directions in its "
+                "frozen-digest and digest terms\n",
+                ok ? "PASS" : "FAIL", path.c_str(), kappas.size());
   return ok;
 }
