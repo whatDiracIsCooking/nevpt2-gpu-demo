@@ -2084,7 +2084,7 @@ table.
 | projection of `y` | `\|c·y\| <= 1e-6`: `y` IS the projected gradient | the `y_I` quotients |
 | projection of `z` | `\|c·z\| <= 1e-6`: `z` IS projected | the CI Z-vector solve |
 | `y` linearity, two seeds | `<u, y>` against a step ladder of `E_corr` along `u`, through `Functional.evaluate` — not through `corr_at_ci`, the route `y` was built on | the `y_I` quotients, `CI_STEP` / `CI_STEP_PC` |
-| CI stationarity, two seeds | the Lagrangian's CI part, laddered along `u` at the solved multipliers, has zero slope | the CI Z-vector solve and the CI/(O2) coupling |
+| CI stationarity, two seeds | the Lagrangian's CI part, laddered along `u` at the solved multipliers, has zero slope (its three pieces laddered one by one and summed when the whole shows no run: "PC's CI-direction ladders, measured") | the CI Z-vector solve and the CI/(O2) coupling |
 | orbital stationarity, two seeds | the Lagrangian at fixed `c`, laddered along `C exp(t kappa)` over every non-gauge rotation — the set derived from the RHF occupied projector, **not** the solve's own `kappa_pairs` | the orbital Z-vector solve, `KAPPA_STEP`'s `A`, `M` and `Q` |
 | nuclear ladder, two seeds | `Phi` laddered along a totally symmetric displacement against `<d, g>` | `NUC_STEP`'s quotients and their Richardson pass |
 | PC guard at every displaced CI vector | a ledger: every PC energy at a CI vector other than the state's own ran the conditioning guard (counted in a different place from the evaluation), and no guarded point **kept a mode the reference state drops** (a block's smallest kept singular value under `1e-2` of the reference's) | every displaced PC quantity; orbital and nuclear ladder rungs are guarded too, as a sample |
@@ -2154,8 +2154,9 @@ its steps did not change either, so it was not re-run for #77, and it was not
 re-run for #70 — it is the 6.3 h pair above. #74 ran them for the first
 time, with the GPU's PC source terms: 7 of 11 hold, the four CI-side ladders
 failing on run length — an open finding ([`pc-nevpt2.md`](pc-nevpt2.md), "The
-source terms by reverse mode", which also records N2 PC's one such ladder with
-the GPU's terms).
+source terms by reverse mode"). N2 PC's one such ladder with the GPU's terms
+was diagnosed and resolved by #104 ("PC's CI-direction ladders, measured",
+below); acrolein's is #105's.
 
 **Two of these pass with little margin, and both are the ladders' own
 limits on N2, not the steps':**
@@ -2338,6 +2339,117 @@ Measured on N2 CAS(4,4) PC:
   1.4e-9 at `2^-5`, astride the cut at `2^-10` (the gap guard refuses one
   seed there, gap 8.1e2) and dropped from `2^-11` down. There the ladder
   agrees with `<u, y>` to **2.2e-10**.
+
+### PC's CI-direction ladders, measured
+
+#103 left N2 CAS(4,4) PC at 10 of 11: CI stationarity, seed 2026, two
+fourfold halvings where the rule wants three (Richardson 8.3e-13 from zero).
+#104 measured why, on N2 CAS(4,4) PC, from both providers: GPU-sourced
+(`--source both`, PR #103's RTX 3080 dump) and PySCF-sourced (`--source
+pyscf`). A scratch copy of the checks extended both ladders to `h = 2^-8 …
+2^-26` and laddered the CI Lagrangian's three pieces one by one. Single-threaded
+Python, PySCF 2.14.0, block2 0.5.4, no card.
+
+**The ladder's start is fixed by the PC metric, not chosen.** Above `2^-11`
+the guard refuses a rung: `irabpq1`'s gap is 4.7e2 at `2^-9` (seed 70) and
+8.1e2 at `2^-10` (seed 2026). Its rank check flags `2^-8 … 2^-10`. So
+`CI_LADDER_PC` cannot start any coarser.
+
+**The ladder's end is double-precision round-off, at machine level on N2.**
+Read off the round-off rungs as `|change| × h`, each evaluation's noise is:
+
+| quantity laddered along the CI direction | noise per evaluation (Eh) |
+|---|---:|
+| `E_corr(PC)` (`y` linearity) | 1e-17 – 4e-17 (`E_corr` is 0.235 Eh: about one ulp) |
+| `<z\|H\|c> − E_CASCI <z\|c>`, `ecore` inside `H\|c>` | 1e-16 – 2e-16 |
+| the same, active-space `H\|c>` only | ~1e-17 |
+| `lambda · G` | ~1e-18 |
+
+So on N2 nothing is block2-specific. The worst term was the check's own: the
+inactive constant `ecore` (~1e2 Eh) entered `<z|H|c>` and `E_CASCI <z|c>`
+identically. It cancels exactly, so it added nothing but `|z| ecore eps` of
+round-off, ten times the rest of the Lagrangian's.
+
+**Why the stationarity ladder is the short one.** The Lagrangian's slope is
+zero because its pieces cancel, and most of their truncation cancels with
+them. The round-off does not cancel. Changes at `2^-12`, seed 2026,
+PySCF-sourced:
+
+| `E_corr` | `<z\|H − E\|c>` | `lambda · G` | the Lagrangian |
+|---:|---:|---:|---:|
+| 1.65e-8 | 1.69e-8 | 4.9e-11 | **4.08e-10** |
+
+The sum's truncation is 40 times smaller than its pieces', so it reaches the
+floor about two halvings sooner. The fourfold runs:
+
+| | GPU-sourced | PySCF-sourced |
+|---|---|---|
+| `y` linearity, seed 70 / 2026 (one ladder; only the reference differs) | 4 / 5 | 4 / 5 |
+| CI stationarity, seed 70 / 2026, `ecore` inside (PR #103's run) | 4 / **2** | pass / 3 |
+| the same, re-run for #104 | 4 / 3 (ratio 4.48 at `2^-15`) | 3 / **2** (ratio 2.93 at `2^-15`) |
+| CI stationarity, active-only `H\|c>` (committed) | 4 / 4 (3 in a second run) | 4 / 3 (both runs) |
+| … its pieces alone, seed 2026: `E_corr` / `lambda · G` / `z` term | 5 / 4 / 6 | 5 / 4 / 6 |
+
+Which provider lands on the rule's edge changes between runs. In PR #103
+the GPU-sourced run failed; in the re-run the PySCF-sourced one did, with
+the same rule and the same inputs. That is the signature of a ladder whose
+round-off rung decides the count. Every Richardson value stayed at most
+8.1e-11 from zero, against the 1e-6 allowance.
+
+**The resolution, in `check_ci_stationarity`.** `FOURFOLD_RUN`, the 1e-6
+allowance, `CI_STEP_PC` and `CI_LADDER_PC` are unchanged. The check changed
+in two ways:
+
+1. **The `z` term is formed from the active-space `H|c>`** (`hvec_act`),
+   without `ecore`. This is the same number in exact arithmetic, with a
+   floor ten times lower.
+2. **When the whole Lagrangian shows no run of three, its pieces are
+   laddered one by one.** Each piece is held to its own run of three and
+   its own Richardson value, and those values must sum to zero within 1e-6.
+   The slope is linear in the pieces, so this is the same statement. Each
+   piece shows 4–6 halvings on N2, where the sum shows 3. This fallback
+   exists for the edge case above, and SC never reaches it.
+
+With both changes, N2 CAS(4,4) PC passes 11 of 11 from both providers, and
+each provider's gradient is unchanged (1.86e-8 and 1.51e-8 from `grad_num`).
+Read by pieces on both seeds, the sums are 2.6e-12 / 1.9e-12 (GPU) and
+2.2e-10 / 7.5e-11 (PySCF).
+
+**SC is unchanged.** LiF CAS(4,6), acrolein CAS(6,5) and N2 CAS(4,4) SC
+each pass 11 of 11, on the whole Lagrangian (CI stationarity 9 / 9
+halvings on LiF, 10 / 9 on acrolein, 8 / 9 on N2), so the fallback is never
+reached. LiF's column of "What the committed cases come out at" reproduces
+(CI stationarity 3.5e-10 / 2.2e-10). The worst CI stationarity moves from
+7.8e-11 to 7.0e-11 on acrolein, and from 7.2e-9 to 7.1e-9 on N2 SC.
+
+**Negative controls** (scratch, `--source dump`): the dump's `y` scaled on
+the 4 in-sector determinants whose alpha string is in irrep 1, which is the
+dominant determinant's.
+
+| `y` scaled by | `\|dy\|` | `y` linearity | CI stationarity, whole | … by pieces (forced) | gradient vs `grad_num` |
+|---|---:|---|---|---|---|
+| 1.01 | 1.4e-3 | **FAIL** 4.7e-4 / 4.1e-4 | **FAIL** 4.7e-4 / 4.1e-4 | **FAIL** 4.7e-4 / 4.1e-4 | **FAIL** 1.1e-4 |
+| 1.0001 | 1.4e-5 | **FAIL** 4.7e-6 / 4.1e-6 | **FAIL** 4.7e-6 / 4.1e-6 | **FAIL** 4.7e-6 / 4.1e-6 | **FAIL** 1.08e-6 |
+
+The CI-direction checks catch a `y` error at the size where the gradient
+itself only just fails, and the by-pieces reading catches it equally.
+
+**N2 CAS(8,8) PC did not fit #104's 30-minute budget per run.** Its PC
+`grad_num` took 233 s. But `--source pyscf` was still inside PySCF's `y_I`
+quotients when it was stopped at 30 minutes. The one CAS(8,8) dump at hand
+(PR #103's) is refused at load: its `E_corr` is 2.7e-10 from the rebuilt
+state's, against `REF_STATE_TOL`. So its CI ladders are unmeasured.
+
+**Acrolein CAS(6,5) PC is not re-run here** (its `--source both` is 6.8 h;
+#105 re-checks it through the directional oracle). Its four failures are not
+all of N2's kind. Its two failing `y`-linearity ladders difference
+`E_corr(PC)` alone, so neither change above touches them. Their round-off
+rungs in PR #103's table (seed 70: changes 3.4e-10 … 2.8e-9 at `2^-14 …
+2^-16`) put each evaluation's noise near 1e-14 to 4e-14 on a 0.547 Eh
+energy. That is roughly 100–400 ulp, against N2's one. So acrolein's PC
+reference functional is itself noisy along CI directions, which supports
+#103's hypothesis there. It also means a PC regime for acrolein's CI
+directions is #105's to measure.
 
 ### The C++ side
 

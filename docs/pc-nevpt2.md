@@ -817,24 +817,27 @@ RTX 3080. (#74 also fixed `--source both`'s PySCF-sourced solve, which had
 | … the GPU's `Y` alone / `y` alone | 3.6e-9 / 7.1e-11 | 2.1e-9 / 9.2e-8 |
 | the dump vs PySCF's `A` at `KAPPA_STEP_PC`, worst block | 1.5e-8 (core–virt) | 3.4e-8 (core–virt) |
 | the dump's `P y` vs PySCF's | 8.6e-10 | 6.5e-7 |
-| residual-independent checks | 10 of 11 (below) | 7 of 11 (below) |
+| residual-independent checks | 11 of 11 since #104 (below; 10 of 11 at #74) | 7 of 11 (below) |
 | `--source both` wall | 182 s | 24616 s |
 
 The worst block is core–virt at `KAPPA_STEP_PC` = 1e-4, which "The PC source
 terms' oracle" measures 1.5e-8 from converged — PySCF's truncation, not the
 device's: against the oracle's converged step the same block is 1.8e-10.
 
-**One residual-independent check fails on N2, on run length alone, and is
-recorded rather than worked around.** CI stationarity, seed 2026: the
-Lagrangian's slope along the seeded CI direction ladders 5.4e-10, 1.4e-10,
-3.4e-11, 9.1e-12 at `h = 2^-11 … 2^-14` and hits the quotient's round-off at
-`2^-15`, so the fourfold run is two halvings where the rule wants three; its
-Richardson value is 8.3e-13 from zero. The PySCF-sourced run of the same case
-passes the same check with three (ratio 3.92 at `2^-13`, and 8.0e-11 from
-zero): the truncation term itself is that small, and which side of the rule's
-edge the round-off rung lands on is luck. Seed 70 passes in both, and so do
-all other ten checks, the PC guard's ledger included (88 of 88 displaced CI
-vectors guarded on PySCF's side, rank unchanged at every one).
+**N2's residual-independent checks: 11 of 11 from both providers since
+#104.** At #74 one check failed on run length alone: CI stationarity, seed
+2026 (two fourfold halvings where the rule wants three, 8.3e-13 from zero),
+while the PySCF-sourced run passed it with three. #104 measured the cause
+([`testing.md`](testing.md), "PC's CI-direction ladders, measured"). At a
+solution the Lagrangian's pieces cancel, so its truncation term is ~40
+times smaller than theirs. Its round-off is not, and the check's `z` term
+carried `ecore`'s for nothing. Between the guard-fixed start at `2^-11` and
+that floor, the ladder sits on the rule's edge, and which provider falls off
+it changes from run to run. The fix is in the check, not in the rule: the
+`z` term is formed without `ecore`, and when the whole shows no run the
+pieces are laddered one by one. The rest held throughout, the PC guard's
+ledger included (88 of 88 displaced CI vectors guarded, rank unchanged at
+every one).
 
 **Acrolein: open findings, not resolved here.** Four of its eleven
 residual-independent checks fail, all on ladder run length: `y` linearity,
@@ -848,7 +851,11 @@ and 1.3e-5 at 5e-8, 2.5e-8 and 1e-8; that attribution row puts 9.2e-8 of the
 gradient's GPU-vs-PySCF difference on `y`. A hypothesis, not a conclusion:
 both are block2's PC energy reaching its round-off at small CI steps on this
 state (the failing ladders difference block2's `E_corr`, and the `P y`
-difference grows as `1/h`). These ladders were never run for acrolein PC
+difference grows as `1/h`). #104 supports it without settling it, and did
+not re-run acrolein. Acrolein's `y`-linearity round-off rungs put each `E_corr(PC)`
+evaluation's noise at ~100–400 ulp, against N2's one, so #104's
+stationarity fix does not reach those two. #105 re-checks acrolein
+([`testing.md`](testing.md), "PC's CI-direction ladders, measured"). These ladders were never run for acrolein PC
 before #74 ([`testing.md`](testing.md), "What the committed cases come out
 at").
 
