@@ -39,11 +39,25 @@ dependencies = [
 # pre-commit is a real dependency: .pre-commit-config.yaml drives it, and
 # docker/Dockerfile.base's venv smoke test runs `ruff --version` and
 # `pre-commit --version` through the venv shebang to catch a venv that works
-# for root and not for uid 1000. No pytest: there is no Python test suite.
+# for root and not for uid 1000. pytest runs reference_data/tests/, the hand
+# cases for the oracle's own logic -- the golden formats' readers and writers
+# and the refusal guards (_check_degeneracy, _check_pc_conditioning,
+# _check_gradient_invariants). They are the one Python code whose silent
+# regression would corrupt every later check: every number src/ is held to
+# comes through them. A named devtools/cpp-tier.sh phase (docs/testing.md,
+# "The oracle's own tests").
 dev = [
     "ruff>=0.6",
     "pre-commit>=3.7",
+    "pytest>=8",
 ]
+
+[tool.pytest.ini_options]
+# The generator scripts are not a package: they import each other by bare
+# name (`import golden_format as gf`), so the tests import them the same way.
+testpaths = ["reference_data/tests"]
+pythonpath = ["reference_data"]
+addopts = ["-ra", "--strict-markers", "-p", "no:cacheprovider"]
 
 [tool.ruff]
 # The C++/HIP trees and the build outputs are not Python.

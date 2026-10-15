@@ -341,6 +341,17 @@ byte-identical, CAS(12,12) included (generated twice in separate processes,
 ~8 min each, single-threaded). A regenerated file that differs from the
 committed one means something changed.
 
+**For the small N2 cases the check is a script**, `devtools/golden-repro.sh`:
+it reruns the commands above for every committed N2 CAS(4,4) / CAS(8,8)
+reference — the four goldens, the two gradient sidecars, the two CASSCF
+`.mogold` sidecars (a fresh `--casscf` each), the two `*_casscf[_df]`
+goldens (`--mo-from` the committed sidecar) and the two `.srcgold` oracles —
+into a scratch directory, compares each with the committed file byte for byte
+(the `G1` CASCI goldens by the header exception below, nothing looser), and
+prints `PASS:` / `FAIL:` per file. What it covers, why the `.srcgold` pair is
+in it, and its wall time are in [`testing.md`](testing.md), "The golden
+regeneration gate".
+
 **The three CASSCF-orbital files regenerate byte-identically from their
 committed sidecars**, with no exception to make for the header: they were
 written after the `reference_kind` field existed, so they are `NEVPT2G2`
@@ -1570,6 +1581,8 @@ not used.
 | `reference_data/sc_source_oracle.py` | **PySCF's exact SC source terms** for N2 CAS(4,4) and LiF, written as `golden/<case>.srcgold` out of `nevpt2_grad.py`'s own machinery at its converged steps; the oracle `nevpt2_sc_pseudodensity --source-oracle` gates the GPU's against (see "The SC source-term oracle" above). With `--pc`, **block2's PC ones** for N2 CAS(4,4), `golden/n2_ccpvdz_cas44_pc.srcgold` ("The PC flavour"). Byte-reproducible |
 | `reference_data/golden_format.py` | the **one Python parser** of the three formats in `golden/` (and of the `.srcgold` oracle, plus its writer `write_srcgold`): the header tables (keyed by magic) the writers pack from and the readers read by, `read_golden` / `read_golden_header` / `read_gradgold` / `read_mo_sidecar` / `read_srcgold`, and `arrays-at FILE` for the regeneration check's `cmp -i`. `struct` and NumPy only, and no thread settings, so the timing script can use it (see "The file format" above) |
 | `reference_data/golden_layout_check.py` | the Python half of the **layout contract**: every committed file of both golden layouts, and every sidecar, through every reader and back through its writer byte for byte, plus a scan for any parser outside `golden_format.py`. Ends `PASS:`/`FAIL:`; a manual gate, no ctest entry ([`testing.md`](testing.md), "The golden layout contract") |
+| `reference_data/tests/` | the **oracle's own tests** (pytest, `uv run pytest`): every format's writer → reader round trip and every reader refusal in `golden_format.py`, and `_check_degeneracy` / `_check_pc_conditioning` / `_check_gradient_invariants` on synthetic inputs just either side of each threshold. No solve, no card; a `cpp-tier.sh` phase ([`testing.md`](testing.md), "The oracle's own tests") |
+| `devtools/golden-repro.sh` | the **regeneration gate**: the committed N2 CAS(4,4) / CAS(8,8) references regenerated into scratch and compared byte for byte (see "Regenerating the golden file" above; [`testing.md`](testing.md), "The golden regeneration gate") |
 | `reference_data/pyscf_contract_time.py` | the CPU side of the head-to-head: reads a golden file and times PySCF's `NEVPTcontract` (`make_dm123` + `_contract4pdm` ×2) on the *same frozen CI vector* the demo reads, with no CASCI re-solve (see [`performance.md`](performance.md), "Head-to-head vs PySCF") |
 | `golden/n2_ccpvdz_cas1010.nevpt2gold` | the **default case**: CAS(10,10) on N2/cc-pVDZ |
 | `golden/n2_ccpvdz_cas1212.nevpt2gold` | CAS(12,12) on the same molecule, the scaling case (see [`performance.md`](performance.md), "Scaling with active-space size"). `slow`-labelled; run with `--tiles 40`. Carries **no** PC fields: its PC metric is ungapped (see "PC fields" above) |

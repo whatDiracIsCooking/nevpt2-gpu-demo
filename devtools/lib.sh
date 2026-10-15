@@ -114,3 +114,30 @@ find_venv() {
   done
   return 1
 }
+
+# Run a Python tool in the project's LOCKED environment (uv.lock; /opt/venv in
+# every image, .venv from `uv sync` on a host). `uv sync --frozen --check`
+# first, which changes nothing and fails when the environment is missing or
+# does not match the lock -- so a box without it FAILS rather than skipping (a
+# gate that skips when it cannot run is how #84's stray reader reached main),
+# and `uv run` never quietly creates an empty venv and runs the check against
+# it. --no-sync because a gate checks the environment, it does not install
+# into it: `uv sync --frozen` is the fix the message names. Shared by
+# cpp-tier.sh's Python phases and golden-repro.sh, so the two cannot drift
+# into different ideas of "the environment".
+#
+#   in_locked_env python reference_data/golden_layout_check.py
+in_locked_env() {
+  local who=${0##*/}
+  command -v uv >/dev/null 2>&1 || {
+    echo "$who: uv not found -- it is the one assumed host tool" \
+      "(.claude/CLAUDE.md, \"Setup\")" >&2
+    return 1
+  }
+  uv sync --frozen --check --quiet || {
+    echo "$who: the locked Python environment is missing or stale" \
+      "(${UV_PROJECT_ENVIRONMENT:-.venv}) -- run \`uv sync --frozen\`" >&2
+    return 1
+  }
+  uv run --frozen --no-sync "$@"
+}

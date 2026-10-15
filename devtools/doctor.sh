@@ -178,14 +178,12 @@ for vpath in $VENV_PATHS; do
     note "on the host: rm -rf '$vdir' && uv sync"
   fi
 done
-# NOT pytest. This project has no Python test suite -- generate_golden.py and
-# pyscf_contract_time.py are offline tools, and the real suite is ctest against
-# a GPU (see devtools/config.sh, CTEST_PRESET). Checking for pytest here would
-# emit a warning that no amount of `uv sync` ever clears, which is worse than
-# no check: a permanently-yellow doctor is one nobody reads. What the dev group
-# actually installs, and what docker/Dockerfile.base's venv smoke test asserts,
-# is ruff + pre-commit.
-for _tool in ruff pre-commit; do
+# What the dev group installs: ruff + pre-commit (docker/Dockerfile.base's
+# venv smoke test asserts those two), and pytest, which runs
+# reference_data/tests/ as cpp-tier.sh's `pytest` phase. A venv from an image
+# built before pytest entered the lock lacks it, and that phase then fails;
+# `uv sync --frozen` is the fix.
+for _tool in ruff pre-commit pytest; do
   if _bin=$(find_tool "$_tool"); then
     ok "$_tool: $_bin"
   else

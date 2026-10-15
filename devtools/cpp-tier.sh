@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Configure, build and ctest the C++ tree -- the ONLY tier that proves src/
-# still works, on whichever backend the preset picks. There is no Python test
-# suite beside it and no install tier; every golden ctest entry is labelled
-# `gpu`, so this needs a real card, and a green `-LE gpu` run proves only the
-# host-only GoogleTest suites (test/) -- logic, never an energy. It runs
-# four gates first, none of which needs a card: devtools/stream-lint.sh
-# --strict, devtools/throw-lint.sh (no `throw` in src/ or apps/),
-# reference_data/golden_layout_check.py (the golden layout contract, and its
-# scan for stray file readers in src/ and apps/) and `ruff check`, the last
-# two through `uv run` against the locked environment (they FAIL, never skip,
-# when that environment is missing or stale).
+# still works, on whichever backend the preset picks. There is no install
+# tier; every golden ctest entry is labelled `gpu`, so this needs a real card,
+# and a green `-LE gpu` run proves only the host-only GoogleTest suites
+# (test/) -- logic, never an energy. It runs five gates first, none of which
+# needs a card: devtools/stream-lint.sh --strict, devtools/throw-lint.sh (no
+# `throw` in src/ or apps/), reference_data/golden_layout_check.py (the golden
+# layout contract, and its scan for stray file readers in src/ and apps/),
+# `ruff check` and `pytest reference_data/tests` (the oracle's own hand
+# cases), the last three through `uv run` against the locked environment
+# (they FAIL, never skip, when that environment is missing or stale).
+# devtools/golden-repro.sh, the regeneration gate, is NOT a phase: it costs
+# minutes of CPU (docs/testing.md, "The golden regeneration gate").
 #
 #   devtools/cpp-tier.sh [--preset NAME] [--fresh] [--clean] [--no-test]
 #                        [--tidy] [--rocm] [-j N] [--report DIR]
@@ -57,8 +59,8 @@
 #                   changing a toolchain variable; a plain reconfigure keeps
 #                   the old value and the change appears to do nothing.
 #   --clean         rebuild every object (`--clean-first`), keeping the cache.
-#   --no-test       configure and build only. The four gates above still
-#                   run: they need no card and cost about a second, and a
+#   --no-test       configure and build only. The five gates above still
+#                   run: they need no card and cost seconds, and a
 #                   --no-test run is often the only run a no-card change
 #                   gets.
 #   --tidy          after a successful build, run clang-tidy over the .cpp
@@ -276,27 +278,9 @@ run_phase() {
   return "$status"
 }
 
-# Run a Python tool in the project's LOCKED environment (uv.lock; /opt/venv in
-# every image, .venv from `uv sync` on a host). `uv sync --frozen --check`
-# first, which changes nothing and fails when the environment is missing or
-# does not match the lock -- so a box without it FAILS the phase rather than
-# skipping it (a gate that skips when it cannot run is how #84's stray reader
-# reached main), and `uv run` never quietly creates an empty venv and runs the
-# check against it. --no-sync because the tier checks the environment, it does
-# not install into it: `uv sync --frozen` is the fix the message names.
-in_locked_env() {
-  command -v uv >/dev/null 2>&1 || {
-    echo "cpp-tier: uv not found -- it is the one assumed host tool" \
-      "(.claude/CLAUDE.md, \"Setup\")" >&2
-    return 1
-  }
-  uv sync --frozen --check --quiet || {
-    echo "cpp-tier: the locked Python environment is missing or stale" \
-      "(${UV_PROJECT_ENVIRONMENT:-.venv}) -- run \`uv sync --frozen\`" >&2
-    return 1
-  }
-  uv run --frozen --no-sync "$@"
-}
+# The three Python phases below run through in_locked_env (devtools/lib.sh):
+# in the LOCKED environment, and FAILING -- never skipping -- when it is
+# missing or stale.
 
 rc=0
 set +e
@@ -319,6 +303,13 @@ run_phase throw-lint "$REPO_ROOT/devtools/throw-lint.sh" || rc=$?
 run_phase golden-layout in_locked_env python \
   "$REPO_ROOT/reference_data/golden_layout_check.py" || rc=$?
 run_phase ruff in_locked_env ruff check "$REPO_ROOT" || rc=$?
+
+# The oracle's own hand cases (docs/testing.md, "The oracle's own tests"): the
+# golden formats' readers and writers and the refusal guards that keep a
+# noise-dependent state out of golden/, on synthetic inputs -- no PySCF solve,
+# no card, no network. A gate like the two above, and like them it FAILS when
+# the environment lacks pytest (an image built before the lock added it).
+run_phase pytest in_locked_env pytest -q "$REPO_ROOT/reference_data/tests" || rc=$?
 
 configure=(cmake --preset "$preset")
 [ "$fresh" -eq 1 ] && configure+=(--fresh)
