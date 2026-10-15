@@ -546,7 +546,14 @@ LADDER_RUN = 3
 #: ``h ~ 2^-9``, sits astride lstsq's cut at ``2^-10`` (the gap guard refuses
 #: it there), and is dropped like the structural ones from ``2^-11`` down: the
 #: same bound the C++ PC tangent's ``kStartPow`` keeps under (docs/pc-nevpt2.md,
-#: "The tangent with respect to the CI vector").
+#: "The tangent with respect to the CI vector"). Its other end is round-off,
+#: and the window between holds few halvings: on N2 CAS(4,4) PC the CI
+#: stationarity Lagrangian's truncation is ~40 times smaller than its pieces'
+#: (they cancel at the solution), so it meets the floor by ``2^-15``/``2^-16``
+#: -- the edge of :data:`LADDER_RUN`. That is why :func:`check_ci_stationarity`
+#: forms its ``z`` term without ``ecore`` and reads the Lagrangian by pieces
+#: when the whole shows no run (docs/testing.md, "PC's CI-direction ladders,
+#: measured"); the rule and this window are unchanged.
 CI_LADDER = (4, 18)
 CI_LADDER_PC = (11, 18)
 KAPPA_LADDER = (3, 17)
@@ -1090,6 +1097,9 @@ class Functional:
         hvec = ecore * ci_flat + np.asarray(hc).ravel()
         out["hvec"] = hvec
         out["e_casci"] = float(ci_flat @ hvec)
+        #: ``H|c>`` without the inactive constant: what :func:`check_ci_stationarity`
+        #: reads, where ``ecore`` cancels exactly and only adds round-off.
+        out["hvec_act"] = np.asarray(hc).ravel()
 
         if with_corr:
             eps = np.diag(f).copy()
@@ -2735,26 +2745,94 @@ def check_ci_stationarity(g: Gradients) -> list[Check]:
     bypassed, and a CI equation that was solved exactly but was the wrong
     equation shows up as a slope. (``E_CASCI(c)`` itself is left out: its
     stationarity is the CASCI eigen-equation's, a residual the Davidson
-    tolerance owns, not something the Z-vector solve can be asked for.)"""
+    tolerance owns, not something the Z-vector solve can be asked for.)
+
+    **The ``<z|H - E|c>`` term is formed from the active-space ``H|c>``
+    alone** (``hvec_act``). The inactive constant ``ecore`` (~1e2 Eh) enters
+    ``<z|H|c>`` and ``E_CASCI <z|c>`` identically and cancels exactly, so it
+    adds nothing but its round-off -- about ``|z| ecore eps``, ten times the
+    rest of the Lagrangian's on N2 CAS(4,4), which on a PC ladder (it cannot
+    start above ``2^-11``, :data:`CI_LADDER_PC`) was the difference between
+    two fourfold halvings and three (docs/testing.md, "PC's CI-direction
+    ladders, measured").
+
+    **When the whole Lagrangian shows no fourfold run of LADDER_RUN, its three
+    pieces are laddered one by one** -- ``E_corr``, ``lambda . G`` and the
+    ``z`` term -- each held to its OWN run of :data:`LADDER_RUN` and its own
+    Richardson value, and the check is then that the three values sum to
+    zero within :data:`LADDER_TOL`. The slope is linear in the pieces, so this
+    is the same statement; what differs is the window. At a solved
+    stationary point the pieces' slopes (each ~1e-1 Eh on N2) cancel, and so
+    do most of their truncation terms -- seed 2026's Lagrangian truncation is
+    ~40 times smaller than its ``E_corr``'s -- while the round-off does not
+    cancel: so the sum's own ladder reaches the floor about two halvings
+    sooner than its pieces' ladders do. Nothing is loosened: every piece must
+    still converge by the unchanged rule, and a wrong multiplier leaves a
+    nonzero sum of converged values. A piece whose every quotient is exactly
+    0 (``E_corr`` under ``--casci-only``) is exactly 0."""
     st = g.st
     exps = CI_LADDER_PC if g.pc else CI_LADDER
     z, lam = g.z.ravel(), g.lam
+    labels = ("E_corr", "lambda . G", "<z|H - E|c>")
     out = []
     for seed in CHECK_SEEDS:
         u = ci_check_direction(g, seed)
+        cache: dict = {}
 
-        def lagrangian(h: float, u=u) -> float:
-            ci = on_sphere(st, u, h)
-            b = g.fn.evaluate(st.mo_coeff, ci, with_corr=g.with_corr,
-                              where=f"the CI-stationarity ladder at h = {h:.3e}")
-            return (b["e_corr"] + float(lam @ constraint_vector(b, g.cons))
-                    + float(z @ b["hvec"]) - b["e_casci"] * float(z @ ci.ravel()))
+        def pieces(h: float, u=u, cache=cache) -> tuple[float, float, float]:
+            if h not in cache:
+                ci = on_sphere(st, u, h)
+                b = g.fn.evaluate(st.mo_coeff, ci, with_corr=g.with_corr,
+                                  where=f"the CI-stationarity ladder at h = {h:.3e}")
+                hc, c = b["hvec_act"], ci.ravel()
+                cache[h] = (b["e_corr"], float(lam @ constraint_vector(b, g.cons)),
+                            float(z @ hc) - float(c @ hc) * float(z @ c))
+            return cache[h]
 
-        out.append(step_ladder(f"CI stationarity, seed {seed}", lagrangian,
-                               ladder_steps(exps), 0.0))
+        name = f"CI stationarity, seed {seed}"
+        steps = ladder_steps(exps)
+        whole = step_ladder(name, lambda h, p=pieces: sum(p(h)), steps, 0.0)
+        if not whole.ok and whole.numbers["run"] < LADDER_RUN:
+            whole = _stationarity_by_pieces(
+                whole, [step_ladder(f"{name}, {lab}", lambda h, i=i, p=pieces: p(h)[i],
+                                    steps, 0.0) for i, lab in enumerate(labels)], labels)
+        out.append(whole)
     g.fn.pt.ci = st.ci
     g.fn.mc.ci = st.ci
     return out
+
+
+def _stationarity_by_pieces(whole: Check, parts: list[Check], labels: tuple) -> Check:
+    """:func:`check_ci_stationarity`'s fallback: the sum of the pieces'
+    Richardson values, each from its own fourfold run, against zero. Fails if
+    any piece shows no run of :data:`LADDER_RUN` (unless every quotient of it
+    is exactly 0)."""
+    values, runs = [], []
+    for p in parts:
+        n = p.numbers
+        if np.all(n["fd"] == 0.0):
+            values.append(0.0)
+            runs.append("exactly 0")
+        elif n["run"] >= LADDER_RUN:
+            values.append(float(n["value"]))
+            runs.append(f"{n['run']} halvings")
+        else:
+            values.append(float("nan"))
+            runs.append(f"{n['run']} halvings (need {LADDER_RUN})")
+    total = float(sum(values))
+    ok = bool(np.isfinite(total) and abs(total) <= LADDER_TOL)
+    err = abs(total) if np.isfinite(total) else float("inf")
+    summary = (f"whole Lagrangian: {whole.numbers['run']} fourfold halvings, so laddered by "
+               "pieces -- " + ", ".join(f"{lab} {v:+.6e} ({r})" for lab, v, r
+                                         in zip(labels, values, runs, strict=True))
+               + f"; |sum| = {err:.2e} (allowed {LADDER_TOL:g})")
+    table = list(whole.table)
+    for lab, p in zip(labels, parts, strict=True):
+        table.append(f"    piece {lab}: {p.summary}")
+        table.extend(p.table)
+    return Check(whole.name, ok, summary, table,
+                 dict(whole.numbers, value=total, err=err, how="pieces",
+                      pieces=dict(zip(labels, values, strict=True))))
 
 
 def check_orbital_stationarity(g: Gradients) -> list[Check]:
