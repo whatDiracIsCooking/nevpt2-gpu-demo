@@ -462,8 +462,9 @@ The adjoint and the tangent agree at **machine precision** — 1e-15 against a
 with the ratio 4.00 to two decimals through the truncation regime. The whole
 entry takes <1 s / 2 s / 30 s at the three sizes (of which the matrix is
 0.01 s / 1.6 s / 15 s and the 28-point sweep most of the rest), and the pool
-high-water is 0.7 MB / 60.8 MB / 1679 MB — the last being the CAS(10,10) RDM
-build's, which the entry runs first and which dominates it.
+high-water is 0.7 MB / 60.8 MB at the first two sizes; at CAS(10,10) it is the
+RDM build's, which the entry runs first and which dominates it — the
+CAS(10,10) `--tiles 3` row of docs/performance.md, "The memory pool".
 
 **CAS(4,4) asserts a nontrivial zero.** N2's four active orbitals there are
 its π system, and in D2h they lie in four *distinct* irreps, so every
@@ -903,7 +904,9 @@ one tangent per determinant stops being seconds.
 The walk `y` rides on is the pseudodensity walk unchanged, which the entry
 also confirms the cheap way: the class energies it computes on the way are
 still `nevpt2.energy`'s own, to 2.5e-16 / 1.4e-15 / 4.9e-15 at the three
-sizes. Building `y` itself takes 0.01s / 0.52s / 5.87s — five sigma calls (one
+sizes. Building `y` itself takes 0.01s / 0.52s at CAS(4,4) / CAS(8,8), and at
+CAS(10,10) what docs/performance.md, "`--tiles` on the CI source term
+(`--gradient-source`)" records at `--tiles 3` — five sigma calls (one
 3-body, and a forward and a dagger for each of the two `f3` orders) on top of
 the walk; the orbital energies' scatter and fold are host arithmetic over
 `(n_core + n_virt) n^2` and add nothing visible — and ctest clocks the three
@@ -3075,7 +3078,8 @@ CUDA costs almost nothing.
 ## Coverage
 
 clang source-based coverage of **host** code: which lines of `src/` and the
-two demos under `apps/` the `fast` test set executes. It is a map of what the
+apps under `apps/` (all but the sanitizer canary) the `fast` test set
+executes. It is a map of what the
 tests never reach, not a measure of correctness — a line counted as covered
 was run, not checked. The golden tier stays the only numerical claim.
 
@@ -3120,21 +3124,36 @@ A failing test still produces a report, but the script exits 1.
 
 ### Measured
 
-`devtools/coverage.sh`, Release, clang 20.1.8, totals over `src/` + the two
-demos (covered / total):
+`devtools/coverage.sh -j 24` and `devtools/coverage.sh --preset hip-coverage
+-j 24`, Release, clang 20.1.8, on the tree of #109 (one card at a time, each
+under its card's lock), totals over `src/` + the four apps llvm-cov finds
+instrumented (`integral_direct`, `density_fit`, `sc_pseudodensity`,
+`pc_tangent`) (covered / total). A covered line was run, not checked:
 
-| card, preset | entries | regions | functions | lines | branches |
-|---|---:|---:|---:|---:|---:|
-| RTX 3080, `coverage` | 76/76 passed | 1338/1500 (89.20%) | 235/241 (97.51%) | 2982/3197 (93.27%) | 770/985 (78.17%) |
-| RX 9060 XT, `hip-coverage` | 71/71 passed | 1316/1495 (88.03%) | 231/241 (95.85%) | 2942/3182 (92.46%) | 751/983 (76.40%) |
+| card, preset | entries | regions | functions | lines | branches | ctest phase |
+|---|---:|---:|---:|---:|---:|---:|
+| RTX 3080, `coverage` | 247/247 passed | 5946/6549 (90.79%) | 732/752 (97.34%) | 12205/12913 (94.52%) | 3588/4523 (79.33%) | 211.2 s |
+| RX 9060 XT, `hip-coverage` | 241/241 passed | 5924/6544 (90.53%) | 728/752 (96.81%) | 12165/12898 (94.32%) | 3569/4521 (78.94%) | 586.3 s |
 
-Each run merged one profile per entry from 13 instrumented binaries; the
-ctest phase took 44.9 s on the 3080 and 143.5 s on the 9060 XT. A Debug build
-of the CUDA preset gave the identical CUDA totals, as it should. The HIP
-totals are lower mostly because `src/cublas/` there is the refusing stub
-(`--cublas` is rejected at flag parsing on HIP), which nothing calls.
+Each run merged one profile per entry from 35 instrumented binaries. The
+whole script (configure, build, ctest, report) took about 253 s on the 3080
+and 621 s on the 9060 XT. Both reports warn that 4 functions have mismatched
+data (llvm-cov's `warning: 4 functions have mismatched data`); the totals are
+llvm-cov's as printed. Against the previous rows (76/76 and 71/71 entries, 13
+binaries, a tree without `src/gradient/`, `apps/sc_pseudodensity/` or
+`apps/pc_tangent/`: CUDA 89.20% / 97.51% / 93.27% / 78.17%, HIP 88.03% /
+95.85% / 92.46% / 76.40%), every percentage rose except **CUDA's function
+coverage, which fell from 97.51% to 97.34%** (6 of 241 functions missed then,
+20 of 752 now). On
+that previous tree a Debug build of the CUDA preset gave the identical CUDA
+totals, as it should; that was not repeated here. The HIP run misses 17 regions more
+than the CUDA one: 10 in `src/rdm/rdm_build.cpp`, 4 in `src/cublas/` (on HIP
+the refusing stub, which nothing calls: `--cublas` is rejected at flag
+parsing) and 3 in `src/cli/cli.cpp`.
 
-The lowest files are the two demos' `main.cppm` (the error-reporting branches
-of argument and golden-file handling, which no ctest entry provokes) and
-`src/common/common.cppm` (`narrowTo`'s failure path, which aborts).
+The lowest file is `src/common/common.cppm` (`narrowTo`'s failure path, which
+aborts); after it come the apps' `main.cppm` (the error-reporting branches of
+argument and golden-file handling, which no ctest entry provokes),
+`apps/sc_pseudodensity/source_oracle.cppm`, `src/einsum/einsum_planner.cppm`
+and `src/rdm/rdm_build.cpp`.
 
