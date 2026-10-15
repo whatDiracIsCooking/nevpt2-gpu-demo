@@ -625,21 +625,25 @@ nothing else, and the floors above apply unchanged: the check runs
 `buildRdmTangentsDevice` once per direction, so CAS(10,10) needs at least 2
 (`--tiles 1` fails with a clean out-of-memory at
 `rdm_build_tangent.cppm`'s `L2` allocation, *after* `y` itself has been built
-without trouble). RTX 3080, CUDA, Release, CAS(10,10), the card shared with
-another process (how much it held was not recorded, so read the `--tiles 1`
-row as "below the floor on a shared card", not as a floor of its own — the
-measured floors are the table above):
+without trouble). RTX 3080, CUDA, Release (the `default` preset), CAS(10,10)
+(`nevpt2_demo --golden golden/n2_ccpvdz_cas1010.nevpt2gold --tiles T
+--gradient-source`), one run per count, with 763 MiB of the card already held
+by other processes (`nvidia-smi`) — so read the `--tiles 1` row as "below the
+floor on a card not wholly free", not as a floor of its own; the measured
+floors are the table above. This table is the home of the CAS(10,10) `y`
+build time; docs/testing.md, "The CI source term's forward-reverse duality"
+cites it:
 
 | `--tiles` | `y` built in | pool used, whole run | outcome |
 |---:|---:|---:|---|
-| 1 | 5.34s | — | out of memory in the tangent build |
-| 3 | 5.68s | 3334.2 MB | the shipped count |
-| 10 | 7.36s | 1039.4 MB | passes |
+| 1 | 5.31s | — | out of memory in the tangent build |
+| 3 | 5.66s | 3334.2 MB | the shipped count |
+| 10 | 7.26s | 1039.4 MB | passes |
 
 The peak difference is entirely the tangent build's per-tile blocks (the rows
 in "Tile floors" above); what `--tiles` does to the new stage is only the
 sigma kernels' launch granularity, and more tiles there are slightly *slower*
-(5.7s to 7.4s from 3 to 10) because each pass is split into more launches with
+(5.7s to 7.3s from 3 to 10) because each pass is split into more launches with
 no buffer shrinking in return. **The recommendation is `--tiles 3` at
 CAS(10,10)**, the same count every other entry at that size uses, and the one
 the duality residuals in docs/testing.md, "The CI source term's
