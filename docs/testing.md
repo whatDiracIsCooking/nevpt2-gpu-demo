@@ -138,7 +138,8 @@ still writes a golden, and every entry downstream then passes against it.
 What they are, all on synthetic inputs, no PySCF solve, no card, no network:
 
 - **`test_golden_format.py`** — every magic (`NEVPT2G2`, the `G1` golden,
-  `NEVPT2D1`, `NEVPT2M1`, `NEVPT2S1`/`NEVPT2P1`) written by its writer
+  `NEVPT2D1`, `NEVPT2M1`, `NEVPT2S1`/`NEVPT2P1` and the directional
+  `NEVPT2SD`/`NEVPT2PD`) written by its writer
   (`write_golden`, `write_gradgold`, `write_mo_sidecar`, `write_srcgold`, or
   `pack_header` + `write_arrays` for `G1`, which no writer produces any more)
   and read back field for field and array for array, then rewritten byte for
@@ -193,7 +194,7 @@ nothing skips.
 `devtools/golden-repro.sh` re-runs the promise CLAUDE.md makes — the
 generators are bit-reproducible, so a regenerated file that differs from the
 committed one means something changed — for every committed N2 CAS(4,4) /
-CAS(8,8) reference. Twelve files from ten generator runs, each with the
+CAS(8,8) reference. Fourteen files from twelve generator runs, each with the
 generator's own settings (`--out` into a scratch directory is the only flag
 added):
 
@@ -204,6 +205,7 @@ added):
 | `n2_ccpvdz_cas44_casscf[_df].mogold` | `generate_golden.py --casscf --mo-out` (a fresh optimisation) |
 | `n2_ccpvdz_cas44_casscf[_df].nevpt2gold` | `generate_golden.py --mo-from` the **committed** sidecar, so a drifted sidecar fails as itself and not as its golden too |
 | `n2_ccpvdz_cas44.srcgold`, `n2_ccpvdz_cas44_pc.srcgold` | `sc_source_oracle.py [--pc]`, reading the committed golden |
+| `n2_ccpvdz_cas44_dir.srcgold`, `n2_ccpvdz_cas44_pc_dir.srcgold` | `sc_source_oracle.py --directional [--pc]` (#105) |
 
 The comparison is `cmp` on the whole file — the one place in this tree a
 byte comparison is right. One exception, the documented one
@@ -212,30 +214,36 @@ a committed `NEVPT2G1` CASCI golden regenerates as `NEVPT2G2`, so for those
 four the state fields must be byte-identical, the new `reference_kind` must
 be `casci`, and everything from the array count on byte-identical, each
 file's header length read with `golden_format.py arrays-at`. It prints one
-`PASS:`/`FAIL:` line per file (naming it) and exits 0 only if all twelve
-reproduce. `--committed DIR` compares against a copy instead of `golden/`
+`PASS:`/`FAIL:` line per file (naming it) and exits 0 only if all
+fourteen reproduce. `--committed DIR` compares against a copy instead of `golden/`
 (the generator inputs stay `golden/`'s), `--only REGEX` narrows the set,
 `--out DIR` keeps the regenerated files and each run's log.
 
-**The `.srcgold` pair is in it** because the 30-minute budget the gradient
-milestone sets for any oracle regeneration holds with them: the SC one is
-seconds and the PC one about two and a half minutes, below. Each generator
+**The four N2 `.srcgold` files are in it** because the 30-minute budget the
+gradient milestone sets for any oracle regeneration holds with them: the SC
+ones are seconds, the PC directional one about a minute and the PC full one
+about two and a half minutes, below. Acrolein's and LiF's directional
+oracles are outside its N2 scope; their byte-reproducibility is
+[`reference-data.md`](reference-data.md), "The directional flavour". Each generator
 is single-threaded by its own import (`generate_golden` forces it, and
 `sc_source_oracle` imports `generate_golden` for exactly that), so `-j N`
 runs N of them at once without changing a byte; the default is `-j 1`.
 
-Measured (RTX 3080 box's CPU, 24 cores; no card used), all twelve `PASS:`:
+Measured (RTX 3080 box's CPU, 24 cores; no card used), all twelve `PASS:`
+before #105 added the two directional files:
 
 | run | wall |
 |---|---:|
 | default, `-j 1` (one generator at a time, each single-threaded) | 330 s (5 min 30 s) |
 | `-j 10` | 144 s |
+| `-j 12`, fourteen files, #105 (the two-card box's CPU, 24 cores, both cards running other jobs) | 152 s, all fourteen `PASS:` |
 
 Per generator run (the `-j 1` run): `--casscf` sidecars 2–3 s,
 `n2_ccpvdz_cas44.srcgold` 9 s, the CAS(4,4) goldens 26–27 s, the CAS(8,8)
 ones 32–33 s, `n2_ccpvdz_cas44_pc.srcgold` 142 s — so `-j 10`'s wall is the
-PC oracle's alone. **Nothing is left out** of the N2 CAS(4,4)/CAS(8,8) set
-for cost: the whole set is 330 s against the 30-minute budget. The larger
+PC oracle's alone. In the `-j 12` run the directional pair took 6 s (SC) and
+56 s (PC), and the full PC oracle 150 s, again the whole wall. **Nothing is left out** of the N2 CAS(4,4)/CAS(8,8) set
+for cost: the whole set was 330 s at `-j 1` against the 30-minute budget. The larger
 committed references are outside its scope, not left out for time; theirs,
 where measured, are in [`reference-data.md`](reference-data.md),
 "Regenerating the golden file", "The SC source-term oracle" and "The files
@@ -2062,6 +2070,246 @@ a finding about the device, and widening the row is a ratchet a human
 moves. The `2^-17` rung of the kappa
 ladder is the committed file byte for byte.
 
+## The directional source-term oracle
+
+The two sections above finite-difference **every** element of `A = Y − Y^T`.
+That is seconds on N2 CAS(4,4) and LiF, but acrolein CAS(6,5) has 2,846
+rotation pairs: its full PC oracle took 21,136 s to generate in #74's
+scratch run, and `nevpt2_grad.py --pc --source both` 24,616 s. So acrolein,
+the one low-symmetry case, had no committed oracle. #105 commits a
+**directional** one. `A` and `P y` enter the gradient linearly, so a wrong
+or missing term in a block moves the projection on a seeded random direction
+in that block with probability 1, and the comparison stays block by block —
+the resolution `kKnownGaps` keys on. The format, the generator
+(`sc_source_oracle.py --directional [--pc]`) and the five committed files
+are [`reference-data.md`](reference-data.md), "The directional flavour":
+two seeded unit `kappa` directions per non-empty block, three seeded CI
+directions (in the state's irrep, orthogonal to it, spin-adapted), each
+value the Richardson extrapolant `(4 fd(h/2) − fd(h)) / 3` of the first two
+rungs of a four-rung ladder, the ladder stored beside it.
+
+**The budget: each file generates in at most 30 minutes, single-threaded.**
+Measured (one at a time, the two-card box's CPU): acrolein PC 582 s, acrolein
+SC 42 s, N2 PC 51 s, LiF 11 s, N2 SC 4 s (reference-data.md has the table).
+The PC files cost more because every evaluation is a block2 PC solve, and
+every displaced CI vector also goes through the PC guard.
+
+On a card, `nevpt2_sc_pseudodensity [--pc] --source-oracle
+golden/<case>[_pc]_dir.srcgold` assembles the same `Y_xy` and `y_I` as the
+full flavour, carries `A` into the oracle's basis and projects it, and `P y`,
+onto the stored directions (`compareSourceDirections` in
+`nevpt2.source_compare`). Each block's row is the worst \|GPU − oracle\|
+over its directions. The verdicts are the full flavour's (`kKnownGaps` is
+empty for all five files), with two more refusals: a direction with support
+outside the block it is labelled with is an IO error
+(`checkDirectionBlocks`), and a block that has pairs but fewer than
+`kMinBlockDirections` = 2 directions **fails**, so an oracle cannot skip a
+block silently. Five entries:
+`nevpt2_sc_pseudodensity_oracle_dir_{n2_ccpvdz_cas44,lif_def2svp_cas46,acrolein_def2svp_cas65}`
+and `…_oracle_dir_pc_{n2_ccpvdz_cas44,acrolein_def2svp_cas65}`. The two
+acrolein entries are `gpu;slow`, and they are registered only where acrolein's
+gitignored gradient sidecar has been regenerated (a configure WARNING
+otherwise).
+
+### The steps and the tolerance, measured from long ladders
+
+The steps are not the full flavour's. A seeded direction is not a bare
+determinant, so the PC CI quotient is not held at `CI_STEP_PC` (1e-7, "The
+PC CI source term's step is a first-order trap"). Each step was chosen from
+**long ladders** of the same generator (`--kappa-rungs` / `--ci-rungs`, up
+to 13 rungs from `2^-7` or `2^-8`), each compared with a GPU
+`--dump-source-terms` projection (RX 9060 XT, preset `hip`). Worst \|Richardson
+− GPU\| per block, by the Richardson pair's first rung:
+
+| case, block | 2^-9 | 2^-11 | 2^-12 | 2^-13 | 2^-14 | 2^-15 | 2^-17 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| N2 SC, core–virt | 8.8e-7 | 3.8e-7 | 1.0e-7 | 1.1e-8 | 8.8e-10 | **1.4e-10** | 1.0e-10 |
+| N2 SC, `P y` | 6.7e-5 | 2.3e-7 | 1.4e-8 | 9.0e-10 | 7.6e-11 | **2.0e-11** | 2.1e-10 |
+| LiF SC, core–virt | 7.7e-8 | 9.9e-9 | 5.4e-9 | 1.6e-9 | 3.1e-10 | **5.2e-11** | 7.3e-10 |
+| acrolein SC, act_O–virt | 1.5e-8 | 1.4e-10 | 4.4e-12 | 4.0e-11 | 1.8e-11 | **1.0e-10** | 5.3e-10 |
+| acrolein SC, core–act_O | 4.4e-10 | 1.3e-10 | 6.1e-10 | 3.6e-10 | 2.0e-9 | **2.1e-9** | 8.3e-9 |
+| acrolein PC, act_O–act_V | 4.2e-5 | 2.1e-7 | 1.6e-8 | **3.8e-9** | 2.6e-9 | 2.3e-9 | — |
+| acrolein PC, `P y` | — | 2.8e-10 | **4.2e-10** | 1.2e-9 | 3.0e-9 | 4.7e-9 | 1.7e-8 |
+| N2 PC, `P y` | — | — | **3.0e-13** | 6.2e-13 | 1.1e-12 | 4.1e-12 | 7.0e-12 |
+
+(Bold: the committed first rung.) Two regimes meet. Coarse steps carry
+truncation, worst at near-poles: N2's core–virt and `P y`, and acrolein PC's
+act_O–act_V, which needs `2^-13` to fall below 1e-8. Fine steps carry
+round-off divided by `h`, which grows from about `2^-15` on. The committed
+steps are where the worst block of each scheme has left the first regime:
+**SC: kappa and CI at `2^-15`; PC: kappa at `2^-13`, CI at `2^-12`.** PC's
+CI step is one rung inside #104's `CI_LADDER_PC` (`2^-11`), because at
+`2^-11` the PC guard refuses one of N2's seeded CI directions. The worst
+block of every committed file, against the same dumps:
+
+| file | worst block | \|GPU − oracle\| |
+|---|---|---:|
+| `acrolein_def2svp_cas65_pc_dir` | act_O–act_V | 3.8e-9 |
+| `acrolein_def2svp_cas65_dir` | core–act_O | 2.1e-9 |
+| `acrolein_def2svp_cas65_dir` | core–virt | 1.5e-9 |
+| `lif_def2svp_cas46_dir` | act_O–act_V | 3.9e-10 |
+| `n2_ccpvdz_cas44_dir` | core–virt | 1.4e-10 |
+| `n2_ccpvdz_cas44_pc_dir` | core–virt | 1.5e-11 |
+
+So the gates are
+
+| | value |
+|---|---|
+| **the directional source-oracle tolerance** | **1e-8** |
+| **the PC directional source-oracle tolerance** | **2e-8** |
+
+per direction, absolute (Eh): about five times the worst committed value of
+each scheme, read off the dumps' ladders above. These rows are the
+tolerances' one home: `apps/sc_pseudodensity/CMakeLists.txt` reads them at
+configure time into `NEVPT2_SOURCE_DIRECTIONAL_TOL` /
+`NEVPT2_PC_SOURCE_DIRECTIONAL_TOL`. They are tighter than the full flavour's
+(1e-6 SC, 1e-7 PC) because the Richardson pair removes the `h²` truncation
+that the full flavour's single central difference keeps. Widening a row is a
+ratchet a human moves.
+
+### What the entries measure
+
+Release, `--tiles 3`, the default digest of each backend, on the RTX 3080
+(preset `default`) and the RX 9060 XT (preset `hip`). Max \|GPU − oracle\|
+per block, over its directions, for the four SC/N2-PC files. The two cards
+agree to the digits shown, except where a row gives both:
+
+| block | N2 SC | N2 PC | LiF SC | acrolein SC |
+|---|---:|---:|---:|---:|
+| core–core | 1.3e-11 | 5.6e-12 | 5.9e-11 | 5.1e-11 |
+| core–act_O | 0 | 0 | 0 | 2.1e-9 |
+| core–act_V | 0 | 0 | 0 | 6.1e-20 |
+| core–virt | 1.4e-10 | 1.5e-11 | 5.2e-11 | 1.5e-9 |
+| act_O–act_V | 2.6e-11 | 2.4e-12 | 3.9e-10 | 5.9e-11 / 5.8e-11 |
+| act_O–virt | 3.9e-11 | 3.6e-12 | 1.6e-10 | 1.0e-10 |
+| act_V–virt | 3.1e-11 | 2.5e-12 | 3.6e-10 | 6.9e-11 |
+| virt–virt | 4.2e-11 | 1.0e-11 | 1.3e-10 | 4.0e-11 |
+| `P y` (3 directions) | 2.0e-11 | 3.1e-13 / 3.0e-13 | 1.3e-10 | 4.3e-11 |
+
+Acrolein PC's table, where the cards do differ (by up to 3e-9 in
+act_O–act_V), is PC's one home: [`pc-nevpt2.md`](pc-nevpt2.md), "block2's
+exact source terms, on a card". Every block of every file passes, with at
+least a factor of five to spare (acrolein PC's act_O–act_V on the RX 9060
+XT is the closest), and the known-gap list is empty. N2's and LiF's
+core–act blocks are zero on both sides, by symmetry, as in the full
+flavour. The values match the dump ladders' committed column above to
+within a unit in the second digit: the entry and the offline analysis
+compute the same projection, from different runs.
+
+ctest walls (the `cpp-tier.sh` run, RTX 3080 / RX 9060 XT): the three
+N2/LiF directional entries 1.37 / 2.25 s, 1.54 / 2.37 s and 2.33 / 5.54 s,
+the same as their full twins, since both are dominated by the dump's `Y`;
+**acrolein SC 175.8 / 388.5 s, acrolein PC 177.7 / 310.3 s**, in which
+`Y`'s 2,850 basis directions are 175–385 s. That is why the two acrolein
+entries are `slow`, and why they are not `small`: the sanitizer tier would
+run the probe at Debug speed (below).
+
+### The RX 9060 XT segfault, characterised
+
+The first ctest run of the acrolein PC entry, on the RX 9060 XT (`ctest -R
+oracle`, eight entries in sequence), ended **`SegFault` at 310.88 s**, its
+full normal run length. Its output stopped at exactly the first 4,096-byte
+stdio flush (stdout is a pipe under ctest), which comes after `Y` and `y`
+were assembled, so the crash came late: in the rest of the printing, at the
+verdict line, or at process teardown. It has not recurred:
+
+| | runs | crashes |
+|---|---:|---:|
+| RX 9060 XT, the entry alone under ctest (a loop, each run under the card's lock) | 10 | 0 |
+| RX 9060 XT, inside full ctest sequences (`cpp-tier.sh --preset hip` once, `-R oracle` twice) | 3 | 0 |
+| RX 9060 XT, the binary run directly, line-buffered | 3 | 0 |
+| RTX 3080, the entry alone under ctest | 10 | 0 |
+| RTX 3080, inside `cpp-tier.sh --preset default` | 1 | 0 |
+
+So the RX 9060 XT crashed once in 17 runs (the first, then 16 clean), and the
+RTX 3080 never in 11. The sanitizers find nothing in our code:
+
+- **`asan`** (RTX 3080, Debug, host ASan + LSan), both acrolein entries by
+  name: pass, no report (405.7 s SC, 572.4 s PC); **`ubsan`** on the acrolein
+  PC entry by name: pass, no report (476.9 s);
+- every preset's own tier passes, the new unit suites in it: `asan` 207/207,
+  `ubsan` 207/207, `compute-sanitizer` memcheck 198/198 and initcheck
+  195/195 (RTX 3080), `hip-asan` 205/205 and `hip-ubsan` 205/205 (RX 9060
+  XT);
+- the three small directional entries (N2 SC, N2 PC, LiF), which run the
+  same comparator, printing and teardown, by name in each of the six builds:
+  all pass, no report. Seconds, N2 SC / N2 PC / LiF: `asan` 4.1 / 5.0 / 3.7,
+  `ubsan` 3.1 / 3.7 / 3.1, memcheck 16.9 / 19.3 / 53.2, initcheck 11.3 /
+  13.1 / 22.1, `hip-asan` 13.4 / 14.4 / 38.5, `hip-ubsan` 12.0 / 12.3 / 37.0;
+- not completed inside the 30-minute cap, so no verdict: compute-sanitizer
+  memcheck on the acrolein PC entry (stopped at 30 min, no error printed
+  before it), and `hip-asan` on the acrolein SC entry (stopped at 34.5 min,
+  its stdout still buffered, no sanitizer report). With Debug device code,
+  `Y`'s 2,850 directions take too long under either.
+
+No core file was obtainable: the container's `core_pattern` pipes to apport,
+and the container has no debugger. So every sanitizer is clean, the RTX 3080
+never crashed, and the RX 9060 XT crashed once. The entry is kept as it is.
+The crash is recorded here as an open, unexplained intermittent on the RX
+9060 XT, to be followed up on its own; the ROCm runtime or process teardown
+is suspected, not shown.
+
+### Negative controls, and the cross-check against the full flavour
+
+Two scratch patches to `apps/sc_pseudodensity/source_dump.cppm` (never
+committed), each built once and run against **every** source oracle, full
+and directional (RTX 3080, preset `default`, Release, `--tiles 3`):
+
+- **digest**: the digests' term dropped from the GPU's `Y` (`&hbar` →
+  `nullptr` in the two `*FullRotationMatrix` calls, #89's control);
+- **eps**: the orbital energies' response dropped from `y` (`&eps` →
+  `nullptr` in the two `*CiSourceDevice` calls, #87's term).
+
+Every run FAILS, naming these blocks (max \|GPU − oracle\| in brackets) and
+no other:
+
+| oracle | digest dropped | eps dropped |
+|---|---|---|
+| N2 SC, full | act_O–virt (2.9e-1), act_V–virt (1.1e-2) | `P y` (3.2e-4) |
+| N2 SC, directional | act_O–virt (1.4e-1), act_V–virt (1.0e-3) | `P y` (5.6e-4) |
+| N2 PC, full | act_O–virt (1.5e-2), act_V–virt (3.8e-3) | `P y` (3.2e-4) |
+| N2 PC, directional | act_O–virt (6.4e-3), act_V–virt (6.4e-4) | `P y` (6.1e-4) |
+| LiF SC, full | act_O–act_V (1.4e-1), act_O–virt (5.5e-1), act_V–virt (5.9e-2) | `P y` (3.2e-3) |
+| LiF SC, directional | act_O–act_V (5.5e-2), act_O–virt (2.9e-1), act_V–virt (2.5e-2) | `P y` (4.8e-3) |
+| acrolein SC, directional | core–act_O (3.3e-2), act_O–act_V (1.6e-1), act_O–virt (3.7e-2), act_V–virt (1.2e-3) | `P y` (1.6e-3) |
+| acrolein PC, directional | core–act_O (1.4e-3), act_O–act_V (1.4e-2), act_O–virt (2.3e-3), act_V–virt (7.9e-4) | `P y` (9.7e-4) |
+
+**The cross-check:** on N2 CAS(4,4) (SC and PC) and LiF the two flavours
+name **the same failing blocks** under both patches, and the same passing
+ones; unpatched, both flavours pass every block (below). The full-flavour
+rows reproduce the earlier records: N2's and LiF's digest rows are #92's
+known gaps to the digit ("What the entries measure" above), and N2 PC's is
+[`pc-nevpt2.md`](pc-nevpt2.md)'s negative control 2. On acrolein every
+block with an active index fails under the digest patch except core–act_V,
+whose reference is ~1e-11 on both schemes; core–act_O, zero by symmetry on
+N2 and LiF, is not zero on acrolein's lower symmetry, and it is the block the
+directional oracle adds to what the full ones could check.
+
+### Acrolein's `P y`: the #103/#104 finding, resolved
+
+#103 recorded acrolein's PC `P y` 6.5e-7 from PySCF's at `CI_STEP_PC`, growing
+as `1/h` at smaller steps ([`pc-nevpt2.md`](pc-nevpt2.md), "The nuclear
+gradient from the GPU's terms"). Along spin-adapted directions at `2^-12`
+the GPU's `P y` agrees with block2's on both cards more than forty times
+inside the PC directional tolerance (the figures are PC's, in
+[`pc-nevpt2.md`](pc-nevpt2.md), "block2's exact source terms, on a card").
+The 6.5e-7 was the oracle's round-off: ~100–400 ulp of `E_corr(PC)`
+per evaluation on this state ("PC's CI-direction ladders, measured") divided
+by a 1e-7 step. No PC known gap is needed. #74's four acrolein ladder
+run-length failures (`y` linearity and CI stationarity, seeds 70 and 2026)
+difference the same noisy functional and were not re-run; they stay on
+record in [`pc-nevpt2.md`](pc-nevpt2.md), an offline diagnostic.
+
+### The hours-long runs are optional diagnostics
+
+Acrolein's full-`A` oracle sweep (`sc_source_oracle.py --case
+acrolein_def2svp_cas65 [--pc]` without `--directional`; 21,136 s for PC) and
+its `nevpt2_grad.py [--pc] --source both` gradient gate (1,290 s SC, 24,616 s
+PC) are **optional diagnostics**, not gates. Their recorded results (#73,
+#89, #74: "The GPU-sourced nuclear gradient" above and
+[`pc-nevpt2.md`](pc-nevpt2.md), "The nuclear gradient from the GPU's terms")
+stay on record. Acrolein's regression gate is the two directional entries.
+
 ## Residual-independent checks of the gradient path
 
 **A converged residual is not evidence that a gradient is right**, and the
@@ -2448,8 +2696,11 @@ rungs in PR #103's table (seed 70: changes 3.4e-10 … 2.8e-9 at `2^-14 …
 2^-16`) put each evaluation's noise near 1e-14 to 4e-14 on a 0.547 Eh
 energy. That is roughly 100–400 ulp, against N2's one. So acrolein's PC
 reference functional is itself noisy along CI directions, which supports
-#103's hypothesis there. It also means a PC regime for acrolein's CI
-directions is #105's to measure.
+#103's hypothesis there. It also meant a PC regime for acrolein's CI
+directions was #105's to measure, and #105 measured it: along spin-adapted
+directions the PC guard accepts `2^-12`, and there the GPU's `P y` agrees
+with block2's two decades inside the 1e-7 gate ("The directional
+source-term oracle", "Acrolein's `P y`: the #103/#104 finding, resolved").
 
 ### The C++ side
 

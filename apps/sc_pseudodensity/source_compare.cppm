@@ -22,12 +22,17 @@
 //   P y = y - <c, y> c -- projectOffState -- against py on the determinants
 //         of the state's irrep (ci_mask), in the golden's own basis.
 //
+// A DIRECTIONAL oracle (#105, `*_dir.srcgold`) holds seeded directions per
+// block and the derivative along each instead of every element; its rows are
+// the same nine, compared by projection (compareSourceDirections, below).
+//
 // THE TOLERANCES ARE NOT 1e-7: the oracle's side is a central difference,
 // and its truncation at the committed steps is what the agreement can be read
 // to. Each is measured from its own step ladders, and each has ONE home,
 // read at configure time (apps/sc_pseudodensity/CMakeLists.txt): SC's
 // docs/testing.md, "The SC source terms against PySCF's, on a card"; PC's
-// docs/testing.md, "The PC source terms' oracle".
+// docs/testing.md, "The PC source terms' oracle"; the directional flavour's
+// two, docs/testing.md, "The directional source-term oracle".
 //
 // THE KNOWN GAPS ARE PINNED, NOT HIDDEN. kKnownGaps is the ONE list of
 // blocks the device is known to get wrong. A block on it must still DISAGREE
@@ -41,6 +46,12 @@ module;
 #endif
 #ifndef NEVPT2_PC_SOURCE_ORACLE_TOL
 #error "NEVPT2_PC_SOURCE_ORACLE_TOL must be defined by apps/sc_pseudodensity/CMakeLists.txt"
+#endif
+#ifndef NEVPT2_SOURCE_DIRECTIONAL_TOL
+#error "NEVPT2_SOURCE_DIRECTIONAL_TOL must be defined by apps/sc_pseudodensity/CMakeLists.txt"
+#endif
+#ifndef NEVPT2_PC_SOURCE_DIRECTIONAL_TOL
+#error "NEVPT2_PC_SOURCE_DIRECTIONAL_TOL must be defined by apps/sc_pseudodensity/CMakeLists.txt"
 #endif
 
 export module nevpt2.source_compare;
@@ -82,14 +93,20 @@ struct KnownGap {
 // LiF: act_O-act_V, act_O-virt, act_V-virt -- for the f3ac/f3ca digests Y held
 // fixed; docs/testing.md, "The GPU as the source-term provider" keeps that
 // record), and `P y` left it with #87. The PC oracle (#95) started empty, and
-// the GPU's PC terms (#74) met every block of it on their first run.
+// the GPU's PC terms (#74) met every block of it on their first run. The
+// directional oracles (#105) started empty too: acrolein's SC and PC terms,
+// which no full oracle fits, met every block of theirs on their first run,
+// and N2's and LiF's directional twins agree with their full oracles on
+// which blocks pass (docs/testing.md, "The directional source-term oracle").
 inline constexpr std::array<KnownGap, 0> kKnownGaps{};
 
 // The oracles that have a classification at all -- one with no known gap is
 // named here too, so an oracle nobody has classified is refused rather than
 // read as "everything must agree".
-inline constexpr std::array<std::string_view, 3> kClassifiedOracles{
-    "n2_ccpvdz_cas44", "lif_def2svp_cas46", "n2_ccpvdz_cas44_pc"};
+inline constexpr std::array<std::string_view, 8> kClassifiedOracles{
+    "n2_ccpvdz_cas44",        "lif_def2svp_cas46",          "n2_ccpvdz_cas44_pc",
+    "n2_ccpvdz_cas44_dir",    "lif_def2svp_cas46_dir",      "n2_ccpvdz_cas44_pc_dir",
+    "acrolein_def2svp_cas65_dir", "acrolein_def2svp_cas65_pc_dir"};
 
 // The oracle file's name without the directory and the `.srcgold` suffix --
 // what kKnownGaps and kClassifiedOracles key on.
@@ -122,6 +139,9 @@ struct SourceBlockRow {
 };
 
 struct SourceComparison {
+  // Read off a directional oracle (#105): a row's n counts directions, and
+  // atP is the direction where its worst difference sits.
+  bool directional = false;
   std::vector<SourceBlockRow> rows;  // the eight blocks in nevpt2_grad's order, then P y
   std::vector<std::string> agreed;     // non-empty blocks held to agree, and that did
   std::vector<std::string> stillGaps;  // non-empty blocks on the list, still off
@@ -139,5 +159,56 @@ struct SourceComparison {
                                                   const Tensor& py,
                                                   std::span<const std::string_view> gaps,
                                                   double tol);
+
+// --- the directional flavour (#105) ------------------------------------------
+//
+// The same verdict off a DIRECTIONAL oracle: the GPU's A' (oracleBasisA's) and
+// P y (projectOffState's) are projected onto the stored directions --
+// <kappa, A'> = sum_{p<q} kappa_pq A'_pq, <u, P y> -- and each block's row is
+// the worst |GPU - oracle| over its directions. A and P y enter the gradient
+// linearly, so a wrong or missing term anywhere in a block moves a seeded
+// random direction's projection with probability 1. The known-gap semantics
+// are compareSourceTerms', and the tolerance is the directional one
+// (sourceDirectionalOracleTol). A block this partition has pairs in, probed
+// by fewer than kMinBlockDirections directions, fails: an oracle that skips a
+// block would otherwise pass it unexamined.
+
+// Per projection, absolute (Eh): the directional oracle's tolerance, one per
+// scheme, measured from its ladders (docs/testing.md, "The directional
+// source-term oracle" -- read at configure time like the two above).
+inline constexpr double kSourceDirectionalTol = NEVPT2_SOURCE_DIRECTIONAL_TOL;
+inline constexpr double kPcSourceDirectionalTol = NEVPT2_PC_SOURCE_DIRECTIONAL_TOL;
+
+[[nodiscard]] constexpr double sourceDirectionalTol(SourceScheme scheme) {
+  return scheme == SourceScheme::Pc ? kPcSourceDirectionalTol : kSourceDirectionalTol;
+}
+
+// The tolerance an oracle of this kind is read at.
+[[nodiscard]] constexpr double sourceOracleTol(const SrcGoldFile& o) {
+  return o.flavour == SourceFlavour::Directional ? sourceDirectionalTol(o.scheme)
+                                                 : sourceOracleTol(o.scheme);
+}
+
+// #105: "at least 2 directions per block".
+inline constexpr std::int64_t kMinBlockDirections = 2;
+
+// An IO Error unless every stored kappa direction lies inside the block its
+// kappa_block names -- no nonzero element outside it, and none on a gauge
+// pair -- so a row reports the block it claims to. A full oracle passes
+// trivially.
+[[nodiscard]] Status checkDirectionBlocks(const SrcGoldFile& o);
+
+// `a` and `py` (as compareSourceTerms takes them) against a directional
+// oracle `o`. Shapes that are not the oracle's are our bug (check).
+[[nodiscard]] SourceComparison compareSourceDirections(const SrcGoldFile& o, const Tensor& a,
+                                                       const Tensor& py,
+                                                       std::span<const std::string_view> gaps,
+                                                       double tol);
+
+// compareSourceTerms or compareSourceDirections, by the oracle's flavour.
+[[nodiscard]] SourceComparison compareSourceOracle(const SrcGoldFile& o, const Tensor& a,
+                                                   const Tensor& py,
+                                                   std::span<const std::string_view> gaps,
+                                                   double tol);
 
 }  // namespace nevpt2

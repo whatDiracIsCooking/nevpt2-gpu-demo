@@ -83,62 +83,66 @@ void accountSourceRow(SourceBlockRow& r, double got, double ref, std::int64_t p,
   }
 }
 
-SourceComparison compareSourceTerms(const SrcGoldFile& o, const Tensor& a, const Tensor& py,
-                                    std::span<const std::string_view> gaps, double tol) {
-  const std::int64_t nmo = o.nmo, ncore = o.ncore, nact = o.nact, nOcc = o.nActOcc;
-  check(a.dims() == std::vector<int64_t>{nmo, nmo},
-        std::format("compareSourceTerms: A is not [{}, {}]", nmo, nmo));
-  check(py.size() == o.ndet,
-        std::format("compareSourceTerms: P y has {} elements, the oracle {}", py.size(),
-                    o.ndet));
-  const auto spaceOf = [&](std::int64_t p) -> int {
-    if (p < ncore) return 0;
-    if (p < ncore + nOcc) return 1;
-    if (p < ncore + nact) return 2;
-    return 3;
-  };
-  SourceComparison out;
-  out.tol = tol;
-  // Every block of two spaces, in nevpt2_grad's order, then P y.
-  std::array<std::array<int, 4>, 4> rowOf{};
+// Which of the four spaces orbital p is in (nevpt2_grad's State.space_of).
+int sourceSpaceOf(const SrcGoldFile& o, std::int64_t p) {
+  if (p < o.ncore) return 0;
+  if (p < o.ncore + o.nActOcc) return 1;
+  if (p < o.ncore + o.nact) return 2;
+  return 3;
+}
+
+// act_O-act_O and act_V-act_V are the gauges: no pair there is compared.
+bool isGaugeBlock(int s, int t) { return s == t && (s == 1 || s == 2); }
+
+// The eight rows of two spaces, in nevpt2_grad's order (every s <= t but the
+// gauges), each with the index of the block it is -- what a directional
+// oracle's kappa_block counts -- and rowOf[s][t] pointing at it.
+std::vector<SourceBlockRow> sourceBlockRows(std::array<std::array<int, 4>, 4>& rowOf) {
+  std::vector<SourceBlockRow> rows;
   for (int s = 0; s < 4; ++s)
     for (int t = s; t < 4; ++t) {
-      // act_O-act_O and act_V-act_V are the gauges: no pair there is compared.
-      if (s == t && (s == 1 || s == 2)) continue;
-      rowOf[s][t] = static_cast<int>(out.rows.size());
-      out.rows.push_back(
+      if (isGaugeBlock(s, t)) continue;
+      rowOf[s][t] = static_cast<int>(rows.size());
+      rows.push_back(
           SourceBlockRow{std::format("{}-{}", kSourceSpaceNames[s], kSourceSpaceNames[t])});
     }
-  const Tensor& aRef = o.get("a_corr");
-  for (std::int64_t p = 0; p < nmo; ++p)
-    for (std::int64_t q = p + 1; q < nmo; ++q) {
-      const int s = spaceOf(p), t = spaceOf(q);
-      if (s == t && (s == 1 || s == 2)) continue;
-      accountSourceRow(out.rows[rowOf[s][t]], a(p, q), aRef(p, q), p, q);
-    }
-  const Tensor& pyRef = o.get("py");
-  const Tensor& mask = o.get("ci_mask");
-  SourceBlockRow ciRow{std::string(kSourceCiBlock)};
-  for (std::int64_t i = 0; i < o.ndet; ++i)
-    if (mask.flat(i) != 0.0) accountSourceRow(ciRow, py.flat(i), pyRef.flat(i), i, -1);
-  out.rows.push_back(ciRow);
+  return rows;
+}
 
+// How many non-gauge pairs block (s, t) has in this oracle's partition.
+std::int64_t sourceBlockPairs(const SrcGoldFile& o, int s, int t) {
+  const std::array<std::int64_t, 4> size{o.ncore, o.nActOcc, o.nact - o.nActOcc, o.nvirt};
+  return s == t ? size[s] * (size[s] - 1) / 2 : size[s] * size[t];
+}
+
+// Every row held to where `gaps` puts it at `tol` -- the one verdict both
+// flavours give. `minProbes` > 0 also fails a row the partition has pairs in
+// that fewer directions than that probed (pairs[i] is row i's pair count; the
+// P y row is last and always has some).
+void finishSourceComparison(SourceComparison& out, std::span<const std::string_view> gaps,
+                            std::span<const std::int64_t> pairs, std::int64_t minProbes) {
   out.ok = true;
-  for (SourceBlockRow& r : out.rows) {
+  for (std::size_t i = 0; i < out.rows.size(); ++i) {
+    SourceBlockRow& r = out.rows[i];
     r.knownGap = std::ranges::find(gaps, std::string_view(r.name)) != gaps.end();
-    if (r.n == 0) {
+    if (minProbes > 0 && pairs[i] > 0 && r.n < minProbes) {
+      r.ok = false;
+      r.verdict = std::format("FAILED: {} pairs in this partition, but only {} direction(s) "
+                              "probe the block (need {})",
+                              pairs[i], r.n, minProbes);
+    } else if (r.n == 0) {
       r.verdict = "empty";
       if (r.knownGap) {
         r.ok = false;
         r.verdict = "FAILED: on the known-gap list, but this case has no such pair";
       }
     } else if (r.knownGap) {
-      r.ok = r.maxDelta > tol;
+      r.ok = r.maxDelta > out.tol;
       r.verdict = r.ok ? "ok, still off"
                        : "FAILED: now AGREES -- take it off kKnownGaps "
                          "(source_compare.cppm)";
     } else {
-      r.ok = r.maxDelta <= tol;
+      r.ok = r.maxDelta <= out.tol;
       r.verdict = r.ok ? "ok" : "FAILED: a block that agreed no longer does";
     }
     if (!r.ok) out.failures.push_back(r.name);
@@ -150,7 +154,110 @@ SourceComparison compareSourceTerms(const SrcGoldFile& o, const Tensor& a, const
       out.failures.push_back(std::format("{} (a known-gap entry naming no block)", gname));
       out.ok = false;
     }
+}
+
+SourceComparison compareSourceTerms(const SrcGoldFile& o, const Tensor& a, const Tensor& py,
+                                    std::span<const std::string_view> gaps, double tol) {
+  const std::int64_t nmo = o.nmo;
+  check(o.flavour == SourceFlavour::Full,
+        "compareSourceTerms: a directional oracle is compareSourceDirections'");
+  check(a.dims() == std::vector<int64_t>{nmo, nmo},
+        std::format("compareSourceTerms: A is not [{}, {}]", nmo, nmo));
+  check(py.size() == o.ndet,
+        std::format("compareSourceTerms: P y has {} elements, the oracle {}", py.size(),
+                    o.ndet));
+  SourceComparison out;
+  out.tol = tol;
+  std::array<std::array<int, 4>, 4> rowOf{};
+  out.rows = sourceBlockRows(rowOf);
+  const Tensor& aRef = o.get("a_corr");
+  for (std::int64_t p = 0; p < nmo; ++p)
+    for (std::int64_t q = p + 1; q < nmo; ++q) {
+      const int s = sourceSpaceOf(o, p), t = sourceSpaceOf(o, q);
+      if (isGaugeBlock(s, t)) continue;
+      accountSourceRow(out.rows[rowOf[s][t]], a(p, q), aRef(p, q), p, q);
+    }
+  const Tensor& pyRef = o.get("py");
+  const Tensor& mask = o.get("ci_mask");
+  SourceBlockRow ciRow{std::string(kSourceCiBlock)};
+  for (std::int64_t i = 0; i < o.ndet; ++i)
+    if (mask.flat(i) != 0.0) accountSourceRow(ciRow, py.flat(i), pyRef.flat(i), i, -1);
+  out.rows.push_back(ciRow);
+  finishSourceComparison(out, gaps, {}, 0);
   return out;
+}
+
+Status checkDirectionBlocks(const SrcGoldFile& o) {
+  if (o.flavour != SourceFlavour::Directional) return {};
+  std::array<std::array<int, 4>, 4> rowOf{};
+  const std::vector<SourceBlockRow> rows = sourceBlockRows(rowOf);
+  const Tensor& dirs = o.get("kappa_dirs");
+  const Tensor& block = o.get("kappa_block");
+  for (std::int64_t d = 0; d < dirs.dims()[0]; ++d) {
+    const int b = static_cast<int>(block.flat(d));
+    for (std::int64_t p = 0; p < o.nmo; ++p)
+      for (std::int64_t q = p + 1; q < o.nmo; ++q) {
+        if (dirs(d, p, q) == 0.0) continue;
+        const int s = sourceSpaceOf(o, p), t = sourceSpaceOf(o, q);
+        if (isGaugeBlock(s, t) || rowOf[s][t] != b)
+          return err_io(std::format(
+              "source-term oracle: kappa direction {} is labelled {} but is nonzero at ({}, "
+              "{}), in {} -- its projection would not be that block's",
+              d, rows[static_cast<std::size_t>(b)].name, p, q,
+              isGaugeBlock(s, t) ? std::format("the {0}-{0} gauge", kSourceSpaceNames[s])
+                                 : rows[static_cast<std::size_t>(rowOf[s][t])].name));
+      }
+  }
+  return {};
+}
+
+SourceComparison compareSourceDirections(const SrcGoldFile& o, const Tensor& a,
+                                         const Tensor& py,
+                                         std::span<const std::string_view> gaps, double tol) {
+  const std::int64_t nmo = o.nmo;
+  check(o.flavour == SourceFlavour::Directional,
+        "compareSourceDirections: a full oracle is compareSourceTerms'");
+  check(a.dims() == std::vector<int64_t>{nmo, nmo},
+        std::format("compareSourceDirections: A is not [{}, {}]", nmo, nmo));
+  check(py.size() == o.ndet,
+        std::format("compareSourceDirections: P y has {} elements, the oracle {}", py.size(),
+                    o.ndet));
+  SourceComparison out;
+  out.directional = true;
+  out.tol = tol;
+  std::array<std::array<int, 4>, 4> rowOf{};
+  out.rows = sourceBlockRows(rowOf);
+  std::vector<std::int64_t> pairs(out.rows.size() + 1, 1);
+  for (int s = 0; s < 4; ++s)
+    for (int t = s; t < 4; ++t)
+      if (!isGaugeBlock(s, t)) pairs[static_cast<std::size_t>(rowOf[s][t])] = sourceBlockPairs(o, s, t);
+
+  const Tensor& dirs = o.get("kappa_dirs");
+  const Tensor& block = o.get("kappa_block");
+  const Tensor& val = o.get("kappa_val");
+  for (std::int64_t d = 0; d < dirs.dims()[0]; ++d) {
+    double got = 0.0;
+    for (std::int64_t p = 0; p < nmo; ++p)
+      for (std::int64_t q = p + 1; q < nmo; ++q) got += dirs(d, p, q) * a(p, q);
+    accountSourceRow(out.rows[static_cast<std::size_t>(block.flat(d))], got, val.flat(d), d, -1);
+  }
+  const Tensor& u = o.get("ci_dirs");
+  const Tensor& cval = o.get("ci_val");
+  SourceBlockRow ciRow{std::string(kSourceCiBlock)};
+  for (std::int64_t d = 0; d < u.dims()[0]; ++d) {
+    double got = 0.0;
+    for (std::int64_t i = 0; i < o.ndet; ++i) got += u(d, i) * py.flat(i);
+    accountSourceRow(ciRow, got, cval.flat(d), d, -1);
+  }
+  out.rows.push_back(ciRow);
+  finishSourceComparison(out, gaps, pairs, kMinBlockDirections);
+  return out;
+}
+
+SourceComparison compareSourceOracle(const SrcGoldFile& o, const Tensor& a, const Tensor& py,
+                                     std::span<const std::string_view> gaps, double tol) {
+  return o.flavour == SourceFlavour::Directional ? compareSourceDirections(o, a, py, gaps, tol)
+                                                 : compareSourceTerms(o, a, py, gaps, tol);
 }
 
 }  // namespace nevpt2

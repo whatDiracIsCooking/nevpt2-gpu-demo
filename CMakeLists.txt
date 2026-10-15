@@ -587,6 +587,70 @@ if(NEVPT2_BUILD_TESTING)
         "PASS: the GPU's PC source terms against block2's committed ones, n2_ccpvdz_cas44_pc:")
   endif()
 
+  # --- the directional source-term oracles (#105) --------------------------------
+  #
+  # The same --source-oracle comparison against a DIRECTIONAL oracle,
+  # golden/<case>[_pc]_dir.srcgold (reference_data/sc_source_oracle.py
+  # --directional): the GPU's full Y and y projected onto seeded directions per
+  # block, block by block, empty known-gap lists, and the directional
+  # tolerances (docs/testing.md, "The directional source-term oracle" -- their
+  # one home). Acrolein CAS(6,5) is why the flavour exists: its full oracle
+  # would take hours to generate, its directional ones take minutes. N2
+  # CAS(4,4) and LiF sit beside their full oracles as the cross-check of the
+  # two flavours.
+  #
+  # Acrolein's gradient sidecar is gitignored (57 MB; docs/reference-data.md,
+  # "The gradient sidecar"), so its two entries are registered only where it
+  # has been regenerated, with a warning otherwise -- the --kappa-full
+  # entries' rule. They are `slow`: the comparison assembles the whole Y, one
+  # basis direction per MO pair, 2,846 of them (docs/testing.md, "The
+  # directional source-term oracle", has their wall time).
+  foreach(_spec "n2_ccpvdz_cas44|sc" "n2_ccpvdz_cas44|pc" "lif_def2svp_cas46|sc"
+                "acrolein_def2svp_cas65|sc" "acrolein_def2svp_cas65|pc")
+    string(REPLACE "|" ";" _spec "${_spec}")
+    list(GET _spec 0 _case)
+    list(GET _spec 1 _scheme)
+    if(_scheme STREQUAL "pc")
+      set(_stem "${_case}_pc_dir")
+      set(_flags --pc)
+      set(_pass "PASS: the GPU's PC source terms against block2's committed ones, ${_stem}:")
+      set(_name nevpt2_sc_pseudodensity_oracle_dir_pc_${_case})
+    else()
+      set(_stem "${_case}_dir")
+      set(_flags "")
+      set(_pass "PASS: the GPU's SC source terms against PySCF's committed ones, ${_stem}:")
+      set(_name nevpt2_sc_pseudodensity_oracle_dir_${_case})
+    endif()
+    set(_dir_oracle "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_stem}.srcgold")
+    set(_dir_side "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.gradgold")
+    if(NOT EXISTS "${_dir_oracle}")
+      message(FATAL_ERROR "nevpt2: committed source-oracle input missing: ${_dir_oracle}")
+    endif()
+    if(NOT EXISTS "${_dir_side}")
+      message(WARNING "nevpt2: gradient sidecar missing, test '${_name}' not registered: "
+                      "${_dir_side}")
+    else()
+      _add_golden_test_with(nevpt2_sc_pseudodensity ${_name}
+                            "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.nevpt2gold"
+                            --tiles 3 ${_flags} --source-oracle "${_dir_oracle}")
+      if(TEST ${_name})
+        set_tests_properties(${_name} PROPERTIES PASS_REGULAR_EXPRESSION "${_pass}")
+        if(_case STREQUAL "acrolein_def2svp_cas65")
+          set_tests_properties(${_name} PROPERTIES LABELS "gpu;slow")
+        endif()
+      endif()
+    endif()
+  endforeach()
+  unset(_spec)
+  unset(_case)
+  unset(_scheme)
+  unset(_stem)
+  unset(_flags)
+  unset(_pass)
+  unset(_name)
+  unset(_dir_oracle)
+  unset(_dir_side)
+
   # --- *_pc: PC-NEVPT2 ----------------------------------------------
   #
   # The same RDM build as the SC entry at the same --tiles; the PC stage runs

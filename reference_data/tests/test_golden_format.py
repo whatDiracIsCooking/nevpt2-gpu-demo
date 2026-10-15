@@ -80,8 +80,9 @@ def _write_mo_sidecar(path, fields=None, arrays=None):
     )
 
 
-def _write_srcgold(path, scheme="sc"):
-    gf.write_srcgold(path, header=dict(SRC_HEADER, scheme=scheme), arrays=_arrays())
+def _write_srcgold(path, scheme="sc", flavour="full"):
+    gf.write_srcgold(path, header=dict(SRC_HEADER, scheme=scheme, flavour=flavour),
+                     arrays=_arrays())
 
 
 def _header_len(layouts, magic) -> int:
@@ -168,23 +169,29 @@ def test_mo_sidecar_round_trip(tmp_path):
     np.testing.assert_array_equal(flat["mo_coeff"], arrays["mo_coeff"])
 
 
-@pytest.mark.parametrize("scheme, magic", [("sc", b"NEVPT2S1"), ("pc", b"NEVPT2P1")])
-def test_srcgold_round_trip_and_rewrite(tmp_path, scheme, magic):
+SRC_KINDS = [("sc", "full", b"NEVPT2S1"), ("pc", "full", b"NEVPT2P1"),
+             ("sc", "directional", b"NEVPT2SD"), ("pc", "directional", b"NEVPT2PD")]
+
+
+@pytest.mark.parametrize("scheme, flavour, magic", SRC_KINDS)
+def test_srcgold_round_trip_and_rewrite(tmp_path, scheme, flavour, magic):
     p, q = tmp_path / "a.srcgold", tmp_path / "b.srcgold"
-    _write_srcgold(p, scheme)
-    assert p.read_bytes()[:8] == magic == gf.SRCGOLD_MAGIC_FOR[scheme]
+    _write_srcgold(p, scheme, flavour)
+    assert p.read_bytes()[:8] == magic == gf.SRCGOLD_MAGIC_FOR[(scheme, flavour)]
     header, arrays = gf.read_srcgold(p)
-    assert header == dict(SRC_HEADER, scheme=scheme)
+    assert header == dict(SRC_HEADER, scheme=scheme, flavour=flavour)
     _assert_arrays_equal(arrays, _arrays())
     gf.write_srcgold(q, header=header, arrays=arrays)
     assert p.read_bytes() == q.read_bytes()
 
 
-def test_srcgold_flavours_differ_only_in_the_magic(tmp_path):
-    _write_srcgold(tmp_path / "sc", "sc")
-    _write_srcgold(tmp_path / "pc", "pc")
-    sc, pc = (tmp_path / "sc").read_bytes(), (tmp_path / "pc").read_bytes()
-    assert sc[:8] != pc[:8] and sc[8:] == pc[8:]
+def test_srcgold_kinds_differ_only_in_the_magic(tmp_path):
+    files = []
+    for scheme, flavour, _magic in SRC_KINDS:
+        _write_srcgold(tmp_path / f"{scheme}_{flavour}", scheme, flavour)
+        files.append((tmp_path / f"{scheme}_{flavour}").read_bytes())
+    assert len({f[:8] for f in files}) == len(SRC_KINDS)
+    assert len({f[8:] for f in files}) == 1
 
 
 def test_rank_zero(tmp_path):
@@ -211,6 +218,17 @@ def test_srcgold_case():
         gf.srcgold_case("golden/n2_ccpvdz_cas44.srcgold", "pc")
 
 
+def test_srcgold_case_directional():
+    for scheme, flavour, _magic in SRC_KINDS:
+        name = gf.srcgold_name("acrolein_def2svp_cas65", scheme, flavour)
+        assert gf.srcgold_case(f"golden/{name}", scheme, flavour) == "acrolein_def2svp_cas65"
+    assert gf.srcgold_name("x", "pc", "directional") == "x_pc_dir.srcgold"
+    with pytest.raises(gf.FormatError, match="must end in _dir"):
+        gf.srcgold_case("golden/x_pc.srcgold", "pc", "directional")
+    with pytest.raises(gf.FormatError, match="must end in _pc_dir"):
+        gf.srcgold_case("golden/x_dir.srcgold", "pc", "directional")
+
+
 def test_arrays_at_cli(tmp_path, capsys):
     p = tmp_path / "g.nevpt2gold"
     _write_golden_v1(p)
@@ -228,6 +246,8 @@ WRITERS = {
     "mogold": (_write_mo_sidecar, gf.read_mo_sidecar),
     "srcgold_sc": (lambda p: _write_srcgold(p, "sc"), gf.read_srcgold),
     "srcgold_pc": (lambda p: _write_srcgold(p, "pc"), gf.read_srcgold),
+    "srcgold_sc_dir": (lambda p: _write_srcgold(p, "sc", "directional"), gf.read_srcgold),
+    "srcgold_pc_dir": (lambda p: _write_srcgold(p, "pc", "directional"), gf.read_srcgold),
 }
 
 

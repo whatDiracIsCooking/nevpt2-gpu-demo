@@ -70,10 +70,13 @@ target_compile_definitions(nevpt2_sc_pseudodensity
 # measured -- the oracle's side is a central difference, so the agreement can
 # be read only to that quotient's truncation -- and each has ONE home in
 # docs/testing.md: SC's (#92) "The SC source terms against PySCF's, on a
-# card", PC's (#95) "The PC source terms' oracle". Defined on
+# card", PC's (#95) "The PC source terms' oracle", and the directional
+# flavour's two (#105) "The directional source-term oracle". Defined on
 # nevpt2.source_compare, whose interface exports them as constants.
 foreach(_nevpt2_tol_spec "the source-oracle tolerance|NEVPT2_SOURCE_ORACLE_TOL"
-                         "the PC source-oracle tolerance|NEVPT2_PC_SOURCE_ORACLE_TOL")
+                         "the PC source-oracle tolerance|NEVPT2_PC_SOURCE_ORACLE_TOL"
+                         "the directional source-oracle tolerance|NEVPT2_SOURCE_DIRECTIONAL_TOL"
+                         "the PC directional source-oracle tolerance|NEVPT2_PC_SOURCE_DIRECTIONAL_TOL")
   string(REPLACE "|" ";" _nevpt2_tol_spec "${_nevpt2_tol_spec}")
   list(GET _nevpt2_tol_spec 0 _nevpt2_tol_label)
   list(GET _nevpt2_tol_spec 1 _nevpt2_tol_define)
