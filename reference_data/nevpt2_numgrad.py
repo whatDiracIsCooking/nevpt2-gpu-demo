@@ -70,7 +70,10 @@ and a ``states.json`` manifest stay in ``--states-dir``, so later consumers
 (``pc_on_states.py``'s GPU PC energies, #126's block2 spot-checks) reuse
 this sweep's states rather than optimising their
 own. SC only, and it writes ``--npz`` only: the committed
-``<case>_casscf.gradgold`` stays the 24 ``--gradgold`` arrays.
+``<case>_casscf.gradgold`` stays the 24 ``--gradgold`` arrays. Its PC twin
+runs no sweep at all: ``--pc-states NPZ`` differences the GPU's PC energies
+on a finished sweep's states with the same stencil
+(:func:`difference_pc_states`, #126).
 docs/reference-data.md, "The numerical gradient of a CASSCF reference", has
 the measurements.
 
@@ -121,6 +124,9 @@ differentiate::
     uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65 \
         --reference casscf --workers 12 --states-dir /tmp/acrolein_states \
         --npz /tmp/acrolein_casscf.numgrad.npz   # the gate, once the screen passes
+    uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65 \
+        --reference casscf --pc-states /tmp/acrolein_pc_states.npz \
+        --npz /tmp/acrolein_casscf_pc.numgrad.npz  # PC, off pc_on_states.py's file
 """
 
 from __future__ import annotations
@@ -981,18 +987,20 @@ def directions(probed, natm: int, n: int, seed: int) -> np.ndarray:
     return out
 
 
-def load_analytic(path: Path, case: str) -> dict:
+def load_analytic(path: Path, case: str, *, pc: bool = False) -> dict:
     """The analytic gradient the directional screen holds the numerical
     derivative to: an ``nevpt2_grad.py --reference casscf --out PATH`` file,
     checked to be the SC (not ``--casci-only``, not ``--pc``) gradient of a
-    ``casscf`` reference of this case."""
+    ``casscf`` reference of this case -- or, with ``pc`` (``--pc-states``),
+    the ``--pc`` one."""
+    scheme = "PC" if pc else "SC"
     with np.load(path) as z:
         got = {k: (str(z[k]) if k in z else None)
                for k in ("case", "reference", "casci_only", "pc")}
         if got["case"] != case or got["reference"] != "casscf" or \
-                got["casci_only"] != "False" or got["pc"] != "False":
+                got["casci_only"] != "False" or got["pc"] != str(pc):
             raise SystemExit(
-                f"{path} is not the SC gradient of --case {case} --reference casscf "
+                f"{path} is not the {scheme} gradient of --case {case} --reference casscf "
                 f"(it says case={got['case']!r}, reference={got['reference']!r}, "
                 f"casci_only={got['casci_only']}, pc={got['pc']}): the screen would "
                 "compare two different functions"
@@ -1022,6 +1030,160 @@ def _difference(states: list[dict], steps, field) -> tuple[float, float]:
     by = {(st["rung"], st["sign"]): field(st) for st in states}
     diffs = {h: (by[(k, 1)] - by[(k, -1)]) / (2 * h) for k, h in enumerate(steps)}
     return richardson(diffs, steps)
+
+
+#: A ``--pc-states`` key: a component (``<atom><axis>``) or a screen
+#: direction (``d<n>``), as :func:`_stencil_tasks` labels them.
+_COMPONENT_KEY = re.compile(r"^(\d+)([xyz])$")
+_DIRECTION_KEY = re.compile(r"^d(\d+)$")
+
+
+def difference_pc_states(path: Path, case: str) -> dict:
+    """``--pc-states``: the PC numerical gradient of a CASSCF reference, from
+    the GPU's PC energies on a ``--reference casscf`` sweep's kept states
+    (``pc_on_states.py``'s keyed ``.npz``, #138), differenced with **this
+    sweep's own stencil** (:func:`stencil`, :func:`_difference`) -- #126.
+
+    Nothing is optimised and nothing runs: the states, their ``E_CASCI`` and
+    their keys are the sweep's, so the PC gradient is taken on exactly the
+    states the SC one was. Every state a coordinate needs must have been
+    built, passed the per-state PC conditioning guard and carry a finite
+    ``e_pc``, or the run is **refused**, naming the states: a refused state
+    is a hole in the stencil, never a number to difference around.
+
+    Beside ``E_CASCI + E_PC`` it differences ``E_CASCI + E_corr(SC)`` from the
+    same file -- PySCF's on the transient goldens, and the device's -- so the
+    SC gradient of the sweep that made the states is reproduced from this
+    file alone, the wiring check of the whole hand-off."""
+    with np.load(path) as z:
+        f = {k: z[k] for k in z.files}
+    if str(f["case"]) != case:
+        raise SystemExit(f"{path} holds the PC energies of case {str(f['case'])!r}, "
+                         f"not {case!r}")
+    step = float(f["step"])
+    steps = stencil(step)
+    labels = [str(x) for x in f["labels"]]
+    usable = f["built"] & f["guard_ok"] & np.isfinite(f["e_pc"])
+    bad = [f"{lab} ({f['guard_why'][i] or f['build_why'][i] or 'no e_pc'})"
+           for i, lab in enumerate(labels) if not usable[i]]
+    if bad:
+        raise SystemExit(
+            f"{path}: {len(bad)} state(s) have no usable PC energy -- {'; '.join(bad)}. "
+            "A refused state is a hole in the stencil: the coordinate it belongs to is "
+            "not differenced around it")
+    natm = f["displacement_bohr"].shape[1]
+    by_key: dict[str, list[dict]] = {}
+    for i, key in enumerate(str(k) for k in f["key"]):
+        if key == "ref":
+            continue
+        by_key.setdefault(key, []).append(dict(
+            rung=int(f["rung"][i]), sign=int(f["sign"][i]), s=float(f["s"][i]),
+            unit=f["displacement_bohr"][i] / float(f["s"][i]),
+            pc=float(f["e_casci"][i] + f["e_pc"][i]),
+            sc=float(f["e_casci"][i] + f["e_corr_sc"][i]),
+            sc_gpu=float(f["e_casci"][i] + f["e_sc_gpu"][i])))
+    want = {(k, sign) for k in range(len(steps)) for sign in (1, -1)}
+    for key, sts in by_key.items():
+        got = [(st["rung"], st["sign"]) for st in sts]
+        if sorted(got) != sorted(want):
+            raise SystemExit(f"{path}: coordinate {key} has states {sorted(got)}, not the "
+                             f"six of the h, h/2, h/4 stencil")
+    rec = dict(case=case, step=step, natm=natm, pc_states=str(path),
+               ref_pc_offset=float(f["ref_pc_offset"]),
+               guard_min_gap=float(f["guard_min_gap"].min()), n_states=len(labels))
+    grad = {n: np.zeros((natm, 3)) for n in ("pc", "sc", "sc_gpu")}
+    res = {n: np.zeros((natm, 3)) for n in ("pc", "sc", "sc_gpu")}
+    probed = np.zeros((natm, 3))
+    dirs: dict[int, tuple] = {}
+    for key, sts in by_key.items():
+        m = _COMPONENT_KEY.match(key)
+        if m:
+            iatom, comp = int(m.group(1)), AXES.index(m.group(2))
+            for n in grad:
+                grad[n][iatom, comp], res[n][iatom, comp] = _difference(
+                    sts, steps, lambda st, n=n: st[n])
+            probed[iatom, comp] = 1.0
+            continue
+        m = _DIRECTION_KEY.match(key)
+        if not m:
+            raise SystemExit(f"{path}: key {key!r} is neither a component nor a direction")
+        unit = next(st["unit"] for st in sts if st["rung"] == 0 and st["sign"] == 1)
+        dirs[int(m.group(1))] = (unit, *(_difference(sts, steps, lambda st, n=n: st[n])
+                                         for n in ("pc", "sc")))
+    rec.update(grad_num_pc=grad["pc"], grad_num_pc_residual=res["pc"],
+               grad_num=grad["sc"], grad_num_residual=res["sc"],
+               grad_num_sc_gpu=grad["sc_gpu"], grad_num_probed=probed,
+               grad_num_step=np.array([step]))
+    if dirs:
+        order = sorted(dirs)
+        rec.update(dir_vectors=np.array([dirs[n][0] for n in order]),
+                   dir_num_pc=np.array([dirs[n][1][0] for n in order]),
+                   dir_residual_pc=np.array([dirs[n][1][1] for n in order]),
+                   dir_num=np.array([dirs[n][2][0] for n in order]),
+                   dir_residual=np.array([dirs[n][2][1] for n in order]))
+    return rec
+
+
+def report_pc_states(rec: dict, analytic: dict | None) -> bool:
+    """``--pc-states``' report: the PC numerical gradient beside the SC one
+    from the same file, and -- with ``analytic``, an ``nevpt2_grad.py
+    --reference casscf --pc --out`` file -- each component and each screen
+    direction against it. The directions are gated here at
+    ``nevpt2_grad.GRAD_NUM_TOL``, as the SC screen is
+    (:func:`report_casscf`); the componentwise gate is ``nevpt2_grad.py
+    --grad-num``'s. Returns whether the directions passed (True with none)."""
+    import nevpt2_grad  # lazily: it imports this module
+
+    tol = nevpt2_grad.GRAD_NUM_TOL
+    probed = rec["grad_num_probed"] > 0
+    print(f"== {rec['case']}  --reference casscf --pc-states {rec['pc_states']}")
+    print(f"{rec['n_states']} states, every one built, guarded (smallest gap "
+          f"{rec['guard_min_gap']:.2g}) and with a PC energy; reference E_PC - committed "
+          f"e_pc_total {rec['ref_pc_offset']:+.2e}; step {rec['step']:g} bohr, stencil "
+          + "/".join(f"{h:g}" for h in stencil(rec["step"])))
+    g, r = rec["grad_num_pc"], rec["grad_num_pc_residual"]
+    a = analytic["grad"] if analytic else None
+    print(f"{'comp':>5} {'PC numerical':>16} {'residual':>9} {'SC numerical':>16}"
+          + (f" {'PC analytic':>16} {'|delta|':>9}" if a is not None else ""))
+    for i in range(rec["natm"]):
+        for c in range(3):
+            tail = (f" {a[i, c]:+16.10f} "
+                    + (f"{abs(a[i, c] - g[i, c]):9.2e}" if probed[i, c] else f"{'0 (sym)':>9}")
+                    if a is not None else "")
+            if probed[i, c]:
+                print(f"{i:>4}{AXES[c]} {g[i, c]:+16.10f} {r[i, c]:9.1e} "
+                      f"{rec['grad_num'][i, c]:+16.10f}{tail}")
+            else:
+                print(f"{i:>4}{AXES[c]} {'0 (sym)':>16} {'.':>9} {'0 (sym)':>16}{tail}")
+    print(f"max PC residual {r[probed].max():.1e}; |SC PySCF - SC GPU| over the probed "
+          f"components {np.abs(rec['grad_num'] - rec['grad_num_sc_gpu'])[probed].max():.1e}")
+    full = probed.all(axis=0)
+    if full.any():
+        print("sum over atoms (0 by translational invariance), PC: "
+              + ", ".join(f"d/d{AXES[c]} {g[:, c].sum():+.2e}" for c in range(3) if full[c]))
+    if a is not None:
+        d = np.abs(a - g)[probed]
+        print(f"against --analytic: max |g - grad_num_pc| {d.max():.2e}, RMS "
+              f"{np.sqrt(np.mean(d ** 2)):.2e} over {int(probed.sum())} components; "
+              f"max |g| on the {int((~probed).sum())} zero-by-symmetry ones "
+              f"{np.abs(a[~probed]).max() if (~probed).any() else 0.0:.2e} (the gate, "
+              f"{tol:g}, is nevpt2_grad.py --grad-num's)")
+    ok = True
+    if "dir_num_pc" in rec:
+        print(f"{'dir':>4} {'PC numerical':>16} {'residual':>9}"
+              + (f" {'<g, d>':>16} {'|delta|':>9}" if a is not None else ""))
+        for n, (num, res) in enumerate(zip(rec["dir_num_pc"], rec["dir_residual_pc"],
+                                           strict=True)):
+            if a is None:
+                print(f"  d{n} {num:+16.10f} {res:9.1e}")
+                continue
+            an = float(np.sum(a * rec["dir_vectors"][n]))
+            ok = ok and abs(num - an) <= tol
+            print(f"  d{n} {num:+16.10f} {res:9.1e} {an:+16.10f} {abs(num - an):9.1e}")
+        if a is not None:
+            print(f"{'PASS' if ok else 'FAIL'}: the PC directional screen, "
+                  f"{len(rec['dir_num_pc'])} directions, allowed |delta| {tol:g}")
+    return ok
 
 
 def warm_probe(cold: list[dict], n: int) -> list[dict]:
@@ -1596,19 +1758,32 @@ def main() -> None:
                          "geometries warm-started from the reference's orbitals "
                          "and refuse any that lands elsewhere than its cold "
                          f"state (default {WARM_PROBE_DEFAULT}; 0 skips it)")
+    ap.add_argument("--pc-states", type=Path, default=None, metavar="NPZ",
+                    help="--reference casscf: run NO sweep; difference the GPU's PC "
+                         "energies on a finished sweep's kept states (the keyed "
+                         ".npz pc_on_states.py writes) with this stencil, into "
+                         "grad_num_pc for nevpt2_grad.py --reference casscf --pc "
+                         "--grad-num (#126). Refused if any state lacks a guarded "
+                         "PC energy. --analytic is then a --pc gradient, and the "
+                         "screen directions in the file are gated against it")
     args = ap.parse_args()
     casscf = args.reference == "casscf"
     if not casscf:
         named = [f for f, on in (("--mo-from", args.mo_from), ("--directional",
                  args.directional), ("--analytic", args.analytic), ("--states-dir",
-                 args.states_dir), ("--warm-probe", args.warm_probe)) if on]
+                 args.states_dir), ("--warm-probe", args.warm_probe),
+                 ("--pc-states", args.pc_states)) if on]
         if named:
             ap.error(f"{', '.join(named)} belong to --reference casscf")
     else:
         if args.pc:
             ap.error("--reference casscf is SC only: the PC gradient of a CASSCF "
-                     "reference is #126's, and reuses this sweep's states "
-                     "(--states-dir) rather than running block2 here")
+                     "reference differences the GPU's PC energies on this sweep's "
+                     "kept states (pc_on_states.py, then --pc-states NPZ) rather "
+                     "than running block2 here")
+        if args.pc_states is not None and (args.directional or args.states_dir):
+            ap.error("--pc-states differences a finished sweep's PC energies; it runs "
+                     "no sweep, so --directional and --states-dir do not apply")
         if args.npz is None and not args.no_write:
             ap.error("--reference casscf writes no sidecar (the committed "
                      "<case>_casscf.gradgold is the 24 --gradgold arrays and stays "
@@ -1625,6 +1800,22 @@ def main() -> None:
         args.sidecar = REPO / "golden" / f"{stem}.gradgold"
     if casscf and args.mo_from is None:
         args.mo_from = REPO / "golden" / f"{stem}.mogold"
+    if args.pc_states is not None:
+        # #126: no sweep -- the PC energies of one that already ran, differenced.
+        analytic = load_analytic(args.analytic, args.case, pc=True) if args.analytic else None
+        rec = difference_pc_states(args.pc_states, args.case)
+        ok = report_pc_states(rec, analytic)
+        if args.npz is not None:
+            names = [n for n in ("grad_num_pc", "grad_num_pc_residual", "grad_num",
+                                 "grad_num_residual", "grad_num_sc_gpu", "grad_num_probed",
+                                 "grad_num_step", "dir_vectors", "dir_num_pc",
+                                 "dir_residual_pc", "dir_num", "dir_residual") if n in rec]
+            np.savez(args.npz, case=np.array(rec["case"]), pc=np.array(True),
+                     reference=np.array("casscf"), **{n: rec[n] for n in names})
+            print(f"wrote {args.npz} ({len(names) + 3} arrays)")
+        if not ok:
+            raise SystemExit(1)
+        return
     analytic = load_analytic(args.analytic, args.case) if args.analytic else None
 
     rec = run(args)

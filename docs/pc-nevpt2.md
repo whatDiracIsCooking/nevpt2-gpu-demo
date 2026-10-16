@@ -997,6 +997,19 @@ report — seconds, dump / oracle: `asan` 5.6 / 5.0, `ubsan` 4.1 / 3.8,
 memcheck 21.1 / 19.5, initcheck 14.1 / 13.0, `hip-asan` 15.8 / 14.5,
 `hip-ubsan` 13.0 / 12.2.
 
+## The nuclear gradient on a CASSCF reference
+
+The PC nuclear gradient of acrolein CAS(6,5) on a CASSCF reference (#126) is
+`nevpt2_grad.py --reference casscf --pc`, block2's PC source terms fed into
+the CP-CASSCF coupled solve. It is gated against a numerical gradient
+differenced from **this device's** PC energies on #124's re-optimised
+states (`pc_on_states.py`, then `nevpt2_numgrad.py --pc-states`), with block2
+spot-checked at displaced geometries. Differencing our own energy is sound
+for the reason "The PC total's run-to-run spread" above gives. No
+GPU-derived `grad_num_pc` is committed: the sweep is a manual validation run.
+The verdict, per component, with the spot-checks and the walls, has one
+home: [`testing.md`](testing.md), "PC on a CASSCF reference: acrolein".
+
 ## What is not supported
 
 - **N2 CAS(12,12)**, conventional or DF: its metric has no gap (see

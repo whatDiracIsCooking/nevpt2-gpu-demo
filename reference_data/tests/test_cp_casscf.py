@@ -106,14 +106,44 @@ def test_dense_operator_is_symmetric_and_positive(grads):
 
 
 @pytest.mark.parametrize("extra", [
-    ["--pc"],
     ["--source", "dump", "--source-path", "x.gradsrc"],
     ["--energy-ordered"],
+    ["--pc", "--source", "dump", "--source-path", "x.gradsrc"],
 ])
 def test_casscf_refuses_what_it_is_not_validated_for(monkeypatch, extra):
     monkeypatch.setattr(sys, "argv", ["nevpt2_grad.py", "--case", "n2_ccpvdz_cas44",
                                       "--reference", "casscf", *extra])
     with pytest.raises(SystemExit, match="--reference casscf"):
+        ng.main()
+
+
+def test_casscf_pc_state_is_the_goldens():
+    """``--reference casscf --pc`` (#126): the state carries block2's PC energy
+    on the committed CASSCF orbitals, through the same conditioning guard, and
+    it is the golden's own ``e_pc_total``; the gradient object differentiates
+    PC (its Functional, its steps) while the coupled operator stays the
+    reference's."""
+    st = ng.build_state("n2_ccpvdz_cas44", dict(ng.CASES["n2_ccpvdz_cas44"]), pc=True,
+                        reference="casscf",
+                        mo_from=ng.REPO / "golden" / "n2_ccpvdz_cas44_casscf.mogold")
+    gold = ng.ngrad.read_golden_pc_total(
+        ng.REPO / "golden" / "n2_ccpvdz_cas44_casscf.nevpt2gold")
+    assert abs(st.e_corr_pc - gold) < 1e-10
+    assert st.pc_gap >= 1e3
+    src = ng.SourceTerms(kappa=np.zeros((st.nmo, st.nmo)), ci=np.zeros(st.ci.shape),
+                         origin="test")
+    g = ng.CasscfGradients(st, src, pc=True)
+    assert g.pc and g.fn.pc
+    assert (g.step, g.kappa_step) == ng.scheme_steps(True)
+    sc = ng.CasscfGradients(st, src)
+    assert not sc.pc and (sc.step, sc.kappa_step) == ng.scheme_steps(False)
+    assert g.cons == sc.cons and g.nvar == sc.nvar
+
+
+def test_casci_pc_still_needs_grad_num(monkeypatch):
+    """Only the CASSCF branch lost the ``--pc needs --grad-num`` refusal."""
+    monkeypatch.setattr(sys, "argv", ["nevpt2_grad.py", "--case", "n2_ccpvdz_cas44", "--pc"])
+    with pytest.raises(SystemExit, match="--pc needs --grad-num"):
         ng.main()
 
 
