@@ -1,11 +1,12 @@
 # Gradients: what the code computes
 
 What the gradient path in this tree actually computes, how the two modes
-check each other, and where it stops. The **derivation** — the Lagrangian for
-a CASCI-on-RHF reference, its constraints, the Z-vector equations and their
-solve order, the integral inventory — is
-[`gradient-theory.md`](gradient-theory.md); this document describes the
-**code**, and cites that one rather than restating it.
+check each other, and where it stops. The **derivation** — the Lagrangian on
+each of the two references a golden can carry (CASCI on RHF orbitals, and on
+CASSCF orbitals), their constraints, Z-vector equations and solve orders, the
+integral inventory they share — is [`gradient-theory.md`](gradient-theory.md);
+this document describes the **code**, and cites that one rather than
+restating it. All of the code is on the CASCI branch.
 
 Like [`architecture.md`](architecture.md), it quotes **no measured numbers**.
 Every tolerance, residual, plateau and timing lives in
@@ -34,7 +35,8 @@ respect to a nuclear coordinate.
 | the RDMs' own derivatives w.r.t. the CI vector | **in tree**, host `dm1`/`dm2` and device `dm3`/`f3ac`/`f3ca` (§4.1) |
 | the pseudocanonical multipliers `z^c` (Park Eqs. 56–57) | **in tree**, divided out of `Y`'s two inactive blocks, refusing a degeneracy the division cannot resolve (§6) |
 | the GPU's `Y_xy` and `y_I` **written out**, for a nuclear gradient to be built from | **in tree**, SC and (with `--pc`, #74) PC: `nevpt2_sc_pseudodensity --dump-source-terms PATH` writes both to a `.gradsrc` (§8), which `reference_data/nevpt2_grad.py --source dump` / `both` reads. A gradient built from it **is the SC-NEVPT2 nuclear gradient**: within the 1e-6 gate of `grad_num` on LiF, acrolein and N2 CAS(4,4), and componentwise PySCF-sourced's to well inside it ([`testing.md`](testing.md), "The GPU as the source-term provider", which keeps the #73 failure — `Y` holding the digests fixed — on record as superseded) |
-| the CI Z-vector equation, the selection-boundary multipliers, the CPHF solve | **not in tree** — **offline Python only**, `reference_data/nevpt2_grad.py`, a `pyscf.grad.lagrange.Gradients` subclass ([`reference-data.md`](reference-data.md), "The analytic gradient"). Deliberately offline: this repo's shape is "offline Python generates the reference, the C++ GPU demo reproduces it", and a PySCF solve inside the runtime would invert that. Derived in [`gradient-theory.md`](gradient-theory.md), §2; nothing in `src/` implements them |
+| the CASCI branch's Z-vector solve: the CI Z-vector equation, the selection-boundary multipliers, the CPHF solve | **not in tree** — **offline Python only**, `reference_data/nevpt2_grad.py`, a `pyscf.grad.lagrange.Gradients` subclass ([`reference-data.md`](reference-data.md), "The analytic gradient"). Deliberately offline: this repo's shape is "offline Python generates the reference, the C++ GPU demo reproduces it", and a PySCF solve inside the runtime would invert that. Derived in [`gradient-theory.md`](gradient-theory.md), §2.2–§2.6; nothing in `src/` implements them |
+| the CASSCF branch: Park's Eq. 23 as written, and its coupled CP-CASSCF `(Z, z)` solve | **not anywhere**, offline or in tree. Derived in [`gradient-theory.md`](gradient-theory.md), §1.4 and §2.7. Every derivative path refuses a `casscf`-kind golden — `--sc-tangent` and `--gradient-source` as `err_unsupported`, `nevpt2_numgrad.py` before it computes an energy — and `--gradgold` is refused with `--casscf` / `--mo-from`, so no sidecar exists for one ([`reference-data.md`](reference-data.md), "The file format"); `nevpt2_grad.py` builds its state on RHF orbitals and has no CASSCF path |
 | derivative MO integrals — the one- and two-electron skeleton derivatives — and the nuclear-repulsion derivative | **not in tree**, and not in the reference data either |
 | a nuclear gradient, a geometry optimisation, or any derivative w.r.t. a coordinate | **not in tree** |
 | a *numerical* nuclear gradient | **offline Python only** — `reference_data/nevpt2_numgrad.py` writes it into the `*.gradgold` sidecar ([`reference-data.md`](reference-data.md), "The numerical gradient"). No binary in `src/` or `apps/` reads it; it is what `nevpt2_grad.py`'s analytic answer is gated against, SC and PC, at a tolerance that cannot be this repo's 1e-7 because both sides are finite differences ([`testing.md`](testing.md), "The analytic gradient against the numerical one") |
@@ -878,4 +880,4 @@ the cases that carry one can run those.
 | the digests' orbital response in reverse mode: the full duality, the source oracle with no known gap, the GPU-sourced nuclear gradient and the negative control | [`testing.md`](testing.md), "The digests' orbital response, reverse mode" |
 | what the digests' transpose costs, and its tile floors | [`performance.md`](performance.md), "The digests' transpose", "Tile floors" |
 | PC's source terms by reverse mode: the dualities, block2's oracle, the PC nuclear gradient from the GPU's terms, the refusals and the negative controls | [`pc-nevpt2.md`](pc-nevpt2.md), "The source terms by reverse mode" |
-| the derivation this implements | [`gradient-theory.md`](gradient-theory.md) |
+| the derivation this implements (its CASCI branch), and the CASSCF branch nothing implements | [`gradient-theory.md`](gradient-theory.md) |
