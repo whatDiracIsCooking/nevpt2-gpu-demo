@@ -521,6 +521,50 @@ same check on a different state, with block2's PC answer on those orbitals as
 the reference and metric gaps decades inside `PC_MIN_GAP`
 ([`reference-data.md`](reference-data.md), "PC fields").
 
+### The PC total's run-to-run spread
+
+The 10-decimal `E_corr (PC-NEVPT2, ours)` line caps anything that
+differences the PC total (a finite-difference gradient oracle) at ~1e-10 Eh.
+So beside it `--pc` also prints
+
+```
+E_corr full precision (PC-NEVPT2) = <%.17g> Ha
+```
+
+(`printPcReport`, so `nevpt2_demo` and `nevpt2_df_demo` alike), and the SC
+paths print the same line as `(SC-NEVPT2)` / `(DF-NEVPT2)`. A caller reads
+that line, never the human-readable one. Nothing else in the output, and no
+gate, changed.
+
+The `atomicAdd` reductions make that total vary run to run. Measured with the
+same protocol as the recorded envelope ([`testing.md`](testing.md), "The
+kernels' same-run self-variation"): RTX 3080, CUDA, Release (preset
+`default`), `nevpt2_demo --golden <case> --pc --tiles <t>`, **30 runs per
+case**, back to back in separate processes with the card held exclusively.
+Every run was a PASS.
+
+| golden | `--tiles` | runs | min / max of the full-precision total (Eh) | spread (max − min) | distinct values | `|E_corr − e_pc_total|`, min / max |
+|---|---|---|---|---|---|---|
+| `acrolein_def2svp_cas65` | 3 | 30 | -0.5473408112453471 / -0.5473408112453451 | **2.0e-15** | 16 | 4.53e-14 / 4.73e-14 |
+| `acrolein_def2svp_cas65_casscf` | 3 | 30 | -0.5229006180667681 / -0.5229006180667674 | **7.8e-16** | 8 | 8.9e-16 / 1.7e-15 |
+| `n2_ccpvdz_cas1012` | 40 | 30 | -0.17488203955444606 / -0.17488203955444437 | **1.7e-15** | 25 | 8.56e-12 / 8.56e-12 |
+
+- **The spread is tens of ulps of the total** (7 to 18 at acrolein's
+  0.52-0.55 Eh, ulp 1.1e-16; 61 at N2's 0.17 Eh, ulp 2.8e-17), and in Eh it
+  does not grow with the active space: CAS(10,12) at `--tiles 40` varies no
+  more than CAS(6,5). It confirms the scouting figures #126 was scoped on
+  (acrolein 1.5e-15 over 10 runs; N2 CAS(10,12) below the 10-decimal print
+  over 3).
+- **What it means for a finite difference.** A central difference at
+  `h = 0.0025` bohr scales energy noise by `1/(2h) = 200`, so a 2e-15 Eh
+  spread is ~4e-13 Eh/bohr, and ~1.6e-12 at `h/4`: some five and a half
+  decades under a ~1e-6 gradient gate.
+- **The spread is not the error.** Against block2 the CASCI acrolein total
+  sits ~4.6e-14 off and N2 CAS(10,12) 8.56e-12 off (Sr's digest-vs-4-RDM
+  difference, "Accuracy against block2" above), both far larger than the
+  spread and the same in every run, so they cancel in a difference taken on
+  one card.
+
 ## Cost
 
 **PC vs SC wall time.** Same binary and flags, `--pc` against none, three
