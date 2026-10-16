@@ -2183,16 +2183,17 @@ full flavour, carries `A` into the oracle's basis and projects it, and `P y`,
 onto the stored directions (`compareSourceDirections` in
 `nevpt2.source_compare`). Each block's row is the worst \|GPU − oracle\|
 over its directions. The verdicts are the full flavour's (`kKnownGaps` is
-empty for all five files), with two more refusals: a direction with support
+empty for every directional file), with two more refusals: a direction with support
 outside the block it is labelled with is an IO error
 (`checkDirectionBlocks`), and a block that has pairs but fewer than
 `kMinBlockDirections` = 2 directions **fails**, so an oracle cannot skip a
-block silently. Five entries:
-`nevpt2_sc_pseudodensity_oracle_dir_{n2_ccpvdz_cas44,lif_def2svp_cas46,acrolein_def2svp_cas65}`
-and `…_oracle_dir_pc_{n2_ccpvdz_cas44,acrolein_def2svp_cas65}`. The two
-acrolein entries are `gpu;slow`, and they are registered only where acrolein's
-gitignored gradient sidecar has been regenerated (a configure WARNING
-otherwise).
+block silently. Seven entries:
+`nevpt2_sc_pseudodensity_oracle_dir_{n2_ccpvdz_cas44,lif_def2svp_cas46,acrolein_def2svp_cas65,acrolein_def2svp_cas65_casscf}`
+and `…_oracle_dir_pc_{n2_ccpvdz_cas44,acrolein_def2svp_cas65,acrolein_def2svp_cas65_casscf}`.
+The four acrolein entries are `gpu;slow`, and each is registered only where
+its gitignored gradient sidecar (CASCI or CASSCF) has been regenerated (a
+configure WARNING otherwise). The two `_casscf` ones are "On CASSCF
+orbitals: acrolein" below.
 
 ### The steps and the tolerance, measured from long ladders
 
@@ -2286,6 +2287,41 @@ the same as their full twins, since both are dominated by the dump's `Y`;
 `Y`'s 2,850 basis directions are 175–385 s. That is why the two acrolein
 entries are `slow`, and why they are not `small`: the sanitizer tier would
 run the probe at Debug speed (below).
+
+### On CASSCF orbitals: acrolein
+
+`golden/acrolein_def2svp_cas65_casscf[_pc]_dir.srcgold` (#135;
+[`reference-data.md`](reference-data.md), "On CASSCF orbitals") are the same
+two oracles for acrolein's CASCI-on-CASSCF state. act_V is empty there, so
+three rows are `empty` by construction and six blocks are compared. The
+protocol was #117's: the GPU comparison ran on the card first, with the two
+stems added to `kClassifiedOracles` and empty known-gap lists, and the
+classification was kept because both passed on that first run.
+
+Release, `--tiles 3`, the default digest, on the RTX 3080 (preset
+`default`), the binary run directly with the ctest entries' flags. Max
+\|GPU − oracle\| per block, over its directions (tolerances 1e-8 SC, 2e-8
+PC, above):
+
+| block | acrolein CASSCF SC | acrolein CASSCF PC |
+|---|---:|---:|
+| core–core | 3.0e-10 | 3.1e-10 |
+| core–act_O | 3.4e-9 | 7.9e-10 |
+| core–act_V | empty | empty |
+| core–virt | 3.5e-9 | 4.9e-10 |
+| act_O–act_V | empty | empty |
+| act_O–virt | 1.4e-10 | 4.3e-11 |
+| act_V–virt | empty | empty |
+| virt–virt | 2.0e-10 | 1.7e-10 |
+| `P y` (3 directions) | 5.3e-11 | 5.3e-10 |
+
+Every non-empty block passes. The closest is SC's core–virt, 3.5e-9 against
+1e-8, a factor of 2.9 to spare: less than the factor of five the CASCI files
+were set with, and still inside the tolerance, which is not moved. PC is at
+least a factor of 25 inside its 2e-8. Wall, the binary run directly: SC
+180.6 s, PC 183.8 s, of which `Y`'s 2,850 basis directions are about 180 s,
+the same as the CASCI twins. ctest walls in the `cpp-tier.sh --preset
+default` run (RTX 3080): SC 180.5 s, PC 182.2 s, both passing.
 
 ### The RX 9060 XT segfault, characterised
 

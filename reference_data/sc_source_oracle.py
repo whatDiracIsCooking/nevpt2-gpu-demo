@@ -163,11 +163,13 @@ block touches it -- and the state stays in its canonicalised basis, so
 ``act_rot`` is the identity. ``--pc`` attaches block2's PC energy itself
 (``nevpt2_grad.attach_pc_energy``, the same conditioning guard), because the
 gradient driver's CASSCF branch refuses ``--pc``. The steps are each
-flavour's, unchanged. Committed for N2 CAS(4,4) alone (#117's scope), in all
-four kinds::
+flavour's, unchanged. Committed for N2 CAS(4,4) in all four kinds (#117),
+and for acrolein CAS(6,5) in the directional two (#135)::
 
     uv run python reference_data/sc_source_oracle.py --case n2_ccpvdz_cas44_casscf \
         --mo-from golden/n2_ccpvdz_cas44_casscf.mogold [--pc] [--directional]
+    uv run python reference_data/sc_source_oracle.py --case acrolein_def2svp_cas65_casscf \
+        --mo-from golden/acrolein_def2svp_cas65_casscf.mogold --directional [--pc]
 
 Offline Python, never run by a build or a test.
 """
@@ -214,11 +216,13 @@ PC_ORACLE_CASES = ("n2_ccpvdz_cas44", "n2_ccpvdz_cas44_casscf")
 #: The cases a DIRECTIONAL ``.srcgold`` is committed for (#105), per scheme:
 #: acrolein CAS(6,5), the low-symmetry case no full oracle fits, and N2
 #: CAS(4,4) and LiF beside their full oracles, as the cross-check of the two
-#: flavours against each other -- N2's on CASSCF orbitals too (#117).
+#: flavours against each other -- N2's on CASSCF orbitals too (#117), and
+#: acrolein's on CASSCF orbitals (#135), which no full oracle fits either.
 DIRECTIONAL_CASES = {
     "sc": ("n2_ccpvdz_cas44", "lif_def2svp_cas46", "acrolein_def2svp_cas65",
-           "n2_ccpvdz_cas44_casscf"),
-    "pc": ("n2_ccpvdz_cas44", "acrolein_def2svp_cas65", "n2_ccpvdz_cas44_casscf"),
+           "n2_ccpvdz_cas44_casscf", "acrolein_def2svp_cas65_casscf"),
+    "pc": ("n2_ccpvdz_cas44", "acrolein_def2svp_cas65", "n2_ccpvdz_cas44_casscf",
+           "acrolein_def2svp_cas65_casscf"),
 }
 
 #: Seeded ``kappa`` directions per non-empty block, and seeded CI directions

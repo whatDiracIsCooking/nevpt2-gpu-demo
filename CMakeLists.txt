@@ -615,16 +615,19 @@ if(NEVPT2_BUILD_TESTING)
   # one home). Acrolein CAS(6,5) is why the flavour exists: its full oracle
   # would take hours to generate, its directional ones take minutes. N2
   # CAS(4,4) and LiF sit beside their full oracles as the cross-check of the
-  # two flavours.
+  # two flavours. Acrolein on its CASSCF orbitals (#135) has the same pair,
+  # golden/acrolein_def2svp_cas65_casscf[_pc]_dir.srcgold.
   #
-  # Acrolein's gradient sidecar is gitignored (57 MB; docs/reference-data.md,
-  # "The gradient sidecar"), so its two entries are registered only where it
-  # has been regenerated, with a warning otherwise -- the --kappa-full
-  # entries' rule. They are `slow`: the comparison assembles the whole Y, one
-  # basis direction per MO pair, 2,846 of them (docs/testing.md, "The
-  # directional source-term oracle", has their wall time).
+  # Acrolein's gradient sidecars, CASCI and CASSCF, are gitignored (57 MB
+  # each; docs/reference-data.md, "The gradient sidecar"), so its four entries
+  # are registered only where the sidecar has been regenerated, with a warning
+  # otherwise -- the --kappa-full entries' rule. They are `slow`: the
+  # comparison assembles the whole Y, one basis direction per MO pair
+  # (docs/testing.md, "The directional source-term oracle", has their wall
+  # time).
   foreach(_spec "n2_ccpvdz_cas44|sc" "n2_ccpvdz_cas44|pc" "lif_def2svp_cas46|sc"
-                "acrolein_def2svp_cas65|sc" "acrolein_def2svp_cas65|pc")
+                "acrolein_def2svp_cas65|sc" "acrolein_def2svp_cas65|pc"
+                "acrolein_def2svp_cas65_casscf|sc" "acrolein_def2svp_cas65_casscf|pc")
     string(REPLACE "|" ";" _spec "${_spec}")
     list(GET _spec 0 _case)
     list(GET _spec 1 _scheme)
@@ -653,7 +656,7 @@ if(NEVPT2_BUILD_TESTING)
                             --tiles 3 ${_flags} --source-oracle "${_dir_oracle}")
       if(TEST ${_name})
         set_tests_properties(${_name} PROPERTIES PASS_REGULAR_EXPRESSION "${_pass}")
-        if(_case STREQUAL "acrolein_def2svp_cas65")
+        if(_case MATCHES "^acrolein_def2svp_cas65")
           set_tests_properties(${_name} PROPERTIES LABELS "gpu;slow")
         endif()
       endif()
