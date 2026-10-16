@@ -1,11 +1,43 @@
-# Gradient theory: the CASCI-on-RHF Lagrangian
+# Gradient theory: the NEVPT2 Lagrangian on two references
 
-The analytic-gradient derivation for **this** reference. Park's theory
-(Ref. [1], below) is written for a converged CASSCF; the golden state here is a
-CASCI diagonalisation on converged RHF orbitals
+The analytic-gradient derivation for the two references a golden can carry
 ([`reference-data.md`](reference-data.md), "What 'CASSCF input' means here, and
-why the golden state is CASCI"), so the constraint set, the Z-vector equations
-and their solve order are not the paper's. They are derived here.
+why the golden state is CASCI"). Every golden's state is a CASCI
+diagonalisation; what differs is the orbitals it runs on, and that is what
+decides the Lagrangian:
+
+| branch | orbitals | orbital constraint | orbital Z-vector solve |
+|---|---|---|---|
+| **CASCI** (`reference_kind = casci`) | converged RHF, then an active-space **selection** | (O1): the RHF Fock block-diagonal over core/active/virtual (§1.2) | CPHF, decoupled from the CI equation (§2.2–§2.6) |
+| **CASSCF** (`reference_kind = casscf`) | a converged `mcscf.CASSCF` | CASSCF stationarity, `A − A† = 0` — Park's Eq. 23 as written (§1.4) | CP-CASSCF, one system coupled to the CI equation (§2.7) |
+
+Park's theory (Ref. [1], below) is written for the second. The first is not
+the paper's, and its constraint set, Z-vector equations and solve order are
+derived here.
+
+**Most of the derivation does not depend on the reference**, and is written
+once:
+
+| part | shared, or per reference |
+|---|---|
+| §0 — notation, the energy as `E(T, C, c)`, the `P`/`Q`/`R` chain rule | shared |
+| §1.1 — Park's Eq. 23, and which of its lines depends on the reference | shared framing |
+| §1.2 — (O1), the selection, the RHF partition | **CASCI** |
+| §1.3 — the active–active block is a gauge | shared |
+| §1.4 — Eq. 23 restored | **CASSCF** |
+| §2.1 — the source terms `Y` and `y` | shared |
+| §2.2–§2.6 — decoupled CI equation, selection multipliers, CPHF, solve order, `act_O`/`act_V` recovery | **CASCI** (§2.3's `z^c` half is shared) |
+| §2.7 — the coupled CP-CASSCF system and its solve order | **CASSCF** |
+| §3 — the integral inventory Eq. 28 reads | shared (§3.5–§3.6 mark their CASCI-only rows) |
+| §4.1–§4.2 — the active-space-selection hazard | **CASCI** |
+| §4.3 — the in-plane-`Cs` displacement rule | shared |
+| §4.4 — what is not that hazard, Park's SC non-invariance included | shared |
+| §5 — what this settles | one column per reference |
+
+**Only the CASCI branch is implemented anywhere.** Its solve is offline
+Python ([`gradients.md`](gradients.md), §1); the CASSCF branch is derived
+here and nothing builds it, and every derivative path refuses a `casscf`
+golden (§1.1).
 
 This document is **derivation only**. It describes no code and names no file
 that does not yet exist; what gets built, and how it is checked, belongs in the
@@ -20,16 +52,19 @@ formulas* in `n_mo`, `n_core`, `n_act` and `n_virt`, which are algebra.
 
 It settles three things the rest of the gradient work rests on:
 
-1. **§1–§2** — the explicit constraints and Z-vector equations for a CASCI
-   reference on RHF orbitals. The headline result: the CI and orbital
-   Z-vector equations **decouple**, and the orbital solve is ordinary
-   **CPHF**, not CP-CASSCF.
-2. **§3** — the inventory of MO-integral arrays Park's Eq. 28 actually reads.
-   Seventeen arrays, each with exactly one index over the full MO range. The
-   one array of the eighteen that is *not* needed is the expensive one.
-3. **§4** — the active-space-selection hazard, and the settled rule for
-   numerical validation: **in-plane displacements of a planar `Cs` molecule
-   only**.
+1. **§1–§2** — the explicit constraints and Z-vector equations for each
+   reference. On RHF orbitals the CI and orbital Z-vector equations
+   **decouple** (the coupling that remains runs one way, through the
+   pseudocanonical multipliers), and the orbital solve is ordinary **CPHF**.
+   On CASSCF orbitals they do not: one **CP-CASSCF** system, with no
+   selection to differentiate across.
+2. **§3** — the inventory of MO-integral arrays Park's Eq. 28 actually reads,
+   the same for both. Seventeen arrays, each with exactly one index over the
+   full MO range. The one array of the eighteen that is *not* needed is the
+   expensive one.
+3. **§4** — the CASCI branch's active-space-selection hazard, and the settled
+   rule for numerical validation, which both branches share: **in-plane
+   displacements of a planar `Cs` molecule only**.
 
 ## 0. Notation
 
@@ -42,8 +77,9 @@ MO — any of the three. Counts are `n_core`, `n_act`, `n_virt` and
 two spaces the zeroth-order density lives on, and it is the range that keeps
 recurring below.
 
-Two *different* partitions of the MO space are in play, and keeping them apart
-is most of the work in §1:
+On the CASCI branch two *different* partitions of the MO space are in play,
+and keeping them apart is most of the work in §1.2 (the CASSCF branch has only
+the first; §1.4):
 
 | partition | spaces | set by |
 |---|---|---|
@@ -66,7 +102,8 @@ real antisymmetric, so `δC_p = Σ_x C_x κ_xp` and
 ```
 
 in chemists' notation. `F` is the **RHF Fock matrix** (built from the RHF
-density, i.e. from `O` alone), `f` is the **generalized Fock** (built from the
+density, i.e. from `O` alone; the CASCI branch's constraint, and nowhere in
+the CASSCF branch), `f` is the **generalized Fock** (built from the
 zeroth-order density `d⁽⁰⁾`: 2 on the core diagonal, `γ⁽¹⁾` on the active
 block, 0 on the virtual), and `ε_p = f_pp`. The golden's `e_core` / `e_virt`
 arrays are `f`'s core and virtual diagonals.
@@ -143,34 +180,43 @@ Park's Lagrangian is
         + sum_{r<s} z^c_rs f_rs                  pseudocanonicality
 ```
 
-(his Eq. 23; `A - A^dag = 0` is the CASSCF orbital-gradient condition). The
-first line is the piece that does not hold here. A CASCI state is **not**
-stationary with respect to orbital rotation: `A - A^dag` is not zero at the
-golden's orbitals, and there is no sense in which it could be, since no
-orbital optimiser was run. Choosing CASCI is deliberate and is what makes the
-goldens reproducible at all ([`reference-data.md`](reference-data.md), "What
-'CASSCF input' means here, and why the golden state is CASCI"); the price is
-that the orbital constraint has to be rewritten.
+(his Eq. 23; `A - A^dag = 0` is the CASSCF orbital-gradient condition).
 
-It is also the reason analytic gradients are *possible* for this reference
-rather than merely convenient: a displaced CASSCF converges to a
-differently-rotated solution of the same energy, so neither the analytic nor
-the numerical gradient would have a stable reference to be a gradient *of*.
-RHF followed by a CASCI diagonalisation is deterministic at every displaced
-geometry.
+**The first line is the only one that depends on the reference.** The other
+five — orthonormality, the CI eigenvector and its normalisation, and the two
+pseudocanonical blocks — hold for both branches and carry the same
+multipliers in both. The first line is a statement about how the orbitals were
+made:
 
-**This is a precondition, and it is enforced rather than assumed.** A golden
-file records which reference built its orbitals in its header
-([`reference-data.md`](reference-data.md), "The file format"), and every
-derivative path refuses a CASSCF one: `nevpt2_demo`'s `--sc-tangent` and
-`--gradient-source` as an unsupported-request error, and
-`reference_data/nevpt2_numgrad.py` before it computes an energy. The refusal
-cites this section; a CASSCF reference needs CP-CASSCF (§5) and, numerically,
-a different strategy altogether (§4.4).
+- **On CASSCF orbitals it holds**, and Eq. 23 is the Lagrangian as written
+  (§1.4).
+- **On RHF orbitals it does not.** A CASCI state is not stationary with
+  respect to orbital rotation: `A - A^dag` is not zero at those orbitals, and
+  there is no sense in which it could be, since no orbital optimiser was run.
+  What makes the core/active/virtual partition hold still is RHF stationarity
+  plus a *selection*, and the first line has to be rewritten as that (§1.2).
 
-### 1.2 What is true here
+Which branch a golden is on is recorded, not inferred: its header carries the
+reference that built its orbitals ([`reference-data.md`](reference-data.md),
+"The file format"). Neither branch is a reproducibility choice — a fresh
+`mcscf.CASSCF` reproduces at a fixed geometry under the generator's settings
+([`reference-data.md`](reference-data.md), "A fresh CASSCF reproduces,
+measured"). What the two differ in is the constraint set, and so the
+Z-vector equations.
 
-The golden's orbitals come out of a fixed four-step chain: converged RHF, then
+**Only the CASCI branch is implemented, and the restriction is enforced
+rather than assumed.** Every derivative path refuses a `casscf` golden:
+`nevpt2_demo`'s `--sc-tangent` and `--gradient-source` as an
+unsupported-request error, and `reference_data/nevpt2_numgrad.py` before it
+computes an energy; no gradient sidecar is written for one; and the offline
+analytic gradient builds its own state on RHF orbitals, with no CASSCF path.
+The refusal cites this section. What
+a CASSCF reference needs is §1.4 and §2.7's coupled CP-CASSCF system (§5), and
+for numerical validation the precondition §4.4 names.
+
+### 1.2 The CASCI branch: what is true on RHF orbitals
+
+A `casci` golden's orbitals come out of a fixed four-step chain: converged RHF, then
 an active-space **selection** among the RHF canonical orbitals (by energy
 order, or by irrep with `--cas-irreps` / `--core-irreps`), then the CASCI
 diagonalisation, then `canonicalize(..., cas_natorb=True)`, which rotates
@@ -205,7 +251,8 @@ space was picked. That is the hazard of §4, and it has no counterpart in
 Park's Eq. 23, where CASSCF stationarity covers core–active and active–virtual
 alike.
 
-The remaining constraints carry over from Eq. 23 unchanged:
+The remaining constraints carry over from Eq. 23 unchanged, and are the
+CASSCF branch's too (§1.4):
 
 > **(O2) Pseudocanonicality.** `f_ij = 0` for `i ≠ j` in core, `f_rs = 0` for
 > `r ≠ s` in virtual. This is what `canonicalize` establishes and what the
@@ -215,13 +262,14 @@ The remaining constraints carry over from Eq. 23 unchanged:
 >
 > **(C1) CI eigenvector.** `sum_J (H_IJ - E_CASCI δ_IJ) c_J = 0`, with
 > multiplier `z_I`, plus `c^dag c = 1` with multiplier `x`. One state, so one
-> `z` and one `x`.
+> `z` and one `x`. (`E_CASCI` is the eigenvalue of the active Hamiltonian on
+> whichever orbitals the branch has; on CASSCF orbitals it is `E_CASSCF`.)
 >
 > **(N1) Orthonormality.** `C^dag S C = 1`, multiplier `X`. Automatically
 > satisfied by the `exp(κ)` parameterisation; its multiplier is the
 > energy-weighted density the AO contraction needs at the end.
 
-So the Lagrangian for this reference is
+So the CASCI branch's Lagrangian is
 
 ```
   L = E + sum_{x in act+virt, i in core} Z_xi F_xi
@@ -243,7 +291,8 @@ and transforming the CI vector accordingly leaves the CASCI state, and hence
 every NEVPT2 class energy, unchanged. The active–active block of `κ` is
 therefore redundant with the CI parameters: if `∂L/∂c_I = 0` holds, then
 `∂L/∂κ_{aa'} = 0` follows by the chain rule along the invariance direction.
-This is the same redundancy CASSCF has, arrived at without CASSCF.
+This is the same redundancy CASSCF has, arrived at without CASSCF — so it
+holds on both branches, and §1.4 adds nothing to it.
 
 Two things follow that are easy to get wrong:
 
@@ -264,6 +313,74 @@ Two things follow that are easy to get wrong:
   "the active block needs only what the golden already carries" is the easiest
   mistake to make here.
 
+### 1.4 The CASSCF branch: Eq. 23 restored
+
+A `casscf` golden's orbitals come out of a converged `mcscf.CASSCF`, committed
+once to an MO sidecar ([`reference-data.md`](reference-data.md), "The MO
+sidecar: committed CASSCF orbitals"); the same deterministic CASCI and the
+same `canonicalize(..., cas_natorb=True)` then run on them. Canonicalisation
+rotates within core, within active and within virtual, and the CASSCF energy
+is invariant to all three, so its orbital gradient transforms covariantly and
+**stays zero**: the canonicalised orbitals are as stationary as the converged
+ones.
+
+So the first line of Eq. 23 holds, and the Lagrangian is Park's, verbatim:
+
+```
+  L = E + (1/2) tr[ Z^dag (A - A^dag) ]          (S1) CASSCF orbital stationarity
+        + (1/2) tr[ X (C^dag S C - 1) ]          (N1)
+        + sum_M z_M^dag (H - E) c_M              (C1)
+        - (1/2) sum_M x_M (c_M^dag c_M - 1)      (C1)
+        + sum_{i<j} z^c_ij f_ij
+        + sum_{r<s} z^c_rs f_rs                  (O2)
+```
+
+with one state, so one `z` and one `x`. `A` is the CASSCF orbital gradient,
+up to the factor-of-two convention:
+
+```
+  A_xp = sum_q h_xq d_pq + sum_{qrs} (xq|rs) D_pqrs      p in core + active
+  A_xr = 0                                               r in virtual
+```
+
+with `d` and `D` the reference's one- and two-particle densities over core
+and active (closed-shell on the core). Unlike `F`, both are built from the
+CI vector.
+
+**(S1) carries multipliers only on its non-redundant blocks** — core–active,
+core–virtual and active–virtual — `n_core·n_act + n_core·n_virt +
+n_act·n_virt` of them. The other three blocks are redundant for the CASSCF
+energy and need none from (S1):
+
+- **core–core and virtual–virtual** are not redundant for the *NEVPT2* energy,
+  which is not invariant there; (O2) pins them, with the same `z^c` as the
+  CASCI branch.
+- **active–active** is §1.3's gauge, unchanged.
+
+**What the branch does not have** is as important as what it has:
+
+- **No (O1) and no RHF partition.** `F` appears nowhere in the constraint
+  set. Core–active and active–virtual are covered by stationarity rather than
+  by a selection, so there are no selection-boundary multipliers (§2.3's
+  Sylvester half), no `act_O`/`act_V` split, and §2.6's recovery of it is
+  unnecessary rather than merely inapplicable — there is no RHF partition for
+  it to recover.
+- **No selection hazard.** Stationarity is a smooth condition: where the
+  CASSCF orbital Hessian is non-singular, the stationary orbitals are a
+  differentiable function of the geometry, and the kink §4.1 describes cannot
+  occur. What takes its place is §2.7's conditioning and §4.4's
+  solution-branch precondition.
+
+**Stationarity is assumed exact.** Eq. 23 assumes `A - A^dag = 0`; a
+converged optimiser stops at a residual orbital gradient, and the gradient
+this Lagrangian delivers is off by a term of first order in that residual.
+The CASCI branch makes the same assumption of its own optimiser — (O1)'s
+`O`–`V` blocks are RHF Brillouin — so this is not a new kind of error, only a
+different optimiser's residual. What the generator accepts from the CASSCF
+one, and what a residual costs the energy, are measured in
+[`reference-data.md`](reference-data.md), "The `--casscf` / `--mo-from` gate
+thresholds".
+
 ## 2. The Z-vector equations
 
 ### 2.1 Source terms
@@ -280,45 +397,83 @@ differentiation, no solve. The whole point of the Lagrangian is that these are
 the only derivatives of `E` anyone has to take; the geometry dependence is
 carried by the multipliers and by derivative integrals.
 
-`Y` is needed over the **full** `n_mo × n_mo` range. Every block has a
-consumer: core–core and virtual–virtual feed (O2)'s multipliers, core–active
-and active–virtual feed (O1)'s, core–virtual feeds the CPHF right-hand side,
-and active–active feeds §1.3's consistency check. There is no block to skip.
+Both are the same on the two branches: they differentiate the NEVPT2 energy,
+which reads the orbitals and the CI vector and does not know how either was
+made. Only what consumes them differs.
 
-### 2.2 The CI Z-vector equation decouples, and is solved first
+`Y` is needed over the **full** `n_mo × n_mo` range. Every block has a
+consumer: core–core and virtual–virtual feed (O2)'s multipliers on both
+branches, active–active feeds §1.3's consistency check on both, and the three
+mixed blocks feed the orbital Z-vector equation — on the CASCI branch
+core–active and active–virtual through (O1)'s selection multipliers and
+core–virtual through CPHF's right-hand side, on the CASSCF branch all three
+through CP-CASSCF's right-hand side. There is no block to skip.
+
+### 2.2 The CASCI branch: the CI Z-vector equation decouples, and is solved before the orbital one
 
 Differentiate `L` with respect to `c_I`:
 
 ```
   dL/dc_I = y_I + sum_J (H_IJ - E_CASCI δ_IJ) z_J - x c_I
             + sum_{xy} Z_xy dF_xy/dc_I
+            + sum_{i<j} z^c_ij df_ij/dc_I + sum_{r<s} z^c_rs df_rs/dc_I
           = 0
 ```
 
-**The last term is identically zero.** `F` is built from the RHF density, which
+**The `Z` term is identically zero.** `F` is built from the RHF density, which
 is determined by the RHF occupied space alone; it has no CI-coefficient
 dependence whatsoever. (In Park's Eq. 23 the corresponding term is
 `Z^dag ∂(A - A^dag)/∂c`, and it does *not* vanish: the CASSCF orbital gradient
 is built from the CASSCF 1- and 2-RDMs, hence from `c`. That coupling is what
-makes CP-CASSCF one big linear system.)
+makes CP-CASSCF one big linear system; §2.7.)
 
-So the CI equation stands alone:
+**The `z^c` term is not zero.** (O2) constrains the *generalized* Fock, which
+is built from the active density and so depends on `c`:
 
 ```
-  P (H - E_CASCI) P z = - P y,        P = 1 - |c><c|
-  x = c^dag y
+  df_pq/dc_I = sum_tu (dgamma_tu/dc_I) [ (pq|tu) - (1/2)(pt|uq) ]
+  dgamma_tu/dc_I = [ (E_tu + E_ut) c ]_I
 ```
 
-a single projected linear solve in the determinant space, with the reference
-state projected out (it is the null direction of `H - E_CASCI`, and `x` absorbs
-the component along it). `E_CASCI` is the CASCI eigenvalue, so this is an
+But it couples in one direction only. The `z^c` are divisions of `Y` alone
+(§2.3: no other constraint responds to a core–core or virtual–virtual
+rotation), so they are known before this equation is written, and their term
+is a right-hand side, not a coupling:
+
+```
+  y^c_I = sum_tu [ (E_tu + E_ut) c ]_I W_tu
+  W_tu  = sum_{p<q, same inactive space} z^c_pq [ (pq|tu) - (1/2)(pt|uq) ]
+```
+
+a one-body sigma vector of one multiplier-weighted `n_act × n_act` matrix. Its
+integrals are `(cc|aa)`, `(ca|ac)`, `(vv|aa)` and `(va|av)` slices of §3.3's
+inventory.
+
+So the CI equation is one projected solve:
+
+```
+  P (H - E_CASCI) P z = - P (y + y^c),        P = 1 - |c><c|
+  x = c^dag (y + y^c)
+```
+
+a single linear solve in the determinant space, with the reference state
+projected out (it is the null direction of `H - E_CASCI`, and `x` absorbs the
+component along it). `E_CASCI` is the CASCI eigenvalue, so this is an
 ordinary CASCI Z-vector equation and nothing about NEVPT2 enters it except
-through `y`.
+through `y` and `y^c`.
 
 **This is the main structural simplification of a CASCI reference**, and it
-sets the solve order: `z` is known before the orbital equation is touched.
+sets the solve order: the system is block-triangular, `z^c`, then `z`, then
+the orbital multipliers, and `z` is known before the orbital equation is
+touched.
 
 ### 2.3 The pseudocanonical and selection multipliers: no iteration
+
+The pseudocanonical half of this section — `z^c`, Eqs. 56–57, and the
+degeneracy refusal guarding their divisions — is **shared**: the CASSCF
+branch uses it verbatim (§2.7), since on both branches no constraint but (O2)
+responds to a core–core or virtual–virtual rotation. The selection half — the
+Sylvester equations — is the **CASCI branch** only.
 
 Now differentiate with respect to `κ` on the blocks that **do not change the
 RHF density**: core–core, virtual–virtual, `core`–`act_O`, and
@@ -350,9 +505,16 @@ instead) nor within the active space (natural orbitals). What the stationarity
 condition gives is therefore a small **Sylvester equation** per block:
 
 ```
-  F^core Z - Z F^actO = Y_ip - Y_pi        i in core,    p in act_O
-  F^virt Z - Z F^actV = Y_rp - Y_pr        r in virtual, p in act_V
+  F^core Z - Z F^actO = S_ip        i in core,    p in act_O
+  F^virt Z - Z F^actV = S_rp        r in virtual, p in act_V
 ```
+
+where `S` is the block's source: `Y_ip - Y_pi` (or `Y_rp - Y_pr`), plus the
+CI-relaxation and `z^c` terms §2.4's right-hand side carries, restricted to
+this block. Unlike a core–core rotation, a core–active or active–virtual one
+moves the active orbitals and the core density, so it moves the active
+Hamiltonian and `f`; both of those multipliers are known by now (§2.2), so
+the terms are numbers, not unknowns.
 
 This is still not an iteration. Diagonalise `F` inside each of the four
 spaces — `n_core`, `n_act`, `n_virt` sized symmetric eigenproblems, cheap, and
@@ -376,7 +538,7 @@ gradient needs that guard *more* than the energy does, since the energy's
 sensitivity to a same-irrep rotation is bounded while the multiplier goes as
 `1/Δε`. For the selection boundaries it is §4's hazard.
 
-### 2.4 The CPHF equation
+### 2.4 The CPHF equation (CASCI branch)
 
 What is left is the density-changing part: `κ` between `O` and `V`, which for
 this partition means `core`–`act_V`, `core`–`virtual` and `act_O`–`virtual`.
@@ -405,13 +567,14 @@ orbital gradient built from the symmetrised **transition** density between the
 reference and `|z>`, `d^z_pq = <z|E_pq|Psi> + <Psi|E_pq|z>`, plus its
 two-particle partner. It needs no integral block beyond §3's inventory.
 
-### 2.5 Solve order
+### 2.5 Solve order (CASCI branch)
 
 ```
-  1.  Y_xy, y_I                      source terms. Differentiation only.
-  2.  P (H - E) P z = -P y           CI Z-vector. Decoupled (2.2).
-  3.  z^c, Z_ip, Z_rp                Eqs. 56-57 plus two small Sylvester
-                                     equations; no iteration (2.3).
+  1.  Y_xy, y_I, z^c                 source terms, differentiation only; and
+                                     Eqs. 56-57, divisions of Y (2.3).
+  2.  P (H - E) P z = -P (y + y^c)   CI Z-vector. Decoupled from Z (2.2).
+  3.  Z_ip, Z_rp                     two small Sylvester equations; no
+                                     iteration (2.3).
   4.  A Z = -rhs                     CPHF on the O-V block, less its
                                      active-internal part (2.4). The only
                                      iterative step in the whole procedure.
@@ -419,11 +582,14 @@ two-particle partner. It needs no integral block beyond §3's inventory.
                                      in the AO basis.
 ```
 
-Compared with the CASSCF case this is one coupled system fewer: steps 2 and 4
-are separate solves here, where CP-CASSCF couples them into one. Everything
-specific to NEVPT2 is in step 1.
+Compared with the CASSCF branch (§2.7) this is one coupled system fewer:
+steps 2 and 4 are separate solves here, where CP-CASSCF merges them into one.
+Everything specific to NEVPT2 is in step 1.
 
-### 2.6 Recovering the RHF partition from a canonicalized state
+### 2.6 Recovering the RHF partition from a canonicalized state (CASCI branch)
+
+This section exists only because the CASCI branch has an RHF partition. The
+CASSCF branch has none, so there is nothing to recover (§1.4, §2.7).
 
 Steps 3 and 4 need to know which active orbitals came from `O` and which from
 `V`, and the natural-orbital rotation has mixed them (§0). It is recoverable
@@ -440,6 +606,75 @@ For that to be available at all, the reference data has to carry `F` in the
 final MO basis. §3.5 lists it among what the sidecar must hold, and §3.6 turns
 its block structure into a cheap self-check.
 
+### 2.7 The CASSCF branch: one coupled CP-CASSCF system
+
+Differentiate §1.4's Lagrangian with respect to `c_I`:
+
+```
+  dL/dc_I = y_I + y^c_I + sum_J (H_IJ - E δ_IJ) z_J - x c_I
+            + (1/2) sum_{xy} Z_xy d(A - A^dag)_xy/dc_I
+          = 0
+```
+
+`y^c` is §2.2's, unchanged. **The `Z` term is what §2.2 could drop and this
+branch cannot:** `A` is built from the reference's 1- and 2-RDMs, so
+`∂(A − A†)/∂c ≠ 0`, and the CI equation reads the orbital multipliers. The
+orbital equation, on (S1)'s three non-redundant blocks, reads the CI ones in
+turn — `z^dag (dH/dkappa) c + h.c.`, which on the CASCI branch was a known
+term on CPHF's right-hand side, is now a product with an unknown. So §2.2's
+decoupling fails, and **steps 2 and 4 of §2.5 merge into one system**:
+
+```
+  [ G_kk  G_kc ] [ Z ]       [ Y_xy - Y_yx + (z^c terms) ]
+  [ G_ck  G_cc ] [ z ]  =  - [ P (y + y^c)               ]
+
+  G_kk Z = (1/2) d(A - A^dag)/dkappa . Z     orbital-orbital
+  G_kc z = z^dag (dH/dkappa) c + h.c.        orbital-CI
+  G_ck Z = (1/2) Z . d(A - A^dag)/dc         CI-orbital
+  G_cc   = P (H - E) P                       CI-CI
+```
+
+with `kappa` running over core–active, core–virtual and active–virtual only
+and the CI space projected against `c`: dimension `n_core·n_act +
+n_core·n_virt + n_act·n_virt` plus the determinant count less one. The two
+off-diagonal blocks are each other's transpose up to normalisation, since
+both are mixed second derivatives of the CASSCF energy; the whole matrix is
+the CASSCF electronic Hessian at the converged point — the operator a
+second-order CASSCF optimiser applies — solved once, against an NEVPT2
+right-hand side. Like CPHF's, it is applied from the AO integrals and
+`mo_coeff`; §3's inventory sizes `Y`, on both branches, not either Hessian.
+
+**What it costs.** One linear system over the union of the two spaces, where
+the CASCI branch has two smaller ones solved in turn, and an operator with
+multireference content of its own (`A` reads `D`). Its conditioning is the
+CASSCF Hessian's: a near-singular Hessian — a nearly redundant rotation, or a
+second root close to the reference — makes the multipliers large and
+inaccurate. That is this branch's analogue of §4.2's small selection gap, and
+it is the same condition (§1.4) under which the stationary orbitals stop
+being a smooth function of the geometry.
+
+**What it buys.** No selection-boundary multipliers: §2.3's Sylvester
+equations and §2.6's recovery are gone, the latter unnecessary rather than
+merely inapplicable. No RHF Fock and no RHF electron count anywhere (§3.5).
+And none of §4.1–§4.2's hazard class, because core–active and active–virtual
+are covered by stationarity rather than by a selection.
+
+**What carries over untouched.** The source terms `Y` and `y` (§2.1); `z^c`,
+Eqs. 56–57, and the degeneracy refusal guarding their divisions (§2.3); `y^c`
+(§2.2); the active–active gauge (§1.3); the whole §3 inventory.
+
+Solve order (CASSCF branch):
+
+```
+  1.    Y_xy, y_I, z^c               as §2.5's step 1, unchanged.
+  2+4.  G [Z; z] = -rhs              the coupled CP-CASSCF system above. The
+                                     only linear system in the procedure.
+  3.    (nothing)                    no selection multipliers.
+  5.    relaxed densities, X         Z's contribution goes through A's
+                                     response, not F's; then the same AO
+                                     contraction.
+```
+
 ## 3. The integral-block inventory for Eq. 28
 
 This is the part that sizes the gradient sidecar. A dump of all MO integrals is
@@ -447,6 +682,12 @@ This is the part that sizes the gradient sidecar. A dump of all MO integrals is
 the committed cases' actual sizes are in
 [`reference-data.md`](reference-data.md). The question is which arrays Park's
 Eq. 28 reads, and the answer is a short, mechanical list.
+
+**All of §3 is shared by the two branches.** Eq. 28 is `Y`, and `Y` is a
+derivative of the energy functional, which does not know how its orbitals
+were made (§2.1). The only rows that depend on the reference are two of
+§3.5's and two of §3.6's, which exist for the CASCI branch's RHF partition and
+are marked there.
 
 ### 3.1 The promotion rule
 
@@ -661,8 +902,12 @@ by comparison, but it has to be *there*:
 | `f` (generalized Fock) | `n_mo × n_mo` | `f d^Fock`; its core/virtual diagonal is the golden's `e_core`/`e_virt` |
 | `f^h` | `n_mo × n_mo` | `f^h d^h` — the Fock with the active space fully occupied |
 | `h^eff`, `h^eff'`, `h^eff''` | `n_mo × n_mo` each | `h^eff d^eff` and friends; the golden carries only the restricted slices (`h1e`, `h1e_v_*`) |
-| `F` (RHF Fock) | `n_mo × n_mo` | §2.4's CPHF operator, and §2.6's recovery of `act_O`/`act_V` |
-| the RHF electron count | scalar | fixes which side of `F`'s active spectrum is occupied |
+| `F` (RHF Fock) | `n_mo × n_mo` | **CASCI branch only**: §2.4's CPHF operator, and §2.6's recovery of `act_O`/`act_V` |
+| the RHF electron count | scalar | **CASCI branch only**: fixes which side of `F`'s active spectrum is occupied |
+
+The CASSCF branch reads neither — it has no RHF partition (§1.4) — and adds
+nothing to the list: `A` and its response are built from `mo_coeff`, the AO
+integrals and the reference densities the energy path already has (§2.7).
 
 The golden's existing one-electron fields are **restrictions** of these: the
 sidecar's job on the one-electron side is to carry the same matrices over the
@@ -686,6 +931,14 @@ sidecar:
   `act_O` and `act_V` (§2.6) working; if it does not come out that way, the
   active space was not a set of RHF canonical orbitals.
 
+The first and third are the **CASCI branch's**: on CASSCF orbitals `F` is
+not block-diagonal and has no reason to be, and there is no RHF gap to split
+across. The second is shared. The CASSCF branch's counterpart of the first is
+(S1) itself — the residual orbital gradient — which the generator already
+evaluates before it accepts CASSCF orbitals
+([`reference-data.md`](reference-data.md), "The `--casscf` / `--mo-from` gate
+thresholds").
+
 A violation of the first two means the state is not the one this derivation
 describes, and every multiplier downstream is meaningless. They are cheap, so
 they should be checked rather than assumed — the same stance the PC gap check
@@ -703,6 +956,12 @@ does **not** raise the density order the energy already pays for; it adds a
 derivative of it.
 
 ## 4. The active-space-selection hazard, and the settled rule
+
+§4.1–§4.2 are the **CASCI branch's** hazard. It does not exist on the CASSCF
+branch, where core–active and active–virtual are held by stationarity rather
+than by a selection (§1.4); that branch's counterparts are §2.7's
+conditioning and the precondition in §4.4. §4.3's rule and §4.4 are
+**shared**.
 
 ### 4.1 A selection is not a stationarity condition
 
@@ -773,24 +1032,36 @@ planar `Cs` molecule is the right shape of test case in the first place: enough
 independent in-plane components to be a real test, and a symmetry that an
 in-plane displacement cannot break.
 
+**Both justifications hold on the CASSCF branch too.** The second is a
+property of the gradient, not of the reference. The first loses its selection
+but keeps its point: a symmetry-adapted CASSCF is specified in the same irrep
+labels, and an in-plane displacement keeps them meaningful, so each displaced
+optimisation is asked for the same active space.
+
 ### 4.4 What is *not* a hazard, and what is a different one
 
 Three things that look like this hazard and are not, listed because conflating
-them leads to chasing the wrong bug:
+them leads to chasing the wrong bug. All three apply to both branches:
 
 - **The active natural-orbital gauge.** Degenerate active occupation numbers
   make the natural orbitals ambiguous, and the ambiguity is harmless: the
   energy is invariant to an active–active rotation (§1.3), so a natural-orbital
   reordering between displaced geometries does not move `E`. Do not add a
   guard for it.
-- **The reproducibility argument for CASCI over CASSCF.** That is about a
-  single geometry's state being well defined run to run
-  ([`reference-data.md`](reference-data.md), "What 'CASSCF input' means here,
-  and why the golden state is CASCI"). It is a *precondition* for a numerical
-  gradient, not the same question: a CASSCF reference would make even a
-  perfectly stable selection useless, because each displaced geometry would
-  land on a differently-rotated solution.
-- **Park's SC non-invariance finding.** The strongly-contracted energy is not
+- **Run-to-run reproducibility, and the CASSCF branch's precondition.**
+  Whether a single geometry's state is well defined run to run is a
+  *precondition* for a numerical gradient, not the selection question. For
+  the CASCI branch it holds by construction. For the CASSCF branch it is
+  measured at one fixed geometry, perturbed starting points included
+  ([`reference-data.md`](reference-data.md), "A fresh CASSCF reproduces,
+  measured"). What a finite difference additionally needs is that each
+  *displaced* optimisation lands on the same stationary branch as the
+  reference — the branch §1.4's smoothness argument guarantees exists, not
+  one the optimiser is guaranteed to find. A displaced optimisation that
+  lands on a different stationary point gives a number from a different
+  reference, and nothing in this tree has measured whether that happens.
+  It is the CASSCF branch's own hazard, and it is a different one from §4.1's.
+- **Park's SC non-invariance finding — reference-independent.** The strongly-contracted energy is not
   invariant to rotations *among* the inactive orbitals — core and virtual — so
   where those are degenerate the SC gradient and the SC numerical gradient
   legitimately disagree. Park reports exactly that, and reports that it blocks
@@ -800,24 +1071,32 @@ them leads to chasing the wrong bug:
   pair where `Sr` does not, which is why the goldens are built with
   point-group symmetry ([`reference-data.md`](reference-data.md), "Point-group
   symmetry"). It is a property of the SC functional, living inside core and
-  virtual, and it is independent of §4.1–§4.3, which are about the
-  *boundaries* of the active space and apply to SC and PC alike. A symmetric
+  virtual, and so of neither reference: it reaches the gradient through the
+  `z^c` divisions, which are the same on both branches (§2.3), so a CASSCF
+  reference does not remove it. It is also independent of
+  §4.1–§4.3, which are about the *boundaries* of the active space and apply
+  to SC and PC alike. A symmetric
   case is therefore a useful deliberate test of the former and a thing to
   avoid for the latter; when the two are measured against each other, the
   result belongs in [`testing.md`](testing.md) with its card and flags.
 
 ## 5. What this settles
 
-| question | answer |
-|---|---|
-| Does Park's Eq. 23 apply? | Not its first line. CASCI is not orbital-stationary; the constraint is (O1), `F` block-diagonal over core/active/virtual (§1.2). |
-| CP-CASSCF or CPHF? | **CPHF** (§2.4). The RHF Fock has no CI dependence, so the CI and orbital Z-vector equations decouple and are solved in that order (§2.2, §2.5). |
-| Which multipliers need an iterative solve? | One: `Z` on the `O`–`V` block. The pseudocanonical multipliers are Park's Eqs. 56–57 verbatim; the selection-boundary ones are small Sylvester equations, not plain divisions, because `F` is not diagonal in the golden's gauge (§2.3). |
-| Does the active–active block need a multiplier? | No. It is a gauge, redundant with the CI parameters (§1.3). |
-| Which MO-integral arrays does Eq. 28 read? | Seventeen one-general-index arrays, §3.3's table, three of them only on restricted slices. |
-| Which does it not read? | `(xv\|vv)`, and that omission is the whole saving over an `n_mo^4` dump (§3.4). |
-| What else must the reference data carry? | §3.5: `mo_coeff`, `h`, `f`, `f^h`, the three `h^eff` variants and the RHF Fock, each `n_mo × n_mo`, plus the RHF electron count. |
-| How is numerical validation set up? | In-plane displacements of a planar `Cs` molecule, refusing any displacement whose detected point group changes; out-of-plane components checked against zero instead (§4.3). |
+| question | CASCI on RHF orbitals | CASSCF orbitals |
+|---|---|---|
+| Does Park's Eq. 23 apply? | Not its first line. CASCI is not orbital-stationary; the constraint is (O1), `F` block-diagonal over core/active/virtual (§1.2). | **Verbatim**, the `(1/2) tr[Z^dag (A - A^dag)]` line included (§1.4). |
+| CP-CASSCF or CPHF? | **CPHF** (§2.4). The RHF Fock has no CI dependence, so the CI equation does not read `Z`; the system is block-triangular — `z^c`, then `z`, then the orbital multipliers (§2.2, §2.5). | **CP-CASSCF** (§2.7). `∂(A − A†)/∂c ≠ 0`, so the CI and orbital equations are one coupled system over `(Z, z)`: §2.5's steps 2 and 4 merged. |
+| Which multipliers need a linear solve? | One: `Z` on the `O`–`V` block, the only iterative step. The pseudocanonical multipliers are Park's Eqs. 56–57 verbatim; the selection-boundary ones are small Sylvester equations, not plain divisions, because `F` is not diagonal in the golden's gauge (§2.3). | One: the coupled `(Z, z)` system, on core–active, core–virtual and active–virtual. The pseudocanonical multipliers are the same divisions; there are no selection-boundary ones (§2.7). |
+| Does the CI equation see the orbital constraints? | Only through `z^c` — one way, as a right-hand side `y^c` (§2.2). | Through `z^c` as on the left, **and** through `Z` (§2.7). |
+| Does the active–active block need a multiplier? | No. It is a gauge, redundant with the CI parameters (§1.3). | No — the same gauge (§1.3). |
+| Is the RHF partition (`act_O`/`act_V`) needed? | Yes, recovered by one `n_act × n_act` diagonalisation (§2.6). | No. There is no RHF partition; §2.6 is unnecessary (§1.4). |
+| Which MO-integral arrays does Eq. 28 read? | Seventeen one-general-index arrays, §3.3's table, three of them only on restricted slices. | The same seventeen. |
+| Which does it not read? | `(xv\|vv)`, and that omission is the whole saving over an `n_mo^4` dump (§3.4). | The same. |
+| What else must the reference data carry? | §3.5: `mo_coeff`, `h`, `f`, `f^h`, the three `h^eff` variants and the RHF Fock, each `n_mo × n_mo`, plus the RHF electron count. | §3.5 less the RHF Fock and the RHF electron count. |
+| What can make the derivative ill-defined? | The selection: a reordering or a lost point group puts a kink in the energy; a small gap across an active-space boundary makes the selection multipliers large (§4.1–§4.2). | Not a selection. A near-singular CASSCF Hessian (§2.7), and a displaced optimisation landing on a different stationary branch (§4.4). |
+| How is numerical validation set up? | In-plane displacements of a planar `Cs` molecule, refusing any displacement whose detected point group changes; out-of-plane components checked against zero instead (§4.3). | The same rule (§4.3). |
+| Does Park's SC non-invariance apply? | Yes, through `z^c` (§4.4). | Yes, identically: it is a property of the SC functional, not of the reference (§4.4). |
+| Is it implemented? | The source terms in `src/`; the Z-vector solve offline only ([`gradients.md`](gradients.md), §1). | Nowhere; every derivative path refuses a `casscf` golden (§1.1). |
 
 ## References
 

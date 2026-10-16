@@ -53,13 +53,19 @@ orbitals changes is the **reference**: E_corr moves by tens of millihartree
 different number rather than a noisier one, which is why both kinds are worth
 committing.
 
-**What a CASSCF-orbital golden is not an input for: the gradient work.** Every
-derivative in this tree is derived for the CASCI-on-RHF Lagrangian, so
+**What a CASSCF-orbital golden is not an input for: the gradient work.** The
+gradient derivation has a branch per reference
+([`gradient-theory.md`](gradient-theory.md), §5): on RHF orbitals the
+orbital constraint is RHF Brillouin plus the active-space selection, solved
+by CPHF; on CASSCF orbitals it is Park's Eq. 23 as written, CASSCF
+stationarity, solved as one coupled CP-CASSCF system (§1.4, §2.7). Every
+derivative in this tree implements the first branch only, so
 `nevpt2_demo --sc-tangent`, `--gradient-source` and
 `reference_data/nevpt2_numgrad.py` all refuse a `casscf` golden, and
 `--gradgold` is refused with `--casscf` and with `--mo-from`
-([`gradient-theory.md`](gradient-theory.md), §1.1 and §5). The gradient tier
-stays CASCI-only on purpose; the energy path is what these files exercise.
+([`gradient-theory.md`](gradient-theory.md), §1.1). The second branch is
+derived and built nowhere; until it is, the energy path is what these files
+exercise.
 
 Whichever orbitals it is handed, the generator never writes `dm3`, `f3ac` or
 `f3ca`. Producing those from the CI vector is
@@ -136,11 +142,11 @@ That is the invariance argument holding rather than failing: with
 differently-rotated *route* to the same stationary point cannot move E_corr by
 more than the leftover gradient allows — ~1e-8, not ~1e-2.
 
-This measurement is about **one fixed geometry**. The separate statement in
-[`gradient-theory.md`](gradient-theory.md), §1.1 and §4.4 — that a *displaced*
-CASSCF would not give a finite difference a stable reference to be a gradient
-of — is a different claim about a different calculation, and nothing here
-measures it.
+This measurement is about **one fixed geometry**. The precondition
+[`gradient-theory.md`](gradient-theory.md), §4.4 names for a numerical
+gradient on CASSCF orbitals — that each *displaced* optimisation lands on the
+same stationary branch as the reference — is a different claim about a
+different calculation, and nothing here measures it.
 
 ### The `--casscf` / `--mo-from` gate thresholds
 
