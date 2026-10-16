@@ -2,9 +2,10 @@
 # missing, truncated or wrongly-tagged file (temp files the test writes) come
 # back as an IO Result, never an abort; GoldenFile::require names a missing
 # array; the header's reference_kind field round-trips in the NEVPT2G2 layout,
-# reads as CASCI from the pre-kind NEVPT2G1 one and gates the derivative paths
-# (requireCasciReference) -- on a spliced file and on the committed
-# CASSCF-orbital golden; and the committed CAS(4,4) golden parses with the
+# reads as CASCI from the pre-kind NEVPT2G1 one, and splits the two gates
+# (requireSourceTermReference accepts a CASSCF golden,
+# requireLagrangianReference refuses it) -- on a spliced file and on the
+# committed CASSCF-orbital golden; and the committed CAS(4,4) golden parses with the
 # expected header and array shapes. Pure host file parsing, no device: NOT
 # REQUIRES_GPU, so these run with no card visible. Nothing here checks an
 # energy.

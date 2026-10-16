@@ -48,7 +48,9 @@ export namespace nevpt2 {
 // The two are different references, not a clean and a noisy version of one:
 // optimising the orbitals moves E_corr by tens of millihartree. The whole
 // gradient derivation is written for the first of them
-// (docs/gradient-theory.md), which is why `requireCasciReference` exists.
+// (docs/gradient-theory.md), which is why `requireLagrangianReference`
+// exists; the source terms it starts from are not, which is why
+// `requireSourceTermReference` accepts both.
 enum class ReferenceKind {
   Casci = 0,   // a CASCI diagonalisation on converged RHF orbitals
   Casscf = 1,  // orbitals from a converged CASSCF
@@ -95,13 +97,30 @@ struct GoldenFile {
   // vector's length to the active space the kernels index it with.
   [[nodiscard]] Status checkNdet(int64_t expected) const;
 
-  // An Unsupported Error unless `reference` is a CASCI -- the gate every
-  // derivative path sits behind, with `what` naming the one asking
-  // (`--sc-tangent`, say). NOT an IO Error: a CASSCF-orbital golden is a
-  // perfectly well-formed file, and a valid request this code does not
-  // handle is the Unsupported tier (docs/architecture.md, "Error handling").
-  // Host-only and cheap, so a caller runs it before any GPU work.
-  [[nodiscard]] Status requireCasciReference(std::string_view what) const;
+  // The two reference-kind gates, with `what` naming the flag asking
+  // (`--sc-tangent`, say). Host-only and cheap, so a caller runs them before
+  // any GPU work. A refusal is Unsupported, NOT an IO Error: a CASSCF-orbital
+  // golden is a perfectly well-formed file, and a valid request this code
+  // does not handle is the Unsupported tier (docs/architecture.md, "Error
+  // handling").
+  //
+  // requireSourceTermReference: the SOURCE-TERM gate, which accepts either
+  // kind. Y_xy = dE/dkappa_xy and y_I = dE/dc_I are derivatives of the
+  // NEVPT2 energy at FIXED orbitals and CI vector (Park, JCTC 2019, Eqs.
+  // 26-28, 36-38, 41-48): nothing in them knows which reference produced the
+  // orbitals, so --sc-tangent, --gradient-source, --dump-source-terms and
+  // --source-oracle sit behind this one. It exists so each of those call
+  // sites says which claim it rests on, and so a future kind the source
+  // terms cannot take has one place to be refused.
+  [[nodiscard]] Status requireSourceTermReference(std::string_view what) const;
+
+  // requireLagrangianReference: the LAGRANGIAN gate, which refuses anything
+  // but a CASCI. The CI Z-vector -> Sylvester -> CPHF chain downstream of the
+  // source terms is derived for a CASCI diagonalisation on converged RHF
+  // orbitals (docs/gradient-theory.md, Secs. 1.1, 1.2, 2 and 5), so whatever
+  // consumes a full nuclear gradient -- numerical or analytic -- sits behind
+  // this one.
+  [[nodiscard]] Status requireLagrangianReference(std::string_view what) const;
 
   // The array `name`. Aborts (check) if it is absent: the demo should have
   // require()d it, so reaching here without it is our bug, not the file's.

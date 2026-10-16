@@ -638,12 +638,17 @@ ends with an `int32` saying what the state is — `0` CASCI, `1` CASSCF
 (`generate_golden.REFERENCE_KINDS`, `ReferenceKind` in
 `src/golden/golden.cppm`). Provenance belongs in the file rather than in a
 file *name*, because a consumer has to be able to refuse what it does not
-support: every derivative in this tree is derived for the CASCI-on-RHF
-Lagrangian, so `nevpt2_demo`'s `--sc-tangent` and `--gradient-source`
-(`GoldenFile::requireCasciReference`, an `err_unsupported`) and
-`reference_data/nevpt2_numgrad.py` (`_check_reference_kind`) all refuse a
-`casscf` golden — see [`gradient-theory.md`](gradient-theory.md), §1.1 and
-§5. Both demos print the kind in their header line.
+support. The C++ side has two gates on it. The **source-term** gate
+(`GoldenFile::requireSourceTermReference`) accepts either kind: `Y_xy` and
+`y_I` are derivatives of the energy at fixed orbitals and CI vector (Park
+Eqs. 26–28, 36–38, 41–48), so `nevpt2_demo`'s `--sc-tangent` and
+`--gradient-source` and `nevpt2_sc_pseudodensity`'s `--dump-source-terms`
+and `--source-oracle` run on a `casscf` golden. The **Lagrangian** gate
+(`GoldenFile::requireLagrangianReference`, an `err_unsupported`) refuses one,
+because the Z-vector → Sylvester → CPHF chain is derived for CASCI on RHF
+orbitals — see [`gradient-theory.md`](gradient-theory.md), §1.1 and §5 — and
+so does `reference_data/nevpt2_numgrad.py` (`_check_reference_kind`). Both
+demos print the kind in their header line.
 
 **Two magics, because the field is newer than most of the files.** `NEVPT2G2`
 is the layout with the field, which the three `*_casscf*` goldens are written

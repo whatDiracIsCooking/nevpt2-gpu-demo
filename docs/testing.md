@@ -285,15 +285,76 @@ The CAS(4,4) four are `small`, so the sanitizer tier runs a `NEVPT2G2` file
 too; CAS(10,10) is the production size at the shipped `--tiles 3`. All three
 goldens carry PC fields.
 
-**What there is deliberately no entry for: the gradient paths.** Every
-derivative in this tree is derived for the CASCI-on-RHF Lagrangian, so
-`nevpt2_demo --sc-tangent` and `--gradient-source` **refuse** a CASSCF golden
-as an `err_unsupported` before any card is touched, and so does
-`reference_data/nevpt2_numgrad.py`. That refusal is checked in the unit tier
-instead, by `test/golden`'s `GoldenCommittedCasscfTests` — which reads
-`golden/n2_ccpvdz_cas44_casscf.nevpt2gold` itself, so the gate is held against
-a committed reference and not only against a file a test spliced together.
-Host-only, no card.
+**Two gates, and which paths each one admits.** `nevpt2.golden` has two
+reference-kind gates. The **source-term** gate
+(`GoldenFile::requireSourceTermReference`) accepts a CASSCF golden:
+`Y_xy = dE/dkappa_xy` and `y_I = dE/dc_I` are derivatives of the energy at
+fixed orbitals and CI vector, and carry no reference-kind dependence (Park
+Eqs. 26–28, 36–38, 41–48). `nevpt2_demo --sc-tangent` / `--gradient-source`
+and `nevpt2_sc_pseudodensity --dump-source-terms` / `--source-oracle` sit
+behind it. The **Lagrangian** gate (`requireLagrangianReference`) refuses one
+as `err_unsupported`, because the CI Z-vector → Sylvester → CPHF chain is
+derived for CASCI on RHF orbitals ([`gradient-theory.md`](gradient-theory.md),
+§1.1, §1.2, §2, §5); `reference_data/nevpt2_numgrad.py` refuses one as well.
+The split is checked in the unit tier by `test/golden`'s
+`GoldenReferenceKindGateTests` and `GoldenCommittedCasscfTests`. The second
+of those reads `golden/n2_ccpvdz_cas44_casscf.nevpt2gold` itself, so the split
+is held against a committed reference as well as a spliced one. Host-only,
+no card.
+
+### The source terms on CASSCF orbitals: the wave-0 canary
+
+The CASSCF-gradient milestone rests on one claim: the source terms are
+agnostic to the reference kind. Two `gpu;small` entries test it directly on
+the committed CASSCF golden, with no oracle, no `.gradgold` sidecar and no new
+reference data. Each is registered beside its CASCI twin and gated by that
+twin's own PASS line and tolerances:
+
+| entry | binary, flags | twin |
+|---|---|---|
+| `nevpt2_cas44_casscf_sc_tangent` | `nevpt2_demo --tiles 3 --sc-tangent` | `nevpt2_cas44_sc_tangent` ("The SC tangent's finite-difference cross-check") |
+| `nevpt2_sc_pseudodensity_kappa_cas44_casscf` | `nevpt2_sc_pseudodensity --tiles 3 --kappa-act` | `nevpt2_sc_pseudodensity_kappa_cas44` ("The active-rotation source term") |
+
+Both checks hold the golden's `e_core` / `e_virt` fixed on both sides of the
+comparison, and both say so. Each mode differentiates the same functional,
+so the duality still bites.
+
+**Why `--kappa-act` and not `--kappa-full`.** Issue #118 named
+`--kappa-full`. That check reads the `<case>.gradgold` sidecar beside the
+golden. No CASSCF golden has a sidecar yet, so on
+`n2_ccpvdz_cas44_casscf` it stops with an IO error (`could not open gradient
+sidecar`) before computing anything. The issue's description of the check —
+no sidecar, the orbital energies held fixed, the `<kappa, Y>` pairing against
+the forward `Edot(kappa)` — is `--kappa-act`, which is registered instead.
+`--kappa-full` on CASSCF orbitals, and with it the recorded self-variation
+envelope ("The kernels' same-run self-variation"), waits for the CASSCF
+sidecar in #120.
+
+Measured on an RTX 3080 (CUDA, Release, `--tiles 3`), one run each, both PASS:
+
+| `nevpt2_cas44_casscf_sc_tangent` | |
+|---|---|
+| base total, tangent path vs `energiesDevice` | 5.6e-17 |
+| norm increment, worst of the eight classes | 5.1e-16 |
+| Euler, worst of Sr / Srsi / Srs (energy and norm) | 6.4e-16 |
+| `Edot(u)`, seed `0x5eed0032` | -1.3251e-3 |
+| finite difference: fourfold halvings / plateau `|err|` (relative) | 8 / 6.3e-12 (4.8e-9) at `h = 2^-17` |
+
+| `nevpt2_sc_pseudodensity_kappa_cas44_casscf` | |
+|---|---|
+| `<kappa, Y_act>` vs `Edot(kappa)`, worst `|delta|` of 4 directions | 2.3e-30 |
+| `max |Y_act|` (the matrix, 6 basis directions) | 9.1e-17 |
+| matrix pairing vs direct pairing | 6.1e-30 |
+| finite difference: fourfold halvings / plateau `|err|` | 7 / 1.7e-11 at `h = 2^-15` |
+
+**What the `--kappa-act` canary does not show.** At CAS(4,4) on CASSCF
+orbitals, `Y_act` is zero to round-off (9.1e-17), just as the CASCI twin's
+pairing is a symmetry zero ("The kernels' same-run self-variation"). So the
+duality here holds between two numbers that are both zero to round-off. It
+shows that the gate admits the file and that the machinery runs on CASSCF
+orbitals. It is not a strong test of a non-zero active-rotation source term.
+`--sc-tangent`'s `Edot(u)` is non-zero and passes every check, so that entry
+carries the canary's weight.
 
 Nothing in `src/` branches on the reference kind anywhere else: the RDM build,
 the digests, the energy stage and the PC solve see a CI vector and integrals,
@@ -2892,6 +2953,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_sc_pseudodensity_cas44`, `nevpt2_sc_pseudodensity_cas88` | the SC gradient's pseudodensity assembly and its identities ("The SC pseudodensity identities", above) |
 | `nevpt2_pc_tangent_cas44`, `nevpt2_pc_tangent_cas88` | the PC tangent: a second solve per class, the tangent slab einsums and the `(m, m)` blocks' GEMMs, plus ten RDM builds and PC stages per entry ("The PC tangent against a finite difference", above) |
 | `nevpt2_cas44_casscf`, `nevpt2_cas44_casscf_pc`, `nevpt2_df_cas44_casscf`, `nevpt2_df_cas44_casscf_pc` | the same four paths on **CASSCF orbitals** — a `NEVPT2G2` golden whose `reference_kind` is CASSCF ("The CASSCF-orbital entries", above). Same CAS(4,4) shape, so the same cost |
+| `nevpt2_cas44_casscf_sc_tangent`, `nevpt2_sc_pseudodensity_kappa_cas44_casscf` | the two source-term canaries on **CASSCF orbitals** (`--sc-tangent`, `--kappa-act`; "The source terms on CASSCF orbitals: the wave-0 canary", above). Their CASCI twins' cost |
 
 They are ordinary golden checks too, so `ctest --preset fast` and
 `ctest --preset hip` run them on every backend.

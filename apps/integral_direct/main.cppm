@@ -124,14 +124,15 @@ int main(int argc, char** argv) {
     nevpt2::report(st.error());
     return 1;
   }
-  // Both differentiation checks are derivatives of the CASCI-on-RHF
-  // Lagrangian (docs/gradient-theory.md), so a CASSCF-orbital golden is a
-  // valid request this code does not handle: an Unsupported Error, reported
-  // once here. Before DeviceResources::create below, so no card is touched
-  // and the gate is pure host logic (test/golden's
-  // GoldenReferenceKindGateTests.GradientPathRefusesACasscfReference).
+  // Both differentiation checks take the energy's derivative at fixed
+  // orbitals -- the forward tangent and the CI source term y_I -- and stop
+  // there, short of the Lagrangian, so they sit behind the SOURCE-TERM gate,
+  // which takes a CASSCF-orbital golden as readily as a CASCI one (Park
+  // Eqs. 26-28, 36-38, 41-48; nevpt2.golden, requireSourceTermReference).
+  // Before DeviceResources::create below, so no card is touched and the gate
+  // is pure host logic (test/golden's GoldenReferenceKindGateTests).
   if (differentiates) {
-    if (const nevpt2::Status st = g.requireCasciReference(whichFlag); !st) {
+    if (const nevpt2::Status st = g.requireSourceTermReference(whichFlag); !st) {
       nevpt2::report(st.error());
       return 1;
     }
