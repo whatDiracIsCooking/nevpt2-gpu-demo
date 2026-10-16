@@ -341,6 +341,26 @@ CASSCF_CONV_TOL = 1e-12
 CASSCF_CONV_TOL_GRAD = 1e-7
 CASSCF_MAX_CYCLE_MACRO = 200
 
+#: The polish :func:`optimise_mo` runs **only when the optimisation above has
+#: not converged**: a second ``mc1step`` run, warm-started from the first run's
+#: orbitals and CI vector, with the augmented-Hessian solver's ``ah_conv_tol``
+#: lowered from PySCF's 1e-12 to this. Nothing else changes, and no guard is
+#: loosened. Why it is needed (measured, docs/reference-data.md, "The CASSCF
+#: polish"): ``davidson_cc`` accepts an AH step once its residual is under
+#: ``sqrt(ah_conv_tol)`` = 1e-6, which is no longer a small residual once
+#: ``||g_orb||`` itself is ~1e-7. LiF CAS(4,6) and acrolein CAS(6,5) stall there
+#: for all 200 macro iterations (``||g_orb||`` 1.2e-7 / 2.2e-7, just over
+#: ``conv_tol_grad``); with this the polish converges both in 2 macro iterations
+#: to the same stationary point. It is a fallback rather than the setting
+#: because applying it from the start moves N2 CAS(10,10)'s committed
+#: ``.mogold`` (a different, equally converged point inside the 1e-7
+#: tolerance), and a regenerated file that differs is this tree's signal that
+#: something changed. Every committed N2 sidecar converges without it, so none
+#: of them runs the polish. 1e-15, 1e-16 and 1e-18 polish both cases to the
+#: same E_CASSCF (12 decimals) and ``||g_orb||`` (4 digits); 1e-16 is inside
+#: that plateau.
+CASSCF_POLISH_AH_CONV_TOL = 1e-16
+
 #: How far from stationary a ``--mo-from`` sidecar's orbitals may be: the
 #: 2-norm of ``mc.get_grad(mo, (casdm1, casdm2), eris)`` -- i.e.
 #: ``mc1step.gen_g_hop(mo, 1, casdm1, casdm2, eris)[0]``, the quantity
@@ -889,7 +909,10 @@ def optimise_mo(
 
     Settings: :data:`CASSCF_CONV_TOL` / :data:`CASSCF_CONV_TOL_GRAD` /
     :data:`CASSCF_MAX_CYCLE_MACRO`, and :data:`FCI_CONV_TOL` on the Davidson,
-    in the point group :func:`_build_mol` detects. Three refusals before a
+    in the point group :func:`_build_mol` detects. If that run does not
+    converge, one warm-started polish with :data:`CASSCF_POLISH_AH_CONV_TOL`
+    follows (it is what converges LiF CAS(4,6) and acrolein CAS(6,5)); a case
+    that converges first time never runs it. Three refusals before a
     sidecar is written -- an unconverged optimisation, orbitals that are not
     symmetry-pure (:func:`_check_mo_symmetry`), and an orbital gradient above
     :data:`CASSCF_GRAD_TOL` -- so ``--mo-out`` never writes a file
@@ -915,11 +938,32 @@ def optimise_mo(
         assert sum(cas_irreps.values()) == ncas, f"{cas_irreps} is not {ncas} orbitals"
         mo_start = mc.sort_mo_by_irrep(cas_irreps, core_irreps, mo_coeff=mo_start)
     mc.kernel(mo_start)
+    n_macro = (max(macro) + 1) if macro else 0
+    polish = ""
+    if not mc.converged:
+        # The fallback (CASSCF_POLISH_AH_CONV_TOL): same settings, warm-started
+        # from where the first run stalled, tighter AH solve. Never runs for a
+        # case that converged above, so it moves no file that did.
+        print(
+            f"[{name}] CASSCF not converged in {CASSCF_MAX_CYCLE_MACRO} macro "
+            f"iterations; polishing with ah_conv_tol {CASSCF_POLISH_AH_CONV_TOL:g}"
+        )
+        mcp = _casscf(mf, ncas, nelecas, auxbasis)
+        mcp.conv_tol = CASSCF_CONV_TOL
+        mcp.conv_tol_grad = CASSCF_CONV_TOL_GRAD
+        mcp.max_cycle_macro = CASSCF_MAX_CYCLE_MACRO
+        mcp.ah_conv_tol = CASSCF_POLISH_AH_CONV_TOL
+        polish_macro: list = []
+        mcp.callback = lambda envs: polish_macro.append(envs.get("imacro"))
+        mcp.kernel(mc.mo_coeff, ci0=mc.ci)
+        polish = f" + polish macro={max(polish_macro) if polish_macro else 0}"
+        mc = mcp
     if not mc.converged:
         raise SystemExit(
             f"CASSCF did not converge to conv_tol {CASSCF_CONV_TOL:g} / "
             f"conv_tol_grad {CASSCF_CONV_TOL_GRAD:g} in "
-            f"{CASSCF_MAX_CYCLE_MACRO} macro iterations. Non-stationary "
+            f"{CASSCF_MAX_CYCLE_MACRO} macro iterations, nor after the "
+            f"ah_conv_tol {CASSCF_POLISH_AH_CONV_TOL:g} polish. Non-stationary "
             "orbitals are what --mo-from's gate exists to refuse, so none are "
             "written."
         )
@@ -942,7 +986,7 @@ def optimise_mo(
     print(
         f"[{name}] CASSCF CAS({ncas},{na + nb}) ncore={mc.ncore} "
         f"E_CASSCF={mc.e_tot:.10f} |g_orb|={g_norm:.3e} "
-        f"purity defect {purity:.1e} macro={(max(macro) + 1) if macro else 0} "
+        f"purity defect {purity:.1e} macro={n_macro}{polish} "
         f"({time.perf_counter() - t0:.1f}s)"
     )
     print(f"[{name}] active irreps: {names[mc.ncore : mc.ncore + ncas]}")
