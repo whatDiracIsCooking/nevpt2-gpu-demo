@@ -40,7 +40,8 @@ different times, the last by luck (issue #71). Since then there is one parser,
    ``nevpt2_numgrad._write_manifest`` must read back through
    ``golden_format.read_states_manifest``. A transient golden as
    ``pc_on_states.py`` writes it (NaN PC placeholders) must read back through
-   every golden reader.
+   every golden reader -- and a golden under ``golden/`` holding any NaN or
+   infinity is refused, so such a file can never be committed.
 
 The C++ half is ``test/golden``'s ``GoldenLayoutContractTests``, which loads
 every committed golden and sidecar with ``loadGolden`` / ``loadGradGold`` /
@@ -197,6 +198,15 @@ def every_golden_reader(fail: Failures, path: Path, header: dict, arrays: dict) 
                    f"{name}: pyscf_contract_time's arrays disagree")
 
 
+def non_finite(arrays: dict[str, np.ndarray]) -> list[str]:
+    """The arrays holding a NaN or an infinity. No committed golden may hold
+    one: a NaN is what ``pc_on_states.py``'s transient goldens carry in place
+    of block2's PC fields, so a NaN under ``golden/`` is a transient golden
+    that was committed, and every ``--pc`` check against it would fail or
+    mean nothing."""
+    return [k for k, a in arrays.items() if not np.isfinite(a).all()]
+
+
 def committed_goldens(fail: Failures, tmp: Path) -> set[bytes]:
     layouts: set[bytes] = set()
     for path in sorted(GOLDEN.glob("*.nevpt2gold")):
@@ -205,6 +215,10 @@ def committed_goldens(fail: Failures, tmp: Path) -> set[bytes]:
             continue
         header, arrays = r
         layouts.add(header["magic"])
+        bad = non_finite(arrays)
+        fail.check(not bad, f"{path.name}: non-finite values in {', '.join(bad)} -- a "
+                   "transient golden's NaN placeholders (pc_on_states.py) are never "
+                   "committed")
         raw = path.read_bytes()
         packed = packed_golden(header, arrays)
         fail.check(packed == raw, f"{path.name}: re-packed from its "
@@ -395,7 +409,10 @@ def states_hand_off(fail: Failures, tmp: Path) -> None:
         fail.check(list(got) == list(arrays) and same_arrays(got, arrays, arrays),
                    f"{path.name}: the arrays read back are not the ones written")
         every_golden_reader(fail, path, header, got)
-        print(f"  {path.name}: a transient golden with NaN PC placeholders, read back",
+        fail.check(non_finite(got) == ["pc_class_energies", "e_pc_total"],
+                   f"{path.name}: the committed-golden NaN refusal would not catch it")
+        print(f"  {path.name}: a transient golden with NaN PC placeholders, read back "
+              "(and refused if committed)",
               flush=True)
 
 

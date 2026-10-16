@@ -106,8 +106,9 @@ checked in two halves:
   which is never committed. A `states.json` from
   `nevpt2_numgrad._write_manifest` must read back through
   `read_states_manifest`, and a transient golden with NaN PC placeholders
-  (`pc_on_states.py`'s) must pass every golden reader. Ends `PASS:` or
-  `FAIL:` with an exit status.
+  (`pc_on_states.py`'s) must pass every golden reader. A committed golden
+  holding any NaN or infinity is refused, so such a transient file cannot
+  land in `golden/`. Ends `PASS:` or `FAIL:` with an exit status.
 
 The Python half registers **no ctest entry**, for the same reasons the
 gradient comparison does not ("Why there is no ctest entry for it", below):
