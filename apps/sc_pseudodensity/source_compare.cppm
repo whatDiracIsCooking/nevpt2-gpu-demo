@@ -101,18 +101,21 @@ struct KnownGap {
 // The four N2 CAS(4,4) oracles on CASSCF orbitals (#117,
 // n2_ccpvdz_cas44_casscf[_pc][_dir]) started empty too: the GPU's SC and PC
 // terms met every block their partition has (act_V's three are empty there
-// by construction) on the first run, before they were classified.
+// by construction) on the first run, before they were classified. So did
+// acrolein's two directional oracles on CASSCF orbitals (#135,
+// acrolein_def2svp_cas65_casscf[_pc]_dir).
 inline constexpr std::array<KnownGap, 0> kKnownGaps{};
 
 // The oracles that have a classification at all -- one with no known gap is
 // named here too, so an oracle nobody has classified is refused rather than
 // read as "everything must agree".
-inline constexpr std::array<std::string_view, 12> kClassifiedOracles{
+inline constexpr std::array<std::string_view, 14> kClassifiedOracles{
     "n2_ccpvdz_cas44",        "lif_def2svp_cas46",          "n2_ccpvdz_cas44_pc",
     "n2_ccpvdz_cas44_dir",    "lif_def2svp_cas46_dir",      "n2_ccpvdz_cas44_pc_dir",
     "acrolein_def2svp_cas65_dir", "acrolein_def2svp_cas65_pc_dir",
     "n2_ccpvdz_cas44_casscf",     "n2_ccpvdz_cas44_casscf_pc",
-    "n2_ccpvdz_cas44_casscf_dir", "n2_ccpvdz_cas44_casscf_pc_dir"};
+    "n2_ccpvdz_cas44_casscf_dir", "n2_ccpvdz_cas44_casscf_pc_dir",
+    "acrolein_def2svp_cas65_casscf_dir", "acrolein_def2svp_cas65_casscf_pc_dir"};
 
 // The oracle file's name without the directory and the `.srcgold` suffix --
 // what kKnownGaps and kClassifiedOracles key on.

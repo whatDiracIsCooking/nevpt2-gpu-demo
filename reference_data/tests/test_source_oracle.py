@@ -20,6 +20,8 @@ import pytest
 import sc_source_oracle as so
 
 CASE = "n2_ccpvdz_cas44_casscf"
+#: Acrolein CAS(6,5) on its CASSCF orbitals: directional oracles only (#135).
+ACROLEIN = "acrolein_def2svp_cas65_casscf"
 GOLDEN = so.REPO / "golden"
 
 
@@ -39,7 +41,7 @@ def test_every_casscf_case_has_its_inputs():
     cases = (set(so.ORACLE_CASES) | set(so.PC_ORACLE_CASES)
              | set(so.DIRECTIONAL_CASES["sc"]) | set(so.DIRECTIONAL_CASES["pc"]))
     casscf = sorted(c for c in cases if c.endswith(so.CASSCF_SUFFIX))
-    assert casscf == [CASE]
+    assert casscf == sorted([CASE, ACROLEIN])
     for c in casscf:
         base, _ = so.resolve_case(c, GOLDEN / f"{c}.mogold")
         assert base in so.ng.CASES
@@ -68,12 +70,14 @@ def test_sidecar_differing_in_one_field_names_that_field():
     assert lines == ["  auxbasis: sidecar 'cc-pvdz-jkfit', this run ''"]
 
 
-@pytest.mark.parametrize("scheme,flavour", [("sc", "full"), ("pc", "full"),
-                                            ("sc", "directional"), ("pc", "directional")])
-def test_committed_casscf_oracle_is_one_active_range(scheme, flavour):
+@pytest.mark.parametrize("case,scheme,flavour", [
+    (CASE, "sc", "full"), (CASE, "pc", "full"),
+    (CASE, "sc", "directional"), (CASE, "pc", "directional"),
+    (ACROLEIN, "sc", "directional"), (ACROLEIN, "pc", "directional")])
+def test_committed_casscf_oracle_is_one_active_range(case, scheme, flavour):
     """No RHF partition on CASSCF orbitals (docs/gradient-theory.md, section
     1.4): the active space is one range, and the state is never rotated."""
-    header, arrays = gf.read_srcgold(GOLDEN / gf.srcgold_name(CASE, scheme, flavour))
+    header, arrays = gf.read_srcgold(GOLDEN / gf.srcgold_name(case, scheme, flavour))
     assert header["n_act_occ"] == header["nact"]
     assert np.array_equal(arrays["act_rot"], np.eye(header["nact"]))
     if flavour == "directional":
