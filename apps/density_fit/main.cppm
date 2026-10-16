@@ -285,6 +285,10 @@ int main(int argc, char** argv) {
   ok = ok && dTotal < kAtol;
   std::printf("\nE_corr (DF-NEVPT2, ours)  = %.10f Ha\n", r.total);
   std::printf("E_corr (DF-NEVPT2, golden)= %.10f Ha  |delta|=%.2e\n", g.eNevpt2Total, dTotal);
+  // Full double precision, beside the 10-decimal line: the SC twin of
+  // printPcReport's PC line (docs/pc-nevpt2.md, "The PC total's
+  // run-to-run spread").
+  std::printf("E_corr full precision (DF-NEVPT2) = %.17g Ha\n", r.total);
   std::printf("E_total (E_CASCI + E_corr) = %.10f Ha\n", g.eCasci + r.total);
   std::printf("GPU RDM build: %.2fs   GPU energy contraction: %.2fs   total: %.2fs\n",
               rdmSeconds, energySeconds, rdmSeconds + energySeconds);

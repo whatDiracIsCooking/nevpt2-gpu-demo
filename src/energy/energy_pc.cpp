@@ -224,6 +224,11 @@ bool printPcReport(const PcEnergyResult& r, const Tensor& ref, double refTotal, 
     ok = ok && dTotal < atol;
     std::printf("\nE_corr (PC-NEVPT2, ours)   = %.10f Ha\n", total);
     std::printf("E_corr (PC-NEVPT2, block2) = %.10f Ha  |delta|=%.2e\n", refTotal, dTotal);
+    // The same total at full double precision (%.17g round-trips a double),
+    // for a caller that differences it -- a finite-difference oracle -- rather
+    // than reading the 10-decimal line above. docs/pc-nevpt2.md, "The PC
+    // total's run-to-run spread".
+    std::printf("E_corr full precision (PC-NEVPT2) = %.17g Ha\n", total);
   } else {
     std::printf("\nE_corr (PC-NEVPT2): not summed, %d of 8 classes computed\n", computed);
   }
