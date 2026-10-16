@@ -397,14 +397,16 @@ Usage::
     # and the CASCI validation gated the same way, against the npz's grad_casci:
     uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 \
         --casci-only --grad-num /tmp/n2_cas44.numgrad.npz
-    # the CASSCF branch (CP-CASSCF, dense): the committed N2 sidecar is found
-    # by name; any other case names its .mogold
+    # the CASSCF branch (CP-CASSCF, dense): a committed golden/<case>_casscf.mogold
+    # (N2 CAS(4,4), LiF, acrolein) is found by name; any other names its .mogold
     uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 \
         --reference casscf
     uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 \
         --reference casscf --casci-only        # the pyscf.grad.casscf smoke test
     uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
-        --reference casscf --mo-from /tmp/lif_def2svp_cas46_casscf.mogold
+        --reference casscf
+    uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
+        --reference casscf --mo-from /tmp/other_orbitals.mogold   # no golden: gate only
 
 ``--out`` writes the gradient and every residual as an ``.npz``; nothing is
 written by default, and **no committed file is ever touched** (the

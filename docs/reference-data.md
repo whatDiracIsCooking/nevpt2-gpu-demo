@@ -24,7 +24,7 @@ and the header's `reference_kind` says which ("The file format" below):
 | `reference_kind` | orbitals | committed files |
 |---|---|---|
 | `casci` | converged RHF | every golden without `_casscf` in its name |
-| `casscf` | a converged `mcscf.CASSCF`, committed in an MO sidecar | the three `*_casscf*` files ("The MO sidecar: committed CASSCF orbitals" below) |
+| `casscf` | a converged `mcscf.CASSCF`, committed in an MO sidecar | the `*_casscf*` files ("The MO sidecar: committed CASSCF orbitals" below) |
 
 **The CASSCF-orbital references are built in two steps, and the sidecar is the
 design.** `--casscf --mo-out FILE` runs the optimiser **once** and commits its
@@ -58,13 +58,15 @@ gradient derivation has a branch per reference
 ([`gradient-theory.md`](gradient-theory.md), §5): on RHF orbitals the
 orbital constraint is RHF Brillouin plus the active-space selection, solved
 by CPHF; on CASSCF orbitals it is Park's Eq. 23 as written, CASSCF
-stationarity, solved as one coupled CP-CASSCF system (§1.4, §2.7). Every
-derivative in this tree implements the first branch only, so
-`nevpt2_demo --sc-tangent`, `--gradient-source` and
-`reference_data/nevpt2_numgrad.py` all refuse a `casscf` golden
-([`gradient-theory.md`](gradient-theory.md), §1.1). The second branch is
-derived and built nowhere; until it is, the energy path is what these files
-exercise. The one exception is data, not a derivative: `--gradgold` is
+stationarity, solved as one coupled CP-CASSCF system (§1.4, §2.7). The
+second branch is built **offline only**, in
+`reference_data/nevpt2_grad.py --reference casscf` (SC-NEVPT2 with PySCF's
+own source terms; "The CASSCF branch" below). Every derivative on the GPU
+implements the first branch only, so `nevpt2_demo --sc-tangent`,
+`--gradient-source` and `reference_data/nevpt2_numgrad.py` all refuse a
+`casscf` golden ([`gradient-theory.md`](gradient-theory.md), §1.1), and on
+the device the energy path is what these files exercise. One more exception
+is data, not a derivative: `--gradgold` is
 permitted with `--mo-from` (refused with `--casscf`), and writes the
 one-general-index integral arrays on the committed CASSCF orbitals, the
 input the second branch will read, at the price of a weaker provenance
@@ -251,6 +253,68 @@ uv run python reference_data/casscf_repro_probe.py --runs 5 --perturb 0.1
 uv run python reference_data/casscf_repro_probe.py --runs 1 --conv-tol-grad 1e-5
 ```
 
+### The CASSCF polish
+
+**Under the settings above, `mc1step` does not converge LiF CAS(4,6) or
+acrolein CAS(6,5)** (#122 found it; "LiF and acrolein on CASSCF orbitals"
+below is the case pair). Both run the full 200 macro iterations and stop
+just above `conv_tol_grad` — ‖g_orb‖ 1.2e-7 (LiF) and 2.2e-7 (acrolein), the
+optimiser's own norm — so `--casscf` refused both. The log of a stalled
+macro iteration (LiF, `verbose` 5) says what is happening: `|u−1|` is
+exactly 0, `dE` exactly 0, and `max_stepsize_scheduler` shrinks the step
+cap by 0.3 every iteration (to ~1e-17 by macro 39), because a step that
+does not lower the energy by `conv_tol` (1e-12) counts as an energy
+increase. The augmented-Hessian solver no longer produces a step worth
+taking. Our reading of PySCF's `soscf.ciah.davidson_cc` fits this: it
+accepts an AH solution once its residual is under
+`sqrt(ah_conv_tol)` = 1e-6 at PySCF's default `ah_conv_tol` (1e-12), and
+that is not a small residual once the gradient is ~1e-7 itself.
+
+**What was tried, and what converged.** Each probe was run from the
+generator's own RHF + `--cas-irreps` start, or from the stalled point (its
+orbitals and CI vector), single-threaded, offline CPU only:
+
+| change (nothing else touched) | start | LiF | acrolein |
+|---|---|---|---|
+| none (the committed settings) | RHF | stalls, 200 macro | stalls, 200 macro |
+| `ah_lindep` 1e-14 → 1e-20 | RHF, and stalled point | stalls | stalls |
+| FCI `lindep` 1e-14 → 1e-16 | RHF | stalls | stalls |
+| FCI `conv_tol_residual` 1e-9 + `lindep` 1e-20 | stalled point | stalls | stalls |
+| `mcscf.newton` (second-order, CI coupled) | RHF | stalls (CI gradient 2.9e-7) | stalls at ‖g‖ 3.4e-4, E 6.8e-6 **above** the `mc1step` point |
+| `mcscf.newton` + FCI `lindep` 1e-16 | RHF | converged, 10 macro | stalls, as the row above |
+| `mcscf.newton` + FCI `lindep` 1e-16 | stalled point | stalls | stalls |
+| **`ah_conv_tol` 1e-12 → 1e-16** | RHF | converged, 11 macro | converged, 157 macro |
+| **`ah_conv_tol` 1e-12 → 1e-16** | **stalled point** | **converged, 2 macro** | **converged, 2 macro** |
+
+`ah_conv_tol` is the one knob that matters (PySCF's own docstring names it
+and `ah_lindep` as the accuracy controls); 1e-15, 1e-16 and 1e-18 give the
+same E_CASSCF to 12 decimals and the same ‖g_orb‖ to 4 digits, from either
+start, so 1e-16 sits inside a plateau.
+
+**Why a fallback and not the setting.** With `ah_conv_tol` 1e-16 applied
+from the start, a fresh `--casscf` reproduces the committed
+`n2_ccpvdz_cas44_casscf.mogold` and `n2_ccpvdz_cas44_casscf_df.mogold` byte
+for byte but **not** `n2_ccpvdz_cas1010_casscf.mogold`: CAS(10,10) then
+lands at ‖g_orb‖ 2.635e-9 instead of 2.521e-8, a different, equally
+converged point inside the same tolerance. A regenerated file that differs
+is this directory's signal that something changed, so the setting stays
+PySCF's and the tight AH solve is a **polish**: `optimise_mo` runs it only
+when the first optimisation has not converged, as a second `mc1step` run
+warm-started from the first one's orbitals and CI vector, every other
+setting unchanged (`CASSCF_POLISH_AH_CONV_TOL` in `generate_golden.py`).
+Every committed N2 sidecar converges first time, so none of them runs it,
+and the line `--casscf` prints says `+ polish macro=N` when one did. If the
+polish does not converge either, `--casscf` refuses as before. No guard is
+touched by it: `conv_tol_grad`, `CASSCF_GRAD_TOL` and the `--mo-from` gate,
+`_check_degeneracy` and `_check_pc_conditioning` all run unchanged on its
+output.
+
+**The polish moves the stalled point by almost nothing**, which is the
+check that it finishes the same optimisation rather than finding another
+one: against the stalled point, E_CASSCF moves by +1.4e-14 (LiF) and
+−1.3e-11 (acrolein), and the active-subspace overlap singular values are
+≥ 0.999999999999 (LiF) and ≥ 0.9999999975 (acrolein).
+
 ## Regenerating the golden file
 
 Not needed to build or run anything: the committed files are the reference.
@@ -353,6 +417,32 @@ uv run python reference_data/generate_golden.py --df --ncas 4 --nelecas 4 \
 uv run python reference_data/generate_golden.py --df --ncas 4 --nelecas 4 \
     --name n2_ccpvdz_cas44_casscf_df \
     --mo-from golden/n2_ccpvdz_cas44_casscf_df.mogold
+
+# the gradient-validation pair on CONVERGED CASSCF orbitals (see "LiF and
+# acrolein on CASSCF orbitals"), same two steps; both --casscf runs go through
+# the polish ("The CASSCF polish"), and the --mo-from step writes the gradient
+# sidecar too. Acrolein's .gradgold is gitignored (57 MB): this is how to get it
+uv run python reference_data/generate_golden.py \
+    --atom reference_data/geometries/lif.xyz --basis def2-svp \
+    --ncas 6 --nelecas 4 --cas-irreps "B1=3,B2=3" --no-pc \
+    --name lif_def2svp_cas46_casscf --casscf \
+    --mo-out golden/lif_def2svp_cas46_casscf.mogold
+uv run python reference_data/generate_golden.py \
+    --atom reference_data/geometries/lif.xyz --basis def2-svp \
+    --ncas 6 --nelecas 4 --cas-irreps "B1=3,B2=3" --no-pc \
+    --name lif_def2svp_cas46_casscf \
+    --mo-from golden/lif_def2svp_cas46_casscf.mogold --gradgold
+
+uv run python reference_data/generate_golden.py \
+    --atom reference_data/geometries/acrolein.xyz --basis def2-svp \
+    --ncas 5 --nelecas 6 --cas-irreps "A'=1,A\"=4" \
+    --name acrolein_def2svp_cas65_casscf --casscf \
+    --mo-out golden/acrolein_def2svp_cas65_casscf.mogold
+uv run python reference_data/generate_golden.py \
+    --atom reference_data/geometries/acrolein.xyz --basis def2-svp \
+    --ncas 5 --nelecas 6 --cas-irreps "A'=1,A\"=4" \
+    --name acrolein_def2svp_cas65_casscf \
+    --mo-from golden/acrolein_def2svp_cas65_casscf.mogold --gradgold
 ```
 
 **Regeneration is a check.** Every committed golden regenerates
@@ -373,7 +463,7 @@ CASSCF-reference gradient sidecar" below). What it covers, why the `.srcgold` fi
 in it, and its wall time are in [`testing.md`](testing.md), "The golden
 regeneration gate".
 
-**The three CASSCF-orbital files regenerate byte-identically from their
+**The CASSCF-orbital files regenerate byte-identically from their
 committed sidecars**, with no exception to make for the header: they were
 written after the `reference_kind` field existed, so they are `NEVPT2G2`
 already and `cmp` compares them whole. Measured, each regenerated from
@@ -385,6 +475,12 @@ file (CUDA devcontainer, PySCF 2.14.0, single-threaded):
 | `n2_ccpvdz_cas44_casscf.nevpt2gold` | 238 653 B | identical | `79f564e8…` |
 | `n2_ccpvdz_cas44_casscf_df.nevpt2gold` | 470 637 B | identical | `8d36d59c…` |
 | `n2_ccpvdz_cas1010_casscf.nevpt2gold` | 1 130 061 B | identical | `f8f00352…` |
+| `lif_def2svp_cas46_casscf.nevpt2gold` | 202 138 B | identical | `28367a4b…` |
+| `acrolein_def2svp_cas65_casscf.nevpt2gold` | 7 121 421 B | identical | `007c5a7e…` |
+
+(the last two measured on the RTX 3080 box's CPU at #123, same PySCF, each
+with and without `--gradgold`; "LiF and acrolein on CASSCF orbitals" has
+their sidecars' hashes.)
 
 **One exception, and it applies to the pre-kind files only.** The committed
 **CASCI** goldens are written in the `NEVPT2G1` layout; the generator now
@@ -673,15 +769,19 @@ format" above) and nothing else about the generator changes: the
 canonicalisation, `_check_degeneracy`, the RDMs, PySCF's per-class answer and
 block2's PC all run exactly as they do on the RHF path.
 
-**The three committed pairs**, each a 6.6 KB sidecar beside its golden
-(regeneration commands in "Regenerating the golden file" above; their ctest
-entries in [`testing.md`](testing.md), "The CASSCF-orbital entries"):
+**The committed pairs** (regeneration commands in "Regenerating the golden
+file" above; the N2 goldens' ctest entries in [`testing.md`](testing.md),
+"The CASSCF-orbital entries"; the LiF and acrolein pair, #123, has no ctest
+entry of its own yet and is described in "LiF and acrolein on CASSCF
+orbitals" below):
 
 | sidecar | golden | E_CASSCF | ‖g_orb‖ at `--casscf` | purity defect | macro |
 |---|---|---|---|---|---:|
 | `n2_ccpvdz_cas44_casscf.mogold` | `n2_ccpvdz_cas44_casscf.nevpt2gold` | −109.0461390747 | 5.860e-9 | 1.3e-14 | 5 |
 | `n2_ccpvdz_cas1010_casscf.mogold` | `n2_ccpvdz_cas1010_casscf.nevpt2gold` | −109.1296891843 | 2.521e-8 | 1.8e-14 | 16 |
 | `n2_ccpvdz_cas44_casscf_df.mogold` | `n2_ccpvdz_cas44_casscf_df.nevpt2gold` | −109.0458757487 | 5.786e-9 | 5.8e-15 | 5 |
+| `lif_def2svp_cas46_casscf.mogold` | `lif_def2svp_cas46_casscf.nevpt2gold` | −106.9035612554 | 3.691e-9 | 1.4e-15 | 200 + 2 (polish) |
+| `acrolein_def2svp_cas65_casscf.mogold` | `acrolein_def2svp_cas65_casscf.nevpt2gold` | −190.6794323473 | 5.774e-9 | 1.0e-14 | 200 + 2 (polish) |
 
 and what the goldens they wrote carry (the `--mo-from` gate's own two numbers,
 then the state):
@@ -691,6 +791,8 @@ then the state):
 | `n2_ccpvdz_cas44_casscf` | 9.153e-8 | 1.705e-13 | −0.2070717321 | −0.2072316444 |
 | `n2_ccpvdz_cas1010_casscf` | 7.513e-8 | 8.527e-14 | −0.1261825397 | −0.1298993211 |
 | `n2_ccpvdz_cas44_casscf_df` | 9.037e-8 | 1.847e-13 | −0.2070810097 | −0.2072408933 |
+| `lif_def2svp_cas46_casscf` | 5.701e-7 | 2.984e-13 | −0.1473025529 | **refused** (`--no-pc`) |
+| `acrolein_def2svp_cas65_casscf` | 1.721e-7 | 3.126e-13 | −0.5221559894 | −0.5229006181 |
 
 The DF pair is fitted throughout — the CASSCF optimisation included
 (`--df` is passed to both commands, and the sidecar records the auxiliary
@@ -708,7 +810,7 @@ across PySCF versions and settings, the expensive optimisation happens once,
 and the second step keeps the property the whole directory rests on — a
 regenerated golden that differs from the committed one means something
 changed. Running `--mo-from` twice on one sidecar gives byte-identical
-`.nevpt2gold` files, and each of the three committed goldens regenerates
+`.nevpt2gold` files, and each committed CASSCF-orbital golden regenerates
 byte-identically from its committed sidecar — the hashes are in "Regenerating
 the golden file" above.
 
@@ -762,8 +864,8 @@ golden whose answer is not the one it claims:
 Both thresholds, what they measure and the headroom they have are in "The
 `--casscf` / `--mo-from` gate thresholds" above. `--casscf` applies the first
 of them to its own result too, so `--mo-out` never writes a file `--mo-from`
-would turn around and refuse, and it refuses an unconverged optimisation
-outright.
+would turn around and refuse, and it refuses an optimisation that is still
+unconverged after its one polish ("The CASSCF polish" above) outright.
 
 **What the three deliberately broken inputs produce** (CAS(4,4), the sidecar
 above):
@@ -962,6 +1064,11 @@ committed orbitals at a displaced geometry. Nothing in the ctest tier reads
 this file yet beyond the layout contract (`golden_layout_check.py` and
 `golden_tests`' `EveryCommittedGradientSidecarLoadsAgainstItsGolden`, which
 glob every `*.gradgold`).
+
+**LiF and acrolein have one each since #123**, written the same way by
+their `--mo-from … --gradgold` step and under the same contract: LiF's is
+committed, acrolein's (57 MB) gitignored. Their (O2) residuals, (O1)
+records and hashes are in "LiF and acrolein on CASSCF orbitals" below.
 
 ### The numerical gradient
 
@@ -1314,6 +1421,17 @@ every other refusal ran, and `--mo-from`'s gate passed both (5.8e-7 and
 2.2e-7 against its 1e-6). N2 CAS(4,4) is the committed
 `golden/n2_ccpvdz_cas44_casscf.mogold`, and its rebuilt state matches that
 golden's `E_CASCI` exactly and `E_corr` to 2.8e-17.
+
+**Since #123 both have committed references** (`golden/<case>_casscf.mogold`,
+found by name; "LiF and acrolein on CASSCF orbitals" below), finished by
+"The CASSCF polish" from the very point those scratch runs stalled at. The
+table below stays the scratch measurement; re-run on the committed orbitals
+(RTX 3080 box's CPU, single-threaded), SC, the rebuilt state matches each
+committed golden's `E_CASCI` and `E_corr` exactly (0.0), 14 of 14
+residual-independent checks hold on both, and the spectra keep their shape:
+LiF −7.3215e-3 (×2), +2.8218e-6 (×2), +2.8196e-3, cond 4.08e7, 2 negative;
+acrolein +3.6171e-3, +3.9915e-3, +4.5201e-3, cond 2.66e4, 0 negative. Wall
+61.9 s and 1055.7 s, inside the 300 s / 3600 s budgets.
 
 Measured on the gfx1200 box's CPU, single-threaded per run with up to six
 runs side by side:
@@ -1799,6 +1917,101 @@ file holds (see "The numerical gradient" above for the hashes after it, the
 step, and the residuals — the measured in-plane gradient of each molecule is
 there and nowhere else).
 
+### LiF and acrolein on CASSCF orbitals
+
+The CASSCF references the gradient validation needs (#123): the same two
+molecules, geometries, bases and `--cas-irreps` selections as above, with
+the orbitals optimised once by `--casscf --mo-out` and the golden plus its
+gradient sidecar built on them by `--mo-from … --gradgold` (commands in
+"Regenerating the golden file" above). Neither needs the other's
+reason to exist: LiF is the cheap SC case with a componentwise sweep, and
+acrolein the only one with a PC answer.
+
+**Both optimisations stall under the generator's settings and are finished
+by the polish** ("The CASSCF polish" above), 200 macro iterations plus 2.
+Every guard then passes, none of them changed:
+
+| | LiF CAS(4,6) | acrolein CAS(6,5) |
+|---|---|---|
+| `--casscf`: `converged` | **yes**, after the polish | **yes**, after the polish |
+| `--casscf`: ‖g_orb‖ (optimiser's CI), against `CASSCF_GRAD_TOL` 1e-6 | 3.691e-9 | 5.774e-9 |
+| `--casscf`: purity defect, against 1e-9 | 1.4e-15 | 1.0e-14 |
+| active irreps | B1, B2 ×3 | A′ + A″ ×4 |
+| E_CASSCF | −106.9035612554 | −190.6794323473 |
+| `--mo-from` gate: ‖g_orb‖ (the generator's CASCI), against 1e-6 | 5.701e-7 | 1.721e-7 |
+| `--mo-from` gate: \|E_CASCI − E_CASSCF\|, against 1e-9 | 2.984e-13 | 3.126e-13 |
+| `_check_degeneracy` | passes | passes |
+| block2 SC − PySCF SC, max class | (not run: `--no-pc`) | 6.1e-16 |
+| `_check_pc_conditioning`, smallest gap (≥ 1e3 needed) | **refused**: 8.8e2 (`iabcpqg*`) | passes: 2.4e5 (`ijabpq+`) |
+| E_corr SC (PySCF) | −0.1473025529 | −0.5221559894 |
+| E_corr PC (block2) | refused, so `--no-pc` | −0.5229006181 |
+| (O2), against 1e-10 / (O1) measured, not asserted: core–act, core–virt, act–virt | 2.13e-14 / 0, 5.41e-3, 6.26e-1 | 1.55e-12 / 3.55e-1, 7.14e-3, 2.04e-1 |
+| `--casscf` wall, single-threaded | 3.7 s | 94.9 s |
+| `--mo-from --gradgold` wall | 2.0 s | 38.6 s |
+
+The `--mo-from` gate's gradient is the one to read against the refusal: it
+uses the 1e-12-Davidson CASCI the golden records, whose CI residual floors
+near 1e-6 ("Reproducibility" above), so it sits 30–150× above the
+optimiser's own (the same effect as at N2, "The `--casscf` / `--mo-from`
+gate thresholds" above); LiF's 5.7e-7 leaves 1.75× of headroom, acrolein's
+5.8×.
+
+**LiF's PC answer is refused on CASSCF orbitals too.** Generated without
+`--no-pc` into scratch, `_check_pc_conditioning` stops at `iabcpqg*` (Si):
+largest dropped singular value 3.5e-14, smallest kept 7.1e-14, a gap of
+8.8e2 against the 1e3 it needs — the same block, and the same continuum, that
+refuses it on RHF orbitals. So the LiF CASSCF golden is `--no-pc`, like its
+CASCI twin, and carries SC fields only.
+
+**LiF's point is a saddle, and that is not a refusal.** On the committed
+orbitals, `nevpt2_grad.py --case lif_def2svp_cas46 --reference casscf` finds
+the same spectrum #122 found on scratch ones ("The CASSCF branch" above): two
+negative eigenvalues (−7.3215e-3, ×2) and a near-null pair (2.8218e-6, ×2),
+all pure orbital rotations with the right-hand side on them at ≤ 6.7e-15
+of `|b|`. No guard looks at the Hessian, and none refuses: the
+symmetry-adapted optimiser converges within its point group, and these are
+rotations it cannot take. **That they break the symmetry is measured, not
+assumed**: the dense orbital-orbital Hessian (`mc1step.gen_g_hop`'s `h_op`,
+column by column, at the committed orbitals and the generator's CASCI
+RDMs) over all 154 non-redundant rotations has the same structure — two
+negative modes at −3.6608e-3 and two near-null at 1.4109e-6, half the
+coupled values above in `gen_g_hop`'s normalisation — and **every one of
+those four modes has zero weight on same-irrep rotations** (in C2v they
+rotate A1/A2 orbitals into the B1/B2 π space, e.g. 18 A1 ↔ 8 B1, 19 A2 ↔
+9 B2). Restricted to the 44 symmetry-allowed rotations, the space the
+optimiser works in, the same Hessian is positive definite, smallest
+eigenvalue +3.44e-3. So the committed point is a minimum within C2v and a
+saddle only along symmetry-breaking σ/π mixings; the gradient carries no
+component along them (‖g_orb‖ is 5.701e-7 over both sets). It is also not
+what stalled the optimiser: the polish converges inside the
+positive-definite symmetric space ("The CASSCF polish" above). Leaving C2v
+to follow those modes would mean building the molecule without symmetry,
+which "Point-group symmetry" above rules out for reproducibility.
+
+**What is committed.** LiF: all three files (`.mogold` 4 597 B, golden
+202 138 B, sidecar 916 239 B). Acrolein: the `.mogold` (46 732 B) and the
+golden (7 121 421 B, like its CASCI twin); its sidecar (56 940 831 B) is
+**gitignored**, so its regeneration command and fingerprint are the
+deliverable. Each file regenerated byte-identically in a second process
+(each golden also with `--gradgold` dropped):
+
+| file | sha256 |
+|---|---|
+| `lif_def2svp_cas46_casscf.mogold` | `fc35f5199f4f307ff62bc7348e0272581f00358b07d636736085284dbc4dd47f` |
+| `lif_def2svp_cas46_casscf.nevpt2gold` | `28367a4bb63c7842e907899fcc46f255595fa874a2d7ecd4f584bd28f2ee80b5` |
+| `lif_def2svp_cas46_casscf.gradgold` | `8796d740035e9751afb2fa53a86bd42e9fb3da489292ce0e6615355536d292de` |
+| `acrolein_def2svp_cas65_casscf.mogold` | `08f999cea4e6371eb7189ac80be8eadf1bde2bbb47c0d0f37e1111221e39f433` |
+| `acrolein_def2svp_cas65_casscf.nevpt2gold` | `007c5a7e9685a895051c22084232de77a31c9ec4ac0d248578bdc3482aaecd45` |
+| `acrolein_def2svp_cas65_casscf.gradgold` (gitignored) | `300341d45a30145e174b788f23f5db4b6f0fb5bd8c683ece8d0f0d37fdd87c8a` |
+
+Measured on the RTX 3080 box's CPU (PySCF 2.14.0, NumPy 2.5.3, Python
+3.12.3), offline: no card and no build are involved. The two gradient
+sidecars carry the provenance contract of "The CASSCF-reference gradient
+sidecar" above: byte-reproducible from the committed `.mogold`, and from
+scratch only to the `--mo-from` gate's tolerance, so `golden-repro.sh` makes
+no claim over them (it regenerates only N2). Neither golden has a ctest entry
+yet.
+
 ## CAS(14,14)
 
 `n2_ccpvdz_cas1414` (n_det = 11.8M) is the next head-to-head point (see
@@ -1819,7 +2032,7 @@ not used.
 
 | Path | Role |
 |---|---|
-| `reference_data/generate_golden.py` | the **only** file that defines the golden state (`block2_pc_probe.py` imports its `_build_state`). Runs a deterministic `mcscf.CASCI` (see "What "CASSCF input" means here" above), canonicalises it exactly as `pyscf.mrpt.NEVPT.kernel` does, and writes the CI vector, `dm1`/`dm2`, every MO-integral block, and PySCF's own per-class NEVPT2 answer into one flat binary file. `--df` does the same density-fitted and adds the `B_*` blocks. Unless `--no-pc`, it also runs block2's PC-NEVPT2 on the same state and writes `pc_class_energies` / `e_pc_total` (see "PC fields" above). `--casscf --mo-out` / `--mo-from` is the two-step CASSCF-orbital path, and the only thing here that runs an orbital optimiser (see "The MO sidecar" above) |
+| `reference_data/generate_golden.py` | the **only** file that defines the golden state (`block2_pc_probe.py` imports its `_build_state`). Runs a deterministic `mcscf.CASCI` (see "What "CASSCF input" means here" above), canonicalises it exactly as `pyscf.mrpt.NEVPT.kernel` does, and writes the CI vector, `dm1`/`dm2`, every MO-integral block, and PySCF's own per-class NEVPT2 answer into one flat binary file. `--df` does the same density-fitted and adds the `B_*` blocks. Unless `--no-pc`, it also runs block2's PC-NEVPT2 on the same state and writes `pc_class_energies` / `e_pc_total` (see "PC fields" above). `--casscf --mo-out` / `--mo-from` is the two-step CASSCF-orbital path, and the only thing here that runs an orbital optimiser (see "The MO sidecar" above), polishing once with a tighter AH solve if the first run does not converge ("The CASSCF polish" above) |
 | `reference_data/block2_pc_probe.py` | rebuilds a golden's state with `generate_golden._build_state` (imported, not copied), checks it is bit-identical to the committed CI vector, and runs block2's `WickSCNEVPT2` and `WickICNEVPT2` (PC) on it: per-class energies, timings, peak RSS, and the PC linear-solve / metric conditioning (`--metric`). Writes no golden. See [`pc-nevpt2.md`](pc-nevpt2.md) |
 | `reference_data/nevpt2_numgrad.py` | the **numerical** nuclear gradient: displaced RHF → CASCI → SC-NEVPT2 runs (states built by `generate_golden._build_state`, imported) differenced and Richardson-extrapolated into a sidecar's `grad_num` / `grad_num_residual` / `grad_num_probed` / `grad_num_step`. Refuses a displacement whose detected point group — or whose core/active irrep selection — differs from the reference geometry's, rather than produce a number from a different active space, and refuses a golden whose `reference_kind` is not `casci`. `--pc` differences block2's partially-contracted energy on the same displaced states (and writes no sidecar); `--npz PATH` writes the gradient arrays alone, which is how a PC one, or any case whose committed sidecar holds no `grad_num`, reaches `nevpt2_grad.py --grad-num`. Writes no golden and no new sidecar; only the two gradient-validation cases carry its arrays in their sidecars (see "The numerical gradient" above) |
 | `reference_data/nevpt2_grad.py` | the **analytic** nuclear gradient: a `pyscf.grad.lagrange.Gradients` subclass that solves the CI and orbital Z-vector equations of [`gradient-theory.md`](gradient-theory.md), §2 and contracts them into a gradient, differentiating one scalar along a frozen orthonormal path. SC by default, block2's PC with `--pc` (the same Lagrangian: only `E_corr` changes). Source terms from PySCF by default, or from the GPU's `.gradsrc` dump (`--source dump`, written by `nevpt2_sc_pseudodensity --dump-source-terms`; with `--pc` a PC dump, `--pc --dump-source-terms`, #74 — a dump of the other scheme is refused), or both side by side (`--source both`: the two compared componentwise and solved on one sweep; [`testing.md`](testing.md), "The GPU as the source-term provider"). `--edot-check` instead holds the dump's forward `Edot(kappa)` along its seeded directions — frozen-digest tangent plus the digests' term — against PySCF's exact directional derivative, step-laddered, and stops ([`testing.md`](testing.md), "The digests' orbital response, forward mode"). Ends by gating itself against `grad_num` and printing `PASS:`/`FAIL:` ([`testing.md`](testing.md), "The analytic gradient against the numerical one"). Writes **nothing** unless `--out` is given, and never a committed file; `--casci-only` is its own validation (see "The analytic gradient" above) |
@@ -1847,5 +2060,8 @@ not used.
 | `reference_data/geometries/salicylaldimine.xyz`, `reference_data/basis/6-31gss-rifit.nw`, `golden/salicylaldimine_631gss_cas88[_df].nevpt2gold` | the non-N2 case (see "Salicylaldimine CAS(8,8)" above). The two goldens are **gitignored** and regenerate byte-identically in ~2.5 min each; their four ctest entries register only once they exist |
 | `reference_data/geometries/lif.xyz`, `golden/lif_def2svp_cas46.nevpt2gold`, `golden/lif_def2svp_cas46.gradgold` | the **LiF smoke test** of the gradient-validation pair (see "LiF and acrolein, the gradient-validation pair" above): linear, Coov → C2v, CAS(4,6) as the pure π space by irrep, def2-SVP. **SC fields only** — its PC metric is refused as ungapped, so no `--pc` entry exists for it. Both files are committed (0.20 / 0.92 MB), and the sidecar carries the **numerical gradient** on top of the 24 arrays `--gradgold` writes, so it takes two commands to regenerate (see "The numerical gradient" above) |
 | `reference_data/geometries/acrolein.xyz`, `golden/acrolein_def2svp_cas65.nevpt2gold` | the **acrolein** half of the pair: planar Cs, CAS(6,5) = the oxygen lone pair + 2 π + 2 π*, def2-SVP, with SC **and** PC fields. 7.1 MB, committed |
-| `golden/acrolein_def2svp_cas65.gradgold` | **not committed** (gitignored, 57 MB — the one file of the pair that is): acrolein's gradient sidecar. Regenerate it with the `--gradgold` command in "Regenerating the golden file" followed by the `nevpt2_numgrad.py` one for its numerical gradient; the golden beside it is unaffected |
+| `golden/acrolein_def2svp_cas65.gradgold` | **not committed** (gitignored, 57 MB — the one file of the CASCI pair that is): acrolein's gradient sidecar. Regenerate it with the `--gradgold` command in "Regenerating the golden file" followed by the `nevpt2_numgrad.py` one for its numerical gradient; the golden beside it is unaffected |
+| `golden/lif_def2svp_cas46_casscf.mogold`, `golden/lif_def2svp_cas46_casscf.nevpt2gold`, `golden/lif_def2svp_cas46_casscf.gradgold` | the **LiF CASSCF reference** (#123): the converged CASSCF orbitals (4.6 KB, through "The CASSCF polish"), the golden on them (0.20 MB, `reference_kind = casscf`, **SC only**: its PC metric is refused here too) and its 24-array gradient sidecar (0.92 MB, no `grad_num`: `nevpt2_numgrad.py` refuses a `casscf` state). All three committed; `nevpt2_grad.py --reference casscf` finds the `.mogold` by name (see "LiF and acrolein on CASSCF orbitals" above) |
+| `golden/acrolein_def2svp_cas65_casscf.mogold`, `golden/acrolein_def2svp_cas65_casscf.nevpt2gold` | the **acrolein CASSCF reference** (#123): the converged CASSCF orbitals (47 KB, through the polish) and the golden on them (7.1 MB, SC **and** PC), both committed |
+| `golden/acrolein_def2svp_cas65_casscf.gradgold` | **not committed** (gitignored, 57 MB): the acrolein CASSCF reference's gradient sidecar. Regenerate it with the `--mo-from … --gradgold` command in "Regenerating the golden file"; its sha256 is in "LiF and acrolein on CASSCF orbitals" above |
 | `golden/n2_ccpvdz_cas1414.nevpt2gold` | **not committed**; see "CAS(14,14)" above |
