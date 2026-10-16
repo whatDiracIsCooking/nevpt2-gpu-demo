@@ -47,16 +47,34 @@ Status GoldenFile::checkNdet(const int64_t expected) const {
   return {};
 }
 
-Status GoldenFile::requireCasciReference(const std::string_view what) const {
+Status GoldenFile::requireSourceTermReference(const std::string_view what) const {
+  // Both kinds: the source terms are derivatives at fixed orbitals and CI
+  // vector (Park Eqs. 26-28, 36-38, 41-48), so which reference produced the
+  // orbitals does not enter them. Spelled as a switch so a third kind has to
+  // be decided here rather than waved through.
+  switch (reference) {
+    case ReferenceKind::Casci:
+    case ReferenceKind::Casscf:
+      return {};
+  }
+  // loadGolden refuses every other code as an IO Error, so a GoldenFile
+  // holding one could only have been built by us: our bug.
+  check(false, std::format("{}: requireSourceTermReference: unknown ReferenceKind", what));
+  return {};
+}
+
+Status GoldenFile::requireLagrangianReference(const std::string_view what) const {
   if (reference == ReferenceKind::Casci) return {};
   return err_unsupported(std::format(
-      "{}: this golden's reference is {}, and every derivative in this tree is derived for a "
-      "CASCI diagonalisation on converged RHF orbitals -- its orbital constraint is RHF "
-      "Brillouin/CPHF plus an active-space selection, not CASSCF stationarity, so the "
-      "Lagrangian is a different one (docs/gradient-theory.md, §1.1, §1.2 and §5: CPHF, not "
-      "CP-CASSCF). A CASSCF reference needs CP-CASSCF, and differentiating one numerically "
-      "needs a different strategy as well, because a displaced CASSCF lands on a "
-      "differently-rotated solution (§4.4). Not supported; use a CASCI golden.",
+      "{}: this golden's reference is {}, and this path's Lagrangian refuses it. The source "
+      "terms Y_xy and y_I alone would take it -- they are derivatives at fixed orbitals and CI "
+      "vector and carry no reference-kind dependence (Park Eqs. 26-28, 36-38, 41-48) -- but "
+      "the CI Z-vector -> Sylvester -> CPHF chain downstream of them is the CASCI branch, "
+      "derived for a CASCI diagonalisation on converged RHF orbitals: its orbital constraint "
+      "is RHF Brillouin/CPHF plus an active-space selection, not CASSCF stationarity "
+      "(docs/gradient-theory.md, Sec. 1.2 and Secs. 2.2-2.6). A CASSCF reference needs the "
+      "CASSCF branch, one coupled CP-CASSCF system (Sec. 2.7), which is not implemented yet. "
+      "Not supported; use a CASCI golden.",
       what, referenceKindName(reference)));
 }
 
@@ -89,8 +107,8 @@ Result<GoldenFile> loadGolden(const std::string& path) {
   if (hasReferenceKind) {
     // The one enumerated field either format has, so an unknown code is a
     // file this reader cannot interpret -- an IO Error like a bad magic, not
-    // an Unsupported one: the gate on the kinds it *does* know is
-    // requireCasciReference's job.
+    // an Unsupported one: the gates on the kinds it *does* know are
+    // requireSourceTermReference's and requireLagrangianReference's job.
     const int64_t kind = NEVPT2_TRY(r.i32());
     if (kind != static_cast<int64_t>(ReferenceKind::Casci) &&
         kind != static_cast<int64_t>(ReferenceKind::Casscf))

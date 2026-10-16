@@ -15,13 +15,17 @@
 //                         the header's reference_kind field: a "NEVPT2G2"
 //                         file round-trips both kinds, the pre-kind
 //                         "NEVPT2G1" layout reads as CASCI, an unknown code
-//                         is an IO Error, and requireCasciReference -- the
-//                         gate --sc-tangent / --gradient-source sit behind --
-//                         refuses a CASSCF golden as Unsupported
+//                         is an IO Error
+//   GoldenReferenceKindGateTests
+//                         the two reference-kind gates split: the
+//                         source-term gate (--sc-tangent, --gradient-source,
+//                         --dump-source-terms, --source-oracle) accepts a
+//                         CASSCF golden, the Lagrangian gate refuses one as
+//                         Unsupported
 //   GoldenCommittedCasscfTests
 //                         the committed golden/n2_ccpvdz_cas44_casscf.nevpt2gold:
 //                         a real NEVPT2G2 file whose reference_kind is CASSCF,
-//                         so the gate above is checked against a committed
+//                         so the split above is checked against a committed
 //                         file and not only a spliced one
 //   GoldenCas44Tests      the committed golden/n2_ccpvdz_cas44.nevpt2gold:
 //                         header fields and array shapes
@@ -339,40 +343,62 @@ TEST_F(GoldenReferenceKindTests, BadMagicNamesBothAcceptedMagics) {
   }
 }
 
-TEST(GoldenReferenceKindGateTests, ACasciReferencePassesTheGate) {
-  GoldenFile g;  // the default, which is what a pre-kind file loads as
-  EXPECT_EQ(g.reference, ReferenceKind::Casci);
-  EXPECT_TRUE(g.requireCasciReference("--sc-tangent").has_value());
-}
+// The flags behind each gate. The source-term ones are the four real call
+// sites (apps/integral_direct, apps/sc_pseudodensity); nothing in this tree
+// builds a full gradient yet, so the Lagrangian names are what will ask.
+constexpr std::array<std::string_view, 4> kSourceTermFlags = {
+    "--sc-tangent", "--gradient-source", "--dump-source-terms", "--source-oracle"};
+constexpr std::array<std::string_view, 2> kLagrangianConsumers = {"the numerical gradient",
+                                                                   "the analytic gradient"};
 
-TEST(GoldenReferenceKindGateTests, GradientPathRefusesACasscfReference) {
-  GoldenFile g;
-  g.reference = ReferenceKind::Casscf;
-  for (const std::string_view flag : {"--sc-tangent", "--gradient-source"}) {
-    const Status s = g.requireCasciReference(flag);
-    ASSERT_FALSE(s.has_value()) << flag;
+// A CASSCF golden through both gates: every source-term flag accepted, every
+// Lagrangian consumer refused as Unsupported with a message that names it,
+// the kind, and the derivation that does not cover it.
+void expectTheGatesSplit(const GoldenFile& g) {
+  ASSERT_EQ(g.reference, ReferenceKind::Casscf);
+  for (const std::string_view flag : kSourceTermFlags) {
+    const Status s = g.requireSourceTermReference(flag);
+    EXPECT_TRUE(s.has_value()) << flag << ": " << s.error().message;
+  }
+  for (const std::string_view who : kLagrangianConsumers) {
+    const Status s = g.requireLagrangianReference(who);
+    ASSERT_FALSE(s.has_value()) << who;
     // Unsupported, not IO: a CASSCF-orbital golden is a well-formed file
-    // carrying a reference this code does not differentiate.
-    EXPECT_EQ(s.error().kind, ErrorKind::Unsupported) << flag;
-    EXPECT_NE(s.error().message.find(flag), std::string::npos) << s.error().message;
+    // carrying a reference this code's Lagrangian does not cover.
+    EXPECT_EQ(s.error().kind, ErrorKind::Unsupported) << who;
+    EXPECT_NE(s.error().message.find(who), std::string::npos) << s.error().message;
     EXPECT_NE(s.error().message.find("CASSCF"), std::string::npos) << s.error().message;
-    // The message must point at the derivation that does not cover it.
+    // It says which half refuses, and why, citing the theory.
+    EXPECT_NE(s.error().message.find("Lagrangian"), std::string::npos) << s.error().message;
     EXPECT_NE(s.error().message.find("docs/gradient-theory.md"), std::string::npos)
         << s.error().message;
     EXPECT_NE(s.error().message.find("CP-CASSCF"), std::string::npos) << s.error().message;
   }
 }
 
-TEST_F(GoldenReferenceKindTests, TheGateRefusesALoadedCasscfGolden) {
-  // End to end: a G2 file whose kind is CASSCF loads fine and is refused by
-  // the gate, which is the order the demo does it in -- all host-side, with
+TEST(GoldenReferenceKindGateTests, ACasciReferencePassesBothGates) {
+  GoldenFile g;  // the default, which is what a pre-kind file loads as
+  EXPECT_EQ(g.reference, ReferenceKind::Casci);
+  for (const std::string_view flag : kSourceTermFlags)
+    EXPECT_TRUE(g.requireSourceTermReference(flag).has_value()) << flag;
+  for (const std::string_view who : kLagrangianConsumers)
+    EXPECT_TRUE(g.requireLagrangianReference(who).has_value()) << who;
+}
+
+TEST(GoldenReferenceKindGateTests, ACasscfReferenceSplitsTheGates) {
+  GoldenFile g;
+  g.reference = ReferenceKind::Casscf;
+  expectTheGatesSplit(g);
+}
+
+TEST_F(GoldenReferenceKindTests, TheGatesSplitOnALoadedCasscfGolden) {
+  // End to end: a G2 file whose kind is CASSCF loads fine, and then the gates
+  // split on it, which is the order the demos do it in -- all host-side, with
   // no card.
   Result<GoldenFile> r = loadGolden(write("casscf.nevpt2gold", cas44AsG2(1)));
   ASSERT_TRUE(r.has_value()) << r.error().message;
   EXPECT_EQ(referenceKindName(r->reference), "CASSCF");
-  const Status s = r->requireCasciReference("--gradient-source");
-  ASSERT_FALSE(s.has_value());
-  EXPECT_EQ(s.error().kind, ErrorKind::Unsupported);
+  expectTheGatesSplit(*r);
 }
 
 // --- GoldenCommittedCasscfTests -----------------------------------------------
@@ -382,8 +408,8 @@ TEST_F(GoldenReferenceKindTests, TheGateRefusesALoadedCasscfGolden) {
 // golden/n2_ccpvdz_cas44_casscf.nevpt2gold, written by `generate_golden.py
 // --mo-from` on committed CASSCF orbitals (docs/reference-data.md, "The MO
 // sidecar: committed CASSCF orbitals"). These three tests are the same
-// contract read off that real file -- the layout, the kind, and the gradient
-// gate's refusal -- so the refusal is checked against a reference that
+// contract read off that real file -- the layout, the kind, and the two
+// gates' split on it -- so the split is checked against a reference that
 // actually exists. Host-only like the rest of this binary: nothing here
 // computes or compares an energy, only whether two files are the same
 // reference.
@@ -424,21 +450,16 @@ TEST(GoldenCommittedCasscfTests, ItIsADifferentReferenceFromItsCasciTwin) {
   EXPECT_NE(casscf->eNevpt2Total, casci->eNevpt2Total);
 }
 
-TEST(GoldenCommittedCasscfTests, TheGradientGateRefusesTheCommittedCasscfGolden) {
+TEST(GoldenCommittedCasscfTests, TheGatesSplitOnTheCommittedCasscfGolden) {
   const Result<GoldenFile> r = loadGolden(std::string(kGoldenCas44Casscf));
   ASSERT_TRUE(r.has_value()) << r.error().message;
-  for (const std::string_view flag : {"--sc-tangent", "--gradient-source"}) {
-    const Status s = r->requireCasciReference(flag);
-    ASSERT_FALSE(s.has_value()) << flag;
-    EXPECT_EQ(s.error().kind, ErrorKind::Unsupported) << flag;
-    EXPECT_NE(s.error().message.find(flag), std::string::npos) << s.error().message;
-    EXPECT_NE(s.error().message.find("CASSCF"), std::string::npos) << s.error().message;
-  }
-  // And the CASCI twin beside it still passes the same gate, so the refusal
-  // is the kind's doing and not the gate's.
+  expectTheGatesSplit(*r);
+  // And the CASCI twin beside it passes both gates, so the Lagrangian's
+  // refusal is the kind's doing and not the gate's.
   const Result<GoldenFile> casci = loadGolden(std::string(kGoldenCas44));
   ASSERT_TRUE(casci.has_value()) << casci.error().message;
-  EXPECT_TRUE(casci->requireCasciReference("--sc-tangent").has_value());
+  EXPECT_TRUE(casci->requireSourceTermReference("--sc-tangent").has_value());
+  EXPECT_TRUE(casci->requireLagrangianReference("the analytic gradient").has_value());
 }
 
 // --- GoldenCas44Tests ---------------------------------------------------------

@@ -280,6 +280,24 @@ if(NEVPT2_BUILD_TESTING)
     unset(_kappa_gold)
   endforeach()
 
+  # Its wave-0 canary twin (#118): the same check on CASSCF ORBITALS,
+  # golden/n2_ccpvdz_cas44_casscf.nevpt2gold. The source terms are derivatives
+  # at fixed orbitals and CI vector with no reference-kind dependence (Park
+  # Eqs. 26-28, 36-38, 41-48), so the source-term gate lets this golden
+  # through, and the adjoint-vs-tangent duality must hold on it exactly as on
+  # the CASCI twin -- with no sidecar, no oracle and no new reference data.
+  # #118 named --kappa-full here; that check reads a `<case>.gradgold`
+  # sidecar no CASSCF golden has yet, so it waits for #120's, and this sidecar-
+  # free check is the canary instead (docs/testing.md, "The source terms on
+  # CASSCF orbitals: the wave-0 canary"). `small`, like the CASCI twin.
+  _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_kappa_cas44_casscf
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_casscf.nevpt2gold"
+                        --tiles 3 --kappa-act)
+  if(TEST nevpt2_sc_pseudodensity_kappa_cas44_casscf)
+    set_tests_properties(nevpt2_sc_pseudodensity_kappa_cas44_casscf PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_kappa_pass}" LABELS "gpu;small")
+  endif()
+
   # --- the SC gradient's CI source term: forward against reverse ----------------
   #
   # nevpt2_demo --gradient-source: nevpt2.gradient's scCiSourceDevice assembles
@@ -869,6 +887,18 @@ if(NEVPT2_BUILD_TESTING)
     set_tests_properties(nevpt2_cas88_sc_tangent PROPERTIES
       PASS_REGULAR_EXPRESSION "${_nevpt2_sc_tangent_pass}" LABELS "gpu")
   endif()
+  # The wave-0 canary (#118): the same tangent on CASSCF ORBITALS. --sc-tangent
+  # sits behind the source-term gate, which takes a CASSCF golden, and its
+  # checks -- Euler, the exact norm increment, the finite difference -- are of
+  # the same functional either way (docs/testing.md, "The source terms on
+  # CASSCF orbitals: the wave-0 canary"). `small`, like the CAS(4,4) twin.
+  add_golden_test(nevpt2_cas44_casscf_sc_tangent
+                  "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_casscf.nevpt2gold"
+                  --tiles 3 --sc-tangent)
+  if(TEST nevpt2_cas44_casscf_sc_tangent)
+    set_tests_properties(nevpt2_cas44_casscf_sc_tangent PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_sc_tangent_pass}" LABELS "gpu;small")
+  endif()
 
   # --- *_pc, small ----------------------------------------------------
   #
@@ -897,11 +927,15 @@ if(NEVPT2_BUILD_TESTING)
   # noisier one; how far apart is in docs/reference-data.md, "What 'CASSCF
   # input' means here".
   #
-  # Nothing in src/ branches on the kind except the gradient paths, which
-  # REFUSE a CASSCF golden as Unsupported, so there is deliberately no
-  # --sc-tangent / --gradient-source / --kappa-* / nevpt2_sc_pseudodensity
-  # entry here. test/golden's GoldenCommittedCasscfTests is that refusal
-  # checked against one of these committed files rather than a spliced one.
+  # Nothing in src/ branches on the kind except the two gates in
+  # nevpt2.golden: the SOURCE-TERM gate (--sc-tangent, --gradient-source,
+  # --dump-source-terms, --source-oracle) accepts a CASSCF golden, and the
+  # LAGRANGIAN gate a full gradient sits behind refuses one as Unsupported.
+  # The two source-term canaries on n2_ccpvdz_cas44_casscf sit beside their
+  # CASCI twins above (nevpt2_cas44_casscf_sc_tangent,
+  # nevpt2_sc_pseudodensity_kappa_cas44_casscf); test/golden's
+  # GoldenCommittedCasscfTests is the gates' split checked against one of
+  # these committed files rather than a spliced one.
   # Every other path is the unmodified binary on the unmodified flags: a
   # CASSCF-orbital golden is checked the same way, to the same 1e-7.
   #

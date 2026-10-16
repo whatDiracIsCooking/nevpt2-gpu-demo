@@ -453,11 +453,14 @@ returns one:
   each demo calls on the arrays it reads before any GPU work (the DF demo a
   second time for `--check-blocks`'s; its `B_*` tensors and both demos'
   `--pc` fields are tested with `arrays.contains` instead).
-  `GoldenFile::requireCasciReference(what)` → `Status` is the other side of
-  that split: a golden built on CASSCF orbitals parses fine and is a
-  reference no derivative here is derived for, so the differentiation flags
-  gate on it and get `Unsupported`, not `IO`
-  (docs/reference-data.md, "The file format").
+  `GoldenFile::requireSourceTermReference(what)` and
+  `requireLagrangianReference(what)` → `Status` are the other side of that
+  split: a golden built on CASSCF orbitals parses fine, the source-term gate
+  (`--sc-tangent`, `--gradient-source`, `--dump-source-terms`,
+  `--source-oracle`) accepts it because the source terms are derivatives at
+  fixed orbitals and CI vector, and the Lagrangian gate refuses it as
+  `Unsupported`, not `IO`, because the Z-vector → CPHF chain is derived for
+  CASCI on RHF orbitals (docs/reference-data.md, "The file format").
 - `loadGradGold` → `Result<GradGoldFile>`, the same contract on the gradient
   sidecar, plus the header checks its array shapes are written in terms of: a
   space partition that does not add up to `nmo`, an RHF electron count that

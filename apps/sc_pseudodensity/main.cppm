@@ -221,12 +221,13 @@ int main(int argc, char** argv) {
     return nevpt2::loadGradGold(gradgoldPath);
   };
 
-  // --dump-source-terms: Y_xy and y_I, written (:source_dump). They feed the
-  // CASCI-on-RHF Lagrangian of reference_data/nevpt2_grad.py, so a CASSCF
-  // golden is refused as Unsupported, as nevpt2_demo's derivative paths
-  // refuse one.
+  // --dump-source-terms: Y_xy and y_I, written (:source_dump). The terms
+  // themselves are derivatives at fixed orbitals and CI vector, with no
+  // reference-kind dependence, so this is the SOURCE-TERM gate; the
+  // CASCI-only Lagrangian they feed is reference_data/nevpt2_grad.py's, and
+  // refuses a CASSCF golden there.
   if (!dumpPath.empty()) {
-    if (const nevpt2::Status st = g.requireCasciReference("--dump-source-terms"); !st) {
+    if (const nevpt2::Status st = g.requireSourceTermReference("--dump-source-terms"); !st) {
       nevpt2::report(st.error());
       return 1;
     }
@@ -248,9 +249,9 @@ int main(int argc, char** argv) {
   }
 
   // --source-oracle: the same two terms against PySCF's exact ones
-  // (:source_oracle). CASCI-on-RHF only, as the dump is.
+  // (:source_oracle). The source-term gate, as the dump's.
   if (!oraclePath.empty()) {
-    if (const nevpt2::Status st = g.requireCasciReference("--source-oracle"); !st) {
+    if (const nevpt2::Status st = g.requireSourceTermReference("--source-oracle"); !st) {
       nevpt2::report(st.error());
       return 1;
     }
