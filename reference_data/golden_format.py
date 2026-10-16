@@ -2,7 +2,9 @@
 r"""The one Python reader (and the byte-level writer) of the three binary
 formats in ``golden/``: the ``*.nevpt2gold`` golden, the ``*.gradgold``
 gradient sidecar and the ``*.mogold`` MO sidecar -- and of the
-``*.srcgold`` source-term oracle, which ends in the same array section.
+``*.srcgold`` source-term oracle, which ends in the same array section. It
+also reads ``states.json``, the manifest a CASSCF-reference sweep keeps its
+displaced states' ``.mogold`` files under (:func:`read_states_manifest`).
 
 Every reader in ``reference_data/`` goes through this module; none parses a
 header, or seeks to an offset, of its own. The scalar header of each format is
@@ -36,6 +38,7 @@ of a header length written out by hand::
 
 from __future__ import annotations
 
+import json
 import os
 import struct
 import sys
@@ -395,6 +398,68 @@ def srcgold_case(path, scheme: str, flavour: str = "full") -> str:
             raise FormatError(f"{path}: a PC oracle's name must end in {want}.srcgold")
         stem = stem[: -len("_pc")]
     return stem
+
+
+#: The name of the manifest ``nevpt2_numgrad.py --reference casscf
+#: --states-dir DIR`` writes beside the displaced states' ``.mogold`` files.
+STATES_MANIFEST = "states.json"
+
+#: What every ``states.json`` carries at the top, and what every state in it
+#: carries (``nevpt2_numgrad._write_manifest``).
+_MANIFEST_HEAD = ("case", "reference", "basis", "ncas", "nelecas", "cas_irreps",
+                  "step", "finish", "states")
+_MANIFEST_STATE = ("label", "atom", "s")
+
+
+def read_states_manifest(states_dir) -> dict:
+    """``DIR/states.json``, the hand-off of a CASSCF-reference sweep's
+    displaced states (docs/reference-data.md, "The numerical gradient of a
+    CASSCF reference", "One sweep, three consumers"): the manifest as written,
+    with two fields added to every state -- ``kept`` (the continuity guard
+    tripped nothing and nothing refused it, so it was differenced) and
+    ``mogold_path`` (its ``.mogold``, resolved and checked to exist, or
+    ``None`` for a state that is not kept).
+
+    JSON, not a binary layout, but read here so there is still one reader of
+    what the sweep hands on. Refused with :class:`FormatError`: a missing
+    header field, a reference other than ``casscf`` (only that route keeps
+    states), a state without a label, ``--atom`` spec or ``s``, two states
+    with one label, and a kept state whose ``.mogold`` or energies are
+    missing."""
+    path = Path(states_dir) / STATES_MANIFEST
+    try:
+        head = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        raise FormatError(f"{path}: not JSON ({e})") from None
+    if not isinstance(head, dict):
+        raise FormatError(f"{path}: not a states manifest (top level is not an object)")
+    missing = [k for k in _MANIFEST_HEAD if k not in head]
+    if missing:
+        raise FormatError(f"{path}: not a states manifest, missing {', '.join(missing)}")
+    if head["reference"] != "casscf":
+        raise FormatError(f"{path}: reference {head['reference']!r}; only the casscf "
+                          "route keeps its displaced states")
+    seen: set[str] = set()
+    for st in head["states"]:
+        absent = [k for k in _MANIFEST_STATE if k not in st]
+        if absent:
+            raise FormatError(f"{path}: a state lacks {', '.join(absent)}: {st}")
+        label = st["label"]
+        if label in seen:
+            raise FormatError(f"{path}: two states are labelled {label!r}")
+        seen.add(label)
+        st["kept"] = not st.get("tripped") and "refused" not in st
+        st["mogold_path"] = None
+        if not st["kept"]:
+            continue
+        absent = [k for k in ("mogold", "e_casci", "e_corr") if k not in st]
+        if absent:
+            raise FormatError(f"{path}: kept state {label!r} lacks {', '.join(absent)}")
+        mo = Path(states_dir) / st["mogold"]
+        if not mo.is_file():
+            raise FormatError(f"{path}: kept state {label!r}'s {mo.name} is not there")
+        st["mogold_path"] = mo
+    return head
 
 
 def main(argv: list[str]) -> int:

@@ -1430,10 +1430,12 @@ state's finished orbitals as `<label>.mogold`, beside a `states.json`
 manifest. Labels are `<atom><axis><sign><rung>` and `d<n><sign><rung>`; the
 manifest records each state's `--atom` spec, displacement, energies, signals
 and the finish settings. The screen and the componentwise gate share one
-directory, merged by label. #126's block2 spot-checks and its
-per-displacement `--no-pc` goldens for the GPU consume those sidecars
+directory, merged by label. `pc_on_states.py`'s per-state `--no-pc`
+goldens for the GPU ("The GPU's PC energies on the kept states" below) and
+#126's block2 spot-checks consume those sidecars
 (`generate_golden.py --atom SPEC … --mo-from DIR/<label>.mogold`) rather
-than optimising their own. Nothing in it is committed. A state the guard
+than optimising their own. The one reader of the manifest is
+`golden_format.read_states_manifest`. Nothing in it is committed. A state the guard
 refuses has no `.mogold`; its manifest entry carries `tripped` (the signal
 names) or `refused` (the refusal text) instead, and the run exits 1 after
 naming every one. In the sweeps above none was refused.
@@ -1454,6 +1456,70 @@ uv run python reference_data/nevpt2_numgrad.py --case lif_def2svp_cas46 \
 uv run python reference_data/casscf_repro_probe.py --case lif_def2svp_cas46 \
     --displace 0z --runs 3 --workers 12 \
     --steps 0.000625,0.00125,0.0025,0.005,0.01,0.02,0.04,0.08,0.16,0.32
+```
+
+#### The GPU's PC energies on the kept states
+
+`reference_data/pc_on_states.py` (#138) turns a `--states-dir` into the
+GPU's PC-NEVPT2 energy at every kept state, written to one keyed `.npz`.
+#126 differences that file. This script differences nothing and gives no
+verdict. Per state it runs three steps:
+
+1. **A transient golden** on CPU, in `--workers` processes. This is
+   `generate_golden.generate(..., pc=False, mo_from=<label>.mogold)`, the
+   in-process `--no-pc --mo-from`, with every `_build_state` refusal in force.
+   The `.mogold` already holds the two-stage finish, so nothing is
+   re-optimised, and block2 never runs. `nevpt2_demo --pc` refuses a golden
+   without block2's `pc_class_energies` / `e_pc_total`, so the transient
+   file carries them as **NaN**. A NaN matches no energy, so the demo's own
+   PC comparison prints `FAIL` by construction. The script ignores that exit
+   status and reads the parsed lines. The files go to `--work-dir`, never
+   to `golden/` (refused), and are deleted afterwards.
+2. **The wiring check**: the transient golden's `E_CASCI` and `E_corr` must
+   equal the manifest's for the same state within `REF_STATE_TOL`.
+3. **The GPU**, serially, under `--gpu-lock`. `nevpt2_demo --tiles 3` must
+   `PASS` the device's SC against that golden's PySCF SC. `nevpt2_demo --pc
+   --tiles 3` gives the energy from #134's `E_corr full precision
+   (PC-NEVPT2)` line, plus each class's `d`, `dropped`, `max dropped`,
+   `min kept` and `gap`.
+
+**The PC conditioning guard per state** is
+`generate_golden._check_pc_conditioning`, at the same `PC_MIN_GAP` (1e3). It
+is handed the device's per-class gaps, because block2 does not run here. Those
+gaps come from the eigenvalues of each class's metric `S`, cut at
+`PC_TAU · s_max`, not from block2's per-tuple lstsq singular values. A class
+the device refuses fails the guard with the device's reason. The gaps are
+recorded as printed, to two significant figures. A refused state stays in
+the `.npz` with a NaN `e_pc` and its reason. Its `dropped` and `gap` rows
+show a metric mode moving between geometries. The reference state is held
+to the committed golden's `e_pc_total` within the demos' 1e-7.
+
+Measured on acrolein CAS(6,5), with #124's kept states (the screen's 24 and
+the gate's 96, plus `ref`). Run on the gfx1200 box with `--workers 8` and
+the HIP build's `nevpt2_demo`:
+
+| | value |
+|---|---|
+| states processed / refused by the guard / not built | 121 / 0 / 0 |
+| wiring: max \|transient − sweep\| `E_CASCI` / `E_corr` | 0 / 1.1e-16 |
+| max \|GPU SC − PySCF SC\| on the transient goldens | 3.2e-15 |
+| reference geometry: GPU `E_PC` − committed `e_pc_total` | +1.23e-8 |
+| smallest guard gap (every state: `Sij`, nothing dropped) | 2.9e3 |
+| `dropped` per class, every state | Sr 50, Si 85, Sir 2, the rest 0 |
+| wall: transient goldens / GPU (242 demo runs) / total | 14.6 s / 123.5 s / 138.1 s |
+
+The reference offset is the finish's own +1.3e-8 shift in `E_corr` ("The
+numerical gradient of a CASSCF reference" above), carried into PC. No
+class's `dropped` count changes between states, so no metric mode moves in
+or out across the stencil. The smallest gap, `Sij` at 2.9e3, sits under
+three times `PC_MIN_GAP` at every geometry. Nothing is dropped there, so
+that gap is its smallest kept eigenvalue over `PC_TAU`.
+
+```bash
+uv run python reference_data/pc_on_states.py \
+    --states-dir /tmp/acrolein_states --demo build-hip/src/nevpt2_demo \
+    --workers 8 --work-dir /tmp/pc_states --gpu-lock /tmp/nevpt2-gpu-hip.lock \
+    --npz /tmp/acrolein_pc_states.npz
 ```
 
 ### The analytic gradient
@@ -2399,6 +2465,7 @@ not used.
 | `reference_data/block2_pc_probe.py` | rebuilds a golden's state with `generate_golden._build_state` (imported, not copied), checks it is bit-identical to the committed CI vector, and runs block2's `WickSCNEVPT2` and `WickICNEVPT2` (PC) on it: per-class energies, timings, peak RSS, and the PC linear-solve / metric conditioning (`--metric`). Writes no golden. See [`pc-nevpt2.md`](pc-nevpt2.md) |
 | `reference_data/nevpt2_numgrad.py` | the **numerical** nuclear gradient: displaced RHF → CASCI → SC-NEVPT2 runs (states built by `generate_golden._build_state`, imported) differenced and Richardson-extrapolated into a sidecar's `grad_num` / `grad_num_residual` / `grad_num_probed` / `grad_num_step`. Refuses a displacement whose detected point group — or whose core/active irrep selection — differs from the reference geometry's, rather than produce a number from a different active space, and refuses a golden whose `reference_kind` is not the `--reference` asked for. `--reference casscf` re-optimises every displaced state through `generate_golden.casscf_optimise` plus a finish, guarded by the continuity check, with a directional screen (`--directional N --analytic PATH`), `--workers N` processes and the states kept for reuse (`--states-dir`) ("The numerical gradient of a CASSCF reference" above). `--pc` differences block2's partially-contracted energy on the same displaced states (and writes no sidecar); `--npz PATH` writes the gradient arrays alone, which is how a PC one, or any case whose committed sidecar holds no `grad_num`, reaches `nevpt2_grad.py --grad-num`. Writes no golden and no new sidecar; only the two gradient-validation cases carry its arrays in their sidecars (see "The numerical gradient" above) |
 | `reference_data/nevpt2_grad.py` | the **analytic** nuclear gradient: a `pyscf.grad.lagrange.Gradients` subclass that solves the CI and orbital Z-vector equations of [`gradient-theory.md`](gradient-theory.md), §2 and contracts them into a gradient, differentiating one scalar along a frozen orthonormal path. SC by default, block2's PC with `--pc` (the same Lagrangian: only `E_corr` changes). Source terms from PySCF by default, or from the GPU's `.gradsrc` dump (`--source dump`, written by `nevpt2_sc_pseudodensity --dump-source-terms`; with `--pc` a PC dump, `--pc --dump-source-terms`, #74 — a dump of the other scheme is refused), or both side by side (`--source both`: the two compared componentwise and solved on one sweep; [`testing.md`](testing.md), "The GPU as the source-term provider"). `--edot-check` instead holds the dump's forward `Edot(kappa)` along its seeded directions — frozen-digest tangent plus the digests' term — against PySCF's exact directional derivative, step-laddered, and stops ([`testing.md`](testing.md), "The digests' orbital response, forward mode"). Ends by gating itself against `grad_num` and printing `PASS:`/`FAIL:` ([`testing.md`](testing.md), "The analytic gradient against the numerical one"). Writes **nothing** unless `--out` is given, and never a committed file; `--casci-only` is its own validation (see "The analytic gradient" above) |
+| `reference_data/pc_on_states.py` | the **GPU's PC energies on a CASSCF sweep's kept states** (#138): per state of a `nevpt2_numgrad.py --reference casscf --states-dir`, a transient `--no-pc --mo-from` golden (NaN PC placeholders, built in `--workers` processes, deleted afterwards, never in `golden/`), the wiring check against the manifest, `nevpt2_demo` SC (must PASS) and `--pc` (the full-precision line and the per-class spectrum), and `_check_pc_conditioning` on the device's gaps. Writes a keyed `.npz` for #126 and nothing else; needs a built demo and a card ("The GPU's PC energies on the kept states" above) |
 | `reference_data/casscf_repro_probe.py` | the **CASSCF reproducibility** measurement: ≥5 back-to-back RHF → symmetry-adapted `mcscf.CASSCF` → orbital-gradient → fresh `mcscf.CASCI` → SC-NEVPT2 runs under `generate_golden`'s own settings (imported, so single-threaded with the same Davidson tolerance), reporting the spread of E_CASSCF / E_corr / ‖g_orb‖ and whether any run changed stationary point. `--perturb EPS` starts the optimiser from a random same-irrep rotation instead. `--case NAME --displace COMP --steps …` runs `nevpt2_numgrad.py --reference casscf`'s own state path along a ladder of displacements and prints the continuity guard's three signals per step (where its thresholds come from). Writes no golden; its output is what "A fresh CASSCF reproduces, measured" above quotes, and where the `--mo-from` gate thresholds come from |
 | `reference_data/sc_source_oracle.py` | **PySCF's exact SC source terms** for N2 CAS(4,4) and LiF, written as `golden/<case>.srcgold` out of `nevpt2_grad.py`'s own machinery at its converged steps; the oracle `nevpt2_sc_pseudodensity --source-oracle` gates the GPU's against (see "The SC source-term oracle" above). With `--pc`, **block2's PC ones** for N2 CAS(4,4), `golden/n2_ccpvdz_cas44_pc.srcgold` ("The PC flavour"). With `--directional`, the **directional flavour** for acrolein, N2 and LiF, `golden/<case>[_pc]_dir.srcgold` ("The directional flavour"). With `--case n2_ccpvdz_cas44_casscf --mo-from FILE`, all four kinds on **converged CASSCF orbitals** ("On CASSCF orbitals"), and with `--case acrolein_def2svp_cas65_casscf --mo-from FILE --directional`, acrolein's directional pair on them (#135), with the sidecar fingerprint-checked as `generate_golden.py --mo-from` checks it. Byte-reproducible |
 | `reference_data/golden_format.py` | the **one Python parser** of the three formats in `golden/` (and of the `.srcgold` oracle, plus its writer `write_srcgold`): the header tables (keyed by magic) the writers pack from and the readers read by, `read_golden` / `read_golden_header` / `read_gradgold` / `read_mo_sidecar` / `read_srcgold`, and `arrays-at FILE` for the regeneration check's `cmp -i`. `struct` and NumPy only, and no thread settings, so the timing script can use it (see "The file format" above) |

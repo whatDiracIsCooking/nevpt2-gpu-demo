@@ -67,7 +67,8 @@ difference along N seeded in-plane directions), run before the
 componentwise gate. ``--workers N`` runs the independent states as N
 single-threaded processes, bit-identically to one. Each state's MO sidecar
 and a ``states.json`` manifest stay in ``--states-dir``, so later consumers
-(#126's PC energies) reuse this sweep's states rather than optimising their
+(``pc_on_states.py``'s GPU PC energies, #126's block2 spot-checks) reuse
+this sweep's states rather than optimising their
 own. SC only, and it writes ``--npz`` only: the committed
 ``<case>_casscf.gradgold`` stays the 24 ``--gradgold`` arrays.
 docs/reference-data.md, "The numerical gradient of a CASSCF reference", has
@@ -1247,9 +1248,10 @@ def run_casscf(args, case: dict, geom, rec: dict) -> dict:
 def _write_manifest(states_dir: Path, args, rec: dict, r0: dict, states: list[dict]) -> None:
     """``states.json`` beside the displaced states' MO sidecars: what each one
     is (label, displacement, ``--atom`` spec), what it measured, and where its
-    ``.mogold`` is. This is how a later consumer -- #126's block2 spot-checks
-    and its per-displacement ``--no-pc`` goldens for the GPU -- reuses **this**
-    sweep's states instead of re-optimising them: each sidecar is a
+    ``.mogold`` is; ``golden_format.read_states_manifest`` reads it back.
+    This is how a later consumer -- ``pc_on_states.py``'s per-state
+    ``--no-pc`` goldens for the GPU, #126's block2 spot-checks -- reuses
+    **this** sweep's states instead of re-optimising them: each sidecar is a
     ``--mo-from`` input, rebuilt with ``generate_golden.py --atom SPEC`` and
     this case's flags (docs/reference-data.md, "The numerical gradient of a
     CASSCF reference").
