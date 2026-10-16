@@ -102,7 +102,12 @@ checked in two halves:
   committed golden, gradient sidecar and MO sidecar through every reader entry
   point in `reference_data/` and back through its writer, byte for byte; a
   golden from the current writer read back; and no parser outside
-  `golden_format.py`. Ends `PASS:` or `FAIL:` with an exit status.
+  `golden_format.py`. Since #138 it also checks the CASSCF sweep's hand-off,
+  which is never committed. A `states.json` from
+  `nevpt2_numgrad._write_manifest` must read back through
+  `read_states_manifest`, and a transient golden with NaN PC placeholders
+  (`pc_on_states.py`'s) must pass every golden reader. Ends `PASS:` or
+  `FAIL:` with an exit status.
 
 The Python half registers **no ctest entry**, for the same reasons the
 gradient comparison does not ("Why there is no ctest entry for it", below):
@@ -174,6 +179,17 @@ What they are, all on synthetic inputs, no PySCF solve, no card, no network:
   block. The one exception to "no solve": each refusal case runs N2's RHF
   first, because the fingerprint is checked after the RHF and before the
   CASCI.
+- **`test_pc_on_states.py`** (#138) — the plumbing from a CASSCF sweep's
+  kept states to the GPU's PC energies. `golden_format.read_states_manifest`
+  splits kept states from tripped or refused ones. It refuses a doubled
+  label, a missing `.mogold`, energy or `--atom` spec on a kept state, a
+  missing header field, bad JSON and a non-`casscf` manifest. It reads back
+  what `nevpt2_numgrad._write_manifest` writes. `pc_on_states.parse_pc`
+  reads `nevpt2_demo --pc`'s table and full-precision line, including a
+  device-refused class, and refuses a missing class. `pc_guard` feeds the
+  table's gaps to `_check_pc_conditioning` at 0.99 / 1.01 of 1e3. The
+  transient golden's NaN PC placeholders round-trip through
+  `read_golden_pc_total`, and a `--work-dir` inside `golden/` is refused.
 
 **The thresholds are written into the tests as numbers**, not read from the
 module: a test comparing against `DEGENERACY_TOL` would move with it.
