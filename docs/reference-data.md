@@ -1280,6 +1280,81 @@ at a time, with the numbers, in [`testing.md`](testing.md),
    `e_core`/`e_virt` are the generalized Fock's diagonal and so are functions
    of the active density; the device's `y_I` holds them fixed.
 
+#### The CASSCF branch (`--reference casscf`, #122)
+
+`--reference casscf --mo-from FILE` differentiates SC-NEVPT2 on a CASCI run
+on converged CASSCF orbitals ([`gradient-theory.md`](gradient-theory.md),
+§1.4 and §2.7), with PySCF's own source terms; `--mo-from` defaults to
+`golden/<case>_casscf.mogold` where one is committed. Of the four hooks,
+`get_Aop_Adiag` is the one that changes: the operator is
+`pyscf.mcscf.newton_casscf.gen_g_hop`'s orbital+CI Hessian `h_op`, restricted
+to the non-redundant rotations plus the in-sector CI directions orthogonal to
+`c`, **built column by column and factorised** (LU), its symmetric part
+diagonalised. `z^c` is solved first from (O2)'s own rows, as on the CASCI
+branch; there is no (O1), no selection multiplier and no §2.6 rotation.
+`--cp-solve cg` runs `lagrange.Gradients.solve_lagrange`'s conjugate
+gradient through the same operator instead (on N2 CAS(4,4) it converges to
+`|J L + b|` = 2.9e-12 and moves the gradient by 4.3e-13 from the dense
+answer). The constraints in `Phi` are `gen_g_hop`'s `g_all` at each
+displaced geometry. There is no numerical gradient of a `casscf` state
+(`nevpt2_numgrad.py` refuses one), so the gate is the residual-independent
+checks, with two of the branch's own: **the Hessian-vector ladder** — `h_op`
+against central differences of `g_all` along three seeded random directions,
+no NEVPT2 content — and, with `--casci-only`, **the smoke test** —
+multipliers exactly zero, gradient against `pyscf.grad.casscf`.
+
+**LiF and acrolein ran on scratch orbitals, not committed ones.** Their
+CASSCF references are #123's to commit; these were written by
+`generate_golden.py --casscf --mo-out` into a scratch directory with one
+refusal lifted — the optimiser's own `converged` flag. Under the generator's
+settings both optimisations stall just above `conv_tol_grad` = 1e-7 for all
+200 macro iterations (LiF at `|g_orb|` 1.2e-7, acrolein at 2.2e-7, the
+optimiser's norm) and never set it, so `--casscf` as committed refuses both;
+every other refusal ran, and `--mo-from`'s gate passed both (5.8e-7 and
+2.2e-7 against its 1e-6). N2 CAS(4,4) is the committed
+`golden/n2_ccpvdz_cas44_casscf.mogold`, and its rebuilt state matches that
+golden's `E_CASCI` exactly and `E_corr` to 2.8e-17.
+
+Measured on the gfx1200 box's CPU, single-threaded per run with up to six
+runs side by side:
+
+| | N2 CAS(4,4) | LiF CAS(4,6) | acrolein CAS(6,5) |
+|---|---|---|---|
+| orbitals | committed | scratch | scratch |
+| coupled dimension: orbital + CI (in-sector dets − 1) | 191 + 11 = 202 | 154 + 116 = 270 | 1063 + 51 = 1114 |
+| dense build (one `h_op` per column) | 0.3 s | 0.3 s | 30.4 s |
+| `max\|J − Jᵀ\| / max\|J\|` | 2.2e-15 | 1.2e-16 | 6.0e-15 |
+| smallest eigenvalues of the symmetric part | 5.57e-2 (×2), 6.71e-2 (×2) | **−7.32e-3 (×2)**, 2.82e-6 (×2), 2.82e-3 | 3.62e-3, 3.99e-3, 4.52e-3 |
+| condition number | 1.3e3 | 4.1e7 | 2.7e4 |
+| `\|Jᵀ L + b\|` direct / through `h_op`, against `\|b\|` | 3.5e-17 / 1.3e-15, 0.165 | 1.2e-16 / 1.5e-15, 0.168 | 3.3e-16 / 2.6e-13, 0.284 |
+| max `\|Z\|`, `\|z\|` | 3.0e-2, 3.8e-2 | 0.63, 1.8e-2 | 1.26, 0.117 |
+| Hessian-vector ladders, max `\|Richardson − J v\|` | 4.8e-9 – 1.2e-8 | 2.2e-8 – 3.9e-8 | 9.5e-9 – 1.2e-8 |
+| gauge identity, whole Lagrangian | 3.7e-9 | 2.7e-7 | 9.3e-9 |
+| Richardson bar, skeleton / multipliers | 4.9e-9 / 2.2e-11 | 5.6e-10 / 5.8e-12 | 2.1e-9 / 3.0e-10 |
+| residual-independent checks | 14 of 14 | 14 of 14 | 14 of 14 |
+| smoke test (`--casci-only`): multipliers / `\|g − pyscf.grad.casscf\|` | exactly 0 / 1.96e-8 | exactly 0 / 5.04e-8 | exactly 0 / 8.77e-9 |
+| wall, SC / `--casci-only` | 14.4 s / 6.8 s | 58 s / 5.7 s | 1069 s / 783 s |
+| declared budget (`CASSCF_WALL_BUDGET`) | 120 s | 300 s | 3600 s |
+
+**LiF's stationary point is a saddle, and the spectrum says where.** Its
+coupled Hessian has a doubly degenerate negative pair and a doubly
+degenerate near-null pair (2.8e-6), all four pure orbital rotations along
+which the right-hand side vanishes to round-off (`|b·v|/|b|` ≤ 1.4e-15): the
+symmetry-adapted optimiser cannot leave the point group, and these are
+rotations it cannot take. They do not enter the multipliers, and every
+check holds; they are the kind of mode #125 is set up to probe. Acrolein's
+and N2's spectra are positive, with the right-hand side on acrolein's
+nearest-singular modes at up to 2.5e-2 of `|b|`.
+
+The budget is a bound, not a gate: a run over it says so and does not fail.
+The acrolein wall is the `kappa` sweep, as on the CASCI branch (same
+evaluation count to within the gauge set); the dense build is 3% of it.
+
+**`--reference casci` is unchanged by this branch, measured.** The script
+before and after, on LiF and N2 (SC and `--casci-only`) and acrolein (SC):
+every array `--out` writes is bit-identical, the gradient included, the two
+new string fields (`reference`, `mo_from`) aside.
+
 ### The SC source-term oracle
 
 `golden/n2_ccpvdz_cas44.srcgold` and `golden/lif_def2svp_cas46.srcgold` hold
