@@ -146,6 +146,29 @@ budget, and prints its own wall time::
 --dump-source-terms``) prints the GPU's own projection beside every rung --
 the ladder evidence the tolerance is read from. It writes nothing extra.
 
+THE CASSCF REFERENCE (#117). ``--case <case>_casscf --mo-from FILE``
+differentiates the same energy on a CASCI on **converged CASSCF orbitals**:
+``nevpt2_grad.build_state(reference="casscf")``, which is
+``generate_golden._build_state``'s own ``--mo-from`` path -- the sidecar's
+fingerprint (geometry in the symmetry frame, basis, AO/MO counts, point group,
+``ncore``/``ncas``/``nelecas``, the irrep selection), refused with every
+mismatch listed at once, the symmetry-purity check and the stationarity gate
+on ``e_casscf``. Its golden is ``golden/<case>_casscf.nevpt2gold``
+(``reference_kind = casscf``, checked), so the file is
+``golden/<case>_casscf[_pc][_dir].srcgold``: the same formats, nothing new in
+them. What differs is the partition: with no RHF to split the active space
+(docs/gradient-theory.md, section 1.4) it is ONE range -- ``n_act_occ =
+n_act``, every active-active rotation a gauge, act_V empty, so no directional
+block touches it -- and the state stays in its canonicalised basis, so
+``act_rot`` is the identity. ``--pc`` attaches block2's PC energy itself
+(``nevpt2_grad.attach_pc_energy``, the same conditioning guard), because the
+gradient driver's CASSCF branch refuses ``--pc``. The steps are each
+flavour's, unchanged. Committed for N2 CAS(4,4) alone (#117's scope), in all
+four kinds::
+
+    uv run python reference_data/sc_source_oracle.py --case n2_ccpvdz_cas44_casscf \
+        --mo-from golden/n2_ccpvdz_cas44_casscf.mogold [--pc] [--directional]
+
 Offline Python, never run by a build or a test.
 """
 
@@ -169,23 +192,33 @@ from scipy.linalg import expm
 
 REPO = Path(__file__).resolve().parent.parent
 
-#: The cases a ``.srcgold`` is committed for (#92): the two the oracle's
-#: comparison is cheap at. N2 CAS(8,8)'s ``P y`` alone is 6481 s of quotients
-#: (docs/testing.md, "The GPU as the source-term provider").
-ORACLE_CASES = ("n2_ccpvdz_cas44", "lif_def2svp_cas46")
+#: The suffix of a CASSCF-orbital case (#117): ``<case>_casscf`` is
+#: ``nevpt2_grad.CASES[<case>]``'s molecule, basis and active space on the
+#: converged CASSCF orbitals of the ``--mo-from`` sidecar, the state of the
+#: committed ``golden/<case>_casscf.nevpt2gold`` (a ``reference_kind =
+#: casscf`` golden); the docstring's "THE CASSCF REFERENCE".
+CASSCF_SUFFIX = "_casscf"
 
-#: The cases a PC ``.srcgold`` is committed for (#95): N2 CAS(4,4) alone.
-#: LiF has no PC answer to differentiate (its golden carries no PC fields),
-#: and acrolein's full PC sweep is 21,136 s -- it has a directional oracle.
-PC_ORACLE_CASES = ("n2_ccpvdz_cas44",)
+#: The cases a ``.srcgold`` is committed for (#92): the two the oracle's
+#: comparison is cheap at, and N2 CAS(4,4) on its CASSCF orbitals (#117).
+#: N2 CAS(8,8)'s ``P y`` alone is 6481 s of quotients (docs/testing.md, "The
+#: GPU as the source-term provider").
+ORACLE_CASES = ("n2_ccpvdz_cas44", "lif_def2svp_cas46", "n2_ccpvdz_cas44_casscf")
+
+#: The cases a PC ``.srcgold`` is committed for (#95): N2 CAS(4,4), on RHF and
+#: on CASSCF orbitals. LiF has no PC answer to differentiate (its golden
+#: carries no PC fields), and acrolein's full PC sweep is 21,136 s -- it has a
+#: directional oracle.
+PC_ORACLE_CASES = ("n2_ccpvdz_cas44", "n2_ccpvdz_cas44_casscf")
 
 #: The cases a DIRECTIONAL ``.srcgold`` is committed for (#105), per scheme:
 #: acrolein CAS(6,5), the low-symmetry case no full oracle fits, and N2
 #: CAS(4,4) and LiF beside their full oracles, as the cross-check of the two
-#: flavours against each other.
+#: flavours against each other -- N2's on CASSCF orbitals too (#117).
 DIRECTIONAL_CASES = {
-    "sc": ("n2_ccpvdz_cas44", "lif_def2svp_cas46", "acrolein_def2svp_cas65"),
-    "pc": ("n2_ccpvdz_cas44", "acrolein_def2svp_cas65"),
+    "sc": ("n2_ccpvdz_cas44", "lif_def2svp_cas46", "acrolein_def2svp_cas65",
+           "n2_ccpvdz_cas44_casscf"),
+    "pc": ("n2_ccpvdz_cas44", "acrolein_def2svp_cas65", "n2_ccpvdz_cas44_casscf"),
 }
 
 #: Seeded ``kappa`` directions per non-empty block, and seeded CI directions
@@ -244,17 +277,53 @@ def ci_rotation(st: ng.State, u: np.ndarray) -> np.ndarray:
     return out
 
 
-def rebuilt_state(case: str, *, pc: bool) -> tuple[ng.State, np.ndarray, float]:
+def resolve_case(case: str, mo_from: Path | None) -> tuple[str, str]:
+    """``case`` as ``(nevpt2_grad.CASES key, reference)``: a
+    :data:`CASSCF_SUFFIX` case is its base case on the ``mo_from`` sidecar's
+    CASSCF orbitals, and needs one; any other case is the CASCI-on-RHF state
+    and takes none. Solves nothing."""
+    if case.endswith(CASSCF_SUFFIX):
+        if mo_from is None:
+            raise SystemExit(f"--case {case} is a CASSCF-orbital state: it needs --mo-from "
+                             f"FILE (the committed golden/{case}.mogold)")
+        return case[:-len(CASSCF_SUFFIX)], "casscf"
+    if mo_from is not None:
+        raise SystemExit(f"--mo-from belongs to a *{CASSCF_SUFFIX} case, not {case} "
+                         "(a CASCI-on-RHF state)")
+    return case, "casci"
+
+
+def rebuilt_state(case: str, *, pc: bool,
+                  mo_from: Path | None = None) -> tuple[ng.State, np.ndarray, float]:
     """``nevpt2_grad``'s rebuild of ``case``'s golden state -- held to the
     golden's ``E_CASCI`` / ``E_corr`` (and, with ``pc``, ``e_pc_total``) --
     with the golden's own CI vector and the sign the rebuild came out with
-    relative to it (``y`` is odd in ``c``, so a CI source term carries it)."""
-    spec = ng.CASES[case]
-    print(f"[{case}] building the golden's own CASCI-on-RHF state"
+    relative to it (``y`` is odd in ``c``, so a CI source term carries it).
+
+    A :data:`CASSCF_SUFFIX` case is built on ``mo_from``'s orbitals through
+    ``nevpt2_grad.build_state(reference="casscf")``, i.e.
+    ``generate_golden._build_state``'s own ``--mo-from`` path and every
+    refusal it runs -- the sidecar fingerprint (every mismatch listed at
+    once), symmetry purity, the stationarity gate -- and its golden must say
+    ``reference_kind = casscf``."""
+    base, reference = resolve_case(case, mo_from)
+    casscf = reference == "casscf"
+    spec = ng.CASES[base]
+    print(f"[{case}] building the golden's own "
+          + (f"CASCI-on-CASSCF state from {mo_from}" if casscf else "CASCI-on-RHF state")
           + (", with block2's PC energy" if pc else ""), flush=True)
-    st = ng.build_state(case, spec, pc=pc)
+    # The CASSCF branch of build_state refuses pc (the gradient driver has no
+    # validated PC gradient there); the PC energy is attached here instead,
+    # through the same guard (nevpt2_grad.attach_pc_energy).
+    st = ng.build_state(base, spec, pc=pc and not casscf, reference=reference,
+                        mo_from=mo_from)
+    if pc and casscf:
+        ng.attach_pc_energy(st)
     golden_path = REPO / "golden" / f"{case}.nevpt2gold"
     gold, garr = gf.read_golden(golden_path, want={"ci", "e_pc_total"} if pc else {"ci"})
+    if gold["reference_kind"] != reference:
+        raise SystemExit(f"{golden_path.name} is a reference_kind = {gold['reference_kind']} "
+                         f"golden, and this state is a {reference} one")
     d_casci, d_corr = st.e_casci - gold["e_casci"], st.e_corr - gold["e_nevpt2_total"]
     if max(abs(d_casci), abs(d_corr)) > ng.REF_STATE_TOL:
         raise SystemExit(f"the rebuilt state does not match {golden_path.name}: E_CASCI "
@@ -317,9 +386,9 @@ def check_pc_guard(ci_desc: str) -> None:
 
 
 def build(case: str, *, kappa_step: float, ci_step: float,
-          pc: bool = False) -> tuple[dict, dict]:
+          pc: bool = False, mo_from: Path | None = None) -> tuple[dict, dict]:
     t0 = time.perf_counter()
-    st, ci_file, sign = rebuilt_state(case, pc=pc)
+    st, ci_file, sign = rebuilt_state(case, pc=pc, mo_from=mo_from)
 
     fn = ng.Functional(st, pc=pc)
     # The order --source both runs them in: y first, then the sweep.
@@ -429,7 +498,8 @@ def print_ladder(label: str, h0: float, fd: np.ndarray, ref: float | None) -> No
 
 def build_directional(case: str, *, pc: bool, kappa_step: float, kappa_rungs: int,
                       ci_step: float, ci_rungs: int, n_kappa: int, n_ci: int,
-                      against: Path | None = None) -> tuple[dict, dict]:
+                      against: Path | None = None,
+                      mo_from: Path | None = None) -> tuple[dict, dict]:
     """The directional flavour's header and arrays (the docstring's "THE
     DIRECTIONAL FLAVOUR"): ``n_kappa`` directions per non-empty block, each
     laddered over ``kappa_rungs`` rungs from ``kappa_step``, and ``n_ci`` CI
@@ -438,7 +508,7 @@ def build_directional(case: str, *, pc: bool, kappa_step: float, kappa_rungs: in
         raise SystemExit("a Richardson value needs at least 2 rungs")
     t0 = time.perf_counter()
     ng.PC_GUARD.__dict__.update(ng.PcGuardLedger().__dict__)
-    st, ci_file, sign = rebuilt_state(case, pc=pc)
+    st, ci_file, sign = rebuilt_state(case, pc=pc, mo_from=mo_from)
     fn = ng.Functional(st, pc=pc)
     gpu = ng.load_source_terms(against, st, pc=pc) if against is not None else None
     if gpu is not None:
@@ -516,7 +586,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--case", required=True,
-                    choices=sorted(set(ORACLE_CASES) | set(DIRECTIONAL_CASES["sc"])))
+                    choices=sorted(set(ORACLE_CASES) | set(DIRECTIONAL_CASES["sc"])
+                                   | set(DIRECTIONAL_CASES["pc"])))
     ap.add_argument("--pc", action="store_true",
                     help="block2's PC-NEVPT2 source terms instead of PySCF's SC ones "
                          f"(#95; cases: {', '.join(PC_ORACLE_CASES)}, directional: "
@@ -524,6 +595,10 @@ def main() -> None:
     ap.add_argument("--directional", action="store_true",
                     help="the directional flavour (#105): seeded directions per block, "
                          "golden/<case>[_pc]_dir.srcgold")
+    ap.add_argument("--mo-from", type=Path, default=None,
+                    help=f"the MO sidecar a *{CASSCF_SUFFIX} case is built on (required there, "
+                         "refused elsewhere): golden/<case>.mogold, fingerprint-checked as "
+                         "generate_golden.py --mo-from checks it")
     ap.add_argument("--out", type=Path, default=None,
                     help="where to write (default: golden/<case>[_pc][_dir].srcgold)")
     ap.add_argument("--kappa-step", type=float, default=None,
@@ -549,6 +624,10 @@ def main() -> None:
                          "every rung (the tolerance's ladder evidence); changes nothing written")
     args = ap.parse_args()
     scheme = "pc" if args.pc else "sc"
+    try:
+        resolve_case(args.case, args.mo_from)
+    except SystemExit as e:  # the same refusal, as a usage error before any solve
+        ap.error(str(e))
     if args.directional:
         if args.case not in DIRECTIONAL_CASES[scheme]:
             ap.error(f"--directional{' --pc' if args.pc else ''}: no oracle for {args.case} "
@@ -560,7 +639,8 @@ def main() -> None:
             kappa_rungs=args.kappa_rungs if args.kappa_rungs is not None else kr,
             ci_step=args.ci_step if args.ci_step is not None else cs,
             ci_rungs=args.ci_rungs if args.ci_rungs is not None else cr,
-            n_kappa=args.kappa_dirs, n_ci=args.ci_dirs, against=args.against_dump)
+            n_kappa=args.kappa_dirs, n_ci=args.ci_dirs, against=args.against_dump,
+            mo_from=args.mo_from)
     else:
         if args.case not in ORACLE_CASES:
             ap.error(f"no full oracle for {args.case} (cases: {', '.join(ORACLE_CASES)}); "
@@ -572,7 +652,8 @@ def main() -> None:
         kappa_step = args.kappa_step if args.kappa_step is not None else ng.KAPPA_STEP
         ci_step = args.ci_step if args.ci_step is not None else (
             ng.CI_STEP_PC if args.pc else ng.CI_STEP)
-        header, arrays = build(args.case, kappa_step=kappa_step, ci_step=ci_step, pc=args.pc)
+        header, arrays = build(args.case, kappa_step=kappa_step, ci_step=ci_step, pc=args.pc,
+                               mo_from=args.mo_from)
     name = gf.srcgold_name(args.case, scheme, header["flavour"])
     out = args.out if args.out is not None else REPO / "golden" / name
     gf.write_srcgold(out, header=header, arrays=arrays)

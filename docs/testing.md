@@ -165,6 +165,15 @@ What they are, all on synthetic inputs, no PySCF solve, no card, no network:
   0.99 / 1.01 of 1e-5, (O2) on an off-diagonal and both diagonals at 0.9 /
   1.1 of 1e-10, (O3) with an eigenvalue at the HOMO, just inside the gap,
   and act_O one too many or too few.
+- **`test_source_oracle.py`** (#117) — `sc_source_oracle.py`'s CASSCF
+  reference. A `*_casscf` case needs `--mo-from` and any other case refuses
+  it. A mismatched `.mogold` is refused with every mismatch listed: LiF's
+  sidecar for the N2 case gives nine fields, and N2's DF sidecar gives the
+  one `auxbasis` line. Each committed `n2_ccpvdz_cas44_casscf*.srcgold` must
+  have one active range, an identity `act_rot`, and no direction in an act_V
+  block. The one exception to "no solve": each refusal case runs N2's RHF
+  first, because the fingerprint is checked after the RHF and before the
+  CASCI.
 
 **The thresholds are written into the tests as numbers**, not read from the
 module: a test comparing against `DEGENERACY_TOL` would move with it.
@@ -194,7 +203,7 @@ nothing skips.
 `devtools/golden-repro.sh` re-runs the promise CLAUDE.md makes — the
 generators are bit-reproducible, so a regenerated file that differs from the
 committed one means something changed — for every committed N2 CAS(4,4) /
-CAS(8,8) reference. Fourteen files from twelve generator runs, each with the
+CAS(8,8) reference. Eighteen files from sixteen generator runs, each with the
 generator's own settings (`--out` into a scratch directory is the only flag
 added):
 
@@ -206,6 +215,7 @@ added):
 | `n2_ccpvdz_cas44_casscf[_df].nevpt2gold` | `generate_golden.py --mo-from` the **committed** sidecar, so a drifted sidecar fails as itself and not as its golden too |
 | `n2_ccpvdz_cas44.srcgold`, `n2_ccpvdz_cas44_pc.srcgold` | `sc_source_oracle.py [--pc]`, reading the committed golden |
 | `n2_ccpvdz_cas44_dir.srcgold`, `n2_ccpvdz_cas44_pc_dir.srcgold` | `sc_source_oracle.py --directional [--pc]` (#105) |
+| `n2_ccpvdz_cas44_casscf[_pc][_dir].srcgold` | `sc_source_oracle.py --case n2_ccpvdz_cas44_casscf --mo-from` the **committed** sidecar `[--pc] [--directional]` (#117) |
 
 The comparison is `cmp` on the whole file — the one place in this tree a
 byte comparison is right. One exception, the documented one
@@ -215,11 +225,11 @@ four the state fields must be byte-identical, the new `reference_kind` must
 be `casci`, and everything from the array count on byte-identical, each
 file's header length read with `golden_format.py arrays-at`. It prints one
 `PASS:`/`FAIL:` line per file (naming it) and exits 0 only if all
-fourteen reproduce. `--committed DIR` compares against a copy instead of `golden/`
+eighteen reproduce. `--committed DIR` compares against a copy instead of `golden/`
 (the generator inputs stay `golden/`'s), `--only REGEX` narrows the set,
 `--out DIR` keeps the regenerated files and each run's log.
 
-**The four N2 `.srcgold` files are in it** because the 30-minute budget the
+**The eight N2 `.srcgold` files are in it** because the 30-minute budget the
 gradient milestone sets for any oracle regeneration holds with them: the SC
 ones are seconds, the PC directional one about a minute and the PC full one
 about two and a half minutes, below. Acrolein's and LiF's directional
@@ -237,12 +247,15 @@ before #105 added the two directional files:
 | default, `-j 1` (one generator at a time, each single-threaded) | 330 s (5 min 30 s) |
 | `-j 10` | 144 s |
 | `-j 12`, fourteen files, #105 (the two-card box's CPU, 24 cores, both cards running other jobs) | 152 s, all fourteen `PASS:` |
+| `-j 2`, eighteen files, #117 (RTX 3080 box's CPU, measured with a concurrent sweep on the CPU) | 307 s, all eighteen `PASS:` |
 
 Per generator run (the `-j 1` run): `--casscf` sidecars 2–3 s,
 `n2_ccpvdz_cas44.srcgold` 9 s, the CAS(4,4) goldens 26–27 s, the CAS(8,8)
 ones 32–33 s, `n2_ccpvdz_cas44_pc.srcgold` 142 s — so `-j 10`'s wall is the
 PC oracle's alone. In the `-j 12` run the directional pair took 6 s (SC) and
-56 s (PC), and the full PC oracle 150 s, again the whole wall. **Nothing is left out** of the N2 CAS(4,4)/CAS(8,8) set
+56 s (PC), and the full PC oracle 150 s, again the whole wall. In the `-j 2`
+run the four CASSCF-orbital oracles took 9 s (SC), 145 s (PC), 3 s (SC
+directional) and 44 s (PC directional). **Nothing is left out** of the N2 CAS(4,4)/CAS(8,8) set
 for cost: the whole set was 330 s at `-j 1` against the 30-minute budget. The larger
 committed references are outside its scope, not left out for time; theirs,
 where measured, are in [`reference-data.md`](reference-data.md),
@@ -2072,7 +2085,9 @@ reverse mode", PC's one home. Beside it the comparison itself is gated:
 (`apps/sc_pseudodensity/source_compare.cppm`) holds the comparator, the
 known-gap list and both tolerances, and the unit suite
 `test/source_compare/` runs every committed oracle, SC and PC, through it
-with no card — the oracle against itself passes with all nine rows compared,
+with no card — the oracle against itself passes with all nine rows compared
+(on a CASSCF-orbital oracle, #117, the six its partition has: act_V's three
+rows must be empty there, and must not be empty anywhere else),
 and a copy with **one** block moved by ten tolerances fails naming that block
 and nothing else, for every block of every oracle (`P y` included), while half
 a tolerance still passes. The PC oracle is classified with an **empty**

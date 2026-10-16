@@ -387,6 +387,12 @@ uv run python reference_data/sc_source_oracle.py --case acrolein_def2svp_cas65 -
 uv run python reference_data/sc_source_oracle.py --case n2_ccpvdz_cas44 --directional
 uv run python reference_data/sc_source_oracle.py --case n2_ccpvdz_cas44 --directional --pc
 uv run python reference_data/sc_source_oracle.py --case lif_def2svp_cas46 --directional
+# ... and all four kinds on N2 CAS(4,4)'s CONVERGED CASSCF orbitals,
+# golden/n2_ccpvdz_cas44_casscf[_pc][_dir].srcgold (see "On CASSCF orbitals"
+# under "The SC source-term oracle"); the sidecar is the committed one
+uv run python reference_data/sc_source_oracle.py --case n2_ccpvdz_cas44_casscf \
+    --mo-from golden/n2_ccpvdz_cas44_casscf.mogold            # also with --pc,
+                                                              # --directional [--pc]
 
 # the three goldens on CONVERGED CASSCF orbitals, each in two steps (see "The
 # MO sidecar"). The FIRST command of each pair rewrites the committed sidecar
@@ -454,8 +460,8 @@ committed one means something changed.
 it reruns the commands above for every committed N2 CAS(4,4) / CAS(8,8)
 reference — the four goldens, the two gradient sidecars, the two CASSCF
 `.mogold` sidecars (a fresh `--casscf` each), the two `*_casscf[_df]`
-goldens (`--mo-from` the committed sidecar) and the four N2 `.srcgold`
-oracles (full and directional, SC and PC) — into a scratch directory, compares each with the committed file byte for byte
+goldens (`--mo-from` the committed sidecar) and the eight N2 `.srcgold`
+oracles (full and directional, SC and PC, on RHF and on CASSCF orbitals) — into a scratch directory, compares each with the committed file byte for byte
 (the `G1` CASCI goldens by the header exception below, nothing looser), and
 prints `PASS:` / `FAIL:` per file. It makes no claim over
 `n2_ccpvdz_cas44_casscf.gradgold`, whose contract is a tolerance ("The
@@ -1619,6 +1625,65 @@ That sidecar is gitignored ("The gradient sidecar"), so their ctest entries
 exist only where it has been regenerated. The generator itself does not need
 the sidecar.
 
+#### On CASSCF orbitals
+
+`golden/n2_ccpvdz_cas44_casscf[_pc][_dir].srcgold` (#117) are all four kinds
+above for the state of `golden/n2_ccpvdz_cas44_casscf.nevpt2gold`: a CASCI on
+the converged CASSCF orbitals of the committed
+`golden/n2_ccpvdz_cas44_casscf.mogold`. `sc_source_oracle.py --case
+n2_ccpvdz_cas44_casscf --mo-from FILE` builds it through
+`nevpt2_grad.build_state(reference="casscf")`, which is
+`generate_golden._build_state`'s own `--mo-from` path, so the sidecar passes
+the same refusals the golden did: the fingerprint ("The MO sidecar: committed
+CASSCF orbitals"; every mismatch listed in one refusal), symmetry purity and
+the stationarity gate ("The `--casscf` / `--mo-from` gate thresholds"). The
+golden must say `reference_kind = casscf`. A `*_casscf` case without
+`--mo-from` is refused, and so is `--mo-from` on any other case. **No new
+format**: the magics, header and arrays are the ones above. Only the
+orbitals and the partition differ. With no RHF to split it
+([`gradient-theory.md`](gradient-theory.md), section 1.4), the active space
+is one range (`n_act_occ = n_act`), act_V is empty and every active-active
+rotation is a gauge, so no directional block touches act_V. The state is
+never rotated, so `act_rot` is the identity. `--pc` attaches block2's PC
+energy through `nevpt2_grad.attach_pc_energy`, the same conditioning guard,
+because the gradient driver's CASSCF branch still refuses `--pc`. Measured:
+the PC energy is 2.1e-15 from the golden's `e_pc_total`, and every displaced
+CI vector was guarded with no rank change. The steps are each flavour's own.
+
+Byte-reproducible, measured: each file was generated twice with `--out` and
+the two copies compare identical with `cmp`. A third copy, written to
+`golden/` by the default path, is also identical. All three copies were run
+one at a time while a concurrent PySCF sweep used the CPU, so the wall times
+are an upper bound:
+
+| file | bytes | wall |
+|---|---:|---:|
+| `n2_ccpvdz_cas44_casscf.srcgold` | 7440 | 21 s |
+| `n2_ccpvdz_cas44_casscf_pc.srcgold` | 7440 | 165–212 s |
+| `n2_ccpvdz_cas44_casscf_dir.srcgold` | 64913 | 3 s |
+| `n2_ccpvdz_cas44_casscf_pc_dir.srcgold` | 64913 | 44 s |
+
+`devtools/golden-repro.sh` regenerates all four from the committed sidecar
+([`testing.md`](testing.md), "The golden regeneration gate"). A mismatched
+sidecar is refused before the CASCI runs. LiF's `.mogold` handed to the N2
+case lists nine mismatches (`nao`, `nmo`, `ncore`, `ncas`, `symbols`,
+`basis`, `groupname`, `cas_irreps` and the geometry). N2's own DF sidecar
+lists one (`auxbasis`). `reference_data/tests/test_source_oracle.py` pins
+both. The four are in `kClassifiedOracles` with **empty** known-gap lists.
+They were classified only after `nevpt2_sc_pseudodensity --golden
+golden/n2_ccpvdz_cas44_casscf.nevpt2gold --tiles 3 [--pc] --source-oracle`
+had held the GPU's terms to every block of each of them at the existing
+tolerances, on the first run. The comparator's host suites
+(`test/source_compare/`) expect act_V's three rows empty on these oracles
+and on no other. No ctest entry runs the GPU comparison yet: #121 registers
+those entries and records the measurement in [`testing.md`](testing.md).
+
+```bash
+uv run python reference_data/sc_source_oracle.py --case n2_ccpvdz_cas44_casscf \
+    --mo-from golden/n2_ccpvdz_cas44_casscf.mogold --directional --pc --out /tmp/c.srcgold
+cmp /tmp/c.srcgold golden/n2_ccpvdz_cas44_casscf_pc_dir.srcgold    # silent: identical
+```
+
 ## Density fitting
 
 `nevpt2_df_demo` computes SC-NEVPT2 from three-index `(L|pq)` tensors
@@ -2037,7 +2102,7 @@ not used.
 | `reference_data/nevpt2_numgrad.py` | the **numerical** nuclear gradient: displaced RHF → CASCI → SC-NEVPT2 runs (states built by `generate_golden._build_state`, imported) differenced and Richardson-extrapolated into a sidecar's `grad_num` / `grad_num_residual` / `grad_num_probed` / `grad_num_step`. Refuses a displacement whose detected point group — or whose core/active irrep selection — differs from the reference geometry's, rather than produce a number from a different active space, and refuses a golden whose `reference_kind` is not `casci`. `--pc` differences block2's partially-contracted energy on the same displaced states (and writes no sidecar); `--npz PATH` writes the gradient arrays alone, which is how a PC one, or any case whose committed sidecar holds no `grad_num`, reaches `nevpt2_grad.py --grad-num`. Writes no golden and no new sidecar; only the two gradient-validation cases carry its arrays in their sidecars (see "The numerical gradient" above) |
 | `reference_data/nevpt2_grad.py` | the **analytic** nuclear gradient: a `pyscf.grad.lagrange.Gradients` subclass that solves the CI and orbital Z-vector equations of [`gradient-theory.md`](gradient-theory.md), §2 and contracts them into a gradient, differentiating one scalar along a frozen orthonormal path. SC by default, block2's PC with `--pc` (the same Lagrangian: only `E_corr` changes). Source terms from PySCF by default, or from the GPU's `.gradsrc` dump (`--source dump`, written by `nevpt2_sc_pseudodensity --dump-source-terms`; with `--pc` a PC dump, `--pc --dump-source-terms`, #74 — a dump of the other scheme is refused), or both side by side (`--source both`: the two compared componentwise and solved on one sweep; [`testing.md`](testing.md), "The GPU as the source-term provider"). `--edot-check` instead holds the dump's forward `Edot(kappa)` along its seeded directions — frozen-digest tangent plus the digests' term — against PySCF's exact directional derivative, step-laddered, and stops ([`testing.md`](testing.md), "The digests' orbital response, forward mode"). Ends by gating itself against `grad_num` and printing `PASS:`/`FAIL:` ([`testing.md`](testing.md), "The analytic gradient against the numerical one"). Writes **nothing** unless `--out` is given, and never a committed file; `--casci-only` is its own validation (see "The analytic gradient" above) |
 | `reference_data/casscf_repro_probe.py` | the **CASSCF reproducibility** measurement: ≥5 back-to-back RHF → symmetry-adapted `mcscf.CASSCF` → orbital-gradient → fresh `mcscf.CASCI` → SC-NEVPT2 runs under `generate_golden`'s own settings (imported, so single-threaded with the same Davidson tolerance), reporting the spread of E_CASSCF / E_corr / ‖g_orb‖ and whether any run changed stationary point. `--perturb EPS` starts the optimiser from a random same-irrep rotation instead. Writes no golden; its output is what "A fresh CASSCF reproduces, measured" above quotes, and where the `--mo-from` gate thresholds come from |
-| `reference_data/sc_source_oracle.py` | **PySCF's exact SC source terms** for N2 CAS(4,4) and LiF, written as `golden/<case>.srcgold` out of `nevpt2_grad.py`'s own machinery at its converged steps; the oracle `nevpt2_sc_pseudodensity --source-oracle` gates the GPU's against (see "The SC source-term oracle" above). With `--pc`, **block2's PC ones** for N2 CAS(4,4), `golden/n2_ccpvdz_cas44_pc.srcgold` ("The PC flavour"). With `--directional`, the **directional flavour** for acrolein, N2 and LiF, `golden/<case>[_pc]_dir.srcgold` ("The directional flavour"). Byte-reproducible |
+| `reference_data/sc_source_oracle.py` | **PySCF's exact SC source terms** for N2 CAS(4,4) and LiF, written as `golden/<case>.srcgold` out of `nevpt2_grad.py`'s own machinery at its converged steps; the oracle `nevpt2_sc_pseudodensity --source-oracle` gates the GPU's against (see "The SC source-term oracle" above). With `--pc`, **block2's PC ones** for N2 CAS(4,4), `golden/n2_ccpvdz_cas44_pc.srcgold` ("The PC flavour"). With `--directional`, the **directional flavour** for acrolein, N2 and LiF, `golden/<case>[_pc]_dir.srcgold` ("The directional flavour"). With `--case n2_ccpvdz_cas44_casscf --mo-from FILE`, all four kinds on **converged CASSCF orbitals** ("On CASSCF orbitals"), with the sidecar fingerprint-checked as `generate_golden.py --mo-from` checks it. Byte-reproducible |
 | `reference_data/golden_format.py` | the **one Python parser** of the three formats in `golden/` (and of the `.srcgold` oracle, plus its writer `write_srcgold`): the header tables (keyed by magic) the writers pack from and the readers read by, `read_golden` / `read_golden_header` / `read_gradgold` / `read_mo_sidecar` / `read_srcgold`, and `arrays-at FILE` for the regeneration check's `cmp -i`. `struct` and NumPy only, and no thread settings, so the timing script can use it (see "The file format" above) |
 | `reference_data/golden_layout_check.py` | the Python half of the **layout contract**: every committed file of both golden layouts, and every sidecar, through every reader and back through its writer byte for byte, plus a scan for any parser outside `golden_format.py`. Ends `PASS:`/`FAIL:`; a manual gate, no ctest entry ([`testing.md`](testing.md), "The golden layout contract") |
 | `reference_data/tests/` | the **oracle's own tests** (pytest, `uv run pytest`): every format's writer → reader round trip and every reader refusal in `golden_format.py`, and `_check_degeneracy` / `_check_pc_conditioning` / `_check_gradient_invariants` on synthetic inputs just either side of each threshold. No solve, no card; a `cpp-tier.sh` phase ([`testing.md`](testing.md), "The oracle's own tests") |
@@ -2054,8 +2119,9 @@ not used.
 | `golden/n2_ccpvdz_cas44.gradgold`, `golden/n2_ccpvdz_cas88.gradgold` | the **gradient sidecars** for those two cases: the general-range MO-integral blocks an analytic gradient reads, plus the full-range Fock matrices and `mo_coeff` (see "The gradient sidecar" above). Separate files, so the goldens beside them are untouched. `test/golden/gradgold_tests.cpp` round-trips the reader and checks the CAS(4,4) one against the golden beside it. Neither holds a `grad_num`: they stay the 24 arrays `--gradgold` writes, and CAS(4,4)'s numerical gradient goes to an `--npz` instead — `nevpt2_numgrad.py` refuses the in-place write for that case rather than move these bytes ([`testing.md`](testing.md), "The analytic gradient against the numerical one") |
 | `golden/n2_ccpvdz_cas44_casscf.gradgold` | the **CASSCF-reference gradient sidecar** (1.52 MB): the same 24 arrays on the committed CASSCF orbitals of `n2_ccpvdz_cas44_casscf.mogold`, written by its `--mo-from` step with `--gradgold`. Reproducible from the committed `.mogold` byte for byte, from scratch only to a tolerance, so `golden-repro.sh` makes no claim over it; (O2) asserted, (O1)/(O3) not (see "The CASSCF-reference gradient sidecar" above) |
 | `golden/n2_ccpvdz_cas44.srcgold`, `golden/lif_def2svp_cas46.srcgold` | the **SC source-term oracles** (7.4 / 10.1 KB): PySCF's exact `A` and `P y` for those two states (see "The SC source-term oracle" above). Read by `loadSrcGold` and nothing else at run time; `test/golden`'s `GoldenLayoutContractTests` and `SrcGoldLoadErrorTests` hold the reader to them |
-| `golden/*_dir.srcgold` (five) | the **directional source-term oracles** (#105; `NEVPT2SD` / `NEVPT2PD`): seeded directions per block and the oracle's converged derivative along each, for acrolein CAS(6,5) SC and PC, N2 CAS(4,4) SC and PC and LiF SC ("The directional flavour" above has their sizes). `nevpt2_sc_pseudodensity_oracle_dir_*` hold the GPU's terms to them; `test/source_compare/` and `test/golden` hold the comparator and the reader |
+| `golden/*_dir.srcgold` (five on RHF orbitals; the CASSCF-orbital two are the `n2_ccpvdz_cas44_casscf*` row below) | the **directional source-term oracles** (#105; `NEVPT2SD` / `NEVPT2PD`): seeded directions per block and the oracle's converged derivative along each, for acrolein CAS(6,5) SC and PC, N2 CAS(4,4) SC and PC and LiF SC ("The directional flavour" above has their sizes). `nevpt2_sc_pseudodensity_oracle_dir_*` hold the GPU's terms to them; `test/source_compare/` and `test/golden` hold the comparator and the reader |
 | `golden/n2_ccpvdz_cas44_pc.srcgold` | the **PC source-term oracle** (7.4 KB, `NEVPT2P1`): block2's `A` and `P y` for N2 CAS(4,4)'s PC energy ("The PC flavour" above). `nevpt2_sc_pseudodensity_oracle_pc_n2_ccpvdz_cas44` holds the GPU's PC source terms to it (#74); `test/source_compare/` holds the comparator to it, and `test/golden` the reader |
+| `golden/n2_ccpvdz_cas44_casscf.srcgold`, `_pc.srcgold`, `_dir.srcgold`, `_pc_dir.srcgold` | the **source-term oracles on CASSCF orbitals** (#117): all four kinds (SC/PC, full/directional; 7.4 KB each full, 65 KB each directional) for `n2_ccpvdz_cas44_casscf.nevpt2gold`'s state, built with `sc_source_oracle.py --mo-from` the committed `.mogold` ("On CASSCF orbitals" above). `devtools/golden-repro.sh` regenerates them byte for byte. `test/source_compare/` and `test/golden` hold the comparator and the reader to them; no `gpu` ctest entry compares the device's terms with them yet (#121) |
 | `reference_data/geometries/n2.xyz` | the N2 geometry as an `.xyz`, byte-for-byte `generate_golden.py`'s own default `--atom "N 0 0 0; N 0 0 1.1"` — so the two gradient scripts, which take a geometry file, can be pointed at the committed `n2_ccpvdz_cas44` state. That it *is* the same state is checked, not assumed: both scripts refuse unless the rebuilt `E_CASCI`, `E_corr` and `e_pc_total` match the golden's (measured 0.0, bit-identical). N2 is the **deliberately symmetric** case of the gradient comparison (see [`testing.md`](testing.md), "The analytic gradient against the numerical one") |
 | `reference_data/geometries/salicylaldimine.xyz`, `reference_data/basis/6-31gss-rifit.nw`, `golden/salicylaldimine_631gss_cas88[_df].nevpt2gold` | the non-N2 case (see "Salicylaldimine CAS(8,8)" above). The two goldens are **gitignored** and regenerate byte-identically in ~2.5 min each; their four ctest entries register only once they exist |
 | `reference_data/geometries/lif.xyz`, `golden/lif_def2svp_cas46.nevpt2gold`, `golden/lif_def2svp_cas46.gradgold` | the **LiF smoke test** of the gradient-validation pair (see "LiF and acrolein, the gradient-validation pair" above): linear, Coov → C2v, CAS(4,6) as the pure π space by irrep, def2-SVP. **SC fields only** — its PC metric is refused as ungapped, so no `--pc` entry exists for it. Both files are committed (0.20 / 0.92 MB), and the sidecar carries the **numerical gradient** on top of the 24 arrays `--gradgold` writes, so it takes two commands to regenerate (see "The numerical gradient" above) |
