@@ -208,7 +208,10 @@ Z-vector equations.
 rather than assumed.** Every derivative path refuses a `casscf` golden:
 `nevpt2_demo`'s `--sc-tangent` and `--gradient-source` as an
 unsupported-request error, and `reference_data/nevpt2_numgrad.py` before it
-computes an energy; no gradient sidecar is written for one; and the offline
+computes an energy; the one gradient sidecar written for one
+(`--mo-from --gradgold`, [`reference-data.md`](reference-data.md), "The
+CASSCF-reference gradient sidecar") is data that no derivative path reads yet;
+and the offline
 analytic gradient builds its own state on RHF orbitals, with no CASSCF path.
 The refusal cites this section. What
 a CASSCF reference needs is §1.4 and §2.7's coupled CP-CASSCF system (§5), and

@@ -26,6 +26,14 @@
 #                          golden/n2_ccpvdz_cas44.nevpt2gold, the committed
 #                          one, as their input)
 #
+# What it deliberately does NOT regenerate: golden/n2_ccpvdz_cas44_casscf.gradgold,
+# the CASSCF-reference gradient sidecar (#120). An orbital optimiser sits
+# upstream of it (the .mogold), so its contract is reproducibility to a
+# tolerance, not byte for byte, and this gate makes no claim over it
+# (docs/reference-data.md, "The CASSCF-reference gradient sidecar"). The
+# cas44_casscf run below therefore omits the --gradgold that the docs' command
+# for that sidecar adds; the golden it writes is byte-identical either way.
+#
 # The comparison is `cmp` on the whole file, with ONE documented exception
 # (docs/reference-data.md, "Regenerating the golden file"): a committed CASCI
 # golden written as NEVPT2G1 regenerates as NEVPT2G2, four bytes longer by the

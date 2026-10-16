@@ -64,8 +64,9 @@ you try to run it on your own system.
   (docs/reference-data.md, "What "CASSCF input" means here, and why the golden state is CASCI").
 - **The gradient work stays CASCI-only.** Its derivation is the CASCI-on-RHF
   Lagrangian, so every derivative path refuses a CASSCF-orbital golden rather
-  than differentiate a reference it does not cover, and no gradient sidecar is
-  written for one.
+  than differentiate a reference it does not cover. One gradient sidecar is
+  written for one, as data no derivative path reads yet
+  (docs/reference-data.md, "The CASSCF-reference gradient sidecar").
 - **On the GPU, the gradient work is source terms, not a nuclear gradient.**
   The binaries differentiate the NEVPT2 energy with respect to the CI vector
   and with respect to an orbital rotation (the active–active block, or the
