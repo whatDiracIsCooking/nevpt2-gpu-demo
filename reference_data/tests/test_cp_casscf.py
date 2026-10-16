@@ -109,13 +109,35 @@ def test_dense_operator_is_symmetric_and_positive(grads):
     ["--pc"],
     ["--source", "dump", "--source-path", "x.gradsrc"],
     ["--energy-ordered"],
-    ["--grad-num", "x.npz"],
 ])
 def test_casscf_refuses_what_it_is_not_validated_for(monkeypatch, extra):
     monkeypatch.setattr(sys, "argv", ["nevpt2_grad.py", "--case", "n2_ccpvdz_cas44",
                                       "--reference", "casscf", *extra])
     with pytest.raises(SystemExit, match="--reference casscf"):
         ng.main()
+
+
+@pytest.mark.parametrize(("written", "asked", "ok"), [
+    (None, "casscf", False),        # an old CASCI file carries no reference field
+    ("casci", "casscf", False),
+    ("casscf", "casci", False),
+    ("casscf", "casscf", True),
+    (None, "casci", True),
+])
+def test_grad_num_reference_must_match(tmp_path, written, asked, ok):
+    """``--grad-num`` reads a ``nevpt2_numgrad.py --npz`` file; its reference
+    must be the one this run differentiates, or the two gradients are of
+    different functions."""
+    path = tmp_path / "g.npz"
+    extra = {} if written is None else {"reference": np.array(written)}
+    np.savez(path, case=np.array("n2_ccpvdz_cas44"), grad_num=np.zeros((2, 3)),
+             grad_num_probed=np.ones((2, 3)), **extra)
+    if ok:
+        assert ng.load_grad_num(path, "n2_ccpvdz_cas44", pc=False,
+                                reference=asked)["grad_num"].shape == (2, 3)
+    else:
+        with pytest.raises(SystemExit, match="different functions"):
+            ng.load_grad_num(path, "n2_ccpvdz_cas44", pc=False, reference=asked)
 
 
 @pytest.mark.parametrize("extra", [["--mo-from", "x.mogold"], ["--cp-solve", "cg"]])

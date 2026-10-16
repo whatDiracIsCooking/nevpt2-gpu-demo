@@ -62,9 +62,12 @@ stationarity, solved as one coupled CP-CASSCF system (§1.4, §2.7). The
 second branch is built **offline only**, in
 `reference_data/nevpt2_grad.py --reference casscf` (SC-NEVPT2 with PySCF's
 own source terms; "The CASSCF branch" below). Every derivative on the GPU
-implements the first branch only, so `nevpt2_demo --sc-tangent`,
-`--gradient-source` and `reference_data/nevpt2_numgrad.py` all refuse a
-`casscf` golden ([`gradient-theory.md`](gradient-theory.md), §1.1), and on
+implements the first branch only, so `nevpt2_demo --sc-tangent` and
+`--gradient-source` refuse a `casscf` golden
+([`gradient-theory.md`](gradient-theory.md), §1.1), as does
+`reference_data/nevpt2_numgrad.py`'s default `--reference casci` route; its
+`--reference casscf` route re-optimises every displaced state instead ("The
+numerical gradient of a CASSCF reference" below), and on
 the device the energy path is what these files exercise. One more exception
 is data, not a derivative: `--gradgold` is
 permitted with `--mo-from` (refused with `--casscf`), and writes the
@@ -151,7 +154,9 @@ This measurement is about **one fixed geometry**. The precondition
 [`gradient-theory.md`](gradient-theory.md), §4.4 names for a numerical
 gradient on CASSCF orbitals — that each *displaced* optimisation lands on the
 same stationary branch as the reference — is a different claim about a
-different calculation, and nothing here measures it.
+different calculation, measured instead by `nevpt2_numgrad.py --reference
+casscf`'s continuity guard and cold-vs-warm probe ("The numerical gradient of
+a CASSCF reference" below).
 
 ### The `--casscf` / `--mo-from` gate thresholds
 
@@ -231,6 +236,19 @@ orbitals" below), carrying E_corr −0.207071732083 and −0.126182539677 — th
 probe's numbers to every digit it prints. That is the second
 argument against tightening the refusal to 1e-7: that would leave the real
 gate well under 2× of headroom, not 4×.
+
+**On re-optimised displaced states the gate is unchanged, and it bit.**
+`nevpt2_numgrad.py --reference casscf` builds every displaced state through
+`_build_state`'s `--mo-from` path, so this gate refuses there exactly as it
+does here. With `generate_golden`'s optimiser alone, acrolein's displaced
+states measured 1.1e-7 … 1.2e-6 on it while the optimiser's own norm was
+≤ 1.1e-8, and two of 24 were refused (1.016e-6 and 1.201e-6). The gate's
+number is not dominated by the fresh CASCI; `mc1step`'s orbitals are
+stationary only for its own floored CI vector. The numerical gradient
+therefore finishes each displaced state to ~1e-9 on this gate, and the
+threshold stays untouched ("Why the displaced states are finished" below).
+The same mechanism puts the committed CASSCF goldens' `E_corr` 7.2e-9 (LiF)
+and 1.3e-8 (acrolein) from a fully converged one, inside the demos' 1e-7.
 
 **Where "tens of millihartree" actually comes from.** The CASCI-vs-CASSCF
 *reference* difference, which is real, is the whole reason to want
@@ -1063,8 +1081,10 @@ gate's, which has already run on the state.
 
 **What stays refused.** A sidecar's `grad_num` arrays are a *numerical*
 gradient, and differencing needs a re-converged reference at every
-displacement; `nevpt2_numgrad.py` still refuses a `casscf` golden, so this
-file carries the 24 `--gradgold` arrays and no `grad_num`. Permitting
+displacement. `nevpt2_numgrad.py --reference casscf` does exactly that
+("The numerical gradient of a CASSCF reference" below), but writes its
+gradient to an `--npz` only, so this file carries the 24 `--gradgold` arrays
+and no `grad_num`, and stays byte-identical. Permitting
 `--gradgold` to write integral arrays is not permission to difference
 committed orbitals at a displaced geometry. Nothing in the ctest tier reads
 this file yet beyond the layout contract (`golden_layout_check.py` and
@@ -1123,9 +1143,11 @@ displacement, so all six components are differenced and none is refused.
 
 **What makes it possible is the CASCI reference** ("What 'CASSCF input' means
 here" above): RHF → CASCI is deterministic at every displaced geometry, so two
-displaced energies are two values of one function. A CASSCF reference would
-land on a differently-rotated solution at each displacement and the difference
-quotient would be meaningless.
+displaced energies are two values of one function. Committed CASSCF orbitals
+carried to a displaced geometry are not the CASSCF solution there, so this
+route refuses a `casscf` golden; `--reference casscf` is the other route,
+re-optimising every displaced state ("The numerical gradient of a CASSCF
+reference" below).
 
 **The refusals.** The active space is selected by irrep and the group is
 detected per geometry, so a displacement that lowers the symmetry silently
@@ -1198,6 +1220,236 @@ sidecar is sha256 `ae8de2cb…` after both, and acrolein's gitignored one
 `dbafd4da…`; the 24-array intermediates are still `093a7fbe…` / `8001e0c5…`
 ("LiF and acrolein, the gradient-validation pair" below), and both file sizes
 are unchanged to the 0.92 MB / 56.94 MB above.
+
+### The numerical gradient of a CASSCF reference
+
+`nevpt2_numgrad.py --reference casscf` (#124; the acrolein sweep below is
+#133's) is the oracle for
+`nevpt2_grad.py --reference casscf` ("The CASSCF branch" below). It
+differences `golden/<case>_casscf.nevpt2gold`'s state, and it **re-optimises
+every displaced state**. Committed orbitals carried to a displaced geometry
+are not the CASSCF solution there, so differencing them would differentiate
+the wrong functional. Each displaced state takes four steps:
+
+1. **`generate_golden.casscf_optimise`**, the body of `--casscf` (RHF →
+   symmetry-adapted `mc1step` → the fallback polish of "The CASSCF polish"),
+   from a **cold** start: the RHF orbitals sorted by `--cas-irreps`.
+2. **The finish** (`finish_casscf`; "Why the displaced states are finished"
+   below).
+3. **The golden's own `--mo-from` CASCI and SC-NEVPT2** on the finished
+   orbitals, with every refusal of `_build_state` in force, the `--mo-from`
+   stationarity gate (`CASSCF_GRAD_TOL`) included.
+4. **The continuity guard** before anything is differenced (below).
+
+**The reference ties to the committed files with no tolerance relaxed.**
+Re-optimised by step 1, the reference geometry's orbitals are compared
+**bit for bit** with the committed `.mogold`. Those orbitals must then
+reproduce the golden's `E_CASCI` and `E_corr` within `REF_STATE_TOL`. Both
+checks measure exactly 0 on LiF and acrolein. The finished reference, around
+which the differences are taken, is reported against the committed files and
+refused if its `E_CASSCF` moves by more than `CASSCF_E_TOL`:
+
+| | LiF CAS(4,6) | acrolein CAS(6,5) |
+|---|---|---|
+| step-1 orbitals vs the committed `.mogold` | bit-identical | bit-identical |
+| committed orbitals vs golden, `E_CASCI` / `E_corr` | 0 / 0 | 0 / 0 |
+| finish's shift: `E_CASSCF` / `E_corr` | −5.8e-13 / +7.2e-9 | +1.2e-12 / +1.3e-8 |
+| finished `‖g_orb‖` / `--mo-from` gate | 7.5e-11 / 7.0e-11 | 8.1e-10 / 7.9e-10 |
+
+The `E_corr` shift is the committed golden's own convergence error, the
+consequence of the next subsection's mechanism. It is 1e-8, an order inside
+the 1e-7 the demos check to.
+
+The cases, flags and stencil match the CASCI route: the same `CASES`, the
+same h = 0.0025 bohr with h/2 and h/4, the same `--components auto` and
+point-group refusal, the same selection check. The route is **SC only**:
+`--pc` is refused, because the PC gradient of a CASSCF reference is #126's.
+It writes **`--npz` only**: `<case>_casscf.gradgold` stays the 24
+`--gradgold` arrays and its bytes do not move. `nevpt2_grad.py --reference
+casscf --grad-num PATH` reads that `.npz`. Since this change `--grad-num` is
+no longer refused on that branch, and it refuses an `.npz` whose `reference`
+is not the run's.
+
+#### Why the displaced states are finished
+
+Differencing step 1's states directly does not work, and the failure is
+measured, not assumed. On acrolein, displaced states built by
+`generate_golden`'s path alone (polish only) gave these results. Ladder:
+components 0x, 1y, 4y, 7y, 24 states per step. Screen: the four seeded
+directions.
+
+| | value |
+|---|---|
+| optimiser's own `‖g_orb‖` (its CI vector), every state | ≤ 1.1e-8 |
+| `--mo-from` gate's `‖g_orb‖` (the fresh 1e-12-Davidson CASCI's RDMs) | 1.1e-7 … 1.2e-6 |
+| states the gate refused (`> CASSCF_GRAD_TOL` = 1e-6) | 2 of 24 at 0.0025 bohr (1y+0 at 1.016e-6, 1y-2 at 1.201e-6); 1 of 24 at 0.005 (the same geometry as 1y+0, the same 1.016e-6) |
+| directional screen: Richardson residual / \|D − ⟨g, d⟩\| | up to 6.2e-5 / 5.0e-5 |
+
+`mc1step` converges the orbitals against a CI vector whose residual bottoms
+out near 1e-6, so the orbitals are stationary for *that* vector. With an
+accurate CI vector the same orbitals measure up to 1e-6, which is what the
+gate sees. `E_corr` is first order in the orbitals, so it carries
+1e-8-sized noise. Re-converging six such states with an accurate FCI solver
+moved their `E_corr` by up to 3.3e-8 and their `E_CASSCF` by ≤ 1.2e-12.
+
+**The finish is two stages after step 1.** Stage 1 is `mc1step` again, with
+generate_golden's polish settings and `ah_lindep` lowered to 1e-20. Below
+`‖g_orb‖` = 1e-7 the augmented-Hessian subspace `(1, g)` has an overlap
+eigenvalue `‖g‖²` under PySCF's `ah_lindep` (1e-14), and the step it returns
+is exactly zero. So a first run that converged just under `conv_tol_grad`
+stays frozen there; LiF's Li z+0.0025 converged at 9.43e-8, acrolein's 0x+2
+at 7.5e-8. Its stalled-and-polished neighbours sit at ~4e-9. Stage 1 brings
+every state to the same ~4e-9. Stage 2 is `mcscf.newton`, orbitals and CI
+coupled, with the FCI `lindep` at 1e-16 and `conv_tol` at 1e-14,
+`conv_tol_grad` 1e-9, and at most 100 macro iterations. Newton often stalls
+just above its threshold, between 1e-10 and 1.5e-9. That is why the macro
+ceiling is part of the definition and why the guard reads the norm reached,
+not the flag. The measured need for both stages:
+
+| acrolein | step 1 only | + newton | + both stages |
+|---|---|---|---|
+| direction d2: residual / \|D − ⟨g, d⟩\| | 6.2e-5 / 5.0e-5 | 8.1e-8 / 6.1e-8 | 1.1e-7 / 8.3e-8 |
+| component 0x: residual / \|g − grad_num\| | — | 1.23e-6 / 1.20e-6 | 1.3e-9 / 3.6e-8 |
+
+The newton-only 0x failure traced to one state, 0x+2, the state that
+converged first time at 7.5e-8. Started from stage 1 instead, it moved by
+−1.13e-9 Eh, onto the smooth curve: 0x's \|g − grad_num\| fell to 9.4e-9.
+Re-finishing a finished state moves its `E_corr` by ≤ 1.1e-12, so the
+finished states are stable. A tighter CASCI on acrolein's 100 determinants
+changes nothing, because PySCF diagonalises a space that small exactly.
+
+**The finish never replaces step 1.** It runs after it, and the committed
+`.mogold` is what step 1 reproduces bit for bit. Nothing in
+`generate_golden.py` changed its numbers: regenerating every committed
+`*_casscf.mogold` with `--casscf --mo-out` into scratch gives files
+byte-identical (`cmp`) to the committed ones (N2 CAS(4,4), CAS(10,10), DF
+CAS(4,4); LiF; acrolein).
+
+The `--mo-from` gate stays **unchanged and refusing** on every displaced
+state. Finished, the states measure ≤ 1.4e-9 (LiF 4.2e-10) on it, against 1e-6.
+
+#### The continuity guard's thresholds
+
+A displaced state is refused, not differenced, when any of three signals
+trips. The refusal names each state and each tripped signal:
+
+- **`energy`**: \|E_CASSCF(s) − E_CASSCF(0) − s ⟨g_CASSCF, d⟩\|, the
+  displaced energy against its first-order prediction from
+  `pyscf.grad.casscf` at the reference. The cold-start run-to-run band at a
+  fixed geometry is exactly 0 ("A fresh CASSCF reproduces, measured"), so
+  what is left is the second-order remainder.
+- **`gradient`**: `generate_golden`'s optimiser did not set `converged`
+  (`CASSCF_CONV_TOL_GRAD` = 1e-7), or the finished state's own `‖g_orb‖` is
+  over that same 1e-7.
+- **`overlap`**: 1 − σ_min of the active-subspace overlap with the
+  reference's active orbitals (carried into the displaced AO basis and
+  Löwdin-orthonormalised), or 1 − \|⟨c₀\|c(s)⟩\| with c(s) rotated into the
+  reference's active basis. This catches an active orbital swapped out, or a
+  root flip. An active–active rotation, the gauge, costs nothing; that is a
+  hand case in `reference_data/tests/test_numgrad_casscf.py`.
+
+The thresholds are absolute and calibrated on the shipped stencil. Each sits
+at least ten times above the largest value LiF's and acrolein's sweeps
+measured, and below what an oversized displacement produces
+(`casscf_repro_probe.py --case lif_def2svp_cas46 --displace 0z`):
+
+| signal | threshold | max measured, LiF / acrolein sweeps | LiF Li z, `--displace` ladder |
+|---|---|---|---|
+| `energy` | 3e-5 | 5.6e-7 / 2.8e-6 | 5.6e-7 at 0.0025; **trips from 0.02** (3.5e-5) |
+| `gradient` (finished `‖g_orb‖`) | 1e-7 | 4.5e-10 / 1.4e-9 | ≤ 9.1e-10 at every step to 0.32 |
+| `overlap`: 1 − σ_min | 1e-4 | 1.4e-6 / 5.0e-6 | 1.7e-7 at 0.0025; **trips from 0.08** (1.7e-4) |
+| `overlap`: 1 − \|⟨c₀\|c⟩\| | 1e-5 | 2.1e-8 / 5.9e-7 | 2.1e-8 at 0.0025; **trips from 0.08** (2.1e-5) |
+
+So an oversized stencil is refused, and the refusal names its signal. `nevpt2_numgrad.py --case lif_def2svp_cas46 --reference casscf --step 0.04 --components 0z --no-write` exits 1 with `the continuity guard refuses 4 displaced state(s) of 6`. Each refused state is named with `tripped energy` and its numbers: `0z+0` at 1.48e-4, `0z+1` (0.02 bohr) at 3.62e-5, against 3e-5. The 0.01-bohr rung passes. The thresholds are for the shipped step, which is the point: a stencil coarse enough to leave the measured envelope is not differenced.
+
+**Cold start defines the oracle; warm start is the detector.** After the
+sweep, the first two coarse-step geometries are re-optimised from the
+reference's converged orbitals and CI vector, carried into the displaced AO
+basis and projected irrep by irrep, through the same path. Each is compared
+with its cold state. A different `E_CASSCF` (> `CASSCF_E_TOL`), active
+space or CI vector would mark the geometry ambiguous and refuse the sweep.
+Measured, they are the same stationary point everywhere:
+
+| geometry | ΔE_CASSCF | 1 − σ_min | 1 − \|⟨c_cold\|c_warm⟩\| |
+|---|---|---|---|
+| LiF Li x ±0.0025 | −1.1e-13, −1.3e-13 | 1.7e-15, 1.3e-15 | ≤ 1.1e-15 |
+| acrolein d0 ±0.0025 (screen) | +1.2e-12, −6.3e-13 | 3.3e-16, 1.0e-15 | ≤ 1.9e-15 |
+| acrolein O x ±0.0025 (gate) | −1.1e-12, −1.6e-12 | ≤ 6.7e-16 | ≤ 6.7e-16 |
+
+**This answers the precondition [`gradient-theory.md`](gradient-theory.md)
+§4.4 left unmeasured, for these two cases.** No displaced state tripped a
+signal, and cold and warm agree to round-off. That includes LiF's off-axis
+components, where the saddle's symmetry-breaking modes sit ("LiF and
+acrolein on CASSCF orbitals" below). Every LiF state stayed in C2v, which the
+symmetry-adapted optimiser cannot leave.
+
+#### The sweeps
+
+All runs are CPU only, single-threaded per process, `--workers 12` on the
+gfx1200 box's Ryzen 9 5900X (12 physical cores, 24 SMT threads). No card is
+involved. Each state is an independent cold start, collected by label, so
+the result does not depend on `--workers`. On LiF, `--workers 1` and
+`--workers 12` give bit-identical arrays, every one of them (`cmp` on the
+`.npz` contents) at 120.5 s vs 20.4 s.
+
+| | LiF CAS(4,6) | acrolein screen | acrolein CAS(6,5) componentwise |
+|---|---|---|---|
+| what | 6 components (0 zero by symmetry) | 4 seeded directions (`SCREEN_SEED` 124) | 16 probed, 8 zero by symmetry |
+| displaced states (+ 2 warm) | 36 | 24 | 96 |
+| wall (whole run), declared budget | 20.4 s, 600 s | 424.6 s, 1800 s | 950.8 s, 3600 s |
+| max Richardson residual | 1.6e-8 | 1.1e-7 | 7.5e-8 |
+| against `nevpt2_grad.py --reference casscf` | max \|g − grad_num\| 2.9e-8 | max \|D − ⟨g, d⟩\| 8.3e-8: **PASS** (1e-6) | max \|g − grad_num\| 8.3e-8 (RMS 3.1e-8) |
+| free check: CASSCF-only gradient vs `pyscf.grad.casscf` | 1.7e-10 | 1.9e-9 | 3.0e-9 |
+| translational sums | ≤ 1.1e-8 | — | 3.2e-8 (x), 9.7e-8 (y) |
+
+**The residual band is not the CASCI twin's, and this says why.** The issue
+asked for a residual "in the band its CASCI twin reports". That is 1.1e-10
+on LiF and 4.5e-9 on acrolein ("The numerical gradient" above). The CASSCF
+route measures 1.6e-8 and 7.5e-8. A CASCI state is one deterministic
+diagonalisation per geometry. A CASSCF state is the end of an iterative
+optimisation whose stopping point is itself noise. LiF's congruent pairs
+(mirror images ±x/±y, and Li +z against F −z) are the same internal geometry
+and should agree exactly. Finished, they agree to 2.4e-11 Eh in
+`E_CASCI + E_corr`, which is 1.9e-8 Eh/bohr in the finest central
+difference: the LiF floor, measured directly. With step 1's states alone
+the same pairs differed by 2.9e-10 Eh (2.3e-7 Eh/bohr; residual 2.4e-7),
+with the optimiser at its ~4e-9 plateau. The gate stays the analytic
+gradient against this one at 1e-6, and the bars above are far inside it.
+Park's own SC analytic-vs-numerical RMS on these two systems is 2.4e-6 (LiF)
+and 3.4e-6 (acrolein) at a 0.001 bohr step ([`references.md`](references.md),
+"Analytical gradients"; his Table 3). This is an external anchor, not the
+gate.
+
+**One sweep, three consumers.** `--states-dir DIR` keeps every displaced
+state's finished orbitals as `<label>.mogold`, beside a `states.json`
+manifest. Labels are `<atom><axis><sign><rung>` and `d<n><sign><rung>`; the
+manifest records each state's `--atom` spec, displacement, energies, signals
+and the finish settings. The screen and the componentwise gate share one
+directory, merged by label. #126's block2 spot-checks and its
+per-displacement `--no-pc` goldens for the GPU consume those sidecars
+(`generate_golden.py --atom SPEC … --mo-from DIR/<label>.mogold`) rather
+than optimising their own. Nothing in it is committed. A state the guard
+refuses has no `.mogold`; its manifest entry carries `tripped` (the signal
+names) or `refused` (the refusal text) instead, and the run exits 1 after
+naming every one. In the sweeps above none was refused.
+
+Re-run all of the above with:
+
+```bash
+uv run python reference_data/nevpt2_grad.py --case acrolein_def2svp_cas65 \
+    --reference casscf --out /tmp/acrolein.grad.npz     # the analytic side
+uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65 \
+    --reference casscf --directional 4 --analytic /tmp/acrolein.grad.npz \
+    --workers 12 --states-dir /tmp/acrolein_states --npz /tmp/screen.npz
+uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65 \
+    --reference casscf --workers 12 --states-dir /tmp/acrolein_states \
+    --analytic /tmp/acrolein.grad.npz --npz /tmp/acrolein_casscf.numgrad.npz
+uv run python reference_data/nevpt2_numgrad.py --case lif_def2svp_cas46 \
+    --reference casscf --workers 12 --npz /tmp/lif_casscf.numgrad.npz
+uv run python reference_data/casscf_repro_probe.py --case lif_def2svp_cas46 \
+    --displace 0z --runs 3 --workers 12 \
+    --steps 0.000625,0.00125,0.0025,0.005,0.01,0.02,0.04,0.08,0.16,0.32
+```
 
 ### The analytic gradient
 
@@ -1409,9 +1661,11 @@ branch; there is no (O1), no selection multiplier and no §2.6 rotation.
 gradient through the same operator instead (on N2 CAS(4,4) it converges to
 `|J L + b|` = 2.9e-12 and moves the gradient by 4.3e-13 from the dense
 answer). The constraints in `Phi` are `gen_g_hop`'s `g_all` at each
-displaced geometry. There is no numerical gradient of a `casscf` state
-(`nevpt2_numgrad.py` refuses one), so the gate is the residual-independent
-checks, with two of the branch's own: **the Hessian-vector ladder** — `h_op`
+displaced geometry. Its numerical gradient is `nevpt2_numgrad.py
+--reference casscf --npz PATH`, read with `--grad-num PATH` ("The numerical
+gradient of a CASSCF reference" below; the SC verdict on it is #125's);
+without one, the gate is the residual-independent checks, with two of the
+branch's own: **the Hessian-vector ladder** — `h_op`
 against central differences of `g_all` along three seeded random directions,
 no NEVPT2 content — and, with `--casci-only`, **the smoke test** —
 multipliers exactly zero, gradient against `pyscf.grad.casscf`.
@@ -2099,9 +2353,9 @@ not used.
 |---|---|
 | `reference_data/generate_golden.py` | the **only** file that defines the golden state (`block2_pc_probe.py` imports its `_build_state`). Runs a deterministic `mcscf.CASCI` (see "What "CASSCF input" means here" above), canonicalises it exactly as `pyscf.mrpt.NEVPT.kernel` does, and writes the CI vector, `dm1`/`dm2`, every MO-integral block, and PySCF's own per-class NEVPT2 answer into one flat binary file. `--df` does the same density-fitted and adds the `B_*` blocks. Unless `--no-pc`, it also runs block2's PC-NEVPT2 on the same state and writes `pc_class_energies` / `e_pc_total` (see "PC fields" above). `--casscf --mo-out` / `--mo-from` is the two-step CASSCF-orbital path, and the only thing here that runs an orbital optimiser (see "The MO sidecar" above), polishing once with a tighter AH solve if the first run does not converge ("The CASSCF polish" above) |
 | `reference_data/block2_pc_probe.py` | rebuilds a golden's state with `generate_golden._build_state` (imported, not copied), checks it is bit-identical to the committed CI vector, and runs block2's `WickSCNEVPT2` and `WickICNEVPT2` (PC) on it: per-class energies, timings, peak RSS, and the PC linear-solve / metric conditioning (`--metric`). Writes no golden. See [`pc-nevpt2.md`](pc-nevpt2.md) |
-| `reference_data/nevpt2_numgrad.py` | the **numerical** nuclear gradient: displaced RHF → CASCI → SC-NEVPT2 runs (states built by `generate_golden._build_state`, imported) differenced and Richardson-extrapolated into a sidecar's `grad_num` / `grad_num_residual` / `grad_num_probed` / `grad_num_step`. Refuses a displacement whose detected point group — or whose core/active irrep selection — differs from the reference geometry's, rather than produce a number from a different active space, and refuses a golden whose `reference_kind` is not `casci`. `--pc` differences block2's partially-contracted energy on the same displaced states (and writes no sidecar); `--npz PATH` writes the gradient arrays alone, which is how a PC one, or any case whose committed sidecar holds no `grad_num`, reaches `nevpt2_grad.py --grad-num`. Writes no golden and no new sidecar; only the two gradient-validation cases carry its arrays in their sidecars (see "The numerical gradient" above) |
+| `reference_data/nevpt2_numgrad.py` | the **numerical** nuclear gradient: displaced RHF → CASCI → SC-NEVPT2 runs (states built by `generate_golden._build_state`, imported) differenced and Richardson-extrapolated into a sidecar's `grad_num` / `grad_num_residual` / `grad_num_probed` / `grad_num_step`. Refuses a displacement whose detected point group — or whose core/active irrep selection — differs from the reference geometry's, rather than produce a number from a different active space, and refuses a golden whose `reference_kind` is not the `--reference` asked for. `--reference casscf` re-optimises every displaced state through `generate_golden.casscf_optimise` plus a finish, guarded by the continuity check, with a directional screen (`--directional N --analytic PATH`), `--workers N` processes and the states kept for reuse (`--states-dir`) ("The numerical gradient of a CASSCF reference" above). `--pc` differences block2's partially-contracted energy on the same displaced states (and writes no sidecar); `--npz PATH` writes the gradient arrays alone, which is how a PC one, or any case whose committed sidecar holds no `grad_num`, reaches `nevpt2_grad.py --grad-num`. Writes no golden and no new sidecar; only the two gradient-validation cases carry its arrays in their sidecars (see "The numerical gradient" above) |
 | `reference_data/nevpt2_grad.py` | the **analytic** nuclear gradient: a `pyscf.grad.lagrange.Gradients` subclass that solves the CI and orbital Z-vector equations of [`gradient-theory.md`](gradient-theory.md), §2 and contracts them into a gradient, differentiating one scalar along a frozen orthonormal path. SC by default, block2's PC with `--pc` (the same Lagrangian: only `E_corr` changes). Source terms from PySCF by default, or from the GPU's `.gradsrc` dump (`--source dump`, written by `nevpt2_sc_pseudodensity --dump-source-terms`; with `--pc` a PC dump, `--pc --dump-source-terms`, #74 — a dump of the other scheme is refused), or both side by side (`--source both`: the two compared componentwise and solved on one sweep; [`testing.md`](testing.md), "The GPU as the source-term provider"). `--edot-check` instead holds the dump's forward `Edot(kappa)` along its seeded directions — frozen-digest tangent plus the digests' term — against PySCF's exact directional derivative, step-laddered, and stops ([`testing.md`](testing.md), "The digests' orbital response, forward mode"). Ends by gating itself against `grad_num` and printing `PASS:`/`FAIL:` ([`testing.md`](testing.md), "The analytic gradient against the numerical one"). Writes **nothing** unless `--out` is given, and never a committed file; `--casci-only` is its own validation (see "The analytic gradient" above) |
-| `reference_data/casscf_repro_probe.py` | the **CASSCF reproducibility** measurement: ≥5 back-to-back RHF → symmetry-adapted `mcscf.CASSCF` → orbital-gradient → fresh `mcscf.CASCI` → SC-NEVPT2 runs under `generate_golden`'s own settings (imported, so single-threaded with the same Davidson tolerance), reporting the spread of E_CASSCF / E_corr / ‖g_orb‖ and whether any run changed stationary point. `--perturb EPS` starts the optimiser from a random same-irrep rotation instead. Writes no golden; its output is what "A fresh CASSCF reproduces, measured" above quotes, and where the `--mo-from` gate thresholds come from |
+| `reference_data/casscf_repro_probe.py` | the **CASSCF reproducibility** measurement: ≥5 back-to-back RHF → symmetry-adapted `mcscf.CASSCF` → orbital-gradient → fresh `mcscf.CASCI` → SC-NEVPT2 runs under `generate_golden`'s own settings (imported, so single-threaded with the same Davidson tolerance), reporting the spread of E_CASSCF / E_corr / ‖g_orb‖ and whether any run changed stationary point. `--perturb EPS` starts the optimiser from a random same-irrep rotation instead. `--case NAME --displace COMP --steps …` runs `nevpt2_numgrad.py --reference casscf`'s own state path along a ladder of displacements and prints the continuity guard's three signals per step (where its thresholds come from). Writes no golden; its output is what "A fresh CASSCF reproduces, measured" above quotes, and where the `--mo-from` gate thresholds come from |
 | `reference_data/sc_source_oracle.py` | **PySCF's exact SC source terms** for N2 CAS(4,4) and LiF, written as `golden/<case>.srcgold` out of `nevpt2_grad.py`'s own machinery at its converged steps; the oracle `nevpt2_sc_pseudodensity --source-oracle` gates the GPU's against (see "The SC source-term oracle" above). With `--pc`, **block2's PC ones** for N2 CAS(4,4), `golden/n2_ccpvdz_cas44_pc.srcgold` ("The PC flavour"). With `--directional`, the **directional flavour** for acrolein, N2 and LiF, `golden/<case>[_pc]_dir.srcgold` ("The directional flavour"). With `--case n2_ccpvdz_cas44_casscf --mo-from FILE`, all four kinds on **converged CASSCF orbitals** ("On CASSCF orbitals"), with the sidecar fingerprint-checked as `generate_golden.py --mo-from` checks it. Byte-reproducible |
 | `reference_data/golden_format.py` | the **one Python parser** of the three formats in `golden/` (and of the `.srcgold` oracle, plus its writer `write_srcgold`): the header tables (keyed by magic) the writers pack from and the readers read by, `read_golden` / `read_golden_header` / `read_gradgold` / `read_mo_sidecar` / `read_srcgold`, and `arrays-at FILE` for the regeneration check's `cmp -i`. `struct` and NumPy only, and no thread settings, so the timing script can use it (see "The file format" above) |
 | `reference_data/golden_layout_check.py` | the Python half of the **layout contract**: every committed file of both golden layouts, and every sidecar, through every reader and back through its writer byte for byte, plus a scan for any parser outside `golden_format.py`. Ends `PASS:`/`FAIL:`; a manual gate, no ctest entry ([`testing.md`](testing.md), "The golden layout contract") |

@@ -39,8 +39,17 @@ different seed per run, to probe for a *different* stationary point rather
 than for jitter. Without it, every run is the same deterministic calculation
 and the spread it measures is the spread the generator would see.
 
+``--case NAME --displace COMP --steps S1,S2,...`` is the displaced-geometry
+mode: ``nevpt2_numgrad.py --reference casscf``'s own state path (cold
+optimisation, finish) at a ladder of displacements of one component, both
+signs, printing that script's three continuity signals per step against the
+reference -- the measurement its ``CONTINUITY_*`` thresholds are set from,
+on both sides of them.
+
 Usage::
 
+    uv run python reference_data/casscf_repro_probe.py --case lif_def2svp_cas46 \
+        --displace 0z --runs 3 --workers 12
     uv run python reference_data/casscf_repro_probe.py --ncas 4 --nelecas 4
     uv run python reference_data/casscf_repro_probe.py              # CAS(10,10)
     uv run python reference_data/casscf_repro_probe.py --ncas 4 --nelecas 4 \
@@ -55,6 +64,7 @@ import generate_golden as gg
 # isort: split
 import argparse
 import json
+import tempfile
 import time
 from pathlib import Path
 
@@ -235,10 +245,77 @@ def _spread(label: str, values: list[float]) -> str:
     return f"{label:<14} min {lo:.12f}  max {hi:.12f}  spread {hi - lo:.3e}"
 
 
+def displaced_probe(args) -> None:
+    """``--case NAME --displace COMP --steps S1,S2,...``: the continuity
+    guard's three signals (``nevpt2_numgrad.casscf_point``, the numerical
+    gradient's own path) at a ladder of displacements of one component, both
+    signs, against the reference geometry -- the measurement
+    ``nevpt2_numgrad``'s ``CONTINUITY_*`` thresholds are set from. The
+    reference geometry itself is run ``--runs`` times first: its spread is the
+    run-to-run band the energy signal sits on (zero, if the optimiser
+    reproduces), so every number after it is the displacement's own."""
+    import nevpt2_numgrad as ng
+
+    case = dict(ng.CASES[args.case])
+    geom = ng.read_xyz(ng.REPO / case["geometry"])
+    (iatom, comp), = ng._parse_components(args.displace, len(geom))
+    steps = [float(s) for s in args.steps.split(",")]
+    tmp = Path(args.states_dir or tempfile.mkdtemp(prefix="repro-probe-"))
+    tmp.mkdir(parents=True, exist_ok=True)
+
+    def task(label, s, ref, slope):
+        d = np.zeros((len(geom), 3))
+        d[iatom, comp] = 1.0
+        return dict(case=case, geom=ng.displace_vec(geom, s * d), label=label, s=s,
+                    slope=slope, ref=ref, states_dir=str(tmp), keep_mc=ref is None)
+
+    # The first reference in this process (its optimiser object is needed for
+    # the gradient), the rest side by side.
+    r0 = ng.casscf_point(task("ref0", 0.0, None, 0.0))
+    refs = [r0, *ng.run_points([dict(task(f"ref{i}", 0.0, None, 0.0), keep_mc=False)
+                                for i in range(1, args.runs)], args.workers)]
+    e0 = [r["e_casscf"] for r in refs]
+    g = ng.casscf_gradient(r0.pop("mc"))
+    slope = float(g[iatom, comp])
+    print(f"{args.case} displacing atom {iatom} {ng.AXES[comp]}; reference x{args.runs}: "
+          f"E_CASSCF spread {max(e0) - min(e0):.1e}, E_corr spread "
+          f"{max(r['e_corr'] for r in refs) - min(r['e_corr'] for r in refs):.1e}, "
+          f"dE_CASSCF/dx = {slope:+.10f} (pyscf.grad.casscf)")
+    ref = dict(mo=r0["mo"], ci_opt=r0["ci_opt"], e_casscf=r0["e_casscf"])
+    tasks = [task(f"{sign:+d}x{s:g}", sign * s, ref, slope) for s in steps for sign in (1, -1)]
+    print(f"{'step (bohr)':>12} {'e_jump':>9} {'|g_orb|':>9} {'conv':>5} {'1-sv_act':>9} "
+          f"{'1-|ci|':>9} {'gate':>9} {'macro':>7}  tripped")
+    for t, r in zip(tasks, ng.run_points(tasks, args.workers), strict=True):
+        if r.get("refused") and "signals" not in r:
+            print(f"{t['s']:+12g}  refused while building it: {r['refused']}")
+            continue
+        sig = r["signals"]
+        print(f"{t['s']:+12g} {sig['e_jump']:9.2e} {sig['g_opt']:9.2e} "
+              f"{str(sig['converged']):>5} {sig['act_defect']:9.2e} {sig['ci_defect']:9.2e} "
+              f"{r['gate'][0] if 'gate' in r else float('nan'):9.2e} "
+              f"{r['n_macro']:>3}+{r['polish_macro']}  "
+              f"{','.join(r['tripped']) or '-'}"
+              + (f"  (refused: {r['refused'].splitlines()[0]})" if r.get("refused") else ""))
+
+
 def main() -> None:
     import pyscf
 
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--case", default=None,
+                    help="with --displace: a nevpt2_numgrad.py case, run through "
+                         "that script's --reference casscf path")
+    ap.add_argument("--displace", default=None, metavar="COMP",
+                    help="one component, e.g. '0z' (atom index, axis): measure the "
+                         "continuity guard's signals at --steps displacements of it")
+    ap.add_argument("--steps", default="0.000625,0.00125,0.0025,0.01,0.04,0.16",
+                    help="--displace: the displacements, bohr, each taken with both "
+                         "signs")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="--displace: states optimised in parallel")
+    ap.add_argument("--states-dir", default=None,
+                    help="--displace: where the probed states' MO sidecars go "
+                         "(default: a fresh temporary directory)")
     ap.add_argument("--atom", default="N 0 0 0; N 0 0 1.1")
     ap.add_argument("--basis", default="cc-pvdz")
     ap.add_argument("--ncas", type=int, default=10)
@@ -265,6 +342,11 @@ def main() -> None:
     ap.add_argument("--core-irreps", type=gg._irrep_counts, default=None)
     ap.add_argument("--json", default=None, help="write the per-run record here")
     args = ap.parse_args()
+    if args.displace is not None:
+        if args.case is None:
+            ap.error("--displace needs --case")
+        displaced_probe(args)
+        return
     if args.core_irreps is not None and args.cas_irreps is None:
         ap.error("--core-irreps needs --cas-irreps")
 

@@ -48,8 +48,30 @@ this script rather than the hazard below). That is a statement about
 for bit, measured in docs/reference-data.md, "What 'CASSCF input' means here,
 and why the golden state is CASCI". The golden's header says which reference
 built its orbitals, so this is enforced and not merely assumed: a golden whose
-``reference_kind`` is not ``"casci"`` is **refused**
+``reference_kind`` is not the ``--reference`` asked for is **refused**
 (:func:`_check_reference_kind`), before any energy is computed.
+
+**``--reference casscf`` is the other route** (:func:`run_casscf`). Every
+displaced state is re-OPTIMISED from a cold start through
+``generate_golden.casscf_optimise`` -- the body of ``--casscf``, polish
+included -- then finished (:func:`finish_casscf`), then given the golden's
+own ``--mo-from`` CASCI + SC-NEVPT2. Cold start defines the oracle; a warm
+start on the first coarse-step geometries is a free probe for a second
+solution (:func:`warm_probe`). Every displaced state passes a **continuity
+guard** before it is differenced -- an energy jump, an unconverged
+optimiser, or an active space / CI vector that moved too far
+(:func:`continuity_tripped`) -- and the reference must tie to the committed
+``<case>_casscf.mogold`` and golden bit for bit. ``--directional N
+--analytic PATH`` is the cheap **screen** (``<g, d>`` against a central
+difference along N seeded in-plane directions), run before the
+componentwise gate. ``--workers N`` runs the independent states as N
+single-threaded processes, bit-identically to one. Each state's MO sidecar
+and a ``states.json`` manifest stay in ``--states-dir``, so later consumers
+(#126's PC energies) reuse this sweep's states rather than optimising their
+own. SC only, and it writes ``--npz`` only: the committed
+``<case>_casscf.gradgold`` stays the 24 ``--gradgold`` arrays.
+docs/reference-data.md, "The numerical gradient of a CASSCF reference", has
+the measurements.
 
 **In-plane displacements only, and the refusal.** The active space is selected
 by irrep, and the irrep labels exist only as long as the point group does, so
@@ -92,6 +114,12 @@ differentiate::
         --components all                     # refused: 0z breaks Cs
     uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65 \
         --pc --npz /tmp/acrolein.numgrad.npz # SC and PC, nothing written in golden/
+    uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65 \
+        --reference casscf --directional 4 --analytic /tmp/acrolein.grad.npz \
+        --workers 12 --states-dir /tmp/acrolein_states --npz /tmp/screen.npz
+    uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65 \
+        --reference casscf --workers 12 --states-dir /tmp/acrolein_states \
+        --npz /tmp/acrolein_casscf.numgrad.npz   # the gate, once the screen passes
 """
 
 from __future__ import annotations
@@ -101,8 +129,13 @@ import generate_golden as gg
 
 # isort: split
 import argparse
+import contextlib
+import io
+import json
 import re
+import tempfile
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import golden_format as gf
@@ -140,6 +173,91 @@ STEP_BOHR = 0.0025
 #: basis or active-space selection handed in here is not the one the golden
 #: was built from, and the gradient would be of a different function.
 REF_STATE_TOL = 1e-10
+
+# -- the CASSCF reference (--reference casscf) --------------------------------
+#
+# Every displaced state is re-OPTIMISED, cold, through generate_golden's own
+# optimiser (casscf_optimise, the body of --casscf), then gets the same
+# deterministic CASCI on those orbitals the committed golden got (--mo-from).
+# docs/reference-data.md, "The numerical gradient of a CASSCF reference", has
+# every number quoted below.
+
+#: The references this script differentiates; the golden's ``reference_kind``
+#: must be the one asked for (:func:`_check_reference_kind`).
+REFERENCES = ("casci", "casscf")
+
+#: The finish (:func:`finish_casscf`), two stages from the generator's
+#: converged state: ``mc1step`` with the polish's settings and ``ah_lindep``
+#: at FINISH_AH_LINDEP, then ``mcscf.newton`` with its FCI solver's
+#: ``lindep`` and ``conv_tol`` lowered, at this gradient threshold and macro
+#: ceiling. ``mc1step`` converges the
+#: orbitals against a CI vector whose residual floors near 1e-6, which leaves
+#: the orbitals stationary for that vector and not for the accurate one: the
+#: ``--mo-from`` gate, evaluated with the fresh 1e-12-Davidson CASCI, scatters
+#: from 1.1e-7 to 1.2e-6 over acrolein's displaced states (and refuses two of
+#: 24) while their optimiser's own ``|g_orb|`` is <= 1.1e-8, and E_corr --
+#: first order in the orbitals -- carries ~1e-8 Eh of noise: a 6e-5 Eh/bohr
+#: Richardson residual. Finished, the gate reads ~1e-9 and that direction's
+#: residual is 1.1e-7 (docs/reference-data.md, "Why the displaced states are
+#: finished"). The threshold is often not met to the letter -- newton stalls
+#: between 4e-10 and 1e-9 -- which is why the ceiling is part of the
+#: definition and the guard reads the norm reached, not the flag.
+FINISH_CONV_TOL = 1e-13
+FINISH_CONV_TOL_GRAD = 1e-9
+FINISH_MAX_CYCLE_MACRO = 100
+FINISH_AH_LINDEP = 1e-20
+FINISH_FCI_LINDEP = 1e-16
+FINISH_FCI_CONV_TOL = 1e-14
+
+#: The continuity guard's three signals, refused past these. Absolute, and
+#: calibrated on the shipped stencil (:data:`STEP_BOHR` and its halves):
+#: each sits a decade or more above the largest value any step of the LiF and
+#: acrolein sweeps measured and far below what a displacement that leaves the
+#: reference's branch -- or is simply too large for the stencil to resolve --
+#: produces (``casscf_repro_probe.py --displace`` measures both sides;
+#: docs/reference-data.md, "The continuity guard's thresholds").
+#:
+#: ``energy``: ``|E_CASSCF(s) - E_CASSCF(0) - s <g_CASSCF, d>|``, the
+#: displaced optimiser energy against its first-order prediction from
+#: ``pyscf.grad.casscf`` at the reference. The cold-start run-to-run band at a
+#: fixed geometry is exactly zero (docs/reference-data.md, "A fresh CASSCF
+#: reproduces, measured"), so what is left is the second-order remainder.
+CONTINUITY_E_TOL = 3e-5
+#: ``overlap``: ``1 - sigma_min`` of the active-subspace overlap with the
+#: reference geometry's active orbitals (carried into the displaced AO basis,
+#: :func:`carry_orbitals`): an active orbital swapped with a core or virtual.
+CONTINUITY_ACT_TOL = 1e-4
+#: ``overlap`` too: ``1 - |<ci_0|ci(s)>|`` with the displaced CI vector
+#: rotated into the reference's active basis (``fci.addons.transform_ci``):
+#: a root flip, or a CI vector that moved by more than a smooth state does.
+CONTINUITY_CI_TOL = 1e-5
+#: ``gradient``: the generator's optimiser's own ``converged`` flag (its
+#: ``conv_tol_grad``, generate_golden.CASSCF_CONV_TOL_GRAD), and the
+#: finished state's own ``|g_orb|`` against that same 1e-7 -- measured at
+#: <= 1e-9, so a state over it did not finish at all. The golden's
+#: ``--mo-from`` gate (``CASSCF_GRAD_TOL`` on the fresh CASCI) also runs,
+#: unchanged and refusing, on every displaced state; its number is recorded
+#: in the log and the ``--npz``.
+
+#: The directional screen's directions: how many, and the seed they are drawn
+#: with (fixed, so the screen is one reproducible calculation).
+SCREEN_DIRECTIONS = 4
+SCREEN_SEED = 124
+
+#: Declared wall-clock budgets, in seconds, for ``--workers 12`` (one per
+#: physical core; docs/reference-data.md has the measured walls): the screen is
+#: held to #105's 30-minute shape on every case; the componentwise gate, run
+#: once the screen is green, gets its own. A bound, not a gate: a run over it
+#: says so and does not fail (as ``nevpt2_grad.CASSCF_WALL_BUDGET``).
+SCREEN_WALL_BUDGET = 1800.0
+GATE_WALL_BUDGET = {
+    "lif_def2svp_cas46": 600.0,
+    "acrolein_def2svp_cas65": 3600.0,
+}
+
+#: How many displaced geometries the cold-vs-warm probe re-optimises from the
+#: reference's converged orbitals (:func:`warm_probe`).
+WARM_PROBE_DEFAULT = 2
 
 #: The cases with a committed golden + sidecar, keyed by their golden's name.
 #: These MUST stay the ``--gradgold`` invocations in docs/reference-data.md,
@@ -219,29 +337,37 @@ def read_xyz(path: Path) -> list[tuple[str, tuple[float, float, float]]]:
     return geom
 
 
-def _check_reference_kind(kind: str, path: Path) -> None:
-    """Refuse a golden whose orbitals did not come from a CASCI on converged
-    RHF orbitals. Everything here differentiates *that* reference: RHF
-    followed by a CASCI diagonalisation is one deterministic function of the
-    geometry, so two displaced energies are two values of it. A CASSCF
-    reference is a different Lagrangian -- CP-CASSCF rather than RHF
-    Brillouin/CPHF plus an active-space selection (docs/gradient-theory.md,
-    §1.1, §1.2 and §5) -- and differencing one needs a different strategy
-    anyway, since each displaced geometry lands on a differently-rotated
-    solution of the same energy (§4.4). Refused, not warned: the number it
-    would produce looks like a gradient. (``apps/integral_direct``'s
-    ``--sc-tangent`` and ``--gradient-source`` refuse the same input, as an
+def _check_reference_kind(kind: str, path: Path, reference: str = "casci") -> None:
+    """Refuse a golden whose reference is not the one this run differentiates.
+
+    ``--reference casci`` (the default) differences a CASCI on converged RHF
+    orbitals: RHF followed by a CASCI diagonalisation is one deterministic
+    function of the geometry, so two displaced energies are two values of it.
+    A ``casscf`` golden is a different function -- its orbitals are a CASSCF
+    stationary point, and committed orbitals carried to a displaced geometry
+    are not the CASSCF solution there (docs/gradient-theory.md, §1.1, §4.4) --
+    so differencing it on the CASCI route would differentiate the wrong
+    functional. ``--reference casscf`` is that route: it re-optimises at every
+    displaced geometry, and refuses a ``casci`` golden the same way. Refused,
+    not warned: the number either mismatch would produce looks like a
+    gradient. (``apps/integral_direct``'s ``--sc-tangent`` and
+    ``--gradient-source`` refuse a casscf golden too, as an
     ``err_unsupported``.)"""
-    if kind != "casci":
+    if kind != reference:
         raise SystemExit(
-            f"{path}: this golden's reference_kind is {kind!r}, and this "
-            "script differentiates a CASCI on converged RHF orbitals. A "
-            "CASSCF reference needs CP-CASSCF and a different "
-            "numerical-gradient strategy -- each displaced geometry would "
-            "land on a differently-rotated solution of the same energy, so a "
-            "difference quotient of it is not a gradient "
-            "(docs/gradient-theory.md, §1.1 and §4.4). Refused rather than "
-            "differenced."
+            f"{path}: this golden's reference_kind is {kind!r}, and this run "
+            f"differentiates --reference {reference}. "
+            + ("A casci run would difference a CASCI on RHF orbitals, which "
+               "is not the state a casscf golden holds: its orbitals are a "
+               "CASSCF stationary point, and at a displaced geometry they "
+               "have to be re-optimised, not carried over "
+               "(docs/gradient-theory.md, §1.1 and §4.4). Pass --reference "
+               "casscf."
+               if kind == "casscf" else
+               "A casscf run re-optimises the orbitals at every displaced "
+               "geometry, which is not the function a casci golden holds. "
+               "Pass --reference casci.")
+            + " Refused rather than differenced."
         )
 
 
@@ -516,6 +642,654 @@ def numgrad(geom, case: dict, probed, step_bohr: float, ref_labels, *,
     return out
 
 
+# --------------------------------------------------------------------------
+# The CASSCF reference (--reference casscf)
+# --------------------------------------------------------------------------
+
+
+def geom_spec(geom) -> str:
+    """A geometry as the ``--atom`` string PySCF parses, Angstrom, every
+    coordinate written with ``repr`` so it round-trips exactly: what each
+    displaced state's MO sidecar records as its ``atom_spec``, and what a later
+    consumer of that sidecar (``generate_golden.py --atom SPEC --mo-from``)
+    hands back to rebuild the identical molecule."""
+    return "; ".join(f"{sym} {x!r} {y!r} {z!r}" for sym, (x, y, z) in geom)
+
+
+def displace_vec(geom, dvec_bohr: np.ndarray):
+    """``geom`` moved by a whole ``(natm, 3)`` displacement in bohr. For a
+    single-component ``dvec`` it is :func:`displace` to the bit (every other
+    coordinate gets ``+ 0.0``)."""
+    moved = []
+    for k, (sym, xyz) in enumerate(geom):
+        moved.append((sym, tuple(float(xyz[c] + dvec_bohr[k, c] * BOHR) for c in range(3))))
+    return moved
+
+
+def carry_orbitals(mo: np.ndarray, s_ao: np.ndarray) -> np.ndarray:
+    """Orbitals from one geometry carried to another: the same AO coefficients
+    (PySCF keeps the input frame, so an AO index means the same function on
+    the same atom at both), Löwdin-orthonormalised in the displaced overlap
+    ``s_ao``. What the overlap signal compares a displaced state's active
+    space against, and the warm start's orbitals."""
+    w, v = np.linalg.eigh(mo.T @ s_ao @ mo)
+    return mo @ (v * w**-0.5) @ v.T
+
+
+def overlap_signals(mo_s, ci_s, s_ao, mo_0, ci_0, ncore: int, ncas: int,
+                    nelecas) -> tuple[float, float]:
+    """``(1 - sigma_min, 1 - |<ci_0|ci_s>|)``: how far a state's active space
+    and CI vector are from a reference's, both carried into one basis. The
+    active overlap is ``C_s^T S C_0`` over the active columns
+    (:func:`carry_orbitals` for ``C_0``); the CI vector is rotated from the
+    state's active orbitals to the reference's by that overlap's closest
+    orthogonal matrix (``fci.addons.transform_ci``: new orbitals = old @ u),
+    so a rotation *within* the active space -- the gauge -- costs nothing,
+    while a different root or a swapped orbital does."""
+    from pyscf.fci import addons
+
+    c0 = carry_orbitals(mo_0, s_ao)
+    act = slice(ncore, ncore + ncas)
+    m = mo_s[:, act].T @ s_ao @ c0[:, act]
+    uu, sv, vt = np.linalg.svd(m)
+    ci_in_0 = addons.transform_ci(np.asarray(ci_s), nelecas, uu @ vt)
+    ci_ovlp = abs(float(np.vdot(np.asarray(ci_0).ravel(), np.asarray(ci_in_0).ravel())))
+    return float(1.0 - sv.min()), float(1.0 - ci_ovlp)
+
+
+def continuity_tripped(sig: dict) -> list[str]:
+    """Which of the guard's three signals a displaced state trips, by name:
+    ``energy`` (:data:`CONTINUITY_E_TOL`), ``gradient`` (not converged, or the
+    optimiser's own ``|g_orb|`` over ``CASSCF_CONV_TOL_GRAD``) and ``overlap``
+    (:data:`CONTINUITY_ACT_TOL` or :data:`CONTINUITY_CI_TOL`). A NaN -- a
+    signal that could not be evaluated -- trips it."""
+    out = []
+    if not sig["e_jump"] <= CONTINUITY_E_TOL:
+        out.append("energy")
+    if not (sig["converged"] and sig["g_opt"] <= gg.CASSCF_CONV_TOL_GRAD):
+        out.append("gradient")
+    if not (sig["act_defect"] <= CONTINUITY_ACT_TOL and sig["ci_defect"] <= CONTINUITY_CI_TOL):
+        out.append("overlap")
+    return out
+
+
+def signal_text(sig: dict) -> str:
+    """One state's three signals, each beside its threshold."""
+    return (f"energy |E-E0-s<g,d>| {sig['e_jump']:.2e} (<= {CONTINUITY_E_TOL:g}); "
+            f"gradient converged={sig['converged']} |g_orb| {sig['g_opt']:.2e} "
+            f"(<= {gg.CASSCF_CONV_TOL_GRAD:g}); overlap 1-sv_act {sig['act_defect']:.2e} "
+            f"(<= {CONTINUITY_ACT_TOL:g}), 1-|<ci0|ci>| {sig['ci_defect']:.2e} "
+            f"(<= {CONTINUITY_CI_TOL:g})")
+
+
+def _check_continuity(states: list[dict]) -> None:
+    """Refuse the sweep if any displaced state landed on a different
+    stationary point, or could not be shown not to: every refused state is
+    named with the signals it tripped, after all of them have been evaluated
+    (the whole picture is the diagnosis). Refused, not differenced -- the
+    number a branch change would produce looks like a gradient."""
+    bad = [st for st in states if st.get("tripped") or st.get("refused")]
+    if not bad:
+        return
+    lines = []
+    for st in bad:
+        if st.get("refused"):
+            lines.append(f"{st['label']}: refused while building it: {st['refused']}")
+        else:
+            lines.append(f"{st['label']}: tripped {', '.join(st['tripped'])} -- "
+                         + signal_text(st["signals"]))
+    raise SystemExit(
+        f"the continuity guard refuses {len(bad)} displaced state(s) of "
+        f"{len(states)}:\n  " + "\n  ".join(lines) + "\nA displaced CASSCF that "
+        "is not provably on the reference geometry's branch is refused rather "
+        "than differenced (docs/reference-data.md, \"The numerical gradient of "
+        "a CASSCF reference\")."
+    )
+
+
+def casscf_point(task: dict) -> dict:
+    """One displaced CASSCF state, end to end: the optimiser (cold, unless the
+    task carries a warm start), the three continuity signals against the
+    reference, then -- only if none trips -- the state's MO sidecar and the
+    golden's own ``--mo-from`` CASCI + SC-NEVPT2 on it.
+
+    A top-level function of one picklable dict so that ``--workers`` can farm it
+    out; ``generate_golden``'s single-threading holds in every worker (the
+    module is imported before numpy in each). Never raises a refusal: a
+    ``SystemExit`` from a guard inside the CASCI is returned as ``refused`` so
+    the parent can report every state before it refuses the sweep."""
+    from pyscf import symm
+
+    t0 = time.perf_counter()
+    case, geom, label = task["case"], task["geom"], task["label"]
+    spec = geom_spec(geom)
+    ref = task.get("ref")
+    start = None
+    if task.get("warm"):
+        # The warm start: the reference geometry's converged orbitals, carried
+        # into this geometry's AO basis, each projected onto its own irrep and
+        # re-orthonormalised (the irrep blocks are exactly orthogonal, so the
+        # Löwdin step keeps them pure and in order), with its CI vector.
+        mol = gg._build_mol(spec, case["basis"])
+        s_ao = mol.intor_symmetric("int1e_ovlp")
+        mo = symm.symmetrize_orb(mol, carry_orbitals(ref["mo"], s_ao), s=s_ao)
+        start = (carry_orbitals(mo, s_ao), ref["ci_opt"])
+    out = dict(label=label, atom=spec, warm=bool(task.get("warm")), s=task["s"],
+               slope=task["slope"])
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            o = gg.casscf_optimise(
+                spec, case["basis"], case["ncas"], case["nelecas"], label,
+                cas_irreps=case["cas_irreps"], core_irreps=case["core_irreps"],
+                start=start, refuse=False, verbose=False,
+            )
+            mc, fin = finish_casscf(o)
+    except SystemExit as exc:  # impure orbitals: no label means anything
+        out["refused"] = str(exc)
+        out["wall"] = time.perf_counter() - t0
+        return out
+    s_ao = o["mol"].intor_symmetric("int1e_ovlp")
+    ncore, ncas = mc.ncore, mc.ncas
+    out.update(
+        e_casscf=float(mc.e_tot), converged=o["converged"],
+        first_converged=o["first_converged"], n_macro=o["n_macro"],
+        polish_macro=o["polish_macro"], g_gen=o["g_norm"], g_opt=fin["g_norm"],
+        finish_macro=fin["n_macro"], finish_converged=fin["converged"],
+        e_casscf_gen=float(o["meta"]["e_casscf"]), mo_gen=np.asarray(o["mc"].mo_coeff),
+        wall_opt=o["wall"] + fin["wall"],
+        mo=np.asarray(mc.mo_coeff), ci_opt=np.asarray(mc.ci), s_ao=s_ao,
+        act_irreps=o["names"][ncore : ncore + ncas], ncore=ncore, ncas=ncas,
+        nelecas=tuple(mc.nelecas),
+    )
+    if task.get("keep_mc"):
+        out["mc"] = mc
+    if ref is None:
+        act_defect = ci_defect = 0.0
+        e_jump = 0.0
+    else:
+        act_defect, ci_defect = overlap_signals(
+            out["mo"], out["ci_opt"], s_ao, ref["mo"], ref["ci_opt"], ncore, ncas,
+            mc.nelecas)
+        e_jump = abs(out["e_casscf"] - ref["e_casscf"] - task["s"] * task["slope"])
+    out["signals"] = dict(e_jump=float(e_jump), converged=o["converged"],
+                          g_opt=fin["g_norm"], act_defect=act_defect, ci_defect=ci_defect)
+    out["tripped"] = continuity_tripped(out["signals"])
+    if out["tripped"] or task.get("warm"):
+        # A warm-started state is a probe of the cold one, never differenced,
+        # so it needs no CASCI and writes no sidecar.
+        out["wall"] = time.perf_counter() - t0
+        return out
+    path = Path(task["states_dir"]) / f"{label}.mogold"
+    gg.write_mo_sidecar(path, **dict(o["meta"], e_casscf=float(mc.e_tot)),
+                        arrays=dict(o["arrays"], mo_coeff=np.asarray(mc.mo_coeff)))
+    out["mogold"] = path.name
+    try:
+        with contextlib.redirect_stdout(buf):
+            cmc, pt = gg._build_state(
+                spec, case["basis"], case["ncas"], case["nelecas"],
+                cas_irreps=case["cas_irreps"], core_irreps=case["core_irreps"],
+                mo_from=path,
+            )
+            _dm1, _dm2, dms, eris = gg._pyscf_dms(pt)
+            per_class = gg._pyscf_per_class(pt, dms, eris)
+    except SystemExit as exc:  # the --mo-from gate, _check_degeneracy, ...
+        out["refused"] = str(exc)
+        out["wall"] = time.perf_counter() - t0
+        return out
+    out.update(
+        e_casci=float(cmc.e_tot),
+        e_corr=float(sum(per_class[c][1] for c in gg.CLASSES)),
+        labels=selection_labels(pt), gate=tuple(float(x) for x in cmc.mo_gate),
+        ci_casci=np.asarray(cmc.ci),
+    )
+    out["wall"] = time.perf_counter() - t0
+    return out
+
+
+def congruent_spread(states: list[dict]) -> tuple[int, float, float]:
+    """``(pairs, max spread of E_CASSCF, max spread of E_CASCI + E_corr)``
+    over displaced states whose geometries are congruent -- the same sorted
+    interatomic distances, to 1e-10 Å: a mirror image or a translation of one
+    another, so in exact arithmetic the same energy. What they differ by is
+    the sweep's own energy noise, measured directly rather than inferred from
+    a Richardson residual (on LiF, ``+x``/``-x`` and Li ``+z``/F ``-z`` are
+    such pairs; acrolein's in-plane stencil has none)."""
+    groups: dict[tuple, list[dict]] = {}
+    for st in states:
+        xyz = np.array([c for _, c in st["task"]["geom"]])
+        d = np.sort(np.linalg.norm(xyz[:, None] - xyz[None], axis=-1).ravel())
+        groups.setdefault(tuple(np.round(d, 10)), []).append(st)
+    pairs, e_scf, e_tot = 0, 0.0, 0.0
+    for g in groups.values():
+        if len(g) < 2:
+            continue
+        pairs += len(g) - 1
+        e = [st["e_casscf"] for st in g]
+        t = [st["e_casci"] + st["e_corr"] for st in g]
+        e_scf = max(e_scf, max(e) - min(e))
+        e_tot = max(e_tot, max(t) - min(t))
+    return pairs, e_scf, e_tot
+
+
+def finish_casscf(o: dict):
+    """The numerical gradient's finish, in two stages from
+    ``generate_golden.casscf_optimise``'s converged state: the generator's
+    own ``mc1step`` polish with ``ah_lindep`` lowered to
+    :data:`FINISH_AH_LINDEP` (so every state, converged-first-time or not,
+    reaches the same ~4e-9), then ``mcscf.newton`` -- the second-order
+    optimiser, orbitals and CI coupled -- with the FCI
+    solver's ``lindep`` and ``conv_tol`` lowered (:data:`FINISH_FCI_LINDEP`,
+    :data:`FINISH_FCI_CONV_TOL`) and the gradient threshold at
+    :data:`FINISH_CONV_TOL_GRAD`. Returns ``(mc, info)`` with ``info`` the
+    finish's own ``|g_orb|`` (its own CI vector), macro count, ``converged``
+    and wall.
+
+    Why it exists (measured: docs/reference-data.md, "Why the displaced
+    states are finished"): ``mc1step``'s optimiser converges the orbitals
+    against a CI vector whose residual floors near 1e-6 (the Davidson's
+    ``lindep``), so "converged" means stationary for *that* CI vector. With
+    an accurate one the same orbitals measure ``|g_orb|`` up to ~1e-6 -- the
+    ``--mo-from`` gate's scatter -- and E_corr, first order in the orbitals,
+    carries 1e-8-sized noise that a central difference divides by 2h. On
+    acrolein that was a 6e-5 Richardson residual. Finished, the gate measures
+    ~1e-9 and the same direction's residual is 1.1e-7. The finish runs after
+    the generator's path, never instead of it, so the committed orbitals are
+    still what that path reproduces bit for bit (``run_casscf`` checks it)."""
+    from pyscf import mcscf
+
+    t0 = time.perf_counter()
+    # Stage 1: generate_golden's own polish settings, with ah_lindep under
+    # |g_orb|^2. mc1step's augmented Hessian starts from (1, g), whose overlap
+    # has smallest eigenvalue |g|^2; below ah_lindep (PySCF's 1e-14, i.e.
+    # |g| < 1e-7) its step is exactly zero. So a first run that converged just
+    # under conv_tol_grad -- acrolein's 0x+2 at 7.5e-8, LiF's Li z+h at 9.4e-8
+    # -- is frozen there, while its stalled-and-polished neighbours sit at
+    # ~4e-9; newton from those two different starts lands 1.1e-9 Eh apart in
+    # E_corr (1.2e-6 Eh/bohr in acrolein's 0x). This stage brings every state
+    # to the same ~4e-9 before stage 2.
+    mcp = gg._casscf(o["mf"], o["mc"].ncas, o["mc"].nelecas, None)
+    mcp.conv_tol = gg.CASSCF_CONV_TOL
+    mcp.conv_tol_grad = gg.CASSCF_CONV_TOL_GRAD
+    mcp.max_cycle_macro = gg.CASSCF_MAX_CYCLE_MACRO
+    mcp.ah_conv_tol = gg.CASSCF_POLISH_AH_CONV_TOL
+    mcp.ah_lindep = FINISH_AH_LINDEP
+    mcp.kernel(o["mc"].mo_coeff, ci0=o["mc"].ci)
+    # Stage 2: newton, orbitals and CI coupled, with an accurate FCI solver.
+    mcn = mcscf.newton(gg._casscf(o["mf"], o["mc"].ncas, o["mc"].nelecas, None))
+    mcn.conv_tol = FINISH_CONV_TOL
+    mcn.conv_tol_grad = FINISH_CONV_TOL_GRAD
+    mcn.max_cycle_macro = FINISH_MAX_CYCLE_MACRO
+    mcn.ah_conv_tol = gg.CASSCF_POLISH_AH_CONV_TOL
+    mcn.ah_lindep = FINISH_AH_LINDEP
+    mcn.fcisolver.lindep = FINISH_FCI_LINDEP
+    mcn.fcisolver.conv_tol = FINISH_FCI_CONV_TOL
+    macro: list = []
+    mcn.callback = lambda envs: macro.append(envs.get("imacro"))
+    mcn.kernel(mcp.mo_coeff, ci0=mcp.ci)
+    gg._check_mo_symmetry(o["mol"], mcn.mo_coeff)
+    eris = mcn.ao2mo(mcn.mo_coeff)
+    casdm1, casdm2 = mcn.fcisolver.make_rdm12(mcn.ci, mcn.ncas, mcn.nelecas)
+    g = float(np.linalg.norm(mcn.get_grad(mcn.mo_coeff, (casdm1, casdm2), eris)))
+    return mcn, dict(g_norm=g, n_macro=(max(macro) + 1) if macro else 0,
+                     converged=bool(mcn.converged), wall=time.perf_counter() - t0)
+
+
+def casscf_gradient(mc) -> np.ndarray:
+    """``pyscf.grad.casscf`` at an optimised state, ``(natm, 3)`` Eh/bohr: the
+    CASSCF energy's own analytic gradient, which the energy signal's
+    prediction and the CASSCF-only free check use."""
+    from pyscf.grad import casscf as casscf_grad
+
+    return np.asarray(casscf_grad.Gradients(mc).kernel(mo_coeff=mc.mo_coeff, ci=mc.ci))
+
+
+def run_points(tasks: list[dict], workers: int) -> list[dict]:
+    """:func:`casscf_point` over every task, ``workers`` PROCESSES at a time
+    (never threads: each worker is one single-threaded process, so
+    ``generate_golden``'s forced single-threading -- what makes a state
+    bit-reproducible -- holds in every one). The ``spawn`` context starts each
+    worker from a fresh interpreter that re-imports ``generate_golden``
+    before numpy, rather than forking a parent whose thread pools already
+    exist. Every task is an independent cold start, and the results are
+    collected by the task's label, never by completion order, so the output
+    is bit-identical for any ``--workers`` (measured: docs/reference-data.md,
+    "The numerical gradient of a CASSCF reference")."""
+    import multiprocessing
+
+    if workers <= 1 or len(tasks) <= 1:
+        return [casscf_point(t) for t in tasks]
+    with ProcessPoolExecutor(max_workers=workers,
+                             mp_context=multiprocessing.get_context("spawn")) as pool:
+        futures = {t["label"]: pool.submit(casscf_point, t) for t in tasks}
+        assert len(futures) == len(tasks), "two tasks share a label"
+        return [futures[t["label"]].result() for t in tasks]
+
+
+def directions(probed, natm: int, n: int, seed: int) -> np.ndarray:
+    """``n`` seeded random unit directions in the probed components' span,
+    ``(n, natm, 3)``, bohr: every symmetry-zero component exactly zero, so a
+    displacement along one keeps the point group whenever its components do."""
+    rng = np.random.default_rng(seed)
+    out = np.zeros((n, natm, 3))
+    for k in range(n):
+        v = rng.standard_normal(len(probed))
+        v /= np.linalg.norm(v)
+        for (iatom, comp), x in zip(probed, v, strict=True):
+            out[k, iatom, comp] = x
+    return out
+
+
+def load_analytic(path: Path, case: str) -> dict:
+    """The analytic gradient the directional screen holds the numerical
+    derivative to: an ``nevpt2_grad.py --reference casscf --out PATH`` file,
+    checked to be the SC (not ``--casci-only``, not ``--pc``) gradient of a
+    ``casscf`` reference of this case."""
+    with np.load(path) as z:
+        got = {k: (str(z[k]) if k in z else None)
+               for k in ("case", "reference", "casci_only", "pc")}
+        if got["case"] != case or got["reference"] != "casscf" or \
+                got["casci_only"] != "False" or got["pc"] != "False":
+            raise SystemExit(
+                f"{path} is not the SC gradient of --case {case} --reference casscf "
+                f"(it says case={got['case']!r}, reference={got['reference']!r}, "
+                f"casci_only={got['casci_only']}, pc={got['pc']}): the screen would "
+                "compare two different functions"
+            )
+        return dict(grad=np.asarray(z["grad"]), mo_from=str(z["mo_from"])
+                    if "mo_from" in z else "")
+
+
+def _stencil_tasks(key, dvec_unit, steps, slope, geom, case, ref, states_dir):
+    """The six tasks of one coordinate (a component or a direction): signs
+    ``+/-`` at each of the three steps, labelled ``<key><sign><rung>``."""
+    tasks = []
+    for k, h in enumerate(steps):
+        for sign in (+1, -1):
+            s = sign * h
+            tasks.append(dict(
+                case=case, geom=displace_vec(geom, s * dvec_unit),
+                label=f"{key}{'+' if sign > 0 else '-'}{k}", s=s, slope=slope,
+                ref=ref, states_dir=str(states_dir), key=key, rung=k, sign=sign,
+                unit=dvec_unit,
+            ))
+    return tasks
+
+
+def _difference(states: list[dict], steps, field) -> tuple[float, float]:
+    """Richardson over one coordinate's six states, of ``field(state)``."""
+    by = {(st["rung"], st["sign"]): field(st) for st in states}
+    diffs = {h: (by[(k, 1)] - by[(k, -1)]) / (2 * h) for k, h in enumerate(steps)}
+    return richardson(diffs, steps)
+
+
+def warm_probe(cold: list[dict], n: int) -> list[dict]:
+    """Cold start is the oracle's definition; warm start -- from the
+    reference geometry's converged orbitals and CI vector -- is a free probe
+    for a second solution. Re-optimise the first ``n`` coarse-step geometries
+    warm and compare each with its cold state at the same geometry: the
+    energy against ``generate_golden.CASSCF_E_TOL`` (the fingerprint in
+    energy form), the active space and CI vector against the continuity
+    guard's overlap thresholds. A mismatch means the geometry has two
+    solutions within reach, and it is refused like a tripped signal."""
+    picks = [st for st in cold if st["rung"] == 0][:n]
+    tasks = [dict(st["task"], warm=True, label=st["label"] + "w") for st in picks]
+    # Sequential by design: two or three states, and a probe of the
+    # cold ones rather than part of the sweep.
+    warm = [casscf_point(t) for t in tasks]
+    out = []
+    for c, w in zip(picks, warm, strict=True):
+        rec = dict(label=c["label"], refused=w.get("refused"))
+        if not w.get("refused"):
+            act, ci = overlap_signals(w["mo"], w["ci_opt"], c["s_ao"], c["mo"],
+                                      c["ci_opt"], c["ncore"], c["ncas"], c["nelecas"])
+            rec.update(d_e=w["e_casscf"] - c["e_casscf"], act_defect=act, ci_defect=ci,
+                       g_cold=c["g_opt"], g_warm=w["g_opt"], macro_cold=c["n_macro"],
+                       macro_warm=w["n_macro"], polish_warm=w["polish_macro"],
+                       wall_cold=c["wall_opt"], wall_warm=w["wall_opt"])
+            rec["same"] = (abs(rec["d_e"]) <= gg.CASSCF_E_TOL and act <= CONTINUITY_ACT_TOL
+                           and ci <= CONTINUITY_CI_TOL)
+        else:
+            rec["same"] = False
+        out.append(rec)
+    return out
+
+
+def run_casscf(args, case: dict, geom, rec: dict) -> dict:
+    """``--reference casscf``: the reference state re-optimised and checked
+    against the committed golden, then every displaced state re-optimised
+    cold, guarded, built and differenced -- componentwise, or with
+    ``--directional N`` the screen along ``N`` seeded directions."""
+    t0 = time.perf_counter()
+    states_dir = args.states_dir
+    if states_dir is None:
+        states_dir = Path(tempfile.mkdtemp(prefix=f"numgrad-{args.case}-casscf-"))
+    states_dir.mkdir(parents=True, exist_ok=True)
+    rec["states_dir"] = str(states_dir)
+
+    # The reference geometry, through the very path every displaced state
+    # takes. Two checks tie it to the committed files, neither loosened:
+    # generate_golden's own optimiser (before the finish) must reproduce the
+    # committed .mogold's orbitals BIT FOR BIT, and those orbitals must
+    # reproduce the golden's E_CASCI and E_corr within REF_STATE_TOL (both
+    # measured at exactly 0). The finished reference the differences are taken
+    # around is then reported against them: same stationary point (E_CASSCF
+    # within generate_golden.CASSCF_E_TOL), with the E_corr the finish moved.
+    ref_task = dict(case=case, geom=geom, label="ref", s=0.0, slope=0.0, ref=None,
+                    states_dir=str(states_dir), key="ref", rung=0, sign=0,
+                    unit=np.zeros((len(geom), 3)), keep_mc=True)
+    r0 = casscf_point(ref_task)
+    if r0.get("refused") or r0["tripped"]:
+        raise SystemExit(f"the reference geometry's own CASSCF is refused: "
+                         f"{r0.get('refused') or signal_text(r0['signals'])}")
+    gold = gf.read_golden_header(args.golden)
+    mo_side = gg.read_mo_sidecar(args.mo_from)
+    rec["mo_bitwise"] = bool(np.array_equal(r0["mo_gen"], mo_side["mo_coeff"]))
+    rec["d_e_casscf_gen"] = r0["e_casscf_gen"] - mo_side["e_casscf"]
+    with contextlib.redirect_stdout(io.StringIO()):
+        cmc, cpt = gg._build_state(
+            geom_spec(geom), case["basis"], case["ncas"], case["nelecas"],
+            cas_irreps=case["cas_irreps"], core_irreps=case["core_irreps"],
+            mo_from=args.mo_from)
+        _d1, _d2, dms, eris = gg._pyscf_dms(cpt)
+        per_class = gg._pyscf_per_class(cpt, dms, eris)
+    e_corr_c = float(sum(per_class[c][1] for c in gg.CLASSES))
+    rec["d_e_casci"] = float(cmc.e_tot) - gold["e_casci"]
+    rec["d_e_corr"] = e_corr_c - gold["e_nevpt2_total"]
+    if not rec["mo_bitwise"] or \
+            max(abs(rec["d_e_casci"]), abs(rec["d_e_corr"])) > REF_STATE_TOL:
+        raise SystemExit(
+            f"the reference does not tie to {args.golden} / {args.mo_from}: "
+            f"re-optimised orbitals bit-identical to the committed ones: "
+            f"{rec['mo_bitwise']} (E_CASSCF {rec['d_e_casscf_gen']:+.3e}); the "
+            f"committed orbitals' E_CASCI {rec['d_e_casci']:+.3e}, E_corr "
+            f"{rec['d_e_corr']:+.3e} from the golden (tolerance {REF_STATE_TOL:g}). "
+            "The optimiser path here is not the one those files were written by, so "
+            "its displaced states would be of a different function."
+        )
+    rec.update(e_casci=r0["e_casci"], e_corr=r0["e_corr"], e_pc=None,
+               labels=r0["labels"], e_casscf=r0["e_casscf"], ref_state=r0)
+    rec["finish_shift"] = dict(e_casscf=r0["e_casscf"] - mo_side["e_casscf"],
+                               e_casci=r0["e_casci"] - gold["e_casci"],
+                               e_corr=r0["e_corr"] - gold["e_nevpt2_total"])
+    if abs(rec["finish_shift"]["e_casscf"]) > gg.CASSCF_E_TOL:
+        raise SystemExit(
+            f"the finish moved the reference's E_CASSCF by "
+            f"{rec['finish_shift']['e_casscf']:+.3e} (> {gg.CASSCF_E_TOL:g}): it found "
+            "a different stationary point from the committed one, not the same one "
+            "converged further."
+        )
+    # The energy signal's first-order prediction: PySCF's own analytic CASSCF
+    # gradient at the reference (the CASSCF energy is variational, so this is
+    # exact to first order whatever the NEVPT2 machinery does).
+    mc0 = r0.pop("mc")
+    with contextlib.redirect_stdout(io.StringIO()):
+        g_casscf = casscf_gradient(mc0)
+    rec["g_casscf"] = g_casscf
+    ref = dict(mo=r0["mo"], ci_opt=r0["ci_opt"], e_casscf=r0["e_casscf"])
+
+    want = _parse_components(args.components, len(geom))
+    probed, skipped = select_components(geom, case["basis"], rec["group"], args.step, want)
+    rec["probed"], rec["zero_by_symmetry"] = probed, skipped
+    steps = stencil(args.step)
+    natm = len(geom)
+    coords = []  # (key, unit displacement, slope)
+    if args.directional:
+        dirs = directions(probed, natm, args.directional, SCREEN_SEED)
+        for n, d in enumerate(dirs):
+            for s in (*steps, *(-s for s in steps)):
+                _check_point_group(rec["group"], point_group(displace_vec(geom, s * d),
+                                                             case["basis"]),
+                                   f"direction d{n}, step {s:+g} bohr")
+            coords.append((f"d{n}", d, float(np.sum(g_casscf * d))))
+        rec["dir_vectors"] = dirs
+    else:
+        for iatom, comp in probed:
+            d = np.zeros((natm, 3))
+            d[iatom, comp] = 1.0
+            coords.append((f"{iatom}{AXES[comp]}", d, float(g_casscf[iatom, comp])))
+    tasks = []
+    for key, d, slope in coords:
+        tasks += _stencil_tasks(key, d, steps, slope, geom, case, ref, states_dir)
+    what = (f"{args.directional} directions (the screen)" if args.directional else
+            f"{len(probed)} components, {len(skipped)} zero by symmetry")
+    print(f"[{args.case}] --reference casscf: {what}, {len(tasks)} displaced "
+          f"CASSCF+CASCI+NEVPT2 states, --workers {args.workers}, states in {states_dir}",
+          flush=True)
+    t_sweep = time.perf_counter()
+    states = run_points(tasks, args.workers)
+    rec["wall_sweep"] = time.perf_counter() - t_sweep
+    for t, st in zip(tasks, states, strict=True):
+        st.update(task=t, key=t["key"], rung=t["rung"], sign=t["sign"])
+    _write_manifest(states_dir, args, rec, r0, states)
+    for st in states:
+        if st.get("refused"):
+            print(f"  {st['label']:<8} REFUSED: {st['refused']}")
+            continue
+        sig = st["signals"]
+        print(f"  {st['label']:<8} E_CASSCF {st['e_casscf']:+.12f}  macro {st['n_macro']:3d}"
+              f"+{st['polish_macro']}+{st['finish_macro']}n  |g_orb| {st['g_gen']:.1e}"
+              f"->{sig['g_opt']:.1e}  e_jump "
+              f"{sig['e_jump']:.1e}  1-sv {sig['act_defect']:.1e}  1-ci {sig['ci_defect']:.1e}"
+              + (f"  gate {st['gate'][0]:.1e}" if "gate" in st else "")
+              + (f"  TRIPPED {','.join(st['tripped'])}" if st["tripped"] else "")
+              + f"  ({st['wall']:.1f}s)")
+    rec["signals_max"] = {
+        k: max(st["signals"][k] for st in states if "signals" in st)
+        for k in ("e_jump", "g_opt", "act_defect", "ci_defect")
+    }
+    rec["gate_max"] = max((st["gate"][0] for st in states if "gate" in st), default=float("nan"))
+    # Every displaced state's numbers, in task order, for the --npz: the
+    # --mo-from gate's (recorded, not refusing) beside the optimiser's own.
+    rec["state_labels"] = np.array([st["label"] for st in states])
+    rec["state_gate"] = np.array([st["gate"][0] if "gate" in st else np.nan for st in states])
+    rec["state_g_opt"] = np.array([st.get("g_opt", np.nan) for st in states])
+    rec["state_e_jump"] = np.array([st["signals"]["e_jump"] if "signals" in st else np.nan
+                                    for st in states])
+    rec["state_act_defect"] = np.array([st["signals"]["act_defect"] if "signals" in st
+                                        else np.nan for st in states])
+    rec["state_ci_defect"] = np.array([st["signals"]["ci_defect"] if "signals" in st
+                                       else np.nan for st in states])
+    rec["first_converged"] = sorted(st["label"] for st in states if st.get("first_converged"))
+    rec["congruent"] = congruent_spread([s for s in states if "e_corr" in s])
+    _check_continuity(states)
+    for st in states:
+        _check_selection(r0["labels"], st["labels"], f"state {st['label']}")
+
+    # The cold-vs-warm probe, on the first coarse-step geometries.
+    if args.warm_probe:
+        rec["warm"] = warm_probe(states, args.warm_probe)
+        for w in rec["warm"]:
+            if w.get("refused"):
+                print(f"  warm {w['label']}: REFUSED while building it: {w['refused']}")
+                continue
+            print(f"  warm {w['label']}: dE_CASSCF {w['d_e']:+.1e}  1-sv {w['act_defect']:.1e}"
+                  f"  1-ci {w['ci_defect']:.1e}  |g| cold {w['g_cold']:.1e} warm "
+                  f"{w['g_warm']:.1e}  macro cold {w['macro_cold']} warm "
+                  f"{w['macro_warm']}+{w['polish_warm']}  wall cold {w['wall_cold']:.1f}s "
+                  f"warm {w['wall_warm']:.1f}s  -> "
+                  + ("same stationary point" if w["same"] else "DIFFERENT"))
+        bad = [w["label"] for w in rec["warm"] if not w["same"]]
+        if bad:
+            raise SystemExit(
+                f"cold and warm start land on different stationary points at {bad}: "
+                "those geometries are ambiguous, and the continuity guard refuses "
+                "them rather than letting the sweep order pick the solution."
+            )
+
+    by_key: dict[str, list[dict]] = {}
+    for st in states:
+        by_key.setdefault(st["key"], []).append(st)
+    tot = lambda st: st["e_casci"] + st["e_corr"]  # noqa: E731
+    cas = lambda st: st["e_casci"]  # noqa: E731
+    if args.directional:
+        num = np.array([_difference(by_key[f"d{n}"], steps, tot) for n in range(len(coords))])
+        num_cas = np.array([_difference(by_key[f"d{n}"], steps, cas)[0]
+                            for n in range(len(coords))])
+        rec.update(dir_num=num[:, 0], dir_residual=num[:, 1], dir_casscf_num=num_cas,
+                   dir_casscf_pyscf=np.array([c[2] for c in coords]))
+    else:
+        grad = np.zeros((natm, 3))
+        residual = np.zeros((natm, 3))
+        grad_cas = np.zeros((natm, 3))
+        mask = np.zeros((natm, 3))
+        for iatom, comp in probed:
+            key = f"{iatom}{AXES[comp]}"
+            grad[iatom, comp], residual[iatom, comp] = _difference(by_key[key], steps, tot)
+            grad_cas[iatom, comp], _ = _difference(by_key[key], steps, cas)
+            mask[iatom, comp] = 1.0
+        rec.update(grad_num=grad, grad_num_residual=residual, grad_num_probed=mask,
+                   grad_num_step=np.array([args.step]), grad_casci=grad_cas)
+    rec["wall"] = time.perf_counter() - t0
+    return rec
+
+
+def _write_manifest(states_dir: Path, args, rec: dict, r0: dict, states: list[dict]) -> None:
+    """``states.json`` beside the displaced states' MO sidecars: what each one
+    is (label, displacement, ``--atom`` spec), what it measured, and where its
+    ``.mogold`` is. This is how a later consumer -- #126's block2 spot-checks
+    and its per-displacement ``--no-pc`` goldens for the GPU -- reuses **this**
+    sweep's states instead of re-optimising them: each sidecar is a
+    ``--mo-from`` input, rebuilt with ``generate_golden.py --atom SPEC`` and
+    this case's flags (docs/reference-data.md, "The numerical gradient of a
+    CASSCF reference").
+
+    One directory holds one sweep's states for one case: the screen's
+    (``d<n>...``) and the componentwise gate's (``<atom><axis>...``) labels do
+    not collide, so a second run into the same directory MERGES into the
+    manifest by label rather than replacing it, and refuses a directory
+    written for a different case or step."""
+    keep = ("label", "atom", "s", "e_casscf", "e_casci", "e_corr", "converged",
+            "first_converged", "n_macro", "polish_macro", "g_opt", "gate", "mogold",
+            "tripped", "refused", "signals", "wall", "key", "rung", "sign")
+    entries = []
+    for st in [dict(r0, key="ref", rung=0, sign=0), *states]:
+        e = {k: st[k] for k in keep if k in st}
+        unit = st["task"]["unit"] if "task" in st else np.zeros((rec["natm"], 3))
+        e["displacement_bohr"] = (st["s"] * unit).tolist()
+        entries.append(e)
+    path = states_dir / "states.json"
+    head = dict(
+        case=args.case, reference="casscf", basis=rec["basis"], ncas=rec["ncas"],
+        nelecas=rec["nelecas"], cas_irreps=rec["cas_irreps"], step=args.step,
+        finish=dict(method="mcscf.newton", conv_tol=FINISH_CONV_TOL,
+                    conv_tol_grad=FINISH_CONV_TOL_GRAD,
+                    max_cycle_macro=FINISH_MAX_CYCLE_MACRO, ah_lindep=FINISH_AH_LINDEP,
+                    fci_lindep=FINISH_FCI_LINDEP, fci_conv_tol=FINISH_FCI_CONV_TOL),
+    )
+    merged: dict[str, dict] = {}
+    if path.exists():
+        old = json.loads(path.read_text())
+        clash = [k for k in ("case", "step", "basis") if old.get(k) != head[k]]
+        if clash:
+            raise SystemExit(f"{path} holds another sweep's states ({', '.join(clash)} "
+                             "differ): pass a fresh --states-dir")
+        merged = {e["label"]: e for e in old["states"]}
+    merged.update({e["label"]: e for e in entries})
+    head["states"] = list(merged.values())
+    path.write_text(json.dumps(head, indent=1, default=str))
+
+
 def run(args) -> dict:
     """Check the reference state against its golden, pick the components,
     difference them, and return the record :func:`report` prints."""
@@ -545,7 +1319,12 @@ def run(args) -> dict:
     # the refusal lands before the reference energy is computed.
     gold = gf.read_golden_header(args.golden)
     rec["reference_kind"] = gold["reference_kind"]
-    _check_reference_kind(gold["reference_kind"], args.golden)
+    _check_reference_kind(gold["reference_kind"], args.golden, args.reference)
+
+    if args.reference == "casscf":
+        rec["group"] = point_group(geom, case["basis"])
+        rec["pc"] = False
+        return run_casscf(args, case, geom, rec)
 
     t0 = time.perf_counter()
     ref_group = point_group(geom, case["basis"])
@@ -654,6 +1433,84 @@ def report(rec: dict) -> None:
             print(f"sum over atoms (0 by translational invariance): {sums}")
 
 
+def report_casscf(rec: dict, analytic: dict | None) -> None:
+    """``--reference casscf``'s report: the reference against its committed
+    files, the guard's measured maxima, the CASSCF-only free check, and then
+    either the componentwise table (:func:`report`) or the screen. With
+    ``analytic`` the screen is GATED here -- ``|D_d - <g, d>|`` against
+    ``nevpt2_grad.GRAD_NUM_TOL`` per direction -- and ``rec["screen_pass"]``
+    says how it went; componentwise, the comparison is printed and the gate
+    is ``nevpt2_grad.py --grad-num``'s."""
+    import nevpt2_grad  # lazily: it imports this module
+
+    r0 = rec["ref_state"]
+    print(f"== {rec['case']}  --reference casscf  {rec['basis']} "
+          f"CAS({rec['nelecas']},{rec['ncas']})  irreps {rec['cas_irreps']}")
+    fs = rec["finish_shift"]
+    print(f"reference re-optimised by generate_golden's path: orbitals bit-identical "
+          f"to the committed .mogold: {rec['mo_bitwise']} (E_CASSCF "
+          f"{rec['d_e_casscf_gen']:+.1e}, macro {r0['n_macro']}+{r0['polish_macro']}, "
+          f"|g_orb| {r0['g_gen']:.2e}); committed orbitals vs golden: E_CASCI "
+          f"{rec['d_e_casci']:+.1e}, E_corr {rec['d_e_corr']:+.1e}")
+    print(f"reference finished (the point differenced around): E_CASSCF "
+          f"{rec['e_casscf']:.12f} ({fs['e_casscf']:+.1e}), E_CASCI {fs['e_casci']:+.1e}, "
+          f"E_corr {rec['e_corr']:.12f} ({fs['e_corr']:+.1e}) vs the committed files; "
+          f"|g_orb| {r0['g_opt']:.2e} in {r0['finish_macro']} newton macro, gate "
+          f"{r0['gate'][0]:.2e}")
+    m = rec["signals_max"]
+    print(f"continuity guard, max over the {rec['wall_sweep']:.0f}s sweep's states: "
+          f"e_jump {m['e_jump']:.2e} (<= {CONTINUITY_E_TOL:g}), |g_orb| {m['g_opt']:.2e} "
+          f"(<= {gg.CASSCF_CONV_TOL_GRAD:g}), 1-sv_act {m['act_defect']:.2e} "
+          f"(<= {CONTINUITY_ACT_TOL:g}), 1-|<ci0|ci>| {m['ci_defect']:.2e} "
+          f"(<= {CONTINUITY_CI_TOL:g}); --mo-from gate max {rec['gate_max']:.2e} "
+          f"(<= {gg.CASSCF_GRAD_TOL:g}); first run converged (no stall) at "
+          f"{len(rec['first_converged'])} state(s): {', '.join(rec['first_converged']) or '-'}")
+    pairs, c_scf, c_tot = rec["congruent"]
+    if pairs:
+        print(f"energy noise, measured on {pairs} congruent pair(s) of displaced states "
+              f"(mirror images / translations): E_CASSCF {c_scf:.1e}, E_CASCI + E_corr "
+              f"{c_tot:.1e} -- over the finest 2h, {c_tot / (2 * rec['step'] / 4):.1e} "
+              "Eh/bohr in a central difference")
+    tol = nevpt2_grad.GRAD_NUM_TOL
+    if "dir_num" in rec:
+        free = np.abs(rec["dir_casscf_num"] - rec["dir_casscf_pyscf"]).max()
+        print(f"free check: CASSCF-only directional derivative vs pyscf.grad.casscf, "
+              f"max |delta| {free:.2e}")
+        print(f"{'dir':>4} {'numerical':>16} {'residual':>9} {'<g, d>':>16} {'|delta|':>9}")
+        ok = True
+        for n, (num, res) in enumerate(zip(rec["dir_num"], rec["dir_residual"], strict=True)):
+            an = float(np.sum(analytic["grad"] * rec["dir_vectors"][n])) if analytic else None
+            delta = abs(num - an) if an is not None else float("nan")
+            ok = ok and delta <= tol
+            print(f"  d{n} {num:+16.10f} {res:9.1e} "
+                  + (f"{an:+16.10f} {delta:9.1e}" if an is not None else "(no --analytic)"))
+        rec["screen_pass"] = ok if analytic else None
+        budget = SCREEN_WALL_BUDGET
+        verdict = ("PASS" if ok else "FAIL") if analytic else "not gated"
+        print(f"{verdict}: the directional screen, {len(rec['dir_num'])} directions, "
+              f"max residual {rec['dir_residual'].max():.1e}, allowed |delta| {tol:g}")
+    else:
+        probed = rec["grad_num_probed"] > 0
+        free = np.abs(rec["grad_casci"] - rec["g_casscf"])[probed].max()
+        print(f"free check: CASSCF-only numerical gradient vs pyscf.grad.casscf, "
+              f"max |delta| {free:.2e}")
+        report(rec)
+        if analytic is not None:
+            d = np.abs(analytic["grad"] - rec["grad_num"])[probed]
+            print(f"against --analytic: max |g - grad_num| {d.max():.2e} (the gate, "
+                  f"{tol:g}, is nevpt2_grad.py --grad-num's)")
+        budget = GATE_WALL_BUDGET.get(rec["case"], float("nan"))
+    over = rec["wall"] > budget
+    print(f"wall {rec['wall']:.1f}s, declared budget {budget:g}s"
+          + (" -- OVER BUDGET (a bound, not a gate)" if over else ""))
+    for w in rec.get("warm", []):
+        if not w.get("refused"):
+            print(f"cold vs warm at {w['label']}: dE_CASSCF {w['d_e']:+.1e}, 1-sv "
+                  f"{w['act_defect']:.1e}, 1-ci {w['ci_defect']:.1e}: "
+                  + ("the same stationary point" if w["same"] else "DIFFERENT"))
+    print(f"states and their MO sidecars: {rec['states_dir']}/states.json")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--case", default="lif_def2svp_cas46",
@@ -703,13 +1560,87 @@ def main() -> None:
                          "arrays). This is what nevpt2_grad.py --grad-num "
                          "reads, and the only way a PC numerical gradient "
                          "leaves this script: no committed byte moves")
+    ap.add_argument("--reference", default="casci", choices=REFERENCES,
+                    help="'casci' (default): displaced RHF -> CASCI states, "
+                         "differencing golden/<case>.nevpt2gold. 'casscf': every "
+                         "displaced state re-OPTIMISED, cold, through "
+                         "generate_golden's own optimiser, then the --mo-from "
+                         "CASCI on it, differencing golden/<case>_casscf."
+                         "nevpt2gold; guarded by the continuity check. SC only; "
+                         "writes no sidecar (use --npz)")
+    ap.add_argument("--mo-from", type=Path, default=None,
+                    help="--reference casscf: the committed MO sidecar the "
+                         "re-optimised reference must reproduce (default: "
+                         "golden/<case>_casscf.mogold)")
+    ap.add_argument("--directional", type=int, default=0, metavar="N",
+                    help="--reference casscf: the directional SCREEN instead of "
+                         "the componentwise sweep -- the derivative along N "
+                         f"seeded random in-plane directions (the screen uses "
+                         f"{SCREEN_DIRECTIONS}), held to <g, d> from --analytic")
+    ap.add_argument("--analytic", type=Path, default=None,
+                    help="--directional: the analytic gradient to hold the "
+                         "screen to, an `nevpt2_grad.py --reference casscf --out "
+                         "PATH` file")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="--reference casscf: displaced states optimised in "
+                         "parallel, one single-threaded process each (the "
+                         "result does not depend on it)")
+    ap.add_argument("--states-dir", type=Path, default=None,
+                    help="--reference casscf: where each displaced state's MO "
+                         "sidecar and states.json go, for reuse by later "
+                         "consumers (default: a fresh temporary directory)")
+    ap.add_argument("--warm-probe", type=int, default=None, metavar="N",
+                    help="--reference casscf: re-optimise the first N coarse-step "
+                         "geometries warm-started from the reference's orbitals "
+                         "and refuse any that lands elsewhere than its cold "
+                         f"state (default {WARM_PROBE_DEFAULT}; 0 skips it)")
     args = ap.parse_args()
+    casscf = args.reference == "casscf"
+    if not casscf:
+        named = [f for f, on in (("--mo-from", args.mo_from), ("--directional",
+                 args.directional), ("--analytic", args.analytic), ("--states-dir",
+                 args.states_dir), ("--warm-probe", args.warm_probe)) if on]
+        if named:
+            ap.error(f"{', '.join(named)} belong to --reference casscf")
+    else:
+        if args.pc:
+            ap.error("--reference casscf is SC only: the PC gradient of a CASSCF "
+                     "reference is #126's, and reuses this sweep's states "
+                     "(--states-dir) rather than running block2 here")
+        if args.npz is None and not args.no_write:
+            ap.error("--reference casscf writes no sidecar (the committed "
+                     "<case>_casscf.gradgold is the 24 --gradgold arrays and stays "
+                     "byte-identical): pass --npz PATH or --no-write")
+        if args.directional and args.analytic is None:
+            ap.error("--directional needs --analytic PATH: the screen holds the "
+                     "numerical directional derivative to <g, d>")
+        if args.warm_probe is None:
+            args.warm_probe = WARM_PROBE_DEFAULT
+    stem = f"{args.case}_casscf" if casscf else args.case
     if args.golden is None:
-        args.golden = REPO / "golden" / f"{args.case}.nevpt2gold"
+        args.golden = REPO / "golden" / f"{stem}.nevpt2gold"
     if args.sidecar is None:
-        args.sidecar = REPO / "golden" / f"{args.case}.gradgold"
+        args.sidecar = REPO / "golden" / f"{stem}.gradgold"
+    if casscf and args.mo_from is None:
+        args.mo_from = REPO / "golden" / f"{stem}.mogold"
+    analytic = load_analytic(args.analytic, args.case) if args.analytic else None
 
     rec = run(args)
+    if casscf:
+        report_casscf(rec, analytic)
+        if args.npz is not None:
+            names = [n for n in ("grad_num", "grad_num_residual", "grad_num_probed",
+                                 "grad_num_step", "grad_casci", "g_casscf",
+                                 "dir_vectors", "dir_num", "dir_residual",
+                                 "dir_casscf_num", "dir_casscf_pyscf", "state_labels",
+                                 "state_gate", "state_g_opt", "state_e_jump",
+                                 "state_act_defect", "state_ci_defect") if n in rec]
+            np.savez(args.npz, case=np.array(rec["case"]), pc=np.array(False),
+                     reference=np.array("casscf"), **{n: rec[n] for n in names})
+            print(f"wrote {args.npz} ({len(names) + 3} arrays)")
+        if rec.get("screen_pass") is False:
+            raise SystemExit(1)
+        return
     report(rec)
     if args.npz is not None:
         names = ["grad_num", "grad_num_residual", "grad_num_probed",

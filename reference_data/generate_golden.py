@@ -152,8 +152,8 @@ reproducible from scratch only to a tolerance, not byte for byte, and
 :func:`_check_gradient_invariants` asserts, only (O2) is asserted on it; (O1)
 and (O3) state that the active space is a set of RHF canonical orbitals, which
 CASSCF orbitals are not. Permitting the integral arrays is not permission to
-difference committed orbitals at a displaced geometry: ``nevpt2_numgrad.py``
-still refuses a ``casscf`` golden.
+difference committed orbitals at a displaced geometry: ``nevpt2_numgrad.py
+--reference casscf`` re-optimises every displaced state instead.
 """
 
 from __future__ import annotations
@@ -899,13 +899,14 @@ def optimise_mo(
     ``--cas-irreps``/``--core-irreps`` start, returning what
     :func:`write_mo_sidecar` needs to commit its converged orbitals.
 
-    This is the only function in this file that runs an orbital optimiser, and
-    it writes no golden: the orbitals are committed, and a *second*
-    invocation, ``--mo-from``, builds the golden by running the same
-    deterministic ``mcscf.CASCI`` on them that the RHF path runs on RHF
-    orbitals. So a golden's state depends on a file, not on an optimiser --
-    which is the point, rather than any irreproducibility of the optimiser
-    itself (it reproduces; :data:`MO_SIDECAR_MAGIC`).
+    This is the only entry point in this file that runs an orbital optimiser
+    (:func:`casscf_optimise` is its body), and it writes no golden: the
+    orbitals are committed, and a *second* invocation, ``--mo-from``, builds
+    the golden by running the same deterministic ``mcscf.CASCI`` on them that
+    the RHF path runs on RHF orbitals. So a golden's state depends on a file,
+    not on an optimiser -- which is the point, rather than any
+    irreproducibility of the optimiser itself (it reproduces;
+    :data:`MO_SIDECAR_MAGIC`).
 
     Settings: :data:`CASSCF_CONV_TOL` / :data:`CASSCF_CONV_TOL_GRAD` /
     :data:`CASSCF_MAX_CYCLE_MACRO`, and :data:`FCI_CONV_TOL` on the Davidson,
@@ -917,6 +918,50 @@ def optimise_mo(
     symmetry-pure (:func:`_check_mo_symmetry`), and an orbital gradient above
     :data:`CASSCF_GRAD_TOL` -- so ``--mo-out`` never writes a file
     ``--mo-from`` would turn around and refuse."""
+    out = casscf_optimise(atom, basis, ncas, nelecas, name, auxbasis,
+                          cas_irreps=cas_irreps, core_irreps=core_irreps)
+    return out["meta"], out["arrays"]
+
+
+def casscf_optimise(
+    atom,
+    basis: str,
+    ncas: int,
+    nelecas: int,
+    name: str,
+    auxbasis: str | None = None,
+    cas_irreps: dict[str, int] | None = None,
+    core_irreps: dict[str, int] | None = None,
+    *,
+    start: tuple[np.ndarray, np.ndarray | None] | None = None,
+    refuse: bool = True,
+    verbose: bool = True,
+) -> dict:
+    """:func:`optimise_mo`'s body, shared with ``nevpt2_numgrad.py --reference
+    casscf``, which re-optimises at every displaced geometry and must do so
+    through **this** code path, so that a displaced state and the committed
+    reference are defined by one optimiser (it then finishes each state
+    itself: ``nevpt2_numgrad.finish_casscf``).
+
+    Returns a dict: ``meta`` and ``arrays`` (what :func:`write_mo_sidecar`
+    takes), ``mol``, ``mf``, ``mc``, and the optimiser's own diagnostics --
+    ``converged``, ``first_converged`` (whether the first run converged),
+    ``n_macro``, ``polish_macro`` (``None`` if no polish ran), ``g_norm`` (the
+    2-norm of ``mc.get_grad`` with the optimiser's own CI vector: the quantity
+    ``conv_tol_grad`` gates), ``purity`` and ``names`` (the irrep labels).
+
+    The keyword-only arguments are the numerical gradient's, and every one
+    defaults to what ``--casscf`` does:
+
+    * ``start`` -- ``(mo, ci)`` to start from instead of the RHF orbitals
+      sorted by ``--cas-irreps``: orbitals already in core/active/virtual
+      order, as ``--mo-from`` hands them to ``mcscf.CASCI``. The numerical
+      gradient's *warm-start* probe; its oracle is the cold start (``None``).
+    * ``refuse`` -- ``False`` returns an unconverged optimisation, or one whose
+      orbitals fail the irrep-selection or :data:`CASSCF_GRAD_TOL` checks,
+      instead of exiting, so the caller's guard can name the failure. Impure
+      orbitals are refused either way (:func:`_check_mo_symmetry`): no irrep
+      label means anything on them."""
     from pyscf import scf
 
     t0 = time.perf_counter()
@@ -933,32 +978,39 @@ def optimise_mo(
     mc.max_cycle_macro = CASSCF_MAX_CYCLE_MACRO
     macro: list = []
     mc.callback = lambda envs: macro.append(envs.get("imacro"))
-    mo_start = mf.mo_coeff
-    if cas_irreps is not None:
-        assert sum(cas_irreps.values()) == ncas, f"{cas_irreps} is not {ncas} orbitals"
-        mo_start = mc.sort_mo_by_irrep(cas_irreps, core_irreps, mo_coeff=mo_start)
-    mc.kernel(mo_start)
+    ci_start = None
+    if start is not None:
+        mo_start, ci_start = start
+    else:
+        mo_start = mf.mo_coeff
+        if cas_irreps is not None:
+            assert sum(cas_irreps.values()) == ncas, f"{cas_irreps} is not {ncas} orbitals"
+            mo_start = mc.sort_mo_by_irrep(cas_irreps, core_irreps, mo_coeff=mo_start)
+    mc.kernel(mo_start, ci0=ci_start)
     n_macro = (max(macro) + 1) if macro else 0
-    polish = ""
+    first_converged = bool(mc.converged)
+    polish_macro = None
     if not mc.converged:
         # The fallback (CASSCF_POLISH_AH_CONV_TOL): same settings, warm-started
         # from where the first run stalled, tighter AH solve. Never runs for a
         # case that converged above, so it moves no file that did.
-        print(
-            f"[{name}] CASSCF not converged in {CASSCF_MAX_CYCLE_MACRO} macro "
-            f"iterations; polishing with ah_conv_tol {CASSCF_POLISH_AH_CONV_TOL:g}"
-        )
+        if verbose:
+            print(
+                f"[{name}] CASSCF not converged in {CASSCF_MAX_CYCLE_MACRO} macro "
+                f"iterations; polishing with ah_conv_tol {CASSCF_POLISH_AH_CONV_TOL:g}"
+            )
         mcp = _casscf(mf, ncas, nelecas, auxbasis)
         mcp.conv_tol = CASSCF_CONV_TOL
         mcp.conv_tol_grad = CASSCF_CONV_TOL_GRAD
         mcp.max_cycle_macro = CASSCF_MAX_CYCLE_MACRO
         mcp.ah_conv_tol = CASSCF_POLISH_AH_CONV_TOL
-        polish_macro: list = []
-        mcp.callback = lambda envs: polish_macro.append(envs.get("imacro"))
+        p_macro: list = []
+        mcp.callback = lambda envs: p_macro.append(envs.get("imacro"))
         mcp.kernel(mc.mo_coeff, ci0=mc.ci)
-        polish = f" + polish macro={max(polish_macro) if polish_macro else 0}"
+        polish_macro = max(p_macro) if p_macro else 0
         mc = mcp
-    if not mc.converged:
+    polish_text = "" if polish_macro is None else f" + polish macro={polish_macro}"
+    if not mc.converged and refuse:
         raise SystemExit(
             f"CASSCF did not converge to conv_tol {CASSCF_CONV_TOL:g} / "
             f"conv_tol_grad {CASSCF_CONV_TOL_GRAD:g} in "
@@ -970,11 +1022,12 @@ def optimise_mo(
 
     mo = mc.mo_coeff
     _, names, purity = _check_mo_symmetry(mol, mo)
-    _check_mo_irreps(names, mc.ncore, ncas, cas_irreps, core_irreps)
+    if refuse:
+        _check_mo_irreps(names, mc.ncore, ncas, cas_irreps, core_irreps)
     eris = mc.ao2mo(mo)
     casdm1, casdm2 = mc.fcisolver.make_rdm12(mc.ci, ncas, mc.nelecas)
     g_norm = float(np.linalg.norm(mc.get_grad(mo, (casdm1, casdm2), eris)))
-    if g_norm > CASSCF_GRAD_TOL:
+    if g_norm > CASSCF_GRAD_TOL and refuse:
         raise SystemExit(
             f"CASSCF reported convergence but its orbital gradient norm is "
             f"{g_norm:.3e} (> {CASSCF_GRAD_TOL:g}), which --mo-from would "
@@ -983,18 +1036,24 @@ def optimise_mo(
 
     na, nb = mc.nelecas
     nmo = mo.shape[1]
-    print(
-        f"[{name}] CASSCF CAS({ncas},{na + nb}) ncore={mc.ncore} "
-        f"E_CASSCF={mc.e_tot:.10f} |g_orb|={g_norm:.3e} "
-        f"purity defect {purity:.1e} macro={n_macro}{polish} "
-        f"({time.perf_counter() - t0:.1f}s)"
-    )
-    print(f"[{name}] active irreps: {names[mc.ncore : mc.ncore + ncas]}")
+    if verbose:
+        print(
+            f"[{name}] CASSCF CAS({ncas},{na + nb}) ncore={mc.ncore} "
+            f"E_CASSCF={mc.e_tot:.10f} |g_orb|={g_norm:.3e} "
+            f"purity defect {purity:.1e} macro={n_macro}{polish_text} "
+            f"({time.perf_counter() - t0:.1f}s)"
+        )
+        print(f"[{name}] active irreps: {names[mc.ncore : mc.ncore + ncas]}")
     scalars, fields, geom = _mo_fingerprint(
         mol, mc, nmo, atom, basis, auxbasis, cas_irreps, core_irreps
     )
     meta = dict(**scalars, e_casscf=float(mc.e_tot), fields=fields)
-    return meta, dict(mo_coeff=mo, geom=geom)
+    return dict(
+        meta=meta, arrays=dict(mo_coeff=mo, geom=geom), mol=mol, mf=mf, mc=mc,
+        converged=bool(mc.converged), first_converged=first_converged,
+        n_macro=n_macro, polish_macro=polish_macro, g_norm=g_norm,
+        purity=purity, names=names, wall=time.perf_counter() - t0,
+    )
 
 
 def _build_state(
@@ -1089,6 +1148,9 @@ def _build_state(
         g_norm, d_e = _check_casscf_stationary(
             mf, mc, mo, side["e_casscf"], auxbasis
         )
+        # Kept for nevpt2_numgrad.py --reference casscf, which records the
+        # gate's two numbers for every displaced state it builds here.
+        mc.mo_gate = (g_norm, d_e)
         print(
             f"  --mo-from gate: |g_orb|={g_norm:.3e} (<= {CASSCF_GRAD_TOL:g}) "
             f"|E_CASCI-E_CASSCF|={d_e:.3e} (<= {CASSCF_E_TOL:g})"
