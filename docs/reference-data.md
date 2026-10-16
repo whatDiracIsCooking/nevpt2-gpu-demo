@@ -646,7 +646,8 @@ Eqs. 26–28, 36–38, 41–48), so `nevpt2_demo`'s `--sc-tangent` and
 and `--source-oracle` run on a `casscf` golden. The **Lagrangian** gate
 (`GoldenFile::requireLagrangianReference`, an `err_unsupported`) refuses one,
 because the Z-vector → Sylvester → CPHF chain is derived for CASCI on RHF
-orbitals — see [`gradient-theory.md`](gradient-theory.md), §1.1 and §5 — and
+orbitals — see [`gradient-theory.md`](gradient-theory.md), §1.2 and §2.2–§2.6;
+the CASSCF branch, §2.7, is not implemented yet — and
 so does `reference_data/nevpt2_numgrad.py` (`_check_reference_kind`). Both
 demos print the kind in their header line.
 

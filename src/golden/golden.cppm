@@ -116,8 +116,9 @@ struct GoldenFile {
 
   // requireLagrangianReference: the LAGRANGIAN gate, which refuses anything
   // but a CASCI. The CI Z-vector -> Sylvester -> CPHF chain downstream of the
-  // source terms is derived for a CASCI diagonalisation on converged RHF
-  // orbitals (docs/gradient-theory.md, Secs. 1.1, 1.2, 2 and 5), so whatever
+  // source terms is the CASCI branch, derived for a CASCI diagonalisation on
+  // converged RHF orbitals (docs/gradient-theory.md, Sec. 1.2 and Secs.
+  // 2.2-2.6); the CASSCF branch (Sec. 2.7) is not implemented. So whatever
   // consumes a full nuclear gradient -- numerical or analytic -- sits behind
   // this one.
   [[nodiscard]] Status requireLagrangianReference(std::string_view what) const;

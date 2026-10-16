@@ -69,13 +69,12 @@ Status GoldenFile::requireLagrangianReference(const std::string_view what) const
       "{}: this golden's reference is {}, and this path's Lagrangian refuses it. The source "
       "terms Y_xy and y_I alone would take it -- they are derivatives at fixed orbitals and CI "
       "vector and carry no reference-kind dependence (Park Eqs. 26-28, 36-38, 41-48) -- but "
-      "the CI Z-vector -> Sylvester -> CPHF chain downstream of them is derived for a CASCI "
-      "diagonalisation on converged RHF orbitals: its orbital constraint is RHF "
-      "Brillouin/CPHF plus an active-space selection, not CASSCF stationarity "
-      "(docs/gradient-theory.md, Secs. 1.1, 1.2 and 2). A CASSCF reference needs CP-CASSCF "
-      "(Sec. 5), and differentiating one numerically needs a different strategy as well, "
-      "because a displaced CASSCF lands on a differently-rotated solution (Sec. 4.4). Not "
-      "supported; use a CASCI golden.",
+      "the CI Z-vector -> Sylvester -> CPHF chain downstream of them is the CASCI branch, "
+      "derived for a CASCI diagonalisation on converged RHF orbitals: its orbital constraint "
+      "is RHF Brillouin/CPHF plus an active-space selection, not CASSCF stationarity "
+      "(docs/gradient-theory.md, Sec. 1.2 and Secs. 2.2-2.6). A CASSCF reference needs the "
+      "CASSCF branch, one coupled CP-CASSCF system (Sec. 2.7), which is not implemented yet. "
+      "Not supported; use a CASCI golden.",
       what, referenceKindName(reference)));
 }
 
