@@ -34,10 +34,10 @@ once:
 | §4.4 — what is not that hazard, Park's SC non-invariance included | shared |
 | §5 — what this settles | one column per reference |
 
-**Only the CASCI branch is implemented anywhere.** Its solve is offline
-Python ([`gradients.md`](gradients.md), §1); the CASSCF branch is derived
-here and nothing builds it, and every derivative path refuses a `casscf`
-golden (§1.1).
+**Both branches' Z-vector solves are offline Python only**
+([`gradients.md`](gradients.md), §1): the CASCI branch's, and the CASSCF
+branch's coupled system (`nevpt2_grad.py --reference casscf`). Every
+derivative path in the tree refuses a `casscf` golden (§1.1).
 
 This document is **derivation only**. It describes no code and names no file
 that does not yet exist; what gets built, and how it is checked, belongs in the
@@ -204,18 +204,18 @@ reference that built its orbitals ([`reference-data.md`](reference-data.md),
 measured"). What the two differ in is the constraint set, and so the
 Z-vector equations.
 
-**Only the CASCI branch is implemented, and the restriction is enforced
-rather than assumed.** Every derivative path refuses a `casscf` golden:
-`nevpt2_demo`'s `--sc-tangent` and `--gradient-source` as an
+**In the tree only the CASCI branch is implemented, and the restriction is
+enforced rather than assumed.** Every derivative path refuses a `casscf`
+golden: `nevpt2_demo`'s `--sc-tangent` and `--gradient-source` as an
 unsupported-request error, and `reference_data/nevpt2_numgrad.py` before it
 computes an energy; the one gradient sidecar written for one
 (`--mo-from --gradgold`, [`reference-data.md`](reference-data.md), "The
-CASSCF-reference gradient sidecar") is data that no derivative path reads yet;
-and the offline
-analytic gradient builds its own state on RHF orbitals, with no CASSCF path.
-The refusal cites this section. What
-a CASSCF reference needs is §1.4 and §2.7's coupled CP-CASSCF system (§5), and
-for numerical validation the precondition §4.4 names.
+CASSCF-reference gradient sidecar") is data that no derivative path reads yet.
+The refusal cites this section. The offline analytic gradient
+(`reference_data/nevpt2_grad.py`) builds the CASCI branch on RHF orbitals by
+default and, with `--reference casscf`, the CASSCF one — §1.4 and §2.7's
+coupled CP-CASSCF system (§5) — with no numerical gradient yet to hold it to:
+that needs the precondition §4.4 names.
 
 ### 1.2 The CASCI branch: what is true on RHF orbitals
 
@@ -1099,7 +1099,7 @@ them leads to chasing the wrong bug. All three apply to both branches:
 | What can make the derivative ill-defined? | The selection: a reordering or a lost point group puts a kink in the energy; a small gap across an active-space boundary makes the selection multipliers large (§4.1–§4.2). | Not a selection. A near-singular CASSCF Hessian (§2.7), and a displaced optimisation landing on a different stationary branch (§4.4). |
 | How is numerical validation set up? | In-plane displacements of a planar `Cs` molecule, refusing any displacement whose detected point group changes; out-of-plane components checked against zero instead (§4.3). | The same rule (§4.3). |
 | Does Park's SC non-invariance apply? | Yes, through `z^c` (§4.4). | Yes, identically: it is a property of the SC functional, not of the reference (§4.4). |
-| Is it implemented? | The source terms in `src/`; the Z-vector solve offline only ([`gradients.md`](gradients.md), §1). | Nowhere; every derivative path refuses a `casscf` golden (§1.1). |
+| Is it implemented? | The source terms in `src/`; the Z-vector solve offline only ([`gradients.md`](gradients.md), §1). | The coupled solve offline only (`nevpt2_grad.py --reference casscf`, [`gradients.md`](gradients.md), §1); every derivative path in the tree refuses a `casscf` golden (§1.1). |
 
 ## References
 

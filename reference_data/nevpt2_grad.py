@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 r"""Analytic nuclear gradient of the SC- (and with ``--pc``, PC-) NEVPT2
 energy: the Z-vector solve and the AO contraction, for a CASCI-on-RHF
-reference.
+reference -- and, with ``--reference casscf``, for a CASCI on converged
+CASSCF orbitals (the CP-CASSCF branch, last section below).
 
 This is the **offline Python** half of the analytic gradient
 (docs/gradient-theory.md), and it is offline on purpose. This repo's shape is
@@ -48,13 +49,13 @@ simplification of a CASCI reference over a CASSCF one, and it is why
 :meth:`Gradients.get_Aop_Adiag` returns a **block-diagonal** operator rather
 than one coupled CP-CASSCF system.
 
-One coupling survives, and section 2.2 does not mention it: (O2) is a
-condition on the **generalized** Fock, which is built from the active density,
-so ``f`` -- unlike ``F`` -- does depend on the CI vector. The two equations are
-therefore coupled through ``z^c`` alone, weakly, and :meth:`ci_coupling` says
-exactly how. The pair is iterated to a fixed point whose iteration count is
-reported; it is one iteration for a CASCI reference, where ``z^c`` vanishes
-identically.
+One coupling survives, and section 2.2 carries it as a right-hand side,
+``y^c``: (O2) is a condition on the **generalized** Fock, which is built from
+the active density, so ``f`` -- unlike ``F`` -- does depend on the CI vector.
+The two equations are therefore coupled through ``z^c`` alone, one way, and
+:meth:`ci_coupling` is that term. The pair is iterated to a fixed point whose
+iteration count is reported; it is one iteration for a CASCI reference, where
+``z^c`` vanishes identically.
 
 HOW THE ORBITAL MULTIPLIERS ARE SOLVED, AND WHY AS ONE SYSTEM
 -------------------------------------------------------------
@@ -304,6 +305,69 @@ rationale is written once, in docs/testing.md, "The analytic gradient against
 the numerical one", with the two bars it is built from; nothing else restates
 it.
 
+THE CASSCF BRANCH: ONE COUPLED (Z, z) SYSTEM, SOLVED DENSELY
+------------------------------------------------------------
+
+``--reference casscf --mo-from FILE`` differentiates the same NEVPT2 energy on
+a CASCI run on **converged CASSCF orbitals** (``generate_golden.py
+--mo-from``'s state, a ``reference_kind = casscf`` golden). The Lagrangian is
+then Park's Eq. 23 as written (docs/gradient-theory.md, section 1.4)::
+
+    L = E + Z . g_orb(kappa, c)                     (S1) CASSCF stationarity
+          + z . g_ci(kappa, c)                      (C1) the CI eigenvector
+          + sum_{i<j in core} zc_ij f_ij
+          + sum_{r<s in virt} zc_rs f_rs            (O2) pseudocanonicality
+
+with ``(g_orb, g_ci)`` PySCF's own second-order CASSCF gradient,
+``pyscf.mcscf.newton_casscf.gen_g_hop``'s ``g_all``: ``g_orb`` over the
+non-redundant core-active, core-virtual and active-virtual rotations,
+``g_ci = 2 (H - E) c``. There is no ``F``, no (O1), no ``act_O``/``act_V``
+split: every active-active rotation is the gauge (section 1.3), and the
+state is NOT rotated into an RHF basis (section 2.6 is bypassed -- there is
+no RHF partition for it to recover).
+
+What changes is the solve (section 2.7). ``z^c`` comes first and alone, Eqs.
+56-57 with the same degeneracy refusal (:meth:`Gradients.degenerate_constraints`),
+because no other constraint responds to a core-core or virtual-virtual
+rotation at a stationary point. Then **one** linear system::
+
+    J^T [Z; z] = -[ dE/dx + zc . df/dx ;  P (y + y^c) ]
+
+where ``J`` is ``gen_g_hop``'s ``h_op`` -- the orbital+CI Hessian, the exact
+Jacobian of ``g_all`` in its own ``(x_orb, x_ci)`` step variables -- and
+``y^c`` is section 2.2's ``z^c`` coupling, :meth:`Gradients.ci_coupling`.
+The coupled space is small in every case in scope, so ``J`` is **built
+column by column and factorised**, restricted to the orbital rotations plus
+the in-sector CI directions orthogonal to ``c`` (:meth:`CasscfGradients.basis`):
+exact, with no preconditioner, level shift or convergence threshold. Its
+symmetric part is also diagonalised, so a near-null mode of the coupled
+system is printed rather than inferred. ``--cp-solve cg`` runs the base
+class's own conjugate gradient (``lagrange.Gradients.solve_lagrange``)
+through the same operator instead, for a case too large to build densely.
+
+The rest is the CASCI branch's machinery, unchanged: the source terms ``Y``
+and ``y`` (section 2.1) from the same sweeps, the frozen orthonormal path,
+and the residual-independent checks, with ``Z . g_orb(x)`` and ``z . g_ci(x)``
+in ``Phi`` (``gen_g_hop`` evaluated at each displaced geometry) where the
+CASCI branch has ``Z . F(x)`` and ``<z|H(x)|c>``. Two checks are its own:
+
+* **the operator is the true Hessian** (:func:`check_hessian_vector`): ``J v``
+  against a step ladder of central differences of ``gen_g_hop``'s own
+  ``g_all`` along seeded random directions -- no NEVPT2 content, and the one
+  exact check of the coupled operator;
+* **the smoke test** (``--casci-only``): with ``E_corr`` dropped the reference
+  is a CASSCF, stationary in both ``kappa`` and ``c``, so ``Y = 0`` and
+  ``y = 0`` exactly and the multipliers must come out **exactly zero**
+  (:func:`check_multipliers_vanish`), and the gradient must be
+  ``pyscf.grad.casscf``'s (:data:`CASSCF_SMOKE_TOL`). That exercises the AO
+  contraction and the frozen path, not the coupled solve -- which is why the
+  first check exists.
+
+There is no numerical gradient to gate against on this branch yet
+(``nevpt2_numgrad.py`` refuses a ``casscf`` golden), so the gate is the
+residual-independent checks. The measured numbers and the wall-clock budget
+per case are in docs/reference-data.md, "The analytic gradient".
+
 Usage::
 
     uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46
@@ -333,6 +397,14 @@ Usage::
     # and the CASCI validation gated the same way, against the npz's grad_casci:
     uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 \
         --casci-only --grad-num /tmp/n2_cas44.numgrad.npz
+    # the CASSCF branch (CP-CASSCF, dense): the committed N2 sidecar is found
+    # by name; any other case names its .mogold
+    uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 \
+        --reference casscf
+    uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 \
+        --reference casscf --casci-only        # the pyscf.grad.casscf smoke test
+    uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
+        --reference casscf --mo-from /tmp/lif_def2svp_cas46_casscf.mogold
 
 ``--out`` writes the gradient and every residual as an ``.npz``; nothing is
 written by default, and **no committed file is ever touched** (the
@@ -358,6 +430,7 @@ import golden_format as gf
 import numpy as np
 from pyscf import fci, mcscf, mrpt, scf
 from pyscf.grad import lagrange
+from pyscf.mcscf import mc1step, newton_casscf
 from pyscf.mrpt import nevpt2 as pn
 
 #: The repository root.
@@ -588,6 +661,51 @@ PC_RANK_KEPT_FRACTION = 1e-2
 #: a run is reproducible; a pair, so a check does not rest on one direction.
 CHECK_SEEDS = (70, 2026)
 
+# -- the CASSCF branch (--reference casscf; docs/gradient-theory.md,
+# -- sections 1.4 and 2.7) ----------------------------------------------------
+
+#: The references a run can differentiate. ``casci``: a CASCI on converged
+#: RHF orbitals (sections 1.2, 2.2-2.6), the default and every committed
+#: ``grad_num``'s. ``casscf``: a CASCI on converged CASSCF orbitals read from
+#: an MO sidecar (sections 1.4, 2.7).
+REFERENCES = ("casci", "casscf")
+
+#: The seeds of the random directions :func:`check_hessian_vector` holds the
+#: dense operator to. Several, fixed, for the reason :data:`CHECK_SEEDS` is a
+#: pair; random rather than symmetry-adapted, because ``g_all`` is smooth in
+#: every direction (it is a CASSCF gradient, with no NEVPT2 content).
+HVP_SEEDS = (70, 2026, 122)
+
+#: The Hessian-vector ladder's steps, ``h = 2^-k``. On N2 CAS(4,4)'s CASSCF
+#: state the central difference of ``g_all`` closes on ``h_op``'s product
+#: fourfold per halving over most of this range and meets round-off at its
+#: fine end (docs/reference-data.md, "The analytic gradient").
+HVP_LADDER = (4, 16)
+
+#: What the Hessian-vector ladder's Richardson extrapolant may miss ``J v``
+#: by, max over components, per unit direction: :data:`LADDER_TOL`, the
+#: precision every other ladder here is gated at.
+HVP_TOL = GRAD_NUM_TOL
+
+#: The smoke test's tolerance: ``--reference casscf --casci-only`` against
+#: ``pyscf.grad.casscf``, max over components (Eh/bohr). Not 1e-7 for the
+#: reason :data:`GRAD_NUM_TOL` gives -- the frozen-path side is a Richardson
+#: difference quotient with its own bar, and a converged optimiser leaves a
+#: residual orbital gradient whose first-order cost both analytic gradients
+#: ignore -- so it is that same 1e-6.
+CASSCF_SMOKE_TOL = GRAD_NUM_TOL
+
+#: The declared wall-clock budget for one whole ``--reference casscf`` run per
+#: case, NEVPT2 (SC) and ``--casci-only`` alike, in seconds: a bound, set from
+#: the measured walls in docs/reference-data.md, "The analytic gradient", with
+#: room for a loaded machine. A run over it says so (it is a budget, not a
+#: correctness gate, so it does not fail the run).
+CASSCF_WALL_BUDGET = {
+    "n2_ccpvdz_cas44": 120.0,
+    "lif_def2svp_cas46": 300.0,
+    "acrolein_def2svp_cas65": 3600.0,
+}
+
 #: Component names, in the order they index a coordinate.
 AXES = ngrad.AXES
 
@@ -719,6 +837,18 @@ class State:
     #: carries it across with these.
     ci_golden: np.ndarray | None = None
     act_rot: np.ndarray | None = None
+    #: Which reference the orbitals came from (:data:`REFERENCES`). On the
+    #: ``casscf`` branch there is no RHF partition (section 1.4): the state is
+    #: held in its own canonicalised basis, unrotated, and ``n_act_occ`` is
+    #: the whole active space, so the active space is ONE index range and
+    #: every active-active rotation is a gauge -- which is exactly what
+    #: :func:`kappa_pairs`, :func:`constraints` and
+    #: :func:`non_gauge_rotations` then read off it.
+    reference: str = "casci"
+
+    @property
+    def casscf(self) -> bool:
+        return self.reference == "casscf"
 
     @property
     def nocc(self) -> int:
@@ -775,7 +905,8 @@ class State:
         return p
 
 
-def build_state(case: str, spec: dict, *, pc: bool = False) -> State:
+def build_state(case: str, spec: dict, *, pc: bool = False, reference: str = "casci",
+                mo_from: Path | None = None) -> State:
     """``generate_golden._build_state``'s own state -- same single-threading,
     same Davidson tolerance, same auto-detected point group, same
     irrep-selected active space -- plus the generalized and RHF Fock matrices
@@ -783,7 +914,15 @@ def build_state(case: str, spec: dict, *, pc: bool = False) -> State:
 
     With ``pc``, block2's PC energy on the rotated state as well, gated by
     ``generate_golden._check_pc_conditioning`` -- the same guard the golden's
-    own PC fields pass, and the one that refuses LiF."""
+    own PC fields pass, and the one that refuses LiF.
+
+    With ``reference="casscf"`` the orbitals are ``mo_from``'s committed
+    CASSCF ones, through ``generate_golden._build_state``'s own ``--mo-from``
+    path and every refusal it runs (fingerprint, symmetry purity, the
+    stationarity gate). The state is then kept in its canonicalised basis: no
+    RHF partition exists to recover (section 1.4), so section 2.6's rotation
+    is skipped and only (O2) is asserted."""
+    casscf = reference == "casscf"
     geom_path = Path(spec["geometry"])
     if not geom_path.is_absolute():
         geom_path = REPO / geom_path
@@ -791,11 +930,13 @@ def build_state(case: str, spec: dict, *, pc: bool = False) -> State:
     mc, pt = gg._build_state(
         geom, spec["basis"], spec["ncas"], spec["nelecas"],
         cas_irreps=spec.get("cas_irreps"), core_irreps=spec.get("core_irreps"),
+        mo_from=mo_from if casscf else None,
     )
     nmo = pt.mo_coeff.shape[1]
     nact, ncore = pt.ncas, pt.ncore
     nelec_rhf = pt.mol.nelectron
-    n_act_occ = nelec_rhf // 2 - ncore
+    # On the CASSCF branch the whole active space is one range (State.reference).
+    n_act_occ = nact if casscf else nelec_rhf // 2 - ncore
 
     # Section 2.6: F restricted to the active block has the SELECTED RHF
     # orbital energies as its eigenvalues and the pre-canonicalisation active
@@ -813,8 +954,28 @@ def build_state(case: str, spec: dict, *, pc: bool = False) -> State:
         return e_corr, ga
 
     e_corr0, ga0 = arrays_for(pt)
-    invariants = gg._check_gradient_invariants(pt, ga0, nelec_rhf, mc._scf.mo_energy)
     a = slice(ncore, ncore + nact)
+    if casscf:
+        # Section 1.4: no (O1), no RHF partition, so no act_O/act_V split to
+        # recover and no rotation; (O2) is the one invariant there is.
+        invariants = gg._check_gradient_invariants(pt, ga0, nelec_rhf, mc._scf.mo_energy,
+                                                   reference_kind="casscf")
+        f = np.asarray(ga0["f"])
+        ci = np.asarray(pt.load_ci()).copy()
+        st = State(
+            case=case, geom=geom, basis=spec["basis"], mc=mc, pt=pt,
+            mo_coeff=np.asarray(pt.mo_coeff).copy(), ci=ci,
+            ncore=ncore, nact=nact, nvirt=nmo - ncore - nact, nmo=nmo,
+            nelecas=tuple(pt.nelecas), nelec_rhf=nelec_rhf,
+            f=f, fock_rhf=np.asarray(ga0["fock_rhf"]), n_act_occ=n_act_occ,
+            act_eps=np.diag(f)[a].copy(), e_casci=float(mc.e_tot), e_corr=e_corr0,
+            invariants=invariants, ci_golden=ci.copy(), act_rot=np.eye(nact),
+            reference="casscf",
+        )
+        if pc:
+            raise SystemExit("build_state: --pc is refused on the CASSCF branch (run())")
+        return st
+    invariants = gg._check_gradient_invariants(pt, ga0, nelec_rhf, mc._scf.mo_energy)
     eps, vec = np.linalg.eigh(np.asarray(ga0["fock_rhf"])[a, a])
     mo = np.asarray(pt.mo_coeff).copy()
     mo[:, a] = mo[:, a] @ vec
@@ -910,6 +1071,56 @@ class Functional:
         #: the state's own CI vector, by the same key: any other vector handed
         #: to :meth:`pc_energy` is a DISPLACED one, and is guarded there.
         self._ref_key = _ci_key(state.ci)
+        #: the CASSCF branch's (S1)/(C1) constraint evaluator, built on first
+        #: use (:meth:`casscf_g_hop`).
+        self._mcs = None
+
+    # -- the CASSCF branch's constraints (sections 1.4, 2.7) ---------------
+
+    def casscf_solver(self):
+        """An unoptimised ``mcscf.CASSCF`` on this geometry's own RHF object,
+        for ``gen_g_hop`` alone -- nothing is ever optimised with it.
+
+        The plain ``mc1step.CASSCF`` and a plain ``direct_spin1`` FCI solver,
+        on purpose: the symmetry-adapted classes would mask the orbital step
+        variables and the CI space by irrep, and the coupled system is
+        restricted to the state's own sector by
+        :meth:`CasscfGradients.basis` instead, explicitly."""
+        if self._mcs is None:
+            st = self.state
+            mcs = mc1step.CASSCF(self.mf, st.nact, st.nelecas)
+            mcs.fcisolver = fci.direct_spin1.FCI(self.mol)
+            mcs.fcisolver.conv_tol = gg.FCI_CONV_TOL
+            mcs.mo_coeff = st.mo_coeff
+            assert mcs.ncore == st.ncore, "the CASSCF evaluator chose a different core size"
+            self._mcs = mcs
+        return self._mcs
+
+    def casscf_g_hop(self, C: np.ndarray, ci: np.ndarray):
+        """``newton_casscf.gen_g_hop`` at these orbitals and this CI vector:
+        ``(g_all, h_op, h_diag)``, with ``g_all = [g_orb; g_ci]`` the
+        (S1)/(C1) constraint values (section 1.4) and ``h_op`` their Jacobian
+        in ``gen_g_hop``'s own step variables (section 2.7's ``G``). The CI
+        vector is normalised first: ``gen_g_hop`` reads it as given, and
+        ``g_ci = 2 (H - <c|H|c>) c`` is a gradient only at unit norm."""
+        mcs = self.casscf_solver()
+        c = np.asarray(ci, dtype=float).ravel()
+        c = c / np.linalg.norm(c)
+        mcs.mo_coeff = C
+        eris = mcs.ao2mo(C)
+        self.nevals += 1
+        g_all, _g_update, h_op, h_diag = newton_casscf.gen_g_hop(mcs, C, c, eris)
+        return np.asarray(g_all), h_op, np.asarray(h_diag)
+
+    def casscf_variables(self) -> np.ndarray:
+        """``gen_g_hop``'s packed orbital step variables, as ``(i, j)`` with
+        ``i > j``, in packing order: the non-redundant core-active,
+        core-virtual and active-virtual rotations, ``kappa_ij = x``,
+        ``kappa_ji = -x`` (``mc1step.CASSCF.unpack_uniq_var``)."""
+        mcs = self.casscf_solver()
+        st = self.state
+        mask = mcs.uniq_var_indices(st.nmo, st.ncore, st.nact, mcs.frozen)
+        return np.argwhere(mask)
 
     # -- the pieces -------------------------------------------------------
 
@@ -1065,7 +1276,7 @@ class Functional:
 
     def evaluate(self, C: np.ndarray, ci: np.ndarray, *, with_corr: bool = True,
                  dm1: np.ndarray | None = None, guard: bool = False,
-                 where: str = "") -> dict:
+                 where: str = "", with_g: bool = False) -> dict:
         """Everything ``Phi``, the source terms and the Jacobian read, at one
         point: the two energies, the two Fock matrices, and ``H|c>`` as a
         **vector** over determinants.
@@ -1077,7 +1288,14 @@ class Functional:
         ``dm1`` overrides the active 1-RDM used to build ``f``. It is the
         state's own in every call but the ``y_I`` sweep, where the CI vector
         moves and the RDMs must move with it. ``guard`` and ``where`` go to
-        :meth:`pc_energy`."""
+        :meth:`pc_energy`.
+
+        On the CASSCF branch there is no RHF Fock (``fock_rhf`` is ``None``),
+        and ``with_g`` adds the (S1)/(C1) constraint values from
+        :meth:`casscf_g_hop`: ``S``, an ``(n_mo, n_mo)`` matrix holding the
+        orbital gradient's component for step variable ``(q, p)`` at ``[p,
+        q]``, ``p < q`` -- the pair index every constraint here is written in
+        -- and ``g_ci``."""
         st = self.state
         eris = self.eris(C)
         dms = None
@@ -1088,7 +1306,16 @@ class Functional:
             if dm1 is None:
                 dm1 = dm1_built
         f = self.generalized_fock(eris, dm1)
-        out = {"f": f, "fock_rhf": self.rhf_fock(C)}
+        out = {"f": f, "fock_rhf": None if st.casscf else self.rhf_fock(C)}
+        if with_g:
+            if not st.casscf:
+                raise SystemExit("evaluate: with_g is the CASSCF branch's constraint")
+            g_all, _h_op, _h_diag = self.casscf_g_hop(C, ci)
+            var = self.casscf_variables()
+            s = np.zeros((st.nmo, st.nmo))
+            s[var[:, 1], var[:, 0]] = g_all[:len(var)]
+            out["S"] = s
+            out["g_ci"] = g_all[len(var):]
 
         ecore = self.core_energy(eris)
         h2abs = self.active_hamiltonian(eris)
@@ -1189,11 +1416,17 @@ def constraints(st: State) -> list[tuple[str, int, int]]:
 
     So there is exactly one multiplier per non-gauge rotation, stationarity is
     a square system, and the Jacobian is indexed the same way on both sides.
-    The assertion is that identity."""
+    The assertion is that identity.
+
+    On the CASSCF branch (section 1.4) a rotation between two spaces is
+    constrained by (S1), CASSCF stationarity, instead: ``("S", p, q)``, the
+    orbital gradient's component along that rotation. Its active space is one
+    range, so the count below is the same identity with act_V empty."""
     out = []
+    between = "S" if st.casscf else "F"
     for p, q in kappa_pairs(st):
         sp, sq = st.space_of(p), st.space_of(q)
-        out.append(("f" if sp == sq else "F", p, q))
+        out.append(("f" if sp == sq else between, p, q))
     nc, nv, no, na_v = st.ncore, st.nvirt, st.n_act_occ, st.nact - st.n_act_occ
     sizes = (nc, no, na_v, nv)
     want_f = nc * (nc - 1) // 2 + nv * (nv - 1) // 2
@@ -1206,13 +1439,19 @@ def constraints(st: State) -> list[tuple[str, int, int]]:
     return out
 
 
-def constraint_vector(bundle: dict, cons: list) -> np.ndarray:
+def constraint_vector(bundle: dict, cons: list, *, only: str | None = None) -> np.ndarray:
     """The constraints' values at one point: ``F_pq`` on (O1)'s pairs and
-    ``f_pq`` on (O2)'s. Zero at the reference state by construction, which is
-    section 3.6's invariant; nonzero along the frozen path, which is what its
-    nuclear derivative is."""
-    m = {"F": bundle["fock_rhf"], "f": bundle["f"]}
-    return np.array([m[kind][p, q] for kind, p, q in cons])
+    ``f_pq`` on (O2)'s -- or, on the CASSCF branch, the orbital gradient on
+    (S1)'s (:meth:`Functional.evaluate`'s ``S``). Zero at the reference state
+    by construction, which is section 3.6's invariant; nonzero along the
+    frozen path, which is what its nuclear derivative is.
+
+    ``only`` keeps one kind and writes 0 for the rest: the CASSCF branch's
+    ``kappa`` sweep differences (O2)'s alone, because (S1)'s Jacobian is
+    ``gen_g_hop``'s Hessian, not a difference quotient."""
+    m = {"F": bundle["fock_rhf"], "f": bundle["f"], "S": bundle.get("S")}
+    return np.array([m[kind][p, q] if only is None or kind == only else 0.0
+                     for kind, p, q in cons])
 
 
 # --------------------------------------------------------------------------
@@ -1351,6 +1590,9 @@ def kappa_sweep(fn: Functional, st: State, cons: list, *, with_corr: bool,
     invisible in the intra-space blocks and wrong everywhere else."""
     pairs = kappa_pairs(st)
     dm1 = fn.reference_dm1(st)
+    # The CASSCF branch differences (O2)'s columns alone: (S1)'s Jacobian is
+    # gen_g_hop's Hessian (CasscfGradients), and its columns here stay 0.
+    only = "f" if st.casscf else None
     A = np.zeros((st.nmo, st.nmo))
     # E_corr's half of A on its own: what a dump's Y replaces, and what
     # --source both compares it with.
@@ -1367,7 +1609,8 @@ def kappa_sweep(fn: Functional, st: State, cons: list, *, with_corr: bool,
         A[p, q], A[q, p] = a, -a
         ac = (b[0]["e_corr"] - b[1]["e_corr"]) / (2.0 * step)
         A_corr[p, q], A_corr[q, p] = ac, -ac
-        M[k] =(constraint_vector(b[0], cons) - constraint_vector(b[1], cons)) / (2.0 * step)
+        M[k] = (constraint_vector(b[0], cons, only=only)
+                - constraint_vector(b[1], cons, only=only)) / (2.0 * step)
         Q[k] = (b[0]["hvec"] - b[1]["hvec"]) / (2.0 * step)
         if (k + 1) % 250 == 0:
             log(f"    {k + 1}/{len(pairs)} kappa pairs, {time.perf_counter() - t0:.0f}s")
@@ -1970,26 +2213,27 @@ class Gradients(lagrange.Gradients):
 
     def ci_coupling(self, lam: np.ndarray) -> np.ndarray:
         """``sum_m lambda_m dG_m/dc_I``: the (O2) constraints' derivative with
-        respect to the CI vector.
+        respect to the CI vector -- docs/gradient-theory.md, section 2.2's
+        ``y^c``.
 
-        **This is a coupling docs/gradient-theory.md, section 2.2 does not
-        account for, and it is real.** That section shows the CI equation
-        decouples because ``F`` is built from the RHF density and so carries no
-        CI dependence -- true, and it is why there is no CP-CASSCF here. But
-        the Lagrangian's *other* orbital constraint, (O2)'s pseudocanonicality
-        ``f_pq = 0``, is a statement about the **generalized** Fock, which is
-        built from the active density ``gamma`` and therefore does depend on
-        ``c``::
+        Section 2.2 shows the CI equation decouples from the orbital one
+        because ``F`` is built from the RHF density and so carries no CI
+        dependence. But the Lagrangian's *other* orbital constraint, (O2)'s
+        pseudocanonicality ``f_pq = 0``, is a statement about the
+        **generalized** Fock, which is built from the active density
+        ``gamma`` and therefore does depend on ``c``::
 
             f_pq  = h^eff_pq + sum_tu gamma_tu [ (pq|tu) - (1/2)(pt|uq) ]
             df_pq/dc_I = sum_tu (dgamma_tu/dc_I) [ (pq|tu) - (1/2)(pt|uq) ]
 
-        and ``dgamma_tu/dc_I = [(E_tu + E_ut) c]_I``. So the CI and orbital
-        equations are coupled through ``z^c``, weakly (``z^c`` is small, and it
-        vanishes identically for a CASCI reference, where the energy is
-        invariant to a rotation inside the core space), but not at zero. The
-        solve below is a fixed point over exactly this term, and its
-        convergence is reported.
+        and ``dgamma_tu/dc_I = [(E_tu + E_ut) c]_I``. Section 2.2 carries it
+        as the right-hand side ``y^c``, one way: ``z^c`` is a division of
+        ``Y`` alone (section 2.3), known before the CI equation is written.
+        Here it is formed from the **current** multipliers, and the CASCI
+        solve below is a fixed point over it whose convergence is reported --
+        which, because the coupling runs one way, closes once ``z^c`` is in
+        hand. On the CASSCF branch it is the same ``y^c``, added to the coupled
+        system's CI right-hand side (section 2.7; :class:`CasscfGradients`).
 
         Contracted as one matrix rather than one column per constraint: the
         multiplier-weighted integral combination is formed first, then a single
@@ -2004,6 +2248,15 @@ class Gradients(lagrange.Gradients):
             return np.zeros(st.ci.size)
         sig = fci.direct_spin1.contract_1e(w + w.T, st.ci, st.nact, st.nelecas)
         return np.asarray(sig).ravel()
+
+    def ci_term(self, b: dict) -> float:
+        """The (C1) constraint's term in ``Phi`` and in every Lagrangian a
+        check differences, at one :meth:`Functional.evaluate` bundle:
+        ``<z|H|c>``. ``z`` is projected against ``c``, so the ``-E_CASCI
+        <z|c>`` half of the constraint contributes nothing and this one term
+        is the whole CI multiplier's response.
+        :meth:`CasscfGradients.ci_term` has the CASSCF branch's."""
+        return float(self.z.ravel() @ b["hvec"])
 
     def degenerate_constraints(self) -> tuple[list[int], list[str]]:
         """(O2)'s undetermined rows. A core or virtual pair closer than
@@ -2075,13 +2328,10 @@ class Gradients(lagrange.Gradients):
         st = self.st
         fn = self._geom_fn(geom)
         C = frozen_coeff(st.mo_coeff, self._S0_half, fn.ovlp)
-        b = fn.evaluate(C, st.ci, with_corr=self.with_corr, guard=guard, where=where)
+        b = fn.evaluate(C, st.ci, with_corr=self.with_corr, guard=guard, where=where,
+                        with_g=st.casscf)
         ham = b["e_casci"] + b["e_corr"]
-        # <z|H(x)|c>: z is projected against c, so the -E_CASCI <z|c> half of
-        # the (C1) constraint contributes nothing and this one term is the
-        # whole CI multiplier's response.
-        lag = (float(self.lam @ constraint_vector(b, self.cons))
-               + float(self.z.ravel() @ b["hvec"]))
+        lag = float(self.lam @ constraint_vector(b, self.cons)) + self.ci_term(b)
         if ham_only:
             return ham
         if lag_only:
@@ -2405,13 +2655,21 @@ class Gradients(lagrange.Gradients):
         gauge = [(p, q) for p in range(st.ncore, st.nocc)
                  for q in range(p + 1, st.nocc)
                  if st.space_of(p) == st.space_of(q)]
-        z = self.z.ravel()
         for p, q in gauge:
             vals = []
             for sign in (+1.0, -1.0):
                 b = self.fn.evaluate(givens(st.mo_coeff, p, q, sign * self.kappa_step),
-                                     st.ci, with_corr=self.with_corr)
-                vals.append(b["e_casci"] + b["e_corr"] + float(z @ b["hvec"]))
+                                     st.ci, with_corr=self.with_corr, with_g=st.casscf)
+                val = b["e_casci"] + b["e_corr"] + self.ci_term(b)
+                if st.casscf:
+                    # The CASSCF branch's constraints are covariant under an
+                    # active rotation (g_orb rotates with the active index,
+                    # f's core and virtual blocks do not see it), so their
+                    # gauge response is first order in the residual g_orb and
+                    # belongs in the sum: there the identity is the WHOLE
+                    # Lagrangian's gauge derivative (CasscfGradients).
+                    val += float(self.lam @ constraint_vector(b, self.cons))
+                vals.append(val)
             worst = max(worst, abs((vals[0] - vals[1]) / (2.0 * self.kappa_step)))
         return worst
 
@@ -2424,6 +2682,426 @@ class Gradients(lagrange.Gradients):
         self.ham_response = ham
         self.ldotjnuc = lag
         return self.de
+
+
+#: How :class:`CasscfGradients` solves its coupled system: ``dense`` (the
+#: default -- build ``J`` column by column and factorise it) or ``cg`` (the
+#: base class's own conjugate gradient through the same operator, for a case
+#: too large to build).
+CP_SOLVES = ("dense", "cg")
+
+#: How many of the coupled system's smallest eigenvalues are printed.
+N_EIG_REPORTED = 5
+
+
+class CasscfGradients(Gradients):
+    """The CASSCF branch: docs/gradient-theory.md, sections 1.4 and 2.7.
+
+    The constraints are (S1), CASSCF stationarity, on every non-redundant
+    rotation -- core-active, core-virtual, active-virtual -- (O2) on the
+    core-core and virtual-virtual pairs, and (C1) on the CI vector; (S1) and
+    (C1) are ``newton_casscf.gen_g_hop``'s ``g_all`` (:meth:`Functional.casscf_g_hop`),
+    so their multipliers ``Z`` and ``z`` multiply ``g_orb`` and ``g_ci = 2 (H
+    - E) c`` exactly as PySCF normalises them, and the coupled operator is
+    ``gen_g_hop``'s ``h_op``.
+
+    Solve order (section 2.7): ``z^c`` first, from (O2)'s own rows (Eqs.
+    56-57, with :meth:`degenerate_constraints`' refusal); then the one coupled
+    system ``J^T [Z; z] = -b`` with ``z^c``'s terms in ``b`` (its orbital part
+    ``zc . df/dkappa``, its CI part ``y^c``). One pass: nothing in it reads
+    ``Z`` or ``z`` back, so there is no fixed point to iterate.
+
+    The coupled system lives on :meth:`basis`: every ``gen_g_hop`` orbital
+    variable, plus the CI directions in the state's own sector
+    (:func:`allowed_determinants`) orthogonal to ``c``. ``c`` itself is the
+    normalisation's null direction, and outside the sector the NEVPT2 source
+    term is not defined; a symmetry-breaking orbital rotation keeps a zero
+    right-hand side either way."""
+
+    def __init__(self, st: State, src: SourceTerms, *, with_corr: bool = True,
+                 step: float | None = None, richardson: bool = True,
+                 kappa_step: float | None = None, cp_solve: str = "dense"):
+        if not st.casscf:
+            raise SystemExit("CasscfGradients needs a --reference casscf state")
+        super().__init__(st, src, with_corr=with_corr, step=step, richardson=richardson,
+                         pc=False, kappa_step=kappa_step)
+        if cp_solve not in CP_SOLVES:
+            raise SystemExit(f"--cp-solve {cp_solve!r} is not one of {CP_SOLVES}")
+        self.cp_solve = cp_solve
+        #: gen_g_hop's packed orbital variables, (i, j) with i > j.
+        self.var = self.fn.casscf_variables()
+        pos = {(int(j), int(i)): n for n, (i, j) in enumerate(self.var)}
+        #: (S1)'s constraints, as rows of :attr:`cons`, and the gen_g_hop
+        #: variable each one is: the pair (p, q), p < q, is variable (q, p).
+        self.s_rows = np.array([m for m, (kind, _p, _q) in enumerate(self.cons) if kind == "S"])
+        self.s_var = np.array([pos[(p, q)] for kind, p, q in self.cons if kind == "S"])
+        self.o2_rows = np.array([m for m, (kind, _p, _q) in enumerate(self.cons) if kind == "f"],
+                                dtype=int)
+        # One (S1) constraint per gen_g_hop variable, and back: the same
+        # bijection constraints() asserts for the CASCI branch's (O1).
+        assert len(self.s_rows) == len(self.var) and sorted(self.s_var) == list(
+            range(len(self.var))), "(S1)'s pairs are not gen_g_hop's variables"
+        self.nvar = len(self.var)
+
+    # -- the (C1) term ----------------------------------------------------
+
+    def ci_term(self, b: dict) -> float:
+        """``z . g_ci`` with ``g_ci`` evaluated by ``gen_g_hop`` at the
+        bundle's point -- the (C1) constraint in the normalisation ``z`` was
+        solved in."""
+        return float(self.z.ravel() @ b["g_ci"])
+
+    # -- the coupled system's pieces -------------------------------------
+
+    def basis(self) -> np.ndarray:
+        """``B``, ``(n_var + n_det, n_var + n_ci)`` with orthonormal columns:
+        the identity on the orbital variables, and on the CI block an
+        orthonormal basis of the in-sector determinants with ``c`` projected
+        out. ``J`` is solved as ``B^T J B``, so the null direction ``c`` is not
+        in the system at all rather than handled by a projector after it."""
+        st = self.st
+        ndet = st.ci.size
+        # Built in the sector's own coordinates and embedded, so the basis is
+        # exactly zero outside it (allowed_determinants admits a leak of the
+        # state there only at round-off).
+        cs = st.ci.ravel()[self.allowed]
+        cs = cs / np.linalg.norm(cs)
+        u, s, _vt = np.linalg.svd(np.eye(cs.size) - np.outer(cs, cs))
+        keep = s > 1e-8
+        if int(keep.sum()) != cs.size - 1:
+            raise SystemExit(
+                f"the CI block's basis has rank {int(keep.sum())}, expected "
+                f"{cs.size - 1} (the sector less c): the state is not inside the sector "
+                "it was labelled with"
+            )
+        b = np.zeros((self.nvar + ndet, self.nvar + int(keep.sum())))
+        b[:self.nvar, :self.nvar] = np.eye(self.nvar)
+        b[self.nvar + np.flatnonzero(self.allowed), self.nvar:] = u[:, keep]
+        return b
+
+    def rhs_full(self) -> np.ndarray:
+        """``b`` over ``gen_g_hop``'s full variable list: ``dE/dx +
+        zc . df/dx`` on the orbital variables and ``P (y + y^c)`` on the CI
+        ones (section 2.7's right-hand side), from the current ``z^c``.
+
+        A Givens rotation by ``t`` along the pair ``(p, q)``,
+        ``C exp(t (E_pq - E_qp))`` (:func:`givens`), is ``gen_g_hop``'s step
+        ``x_(q,p) = -t``, so every ``d/dt`` the sweep took enters with a minus
+        sign. :func:`check_orbital_stationarity` is the independent check that
+        the sign is right: it differences the assembled Lagrangian, not this."""
+        st = self.st
+        lam = self.lam
+        M = self._jacobian
+        o2 = self.o2_rows
+        b_orb = np.zeros(self.nvar)
+        for m, v in zip(self.s_rows, self.s_var, strict=True):
+            _kind, p, q = self.cons[m]
+            b_orb[v] = -(self.src.kappa[p, q] + float(M[m, o2] @ lam[o2]))
+        c = st.ci.ravel()
+        y = (self.src.ci.ravel() + self.ci_coupling(lam)) * self.allowed
+        self.x_norm = float(c @ y)
+        return np.concatenate([b_orb, y - self.x_norm * c])
+
+    def get_wfn_response(self, **kwargs) -> np.ndarray:
+        """``B^T b``: the coupled system's right-hand side on :meth:`basis`
+        (:meth:`rhs_full`), what the base class's conjugate gradient solves
+        against under ``--cp-solve cg``."""
+        return self._basis.T @ self.rhs_full()
+
+    def get_Aop_Adiag(self, **kwargs):
+        """``B^T J B`` as an operator through ``gen_g_hop``'s ``h_op``, and
+        its diagonal -- exact once the dense matrix is built, and
+        ``gen_g_hop``'s own ``h_diag`` carried onto the basis before that.
+        ``J`` is symmetric to round-off here (:attr:`residuals`'
+        ``cp_asymmetry`` says how close), which is what lets the base class's
+        CG use it in place of ``J^T``."""
+        b = self._basis
+        h_op = self._h_op
+
+        def Aop(v: np.ndarray) -> np.ndarray:
+            return b.T @ h_op(b @ np.asarray(v).ravel())
+
+        if getattr(self, "_j_red", None) is not None:
+            adiag = np.diag(self._j_red).copy()
+        else:
+            adiag = (b ** 2).T @ self._h_diag
+        return Aop, adiag
+
+    def get_lagrange_precond(self, Adiag, level_shift=None, **kwargs):
+        """The base class's Jacobi preconditioner ``1 / (Adiag + shift)``,
+        but **returning a new vector**: ``lagrange.LagPrec`` divides its
+        argument in place, and scipy's CG hands it the residual it goes on to
+        read, so the stock one corrupts the iteration (measured: NaN within a
+        few steps on N2 CAS(4,4))."""
+        shift = self.level_shift if level_shift is None else level_shift
+        d = np.asarray(Adiag, dtype=float) + shift
+        d[np.abs(d) < 1e-8] = 1e-8
+
+        def precond(x):
+            return np.asarray(x, dtype=float) / d
+
+        return precond
+
+    # -- the driver -------------------------------------------------------
+
+    def prepare(self, log=print, **kwargs) -> None:
+        """:meth:`Gradients.prepare`'s sweep, which here supplies ``Y`` and
+        (O2)'s Jacobian, then ``gen_g_hop`` at the reference point.
+
+        With ``E_corr`` dropped the source terms are **exactly zero**, not the
+        sweep's ``dE_CASCI/dkappa``: a CASSCF reference is stationary in
+        ``kappa`` and ``c`` (section 1.4), so ``Y = 0`` and ``y = 0`` by
+        construction. What the sweep measures for it is the residual
+        stationarity of the converged orbitals, and that is reported."""
+        super().prepare(log=log, **kwargs)
+        st = self.st
+        a_casci = self.sweep["A_casci"]
+        s_pairs = [(p, q) for kind, p, q in self.cons if kind == "S"]
+        self.residuals["stationarity_kappa"] = float(
+            max(abs(a_casci[p, q]) for p, q in s_pairs))
+        if not self.with_corr:
+            self.src = SourceTerms(kappa=np.zeros((st.nmo, st.nmo)), ci=np.zeros(st.ci.shape),
+                                   origin=self.src.origin)
+        t0 = time.perf_counter()
+        g_all, self._h_op, self._h_diag = self.fn.casscf_g_hop(st.mo_coeff, st.ci)
+        self.residuals["casscf_g_orb"] = float(np.linalg.norm(g_all[:self.nvar]))
+        self.residuals["casscf_g_ci"] = float(np.linalg.norm(g_all[self.nvar:]))
+        self._basis = self.basis()
+        self._j_red = None
+        self.nlag = self._basis.shape[1]
+        log(f"  gen_g_hop at the reference ({time.perf_counter() - t0:.1f}s): "
+            f"|g_orb| = {self.residuals['casscf_g_orb']:.3e}, |g_ci| = "
+            f"{self.residuals['casscf_g_ci']:.3e}; the sweep's max |dE_CASCI/dkappa| over "
+            f"(S1)'s rotations = {self.residuals['stationarity_kappa']:.3e} (the "
+            "converged orbitals' residual stationarity)")
+        log("  (on this branch the sweep's M holds (O2)'s columns alone, and Q is unread: "
+            "(S1)'s and (C1)'s Jacobian is gen_g_hop's h_op)")
+        log(f"  the coupled space: {self.nvar} orbital variables (core-active, "
+            f"core-virtual, active-virtual) + {self.nlag - self.nvar} CI directions "
+            f"(the {int(self.allowed.sum())} in-sector determinants less c) = {self.nlag}")
+
+    def solve_o2(self, log=print) -> None:
+        """``z^c``: (O2)'s own rows, ``M_oo zc = -Y`` (Eqs. 56-57), with the
+        degenerate pairs left at zero or refused
+        (:meth:`degenerate_constraints`). No other multiplier enters those
+        rows at a stationary point (section 2.3), and
+        :func:`check_orbital_stationarity` differences every core-core and
+        virtual-virtual rotation with the full Lagrangian, so a coupling this
+        leaves out shows as a slope there."""
+        drop, notes = self.degenerate_constraints()
+        dropped = set(drop)
+        keep = np.array([m for m in self.o2_rows if m not in dropped], dtype=int)
+        if notes:
+            log(f"  (O2): {len(notes)} degenerate pair(s) left at zero -- " + "; ".join(notes))
+        lam = np.zeros(self.n_constraint)
+        if keep.size:
+            m_oo = self._jacobian[np.ix_(keep, keep)]
+            rhs = -np.array([self.src.kappa[p, q] for _k, p, q in (self.cons[m] for m in keep)])
+            sol, _res, rank, sv = np.linalg.lstsq(m_oo, rhs, rcond=JACOBIAN_RCOND)
+            lam[keep] = sol
+            self.residuals["o2_direct"] = float(np.linalg.norm(m_oo @ sol - rhs))
+            self.residuals["o2_rank"] = int(rank)
+            self.residuals["o2_cond"] = float(sv[0] / sv[-1]) if sv.size else 0.0
+        else:
+            self.residuals.update(o2_direct=0.0, o2_rank=0, o2_cond=0.0)
+        self.residuals["o2_dropped"] = len(drop)
+        self.residuals["max_zc_o2"] = float(np.abs(lam).max()) if lam.size else 0.0
+        self.lam = lam
+
+    def solve_coupled(self, log=print) -> None:
+        """The coupled ``(Z, z)`` system on :meth:`basis` -- densely by
+        default, or by the base class's CG with ``--cp-solve cg``.
+
+        **Dense**: ``J_red = B^T J B``, one ``h_op`` product per column, then
+        ``J_red^T sol = -B^T b`` by LU. ``J^T`` and not ``J``, because the
+        stationarity of ``L = E + Lambda . g(x)`` is ``dE/dx + J^T Lambda =
+        0`` with ``J = dg/dx``; ``h_op`` is symmetric to round-off, and how
+        close is reported rather than assumed. Two residuals: the dense
+        system's own, and the same solution put back through ``h_op`` --
+        which catches a wrongly assembled matrix, since it never reads it.
+        The symmetric part is diagonalised and its smallest eigenvalues
+        printed: a near-null mode of the coupled system is visible directly.
+
+        **CG**: ``lagrange.Gradients.solve_lagrange``, the base class's own
+        method, through :meth:`get_wfn_response` and :meth:`get_Aop_Adiag`;
+        its convergence is reported, not assumed."""
+        st = self.st
+        b_red = self.get_wfn_response()
+        bas = self._basis
+        t0 = time.perf_counter()
+        if self.cp_solve == "dense":
+            cols = np.empty((self.nlag, self.nlag))
+            for j in range(self.nlag):
+                cols[:, j] = bas.T @ self._h_op(bas[:, j])
+            self._j_red = cols
+            built = time.perf_counter() - t0
+            sol = np.linalg.solve(cols.T, -b_red)
+            asym = float(np.abs(cols - cols.T).max() / max(np.abs(cols).max(), 1e-300))
+            eig, vec = np.linalg.eigh(0.5 * (cols + cols.T))
+            # The modes nearest singular, each with what it is made of (its
+            # weight on the orbital variables; the rest is CI) and how much of
+            # the right-hand side lies along it -- a near-null mode the source
+            # does not excite costs nothing, one it does is what makes the
+            # multipliers large (section 2.7, "What it costs").
+            # Every negative mode too: a saddle is as much the point as a
+            # near-null mode.
+            near = np.argsort(np.abs(eig))[:N_EIG_REPORTED]
+            near = np.concatenate([np.flatnonzero(eig < 0.0),
+                                   [k for k in near if eig[k] >= 0.0]]).astype(int)
+            bn = max(float(np.linalg.norm(b_red)), 1e-300)
+            self.residuals.update(
+                cp_direct=float(np.linalg.norm(cols.T @ sol + b_red)),
+                cp_asymmetry=asym,
+                cp_build_seconds=built,
+                cp_eig_lowest=eig[:N_EIG_REPORTED].copy(),
+                cp_eig_near=eig[near].copy(),
+                cp_eig_near_orb=np.sum(vec[:self.nvar, near] ** 2, axis=0),
+                cp_eig_near_rhs=np.abs(b_red @ vec[:, near]) / bn,
+                cp_eig_min_abs=float(np.abs(eig).min()),
+                cp_cond=float(np.abs(eig).max() / np.abs(eig).min()),
+                cp_negative=int(np.count_nonzero(eig < 0.0)),
+                cp_converged=True,
+            )
+        else:
+            conv, sol, _bvec, _aop, _adiag = lagrange.Gradients.solve_lagrange(self)
+            self.residuals["cp_converged"] = bool(conv)
+        self.residuals["cp_seconds"] = time.perf_counter() - t0
+        self.residuals["cp_operator"] = float(
+            np.linalg.norm(bas.T @ self._h_op(bas @ sol) + b_red))
+        self.residuals["cp_rhs_norm"] = float(np.linalg.norm(b_red))
+        full = bas @ sol
+        lam = self.lam.copy()
+        lam[self.s_rows] = full[:self.nvar][self.s_var]
+        self.lam = lam
+        z = full[self.nvar:]
+        self.z = z.reshape(st.ci.shape)
+        self.Lvec = np.concatenate([z, lam])
+        c = st.ci.ravel()
+        self.residuals["ci_overlap"] = float(c @ z)
+        self.residuals["ci_norm"] = float(np.linalg.norm(z))
+        self.residuals["max_Z_s1"] = float(np.abs(lam[self.s_rows]).max())
+        self.residuals["orbital_norm"] = float(np.linalg.norm(lam))
+        self.converged = bool(self.residuals["cp_converged"])
+
+    def solve_lagrange(self, Lvec_guess=None, level_shift=None, log=print, **kwargs):
+        """Section 2.7's whole solve order: :meth:`solve_o2`, then
+        :meth:`solve_coupled`."""
+        self.solve_o2(log=log)
+        self.solve_coupled(log=log)
+        return self.converged, self.Lvec, None, None, None
+
+    def solve_multipliers(self, log=print, max_iter: int = 1, tol: float = 0.0) -> None:
+        """Every multiplier, every residual printed. One pass (the class
+        docstring says why), so ``max_iter`` and ``tol`` are unused."""
+        self.solve_lagrange(log=log)
+        r = self.residuals
+        log(f"  z^c (O2, Eqs. 56-57): {r['o2_rank']} determined, {r['o2_dropped']} degenerate "
+            f"left at zero; |M_oo zc + Y| = {r['o2_direct']:.3e}, cond {r['o2_cond']:.2e}, "
+            f"max |zc| = {r['max_zc_o2']:.3e}")
+        if self.cp_solve == "dense":
+            log(f"  the coupled (Z, z) system, DENSE: dimension {self.nlag}, built in "
+                f"{r['cp_build_seconds']:.1f}s ({self.nlag} h_op products), max |J - J^T| / "
+                f"max |J| = {r['cp_asymmetry']:.1e}")
+            log("    smallest eigenvalues of its symmetric part: "
+                + " ".join(f"{e:+.6e}" for e in r["cp_eig_lowest"])
+                + f"; min |eig| = {r['cp_eig_min_abs']:.3e}, cond {r['cp_cond']:.3e}, "
+                f"{r['cp_negative']} negative")
+            log("    the modes nearest singular (eigenvalue, weight on the orbital "
+                "variables, |b . v| / |b|):")
+            for e, w, o in zip(r["cp_eig_near"], r["cp_eig_near_orb"], r["cp_eig_near_rhs"],
+                               strict=True):
+                log(f"      {e:+.6e}  orbital {w:.3f}  rhs {o:.2e}")
+            log(f"    |J^T L + b| = {r['cp_direct']:.3e} (the direct solve), "
+                f"{r['cp_operator']:.3e} (the same L through h_op), against |b| = "
+                f"{r['cp_rhs_norm']:.3e}")
+        else:
+            log(f"  the coupled (Z, z) system, CG (lagrange.Gradients.solve_lagrange): "
+                f"dimension {self.nlag}, "
+                f"{'converged' if r['cp_converged'] else 'NOT CONVERGED'}, "
+                f"|J L + b| = {r['cp_operator']:.3e} against |b| = {r['cp_rhs_norm']:.3e}")
+        log(f"    |Z| (S1) max = {r['max_Z_s1']:.3e}, |z| = {r['ci_norm']:.6e}, "
+            f"z.c = {r['ci_overlap']:.1e}, x = c.(y + y^c) = {self.x_norm:+.6e}")
+        self.residuals["gauge"] = self._gauge_identity()
+        log(f"  the gauge identity (section 1.3, no multiplier to absorb it): "
+            f"max |dL/dkappa| over the active-active rotations, constraints included = "
+            f"{self.residuals['gauge']:.3e}")
+
+
+def casscf_step(fn: Functional, st: State, var: np.ndarray, v: np.ndarray,
+                h: float) -> np.ndarray:
+    """``gen_g_hop``'s ``g_all`` after its own step ``h v``: the orbitals
+    ``C exp(unpack(h v_orb))`` (``mc1step.CASSCF.unpack_uniq_var``) and the CI
+    vector ``c + h v_ci``, normalised (``newton_casscf.extract_rotation``)."""
+    from scipy.linalg import expm
+
+    nvar = len(var)
+    k = np.zeros((st.nmo, st.nmo))
+    k[var[:, 0], var[:, 1]] = h * v[:nvar]
+    k = k - k.T
+    ci = st.ci.ravel() + h * v[nvar:]
+    return fn.casscf_g_hop(st.mo_coeff @ expm(k), ci.reshape(st.ci.shape))[0]
+
+
+def check_hessian_vector(g: CasscfGradients) -> list[Check]:
+    """**The operator is the true Hessian**: for each seeded random direction
+    ``v`` -- every orbital variable, and every CI direction orthogonal to ``c``,
+    in or out of the state's sector -- ``h_op(v)`` against central
+    differences of ``gen_g_hop``'s own ``g_all`` along ``v`` over
+    :data:`HVP_LADDER`. Gated like every ladder here (:func:`step_ladder`),
+    componentwise: a run of :data:`LADDER_RUN` fourfold halvings in the change
+    between rungs (the quotient converging as ``h^2``), and the Richardson
+    extrapolant within :data:`HVP_TOL` of ``J v`` in every component. No
+    NEVPT2 content, no card; the one exact check of the coupled solve's
+    operator (the residuals only say the system was solved)."""
+    st = g.st
+    out = []
+    steps = ladder_steps(HVP_LADDER)
+    c = st.ci.ravel()
+    for seed in HVP_SEEDS:
+        rng = np.random.default_rng(seed)
+        v = rng.standard_normal(g.nvar + st.ci.size)
+        v[g.nvar:] -= float(c @ v[g.nvar:]) * c
+        v /= np.linalg.norm(v)
+        av = g._h_op(v)
+        fd = [(casscf_step(g.fn, st, g.var, v, h) - casscf_step(g.fn, st, g.var, v, -h))
+              / (2.0 * h) for h in steps]
+        dif = [float(np.abs(fd[i] - fd[i + 1]).max()) for i in range(len(fd) - 1)]
+        runs = fourfold_runs(dif)
+        good = [r for r in runs if r[0] >= LADDER_RUN]
+        run, end = good[-1] if good else max(runs, default=(0, 0))
+        if run:
+            value = (4.0 * fd[end + 1] - fd[end]) / 3.0
+            err = float(np.abs(value - av).max())
+        else:
+            err = float("inf")
+        ok = run >= LADDER_RUN and err <= HVP_TOL
+        table = []
+        for i, h in enumerate(steps):
+            d = f"{dif[i - 1]:10.3e}" if i else f"{'-':>10}"
+            ratio = f"{dif[i - 2] / dif[i - 1]:8.3f}" if i > 1 and dif[i - 1] > 0.0 else f"{'-':>8}"
+            mark = " <" if run and end - run + 1 <= i <= end + 1 else ""
+            table.append(f"      2^-{round(-np.log2(h)):<3d} max|fd - Jv| = "
+                         f"{float(np.abs(fd[i] - av).max()):10.3e} {d} {ratio}{mark}")
+        summary = (f"{run} consecutive fourfold halvings (need {LADDER_RUN})"
+                   + (f", ending at h = 2^-{round(-np.log2(steps[end + 1]))}" if run else "")
+                   + f"; max |Richardson - J v| = {err:.2e} (allowed {HVP_TOL:g}), "
+                   f"max |J v| = {float(np.abs(av).max()):.4e}")
+        out.append(Check(f"Hessian-vector, seed {seed}", ok, summary, table,
+                         dict(value=err, err=err, run=run, steps=np.array(steps),
+                              fd_err=np.array([float(np.abs(f - av).max()) for f in fd]))))
+    return out
+
+
+def check_multipliers_vanish(g: CasscfGradients) -> Check:
+    """The smoke test's own claim (``--reference casscf --casci-only``): with
+    ``Y = 0`` and ``y = 0`` the multipliers are **exactly** zero -- every
+    element, not a small number -- because the whole solve is linear in a
+    right-hand side that is exactly zero. A nonzero element means something
+    other than the source terms entered the right-hand side."""
+    worst = max(float(np.abs(g.lam).max()), float(np.abs(g.z).max()))
+    return Check("multipliers vanish (CASSCF, E_corr dropped)", worst == 0.0,
+                 f"max |zc|, |Z|, |z| = {worst:.1e} (must be exactly 0)",
+                 numbers=dict(value=worst))
 
 
 # --------------------------------------------------------------------------
@@ -2792,10 +3470,14 @@ def check_ci_stationarity(g: Gradients) -> list[Check]:
             if h not in cache:
                 ci = on_sphere(st, u, h)
                 b = g.fn.evaluate(st.mo_coeff, ci, with_corr=g.with_corr,
-                                  where=f"the CI-stationarity ladder at h = {h:.3e}")
+                                  where=f"the CI-stationarity ladder at h = {h:.3e}",
+                                  with_g=st.casscf)
                 hc, c = b["hvec_act"], ci.ravel()
-                cache[h] = (b["e_corr"], float(lam @ constraint_vector(b, g.cons)),
-                            float(z @ hc) - float(c @ hc) * float(z @ c))
+                # The CASSCF branch's (C1) is gen_g_hop's g_ci = 2 (H - E) c,
+                # active-space only already, so it is read as it is.
+                zterm = (g.ci_term(b) if st.casscf
+                         else float(z @ hc) - float(c @ hc) * float(z @ c))
+                cache[h] = (b["e_corr"], float(lam @ constraint_vector(b, g.cons)), zterm)
             return cache[h]
 
         name = f"CI stationarity, seed {seed}"
@@ -2865,7 +3547,7 @@ def check_orbital_stationarity(g: Gradients) -> list[Check]:
     st = g.st
     pairs = non_gauge_rotations(st)
     dm1 = None if g.with_corr else g.fn.reference_dm1(st)
-    z, lam = g.z.ravel(), g.lam
+    lam = g.lam
     out = []
     for seed in CHECK_SEEDS:
         k = kappa_check_direction(g, pairs, seed)
@@ -2873,9 +3555,10 @@ def check_orbital_stationarity(g: Gradients) -> list[Check]:
         def lagrangian(t: float, k=k) -> float:
             b = g.fn.evaluate(st.mo_coeff @ expm(t * k), st.ci, with_corr=g.with_corr,
                               dm1=dm1, guard=g.pc,
-                              where=f"the orbital-stationarity ladder at t = {t:.3e}")
+                              where=f"the orbital-stationarity ladder at t = {t:.3e}",
+                              with_g=st.casscf)
             return (b["e_casci"] + b["e_corr"] + float(lam @ constraint_vector(b, g.cons))
-                    + float(z @ b["hvec"]))
+                    + g.ci_term(b))
 
         out.append(step_ladder(f"orbital stationarity, seed {seed} ({len(pairs)} rotations)",
                                lagrangian, ladder_steps(KAPPA_LADDER), 0.0))
@@ -2994,6 +3677,33 @@ def run(args) -> dict:
             "correlation energy altogether, so there is no contraction left to "
             "choose"
         )
+    casscf = args.reference == "casscf"
+    if casscf:
+        # What the CASSCF branch (#122) is validated for, and nothing else:
+        # SC-NEVPT2 and its --casci-only smoke test, PySCF's own source terms.
+        refused = [flag for flag, on in (
+            ("--pc", args.pc), ("--source dump/both", args.source != "pyscf"),
+            ("--edot-check", args.edot_check), ("--energy-ordered", args.energy_ordered),
+            ("--grad-num", args.grad_num is not None)) if on]
+        if refused:
+            raise SystemExit(
+                f"--reference casscf: {', '.join(refused)} refused. The CASSCF branch "
+                "differentiates SC-NEVPT2 (or, --casci-only, the CASSCF energy) with "
+                "PySCF's own source terms; there is no numerical gradient of a casscf "
+                "state to gate against (nevpt2_numgrad.py refuses one), no PC or GPU "
+                "source term validated on it, and its active space is the sidecar's"
+            )
+        if args.mo_from is None:
+            default = REPO / "golden" / f"{args.case}_casscf.mogold"
+            if not default.exists():
+                raise SystemExit(
+                    f"--reference casscf needs --mo-from FILE: there is no committed "
+                    f"{default.relative_to(REPO)} for --case {args.case} (write one with "
+                    "generate_golden.py --casscf --mo-out)"
+                )
+            args.mo_from = default
+    elif args.mo_from is not None or args.cp_solve != "dense":
+        raise SystemExit("--mo-from and --cp-solve belong to --reference casscf")
     # Read (and check) the numerical gradient BEFORE the expensive part, so a
     # mismatched or missing file costs nothing.
     grad_num_source = (load_grad_num(args.grad_num, args.case, pc=args.pc,
@@ -3009,15 +3719,26 @@ def run(args) -> dict:
     t0 = time.perf_counter()
     # A fresh ledger: every PC guard run from here on is this run's.
     PC_GUARD.__dict__.update(PcGuardLedger().__dict__)
-    print(f"[{args.case}] building the golden's own CASCI-on-RHF state")
-    st = build_state(args.case, spec, pc=args.pc)
+    if casscf:
+        print(f"[{args.case}] building the CASCI-on-CASSCF state from {args.mo_from} "
+              "(docs/gradient-theory.md, section 1.4)")
+    else:
+        print(f"[{args.case}] building the golden's own CASCI-on-RHF state")
+    st = build_state(args.case, spec, pc=args.pc, reference=args.reference,
+                     mo_from=args.mo_from)
     print(f"  n_mo = {st.nmo} = {st.ncore} core + {st.nact} active + {st.nvirt} virtual; "
           f"ndet = {st.ci.size}; n_elec(RHF) = {st.nelec_rhf}")
-    print(f"  act_O = {st.n_act_occ}, act_V = {st.nact - st.n_act_occ} "
-          f"(section 2.6; the state is rotated into F's active eigenbasis, eps = "
-          + " ".join(f"{e:+.4f}" for e in st.act_eps) + ")")
-    print(f"  section 3.6 invariants: (O1) {st.invariants['o1']:.1e}, "
-          f"(O2) {st.invariants['o2']:.1e}, (O3) act_occ = {st.invariants['act_occ']}")
+    if casscf:
+        print("  no RHF partition (section 1.4): the active space is one range, every "
+              "active-active rotation the gauge, and section 2.6 is bypassed")
+        print(f"  section 3.6 invariants: (O2) {st.invariants['o2']:.1e} (the one asserted on "
+              f"CASSCF orbitals; (O1)'s blocks read {st.invariants['o1']:.1e}, unconstrained)")
+    else:
+        print(f"  act_O = {st.n_act_occ}, act_V = {st.nact - st.n_act_occ} "
+              f"(section 2.6; the state is rotated into F's active eigenbasis, eps = "
+              + " ".join(f"{e:+.4f}" for e in st.act_eps) + ")")
+        print(f"  section 3.6 invariants: (O1) {st.invariants['o1']:.1e}, "
+              f"(O2) {st.invariants['o2']:.1e}, (O3) act_occ = {st.invariants['act_occ']}")
     print(f"  E_CASCI = {st.e_casci:.10f}  E_corr(SC) = {st.e_corr:.10f}"
           + (f"  E_corr(PC) = {st.e_corr_pc:.10f} (smallest lstsq gap "
              f"{st.pc_gap:.1e}, need {gg.PC_MIN_GAP:g})" if args.pc else ""))
@@ -3027,6 +3748,8 @@ def run(args) -> dict:
                nvirt=st.nvirt, ndet=int(st.ci.size), natm=len(st.geom),
                e_casci=st.e_casci, e_corr=st.e_corr, casci_only=args.casci_only,
                pc=args.pc, step=args.step, show_ladders=args.show_ladders,
+               reference=args.reference,
+               mo_from=str(args.mo_from) if args.mo_from is not None else "",
                invariants={k: v for k, v in st.invariants.items()
                            if k != "o1_each"})
     if args.pc:
@@ -3041,14 +3764,29 @@ def run(args) -> dict:
                  and all(getattr(args, k) is None for k in
                          ("geometry", "basis", "ncas", "nelecas", "cas_irreps",
                           "core_irreps")))
+    # The CASSCF branch's golden is <case>_casscf, where one is committed --
+    # and only for its committed orbitals: the same case on other orbitals
+    # (a scratch sidecar) is a different state with no golden to hold it to.
+    gold_name = args.case
+    if casscf:
+        gold_name = f"{args.case}_casscf"
+        committed = (committed and (REPO / "golden" / f"{gold_name}.nevpt2gold").exists()
+                     and Path(args.mo_from).resolve()
+                     == (REPO / "golden" / f"{gold_name}.mogold").resolve())
     rec["committed_case"] = committed
     if committed:
-        gold = gf.read_golden_header(REPO / "golden" / f"{args.case}.nevpt2gold")
+        gold = gf.read_golden_header(REPO / "golden" / f"{gold_name}.nevpt2gold")
+        if gold["reference_kind"] != args.reference:
+            raise SystemExit(
+                f"golden/{gold_name}.nevpt2gold's reference_kind is "
+                f"{gold['reference_kind']!r}, and this run differentiates --reference "
+                f"{args.reference}"
+            )
         rec["d_e_casci"] = st.e_casci - gold["e_casci"]
         rec["d_e_corr"] = st.e_corr - gold["e_nevpt2_total"]
         if max(abs(rec["d_e_casci"]), abs(rec["d_e_corr"])) > REF_STATE_TOL:
             raise SystemExit(
-                f"the rebuilt state does not match golden/{args.case}.nevpt2gold: "
+                f"the rebuilt state does not match golden/{gold_name}.nevpt2gold: "
                 f"E_CASCI differs by {rec['d_e_casci']:.3e}, E_corr by "
                 f"{rec['d_e_corr']:.3e}"
             )
@@ -3072,6 +3810,10 @@ def run(args) -> dict:
         print(f"  against the golden: dE_CASCI = {rec['d_e_casci']:+.1e}, "
               f"dE_corr = {rec['d_e_corr']:+.1e}"
               + (f", dE_corr(PC) = {rec['d_e_corr_pc']:+.1e}" if args.pc else ""))
+    elif casscf:
+        print(f"  no committed golden for these orbitals ({args.mo_from} is not "
+              f"golden/{gold_name}.mogold, or there is no such golden): the state is "
+              "checked by --mo-from's own gate only")
     else:
         print("  no golden for this selection: the active space was overridden, so "
               "this is deliberately a different state")
@@ -3092,7 +3834,11 @@ def run(args) -> dict:
 
     with_corr = not args.casci_only
     fn = Functional(st, pc=args.pc)
-    if args.casci_only:
+    if args.casci_only and casscf:
+        print("\n--casci-only: E_corr dropped from the source terms and from Phi. The "
+              "reference is then a CASSCF, stationary in kappa and c, so Y = 0 and y = 0 "
+              "exactly and pyscf.grad.casscf is the oracle (the smoke test).")
+    elif args.casci_only:
         print("\n--casci-only: E_corr dropped from the source terms and from Phi. The "
               "reference is then a plain CASCI, whose analytic gradient PySCF has.")
 
@@ -3124,8 +3870,10 @@ def run(args) -> dict:
     elif not with_corr:
         # A CASCI is variational in c, so y = 0 exactly.
         src = SourceTerms(kappa=np.zeros((st.nmo, st.nmo)),
-                          ci=np.zeros(st.ci.shape), origin="pyscf (CASCI only)")
-        print("  y_I = 0 exactly: a CASCI is variational in the CI vector")
+                          ci=np.zeros(st.ci.shape),
+                          origin="pyscf (CASSCF only)" if casscf else "pyscf (CASCI only)")
+        print("  y_I = 0 exactly: a CASCI is variational in the CI vector"
+              + (" (and Y = 0 exactly: a CASSCF is in kappa too)" if casscf else ""))
     else:
         y = pyscf_ci_source(fn, st, step=args.ci_step)
         src = SourceTerms(kappa=np.zeros((st.nmo, st.nmo)), ci=y, origin="pyscf")
@@ -3135,8 +3883,13 @@ def run(args) -> dict:
     src.seconds = time.perf_counter() - t_src
     rec["source_origin"] = src.origin
 
-    g = Gradients(st, src, with_corr=with_corr, step=args.step,
-                  richardson=args.richardson, pc=args.pc, kappa_step=args.kappa_step)
+    if casscf:
+        g = CasscfGradients(st, src, with_corr=with_corr, step=args.step,
+                            richardson=args.richardson, kappa_step=args.kappa_step,
+                            cp_solve=args.cp_solve)
+    else:
+        g = Gradients(st, src, with_corr=with_corr, step=args.step,
+                      richardson=args.richardson, pc=args.pc, kappa_step=args.kappa_step)
     print("\nthe frozen orthonormal path, and one kappa sweep")
     # Under --source both the one sweep differentiates E_corr too, so PySCF's
     # half of A exists to compare the dump's with -- and to solve with.
@@ -3163,6 +3916,9 @@ def run(args) -> dict:
     print("\nthe multipliers")
     g.solve_multipliers(log=print)
     rec["residuals"] = dict(g.residuals)
+    if casscf:
+        rec["cp_dim"] = int(g.nlag)
+        rec["cp_solve"] = g.cp_solve
 
     # The residuals above say each solve found the answer to the equations it
     # was given. These say whether those were the right equations -- none of
@@ -3170,7 +3926,14 @@ def run(args) -> dict:
     # the gradient path").
     print("\nresidual-independent checks of the source terms and the multipliers")
     t_chk = time.perf_counter()
-    checks = check_projection(g, src)
+    checks = []
+    if casscf:
+        # The coupled operator itself, against gen_g_hop's own gradient: the
+        # one exact check of the CP-CASSCF solve (no NEVPT2 content).
+        checks += check_hessian_vector(g)
+        if not with_corr:
+            checks.append(check_multipliers_vanish(g))
+    checks += check_projection(g, src)
     if with_corr:
         checks += check_ci_source_linearity(g, src)
     checks += check_ci_stationarity(g)
@@ -3227,7 +3990,22 @@ def run(args) -> dict:
     # Reference numbers, where they exist. The pyscf.grad.casci comparison is
     # reported, never gated (it is an oracle only for an energy-ordered active
     # space, below); the grad_num one below it IS the gate.
-    if args.casci_only:
+    if args.casci_only and casscf:
+        # The smoke test: a CASSCF's analytic gradient, which PySCF has and
+        # which -- unlike pyscf.grad.casci's -- divides by no redundant-block
+        # denominator, so it is an oracle for any active-space ordering. It IS
+        # gated, as a residual-independent check: it reads none of the solve.
+        mcs = mcscf.CASSCF(st.mc._scf, st.nact, st.nelecas)
+        mcs.fcisolver.conv_tol = gg.FCI_CONV_TOL
+        ref = np.asarray(mcs.Gradients().kernel(mo_coeff=st.mo_coeff, ci=st.ci))
+        rec["grad_pyscf_casscf"] = ref
+        d = float(np.abs(de - ref).max())
+        smoke = Check("pyscf.grad.casscf (the smoke test)", d <= CASSCF_SMOKE_TOL,
+                      f"max |g - pyscf.grad.casscf| = {d:.3e} (allowed {CASSCF_SMOKE_TOL:g})",
+                      numbers=dict(value=d))
+        print(f"  {'ok  ' if smoke.ok else 'FAIL'} {smoke.name}: {smoke.summary}")
+        rec["checks"].append(smoke)
+    elif args.casci_only:
         # mo_coeff and ci must be passed: pyscf.grad.casci defaults to
         # mc._scf.mo_coeff, the UNSORTED RHF orbitals, while mc.ci belongs to
         # the irrep-sorted active space -- the two do not describe one state.
@@ -3241,6 +4019,11 @@ def run(args) -> dict:
     # sidecar beside the golden.
     if args.grad_num is not None:
         rec.update(grad_num_source)
+    elif casscf:
+        # No numerical gradient of a casscf state exists to gate against
+        # (nevpt2_numgrad.py refuses one), and the CASCI sidecar's grad_num
+        # is another state's.
+        pass
     elif args.casci_only:
         # The sidecar's grad_num is the NEVPT2 gradient; this run's is a plain
         # CASCI's, so there is nothing there to gate against. The numerical
@@ -3268,6 +4051,9 @@ def run(args) -> dict:
         rec["provider_max_delta"] = float(np.abs(rec["grad"] - rec["grad_pyscf"]).max())
         rec["attrib_kappa"] = float(np.abs(rec["grad_gpu_y_only"] - rec["grad_pyscf"]).max())
         rec["attrib_ci"] = float(np.abs(rec["grad_gpu_ci_only"] - rec["grad_pyscf"]).max())
+    if casscf:
+        rec["wall"] = time.perf_counter() - t0
+        rec["wall_budget"] = CASSCF_WALL_BUDGET.get(args.case, float("nan"))
     return rec
 
 
@@ -3278,6 +4064,12 @@ def report(rec: dict) -> None:
     scheme = "CASCI" if rec["casci_only"] else ("PC" if rec["pc"] else "SC")
     which = {"CASCI": "CASCI only", "PC": "PC-NEVPT2 (block2)",
              "SC": "SC-NEVPT2"}[scheme]
+    if rec.get("reference") == "casscf":
+        # The same names, with the reference said: --casci-only on CASSCF
+        # orbitals is the CASSCF energy, and SC is on a CASSCF reference.
+        scheme = "CASSCF" if rec["casci_only"] else "SC (CASSCF reference)"
+        which = ("CASSCF only (the smoke test)" if rec["casci_only"]
+                 else "SC-NEVPT2 on a CASSCF reference (CP-CASSCF)")
     print(f"\n== {rec['case']}  {rec['basis']}  CAS({rec['nelecas']},{rec['ncas']})  "
           f"{which}")
     print(f"source terms: {rec['source_origin']}")
@@ -3296,6 +4088,40 @@ def report(rec: dict) -> None:
         print(f"--sources-only: no gradient was solved ({rec['wall']:.1f}s)")
         return
     r = rec["residuals"]
+    if rec.get("reference") == "casscf":
+        _report_casscf(rec, r)
+    else:
+        _report_casci_residuals(r)
+    _report_gradient(rec, scheme)
+
+
+def _report_casscf(rec: dict, r: dict) -> None:
+    """The CASSCF branch's solve, in the report: the reference's own
+    stationarity, ``z^c``, and the coupled system's dimension, spectrum and
+    residuals (docs/gradient-theory.md, section 2.7)."""
+    print(f"reference: CASCI on CASSCF orbitals from {rec['mo_from']} (section 1.4); "
+          f"|g_orb| = {r['casscf_g_orb']:.3e}, |g_ci| = {r['casscf_g_ci']:.3e} at the state")
+    print(f"z^c (O2): |M_oo zc + Y| = {r['o2_direct']:.3e}, max |zc| = {r['max_zc_o2']:.3e}")
+    if "cp_eig_lowest" in r:
+        print(f"coupled (Z, z), dense: dimension {rec['cp_dim']}, smallest eigenvalues "
+              + " ".join(f"{e:+.4e}" for e in r["cp_eig_lowest"])
+              + f", cond {r['cp_cond']:.2e}, {r['cp_negative']} negative; nearest "
+              "singular (eig / orbital weight / rhs share): "
+              + ", ".join(f"{e:+.3e}/{w:.2f}/{o:.1e}" for e, w, o in zip(
+                  r["cp_eig_near"], r["cp_eig_near_orb"], r["cp_eig_near_rhs"], strict=True)))
+        print(f"                       |J^T L + b| = {r['cp_direct']:.3e} (direct) / "
+              f"{r['cp_operator']:.3e} (through h_op), |b| = {r['cp_rhs_norm']:.3e}, "
+              f"max |J - J^T| / max |J| = {r['cp_asymmetry']:.1e}")
+    else:
+        print(f"coupled (Z, z), CG: dimension {rec['cp_dim']}, "
+              f"{'converged' if r['cp_converged'] else 'NOT CONVERGED'}, |J L + b| = "
+              f"{r['cp_operator']:.3e}, |b| = {r['cp_rhs_norm']:.3e}")
+    print(f"                       |z| = {r['ci_norm']:.3e}, z.c = {r['ci_overlap']:.1e}, "
+          f"gauge identity (no multiplier) = {r['gauge']:.3e}")
+
+
+def _report_casci_residuals(r: dict) -> None:
+    """The CASCI branch's Z-vector residuals, in the report."""
     print(f"Z-vector residuals -- CI |P(H-E)Pz + Py| = {r['ci_cg']:.3e} "
           f"({'converged' if r['ci_cg_converged'] else 'NOT CONVERGED'}), "
           f"|z| = {r['ci_norm']:.3e}")
@@ -3305,6 +4131,11 @@ def report(rec: dict) -> None:
     print(f"                      gauge identity (no multiplier) = {r['gauge']:.3e}, "
           f"z.c = {r['ci_overlap']:.1e}, fixed point in "
           f"{r['fixed_point_iterations']} iteration(s)")
+
+
+def _report_gradient(rec: dict, scheme: str) -> None:
+    """The gradient, its free checks, the oracles and the gates, in the
+    report -- the same for both references."""
     grad = rec["grad"]
     zero = list(rec["zero_axes"])
     print(f"{'atom':>4} {'dE/dx':>16} {'dE/dy':>16} {'dE/dz':>16}   (Eh/bohr; "
@@ -3335,6 +4166,11 @@ def report(rec: dict) -> None:
                   "answer is for a different partition -- which\n    is exactly what "
                   "docs/gradient-theory.md, section 2.6 exists to fix.\n    Compare "
                   "against grad_num instead.")
+    if "grad_pyscf_casscf" in rec:
+        ref = rec["grad_pyscf_casscf"]
+        print("\nagainst pyscf.grad.casscf (the smoke test: the CASSCF energy's analytic "
+              "gradient, through PySCF's own derivative integrals; gated below):")
+        print(f"  max |delta| = {np.abs(grad - ref).max():.3e}")
     if "grad_num" in rec:
         ref, probed = rec["grad_num"], rec["grad_num_probed"] > 0
         d = np.abs(grad - ref)
@@ -3410,6 +4246,13 @@ def report(rec: dict) -> None:
           + (f" -- failed: {'; '.join(failed)}" if failed else "")
           + f" ({rec['checks_seconds']:.1f}s)")
     print(f"\n{rec['wall']:.1f}s, {rec['kappa_evals']} functional evaluations")
+    if "wall_budget" in rec:
+        # A declared budget, not a gate: a wall clock depends on the machine.
+        within = rec["wall"] <= rec["wall_budget"]
+        print(f"{'within' if within else 'OVER'} the declared wall-clock budget for "
+              f"--reference casscf on {rec['case']}: {rec['wall']:.1f}s "
+              f"{'<=' if within else '>'} {rec['wall_budget']:g}s (CASSCF_WALL_BUDGET; "
+              "docs/reference-data.md, \"The analytic gradient\")")
 
 
 def main() -> None:
@@ -3523,6 +4366,24 @@ def main() -> None:
                          "this repo's 1e-7: the oracle is a finite difference "
                          "(docs/testing.md, \"The analytic gradient against the "
                          "numerical one\")")
+    ap.add_argument("--reference", default="casci", choices=REFERENCES,
+                    help="which reference the orbitals come from: 'casci' (default; a "
+                         "CASCI on converged RHF orbitals, docs/gradient-theory.md "
+                         "sections 1.2 and 2.2-2.6) or 'casscf' (a CASCI on the "
+                         "converged CASSCF orbitals of --mo-from: CASSCF stationarity "
+                         "as the constraint, one coupled CP-CASSCF solve, sections 1.4 "
+                         "and 2.7). SC only, PySCF source terms only")
+    ap.add_argument("--mo-from", type=Path, default=None,
+                    help="with --reference casscf: the .mogold sidecar of CASSCF "
+                         "orbitals (generate_golden.py --casscf --mo-out), read and "
+                         "gated by generate_golden.py's own --mo-from path. Default: "
+                         "golden/<case>_casscf.mogold, where one is committed")
+    ap.add_argument("--cp-solve", default="dense", choices=CP_SOLVES,
+                    help="with --reference casscf: how the coupled (Z, z) system is "
+                         "solved -- 'dense' (default: built column by column from "
+                         "gen_g_hop's h_op and factorised, its spectrum printed) or "
+                         "'cg' (pyscf.grad.lagrange's own conjugate gradient through "
+                         "the same operator, for a case too large to build)")
     ap.add_argument("--show-ladders", action="store_true",
                     help="print every step ladder's table, not only a failing "
                          "one's (docs/testing.md, \"Residual-independent checks "
@@ -3578,7 +4439,11 @@ def main() -> None:
     # The residual-independent checks are a gate of their own, read the same
     # way: any one failing is exit 1 whatever grad_num said.
     failed = not all(chk.ok for chk in rec["checks"])
-    if "grad_num" not in rec:
+    if "grad_num" not in rec and rec.get("reference") == "casscf":
+        print("no numerical gradient of a casscf state exists (nevpt2_numgrad.py "
+              "refuses one): the residual-independent checks, the Hessian-vector "
+              "ladders among them, are the gate")
+    elif "grad_num" not in rec:
         print("no numerical gradient in reach: only the residual-independent "
               "checks were gated (pass --grad-num PATH, or run "
               "nevpt2_numgrad.py for this case first)")
