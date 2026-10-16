@@ -37,7 +37,7 @@ once:
 **Both branches' Z-vector solves are offline Python only**
 ([`gradients.md`](gradients.md), §1): the CASCI branch's, and the CASSCF
 branch's coupled system (`nevpt2_grad.py --reference casscf`). Every
-derivative path in the tree refuses a `casscf` golden (§1.1).
+derivative path on the GPU refuses a `casscf` golden (§1.1).
 
 This document is **derivation only**. It describes no code and names no file
 that does not yet exist; what gets built, and how it is checked, belongs in the
@@ -207,15 +207,16 @@ Z-vector equations.
 **In the tree only the CASCI branch is implemented, and the restriction is
 enforced rather than assumed.** Every derivative path refuses a `casscf`
 golden: `nevpt2_demo`'s `--sc-tangent` and `--gradient-source` as an
-unsupported-request error, and `reference_data/nevpt2_numgrad.py` before it
-computes an energy; the one gradient sidecar written for one
+unsupported-request error, and `reference_data/nevpt2_numgrad.py`'s CASCI
+route before it computes an energy (its `--reference casscf` route
+re-optimises every displaced state instead); the one gradient sidecar written for one
 (`--mo-from --gradgold`, [`reference-data.md`](reference-data.md), "The
 CASSCF-reference gradient sidecar") is data that no derivative path reads yet.
 The refusal cites this section. The offline analytic gradient
 (`reference_data/nevpt2_grad.py`) builds the CASCI branch on RHF orbitals by
 default and, with `--reference casscf`, the CASSCF one — §1.4 and §2.7's
-coupled CP-CASSCF system (§5) — with no numerical gradient yet to hold it to:
-that needs the precondition §4.4 names.
+coupled CP-CASSCF system (§5); its numerical gradient re-optimises every
+displaced state, under a guard for the precondition §4.4 names.
 
 ### 1.2 The CASCI branch: what is true on RHF orbitals
 
@@ -1062,7 +1063,10 @@ them leads to chasing the wrong bug. All three apply to both branches:
   reference — the branch §1.4's smoothness argument guarantees exists, not
   one the optimiser is guaranteed to find. A displaced optimisation that
   lands on a different stationary point gives a number from a different
-  reference, and nothing in this tree has measured whether that happens.
+  reference. `nevpt2_numgrad.py --reference casscf` guards every displaced
+  state against it and probes for it by a warm start; what it measured is
+  [`reference-data.md`](reference-data.md), "The numerical gradient of a
+  CASSCF reference".
   It is the CASSCF branch's own hazard, and it is a different one from §4.1's.
 - **Park's SC non-invariance finding — reference-independent.** The strongly-contracted energy is not
   invariant to rotations *among* the inactive orbitals — core and virtual — so

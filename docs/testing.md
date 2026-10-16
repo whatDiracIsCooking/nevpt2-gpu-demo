@@ -309,7 +309,10 @@ behind it. The **Lagrangian** gate (`requireLagrangianReference`) refuses one
 as `err_unsupported`, because the CI Z-vector → Sylvester → CPHF chain is
 derived for CASCI on RHF orbitals ([`gradient-theory.md`](gradient-theory.md),
 §1.2 and §2.2–§2.6), and the CASSCF branch (§2.7) is not implemented yet.
-`reference_data/nevpt2_numgrad.py` refuses one as well.
+`reference_data/nevpt2_numgrad.py`'s default `--reference casci` route refuses
+one as well; its `--reference casscf` route re-optimises every displaced state
+([`reference-data.md`](reference-data.md), "The numerical gradient of a
+CASSCF reference").
 The split is checked in the unit tier by `test/golden`'s
 `GoldenReferenceKindGateTests` and `GoldenCommittedCasscfTests`. The second
 of those reads `golden/n2_ccpvdz_cas44_casscf.nevpt2gold` itself, so the split

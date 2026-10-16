@@ -363,10 +363,11 @@ CASCI branch has ``Z . F(x)`` and ``<z|H(x)|c>``. Two checks are its own:
   contraction and the frozen path, not the coupled solve -- which is why the
   first check exists.
 
-There is no numerical gradient to gate against on this branch yet
-(``nevpt2_numgrad.py`` refuses a ``casscf`` golden), so the gate is the
-residual-independent checks. The measured numbers and the wall-clock budget
-per case are in docs/reference-data.md, "The analytic gradient".
+Its numerical gradient is ``nevpt2_numgrad.py --reference casscf --npz
+PATH`` (every displaced state re-optimised), read with ``--grad-num PATH``;
+without one, the gate is the residual-independent checks. The measured
+numbers and the wall-clock budget per case are in docs/reference-data.md,
+"The analytic gradient".
 
 Usage::
 
@@ -3627,7 +3628,7 @@ def check_pc_guard_ledger(pc: bool) -> Check:
 
 
 def load_grad_num(path: Path, case: str, *, pc: bool,
-                  casci_only: bool = False) -> dict:
+                  casci_only: bool = False, reference: str = "casci") -> dict:
     """The numerical gradient to gate against, from a
     ``nevpt2_numgrad.py --npz`` file: the gradient itself, its Richardson
     error bar and the probed mask, **for the functional this run
@@ -3638,13 +3639,23 @@ def load_grad_num(path: Path, case: str, *, pc: bool,
     one state; and the PC arrays are only there if that run was given
     ``--pc``, so asking for them without is the refusal rather than a silent
     comparison against the SC answer. ``grad_casci`` carries no Richardson
-    residual of its own, so its bar is reported as zero."""
+    residual of its own, so its bar is reported as zero. And the file's
+    reference must be this run's: a ``--reference casscf`` file differences
+    re-optimised states, a CASCI one does not (a file with no ``reference``
+    field predates the CASSCF mode, and is a CASCI one)."""
     key = "grad_casci" if casci_only else ("grad_num_pc" if pc else "grad_num")
     with np.load(path) as z:
         if "case" in z and str(z["case"]) != case:
             raise SystemExit(
                 f"{path} is the numerical gradient of case {str(z['case'])!r}, "
                 f"not {case!r}: the two gradients would be of different states"
+            )
+        got = str(z["reference"]) if "reference" in z else "casci"
+        if got != reference:
+            raise SystemExit(
+                f"{path} is the numerical gradient of a --reference {got} state, and "
+                f"this run differentiates --reference {reference}: the two gradients "
+                "would be of different functions"
             )
         if key not in z:
             raise SystemExit(
@@ -3696,15 +3707,14 @@ def run(args) -> dict:
         # SC-NEVPT2 and its --casci-only smoke test, PySCF's own source terms.
         refused = [flag for flag, on in (
             ("--pc", args.pc), ("--source dump/both", args.source != "pyscf"),
-            ("--edot-check", args.edot_check), ("--energy-ordered", args.energy_ordered),
-            ("--grad-num", args.grad_num is not None)) if on]
+            ("--edot-check", args.edot_check),
+            ("--energy-ordered", args.energy_ordered)) if on]
         if refused:
             raise SystemExit(
                 f"--reference casscf: {', '.join(refused)} refused. The CASSCF branch "
                 "differentiates SC-NEVPT2 (or, --casci-only, the CASSCF energy) with "
-                "PySCF's own source terms; there is no numerical gradient of a casscf "
-                "state to gate against (nevpt2_numgrad.py refuses one), no PC or GPU "
-                "source term validated on it, and its active space is the sidecar's"
+                "PySCF's own source terms; no PC or GPU source term is validated on "
+                "it, and its active space is the sidecar's"
             )
         if args.mo_from is None:
             default = REPO / "golden" / f"{args.case}_casscf.mogold"
@@ -3720,7 +3730,8 @@ def run(args) -> dict:
     # Read (and check) the numerical gradient BEFORE the expensive part, so a
     # mismatched or missing file costs nothing.
     grad_num_source = (load_grad_num(args.grad_num, args.case, pc=args.pc,
-                                     casci_only=args.casci_only)
+                                     casci_only=args.casci_only,
+                                     reference=args.reference)
                        if args.grad_num is not None else None)
     if args.pc and grad_num_source is None:
         raise SystemExit(
@@ -4033,9 +4044,10 @@ def run(args) -> dict:
     if args.grad_num is not None:
         rec.update(grad_num_source)
     elif casscf:
-        # No numerical gradient of a casscf state exists to gate against
-        # (nevpt2_numgrad.py refuses one), and the CASCI sidecar's grad_num
-        # is another state's.
+        # The committed <case>_casscf.gradgold holds no grad_num (it stays the
+        # 24 --gradgold arrays), and the CASCI sidecar's is another state's:
+        # a casscf numerical gradient comes only from
+        # `nevpt2_numgrad.py --reference casscf --npz PATH`, via --grad-num.
         pass
     elif args.casci_only:
         # The sidecar's grad_num is the NEVPT2 gradient; this run's is a plain
@@ -4453,9 +4465,10 @@ def main() -> None:
     # way: any one failing is exit 1 whatever grad_num said.
     failed = not all(chk.ok for chk in rec["checks"])
     if "grad_num" not in rec and rec.get("reference") == "casscf":
-        print("no numerical gradient of a casscf state exists (nevpt2_numgrad.py "
-              "refuses one): the residual-independent checks, the Hessian-vector "
-              "ladders among them, are the gate")
+        print("no numerical gradient given (pass --grad-num PATH, written by "
+              "nevpt2_numgrad.py --reference casscf --npz PATH): the "
+              "residual-independent checks, the Hessian-vector ladders among them, "
+              "are the gate")
     elif "grad_num" not in rec:
         print("no numerical gradient in reach: only the residual-independent "
               "checks were gated (pass --grad-num PATH, or run "
