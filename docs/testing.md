@@ -1503,6 +1503,168 @@ CAS(4,4) instead, and weakening the guard to manufacture one would make the
 "reference" an implementation's choice of pseudo-inverse cut rather than a
 number.
 
+### PC on a CASSCF reference: acrolein
+
+**The PC-NEVPT2 nuclear gradient of acrolein CAS(6,5) on a CASSCF reference
+agrees with its numerical gradient to 6.0e-8 Eh/bohr in the worst of the 16
+in-plane components (RMS 2.3e-8), and the 8 out-of-plane ones come out at
+≤1.4e-11. The gate is 1e-6: PASS.** This is #126, the milestone's headline
+result. The external anchor is Park's Table 3 ([`references.md`](references.md)):
+an acrolein PC analytic-vs-numerical RMS of 3.36e-6 on a CASSCF reference,
+from a two-point difference at 0.001 bohr. That is an anchor, not the gate.
+
+**What is compared.** The analytic side is `nevpt2_grad.py --reference
+casscf --pc`: block2's PC source terms `Y` and `y` (the CASCI branch's
+`--pc`, unchanged) fed into #122's dense CP-CASSCF `(Z, z)` solve. The
+numerical side is **this GPU's PC energy** on #124's 121 re-optimised
+CASSCF states, `pc_on_states.py`'s keyed `.npz` (#138; every state guarded,
+smallest gap 2.9e3), differenced by `nevpt2_numgrad.py --pc-states` with the
+SC sweep's own h, h/2, h/4 stencil and Richardson pair
+([`reference-data.md`](reference-data.md), "Differencing them:
+`--pc-states`"). So the PC energies are ours and the derivative machinery is
+offline Python, and the comparison asks whether the analytic gradient is the
+derivative of the energy we compute. Our energy's own run-to-run spread is
+far below anything a difference could see ([`pc-nevpt2.md`](pc-nevpt2.md),
+"The PC total's run-to-run spread"). The screen ran first and is green:
+#135's directional PC tier on acrolein's CASSCF orbitals ("On CASSCF
+orbitals: acrolein" below). **No `grad_num_pc` is committed.** The sweep is a
+manual validation run, like every row of this section.
+
+Per component (Eh/bohr; the analytic gradient differences every component
+along the frozen path, so the out-of-plane ones are its free check):
+
+| comp | PC numerical | its Richardson residual | PC analytic | \|analytic − numerical\| |
+|---|---:|---:|---:|---:|
+| O x | −0.0154493570 | 1.6e-9 | −0.0154493186 | 3.8e-8 |
+| O y | −0.0132698003 | 1.2e-8 | −0.0132698113 | 1.1e-8 |
+| C1 x | +0.0056159200 | 1.3e-9 | +0.0056159298 | 9.8e-9 |
+| C1 y | −0.0112110632 | 2.5e-8 | −0.0112110497 | 1.4e-8 |
+| C2 x | +0.0233458277 | 1.4e-8 | +0.0233457994 | 2.8e-8 |
+| **C2 y** | +0.0272757763 | 6.9e-8 | +0.0272757165 | **6.0e-8** |
+| C3 x | −0.0116514180 | 4.3e-8 | −0.0116514477 | 3.0e-8 |
+| C3 y | +0.0042104084 | 3.5e-9 | +0.0042104106 | 2.2e-9 |
+| H4 x | +0.0035114108 | 1.5e-8 | +0.0035114019 | 8.9e-9 |
+| H4 y | +0.0049788578 | 1.3e-8 | +0.0049788440 | 1.4e-8 |
+| H5 x | −0.0009517822 | 3.1e-8 | −0.0009517975 | 1.5e-8 |
+| H5 y | −0.0067247704 | 3.3e-8 | −0.0067247938 | 2.3e-8 |
+| H6 x | −0.0048485788 | 1.4e-8 | −0.0048485708 | 8.0e-9 |
+| H6 y | −0.0004986382 | 7.9e-9 | −0.0004986376 | 6.4e-10 |
+| H7 x | +0.0004280029 | 2.7e-8 | +0.0004280032 | 3.0e-10 |
+| H7 y | −0.0047606771 | 3.2e-9 | −0.0047606790 | 1.9e-9 |
+| all 8 z | 0 by symmetry, not differenced | — | ≤1.4e-11 | — |
+
+Atoms are indexed in the case's geometry order (0 O, 1–3 C, 4–7 H). The
+worst component is also the one with the largest numerical bar, 6.9e-8, so
+the agreement is at the oracle's own resolution. The PC gradient differs
+from the SC one on the same states by up to 5.7e-4 (C1 x), four decades
+above the agreement, so this is not SC agreeing with itself. The screen's
+four seeded directions, differenced from the same file, agree with
+`<g, d>` to ≤6.8e-8 (`--pc-states --analytic`, PASS at 1e-6). The analytic
+side's free checks: the gradient sums over atoms to ≤3.8e-10 per column,
+and its frozen-path bars are 4.2e-7 (skeleton, the usual upper bound) and
+1.7e-8 (multipliers). The numerical one sums to 2.5e-8 (x) and 9.3e-8 (y).
+
+**The coupled solve.** Dimension 1114 (1063 orbital variables plus the 51
+in-sector CI directions orthogonal to `c`), condition number 2.7e4, no negative eigenvalue, `|J^T L + b|`
+2.8e-16 direct and 3.3e-13 through `h_op`, `z·c` −1.9e-17. The three
+Hessian-vector ladders hold `h_op` to ≤6.9e-9 (9 fourfold halvings each).
+
+**The wiring checks, all exact.** Differencing the same file's
+`E_CASCI + E_corr(SC)` reproduces #124's SC `grad_num` **bit for bit**, its
+residuals too, and the screen's SC directional derivatives likewise. The
+device's own SC energies on those states give the same SC gradient to
+3.8e-12. The PC reference state was rebuilt to 5.7e-14 of the committed
+golden's `e_pc_total`. The sweep's finished reference sits 1.23e-8 off it,
+the finish's shift (#138).
+
+**block2 at displaced geometries.** At the reference geometry the GPU's PC
+energy is gated against block2 to 1e-7. The spot-checks close the case of a
+geometry-dependent error by running block2's PC on three displaced states
+of the sweep, through `generate_golden.py --mo-from <label>.mogold` (with
+PC) into scratch:
+
+| state | displacement | GPU − block2, `E_PC` (Eh) |
+|---|---|---:|
+| `2y+0` | C2 y +0.0025 bohr (the largest component) | −2.0e-15 |
+| `0x-0` | O x −0.0025 bohr | −1.0e-15 |
+| `d2+0` | screen direction d2, +0.0025 bohr | −3.2e-15 |
+
+The same states' `E_CASCI` and SC `E_corr` came out identical to the sweep's
+(difference 0). Each spot-check golden took about 31 s of CPU.
+
+**Two of the run's fourteen residual-independent checks fail, and that is a
+known property of acrolein's PC functional, not of this solve.** `y`
+linearity and CI stationarity, both on seed 70, show two fourfold halvings
+where the rule wants three, so `nevpt2_grad.py` exits 1 on them. Their
+Richardson values are 4.9e-10 from the reference, against the 1e-6
+allowance. The piece they share, `E_corr(PC)` along a CI direction, hits its
+round-off floor at `2^-15`. Read as `|change| × h`, that
+is ~1e-14 Eh of noise per block2 evaluation, the 100–400 ulp that #104
+measured on acrolein's CASCI twin, whose `y`-linearity ladders failed the
+same way ("PC's CI-direction ladders, measured" below). The ladder cannot
+start coarser, because the PC guard sets its top at `2^-11`. Nothing was
+loosened: the rule, `CI_LADDER_PC` and `CI_STEP_PC` are unchanged. The other
+twelve hold: seed 2026's two CI ladders (three halvings each), both orbital
+stationarity ladders over the 2840 rotations (11 halvings), both nuclear
+ladders, both projections, the three Hessian-vector ladders and the PC
+guard ledger (168 of 168 displaced CI vectors guarded, smallest gap 2.4e5,
+rank unchanged). Acrolein's `P y` is held exactly where these ladders
+cannot reach, by #135's directional tier.
+
+**`--reference casci --pc` did not move.** N2 CAS(4,4) CASCI PC, run before
+any change and again on the final code: every array of the `--out` file is
+bit-identical, the gradient included (1.5e-8 from `grad_num`, PASS, 11 of
+11). The SC CASSCF branch and its `--casci-only` smoke test (`origin/main`'s
+`reference_data/` against this branch's, N2 CAS(4,4)) are bit-identical too.
+The smoke test is 2.0e-8 from `pyscf.grad.casscf`.
+
+**N2 CAS(4,4) CASSCF PC, the cost probe.** Run first, to declare the budget
+(no PC numerical gradient exists for it, so the residual-independent checks
+are its gate): 14 of 14 hold, the three Hessian-vector ladders within
+1.2e-8, and the gradient's off-axis components ≤1.5e-11. Wall 182.0 s
+serially, of which the `kappa` sweep is 111 s.
+
+**Walls and workers** (the RTX 3080 box's CPU: 12 physical cores,
+single-threaded processes; PySCF 2.14.0, block2 0.5.4):
+
+| run | workers | wall |
+|---|---|---:|
+| N2 CAS(4,4) CASSCF PC analytic | 1 | 182.0 s (budget 600 s) |
+| the same, `--workers 4` | 4 in the sweep | 99.7 s (sweep 111 s → 29 s), bit-identical arrays |
+| acrolein CASSCF PC analytic | 10 in the sweep | **4288 s** (budget 36000 s): `y` 389 s, the 2840-pair sweep 2332 s, the checks 723 s |
+| `--pc-states` differencing | 1 | 1.3 s |
+| block2 spot-check goldens | 1 | ~31 s each |
+
+The `CASSCF_WALL_BUDGET_PC` figures were declared from N2's wall before
+acrolein ran: 600 s and 36000 s. The 36000 s covers a serial acrolein run,
+which on the CASCI branch takes 22277 s ("What is run, and what it comes out
+at" above). The acrolein run shared the CPU part of the time with
+`golden-repro.sh -j 1` during the sweep and with the build and ctest tiers
+afterwards, so its wall is an upper bound. `--workers N` forks the `kappa`
+sweep and nothing else. Its arrays matched the serial run's exactly on N2.
+
+Re-run with:
+
+```bash
+uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65 \
+    --reference casscf --pc-states /tmp/acrolein_pc_states.npz \
+    --npz /tmp/acrolein_casscf_pc.numgrad.npz
+uv run python reference_data/nevpt2_grad.py --case acrolein_def2svp_cas65 \
+    --reference casscf --pc --workers 10 \
+    --grad-num /tmp/acrolein_casscf_pc.numgrad.npz --out /tmp/acrolein_casscf_pc.grad.npz
+uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65 \
+    --reference casscf --pc-states /tmp/acrolein_pc_states.npz \
+    --analytic /tmp/acrolein_casscf_pc.grad.npz --npz /tmp/acrolein_casscf_pc.numgrad.npz
+uv run python reference_data/generate_golden.py --atom "<2y+0's --atom spec>" \
+    --basis def2-svp --ncas 5 --nelecas 6 --cas-irreps "A'=1,A\"=4" \
+    --mo-from /tmp/acrolein_states/2y+0.mogold --out /tmp/spot/2y+0.nevpt2gold
+```
+
+with `/tmp/acrolein_states` and `/tmp/acrolein_pc_states.npz` from the two
+commands in [`reference-data.md`](reference-data.md), "The numerical
+gradient of a CASSCF reference" and "The GPU's PC energies on the kept
+states". The `--atom` spec is the state's own, in that sweep's `states.json`.
+
 ### Why there is no ctest entry for it
 
 Three reasons, each sufficient on its own:

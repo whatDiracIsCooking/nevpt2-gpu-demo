@@ -369,6 +369,18 @@ without one, the gate is the residual-independent checks. The measured
 numbers and the wall-clock budget per case are in docs/reference-data.md,
 "The analytic gradient".
 
+**``--pc`` on this branch** (#126) is the CASCI branch's ``--pc`` fed into the
+coupled solve, and nothing more: the source terms ``Y`` and ``y`` are
+block2's PC ones from the same sweeps (section 2.1 is agnostic to the
+reference kind), ``Phi``'s ``E_corr`` is block2's, the PC steps and the PC
+guard at every displaced CI vector apply, and ``J``, ``(S1)``, ``(C1)``,
+``(O2)`` and the basis are the reference's, untouched. Its numerical
+gradient is the GPU's PC energy differenced over the same re-optimised states
+(``pc_on_states.py``, then ``nevpt2_numgrad.py --reference casscf
+--pc-states NPZ --npz PATH``), read with ``--grad-num PATH``; its measured
+numbers and its own wall-clock budget are in docs/testing.md, "PC on a
+CASSCF reference: acrolein".
+
 Usage::
 
     uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46
@@ -408,6 +420,9 @@ Usage::
         --reference casscf
     uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
         --reference casscf --mo-from /tmp/other_orbitals.mogold   # no golden: gate only
+    # PC on the CASSCF branch (#126), against the GPU-differenced grad_num_pc:
+    uv run python reference_data/nevpt2_grad.py --case acrolein_def2svp_cas65 \
+        --reference casscf --pc --grad-num /tmp/acrolein_casscf_pc.numgrad.npz
 
 ``--out`` writes the gradient and every residual as an ``.npz``; nothing is
 written by default, and **no committed file is ever touched** (the
@@ -709,6 +724,16 @@ CASSCF_WALL_BUDGET = {
     "acrolein_def2svp_cas65": 3600.0,
 }
 
+#: The same budget for ``--reference casscf --pc`` (#126): one block2 PC solve
+#: per non-gauge rotation in the kappa sweep, so orders of magnitude over the
+#: SC run's. Declared from N2 CAS(4,4)'s measured PC wall before acrolein was
+#: run, then held to it; both walls are in docs/testing.md, "PC on a CASSCF
+#: reference: acrolein". A bound, not a gate, like the SC one.
+CASSCF_WALL_BUDGET_PC = {
+    "n2_ccpvdz_cas44": 600.0,
+    "acrolein_def2svp_cas65": 36000.0,
+}
+
 #: Component names, in the order they index a coordinate.
 AXES = ngrad.AXES
 
@@ -976,7 +1001,10 @@ def build_state(case: str, spec: dict, *, pc: bool = False, reference: str = "ca
             reference="casscf",
         )
         if pc:
-            raise SystemExit("build_state: --pc is refused on the CASSCF branch (run())")
+            # The same block2 energy and conditioning guard as the CASCI
+            # branch: the contraction scheme is one scalar, E_corr, and the
+            # reference kind does not enter it (section 1.4; #126).
+            attach_pc_energy(st)
         return st
     invariants = gg._check_gradient_invariants(pt, ga0, nelec_rhf, mc._scf.mo_energy)
     eps, vec = np.linalg.eigh(np.asarray(ga0["fock_rhf"])[a, a])
@@ -1019,10 +1047,9 @@ def attach_pc_energy(st: State) -> None:
     """block2's PC correlation energy on ``st``, gated by
     ``generate_golden._check_pc_conditioning`` (the golden's own guard), and
     the reference ranks every displaced point's is held against
-    (:func:`_pc_guard`). :func:`build_state` runs it for ``--pc`` on the
-    CASCI-on-RHF branch; ``sc_source_oracle.py --pc`` on a CASSCF golden calls
-    it itself, because the gradient driver's CASSCF branch refuses ``--pc``
-    (:func:`run`) and :func:`build_state` keeps that refusal."""
+    (:func:`_pc_guard`). :func:`build_state` runs it for ``--pc`` on both
+    branches; ``sc_source_oracle.py --pc`` on a CASSCF golden calls it itself,
+    on a state it built without ``pc``."""
     gaps: list = []
     st.e_corr_pc = Functional(st, pc=True).pc_energy(
         st.mo_coeff, st.ci, np.diag(st.f).copy(), gaps=gaps)
@@ -1579,7 +1606,7 @@ def load_source_terms(path: Path, st: State, *, pc: bool = False) -> SourceTerms
 
 
 def kappa_sweep(fn: Functional, st: State, cons: list, *, with_corr: bool,
-                step: float, log=print) -> dict:
+                step: float, log=print, workers: int = 1) -> dict:
     """One central-difference pass along every non-gauge ``kappa`` pair,
     returning everything that depends on that direction:
 
@@ -1601,7 +1628,15 @@ def kappa_sweep(fn: Functional, st: State, cons: list, *, with_corr: bool,
     **not** covariant under a rotation that mixes the core and active index
     ranges: its core dressing sums over an index *range*, not a subspace, so
     ``df = [f, kappa]`` holds only inside one space. Getting that wrong is
-    invisible in the intra-space blocks and wrong everywhere else."""
+    invisible in the intra-space blocks and wrong everywhere else.
+
+    ``workers > 1`` runs the pairs in that many **forked** single-threaded
+    processes (:func:`_sweep_rows`). Each pair's evaluations are a pure
+    function of ``(C, c)`` -- the only cache, block2's 4-RDM, is keyed on the
+    CI vector, which the sweep never moves -- so every row comes out bit for
+    bit as the serial loop computes it, and the assembled arrays are the
+    serial ones (docs/testing.md, "PC on a CASSCF reference: acrolein", has
+    the check). Opt-in: the default is the serial loop."""
     pairs = kappa_pairs(st)
     dm1 = fn.reference_dm1(st)
     # The CASSCF branch differences (O2)'s columns alone: (S1)'s Jacobian is
@@ -1614,22 +1649,81 @@ def kappa_sweep(fn: Functional, st: State, cons: list, *, with_corr: bool,
     M = np.zeros((len(pairs), len(cons)))
     Q = np.zeros((len(pairs), st.ci.size))
     t0 = time.perf_counter()
-    for k, (p, q) in enumerate(pairs):
-        b = [fn.evaluate(givens(st.mo_coeff, p, q, sign * step), st.ci,
-                         with_corr=with_corr, dm1=None if with_corr else dm1)
-             for sign in (+1.0, -1.0)]
-        a = ((b[0]["e_casci"] + b[0]["e_corr"]) - (b[1]["e_casci"] + b[1]["e_corr"])) \
-            / (2.0 * step)
+    ctx = dict(fn=fn, st=st, cons=cons, pairs=pairs, with_corr=with_corr, dm1=dm1,
+               step=step, only=only)
+
+    def store(k: int, a: float, ac: float, m_row: np.ndarray, q_row: np.ndarray) -> None:
+        p, q = pairs[k]
         A[p, q], A[q, p] = a, -a
-        ac = (b[0]["e_corr"] - b[1]["e_corr"]) / (2.0 * step)
         A_corr[p, q], A_corr[q, p] = ac, -ac
-        M[k] = (constraint_vector(b[0], cons, only=only)
-                - constraint_vector(b[1], cons, only=only)) / (2.0 * step)
-        Q[k] = (b[0]["hvec"] - b[1]["hvec"]) / (2.0 * step)
-        if (k + 1) % 250 == 0:
-            log(f"    {k + 1}/{len(pairs)} kappa pairs, {time.perf_counter() - t0:.0f}s")
+        M[k] = m_row
+        Q[k] = q_row
+
+    if workers <= 1:
+        for k in range(len(pairs)):
+            store(*_sweep_pair(ctx, k))
+            if (k + 1) % 250 == 0:
+                log(f"    {k + 1}/{len(pairs)} kappa pairs, {time.perf_counter() - t0:.0f}s")
+    else:
+        import multiprocessing
+
+        # Contiguous chunks, many more than workers, so the load balances and
+        # progress is reported as they land.
+        size = max(1, len(pairs) // (8 * workers))
+        chunks = [list(range(i, min(i + size, len(pairs))))
+                  for i in range(0, len(pairs), size)]
+        _SWEEP_CTX.clear()
+        _SWEEP_CTX.update(ctx)
+        done = 0
+        try:
+            with multiprocessing.get_context("fork").Pool(workers) as pool:
+                for rows, nevals in pool.imap_unordered(_sweep_rows, chunks):
+                    for row in rows:
+                        store(*row)
+                    fn.nevals += nevals
+                    before, done = done, done + len(rows)
+                    if done // 250 != before // 250 or done == len(pairs):
+                        log(f"    {done}/{len(pairs)} kappa pairs, {workers} workers, "
+                            f"{time.perf_counter() - t0:.0f}s")
+        finally:
+            _SWEEP_CTX.clear()
     return {"A": A, "A_corr": A_corr, "A_casci": A - A_corr, "M": M, "Q": Q,
-            "seconds": time.perf_counter() - t0, "with_corr": with_corr}
+            "seconds": time.perf_counter() - t0, "with_corr": with_corr,
+            "workers": max(1, workers)}
+
+
+#: :func:`kappa_sweep`'s arguments, set in the parent just before its pool
+#: forks and inherited by the children -- the Functional, its PySCF/block2
+#: objects and the state are never pickled.
+_SWEEP_CTX: dict = {}
+
+
+def _sweep_pair(ctx: dict, k: int) -> tuple:
+    """One kappa pair's central differences: ``(k, A_pq, A_corr_pq, M[k],
+    Q[k])``. The serial loop and the forked workers both call this, so the
+    arithmetic is one piece of code."""
+    fn, st, cons, step, only = ctx["fn"], ctx["st"], ctx["cons"], ctx["step"], ctx["only"]
+    p, q = ctx["pairs"][k]
+    with_corr = ctx["with_corr"]
+    b = [fn.evaluate(givens(st.mo_coeff, p, q, sign * step), st.ci,
+                     with_corr=with_corr, dm1=None if with_corr else ctx["dm1"])
+         for sign in (+1.0, -1.0)]
+    a = ((b[0]["e_casci"] + b[0]["e_corr"]) - (b[1]["e_casci"] + b[1]["e_corr"])) \
+        / (2.0 * step)
+    ac = (b[0]["e_corr"] - b[1]["e_corr"]) / (2.0 * step)
+    m_row = (constraint_vector(b[0], cons, only=only)
+             - constraint_vector(b[1], cons, only=only)) / (2.0 * step)
+    q_row = (b[0]["hvec"] - b[1]["hvec"]) / (2.0 * step)
+    return k, a, ac, m_row, q_row
+
+
+def _sweep_rows(ks: list[int]) -> tuple[list[tuple], int]:
+    """A forked worker's share of :func:`kappa_sweep`: its pairs' rows and
+    how many functional evaluations they took."""
+    fn = _SWEEP_CTX["fn"]
+    n0 = fn.nevals
+    rows = [_sweep_pair(_SWEEP_CTX, k) for k in ks]
+    return rows, fn.nevals - n0
 
 
 def allowed_determinants(st: State) -> np.ndarray:
@@ -2144,7 +2238,7 @@ class Gradients(lagrange.Gradients):
 
     def __init__(self, st: State, src: SourceTerms, *, with_corr: bool = True,
                  step: float | None = None, richardson: bool = True,
-                 pc: bool = False, kappa_step: float | None = None):
+                 pc: bool = False, kappa_step: float | None = None, workers: int = 1):
         self.st = st
         default_step, default_kappa = scheme_steps(pc)
         step = default_step if step is None else step
@@ -2152,6 +2246,8 @@ class Gradients(lagrange.Gradients):
         self.src = src
         self.with_corr = with_corr
         self.pc = pc
+        #: processes the kappa sweep runs in (:func:`kappa_sweep`; 1 = serial).
+        self.workers = workers
         self.step = step
         self.kappa_step = kappa_step
         self.richardson = richardson
@@ -2461,7 +2557,7 @@ class Gradients(lagrange.Gradients):
             if sweep_corr is None:
                 sweep_corr = self.with_corr and not self.src.from_dump
             sweep = kappa_sweep(self.fn, st, self.cons, with_corr=sweep_corr,
-                                step=self.kappa_step, log=log)
+                                step=self.kappa_step, log=log, workers=self.workers)
         if self.with_corr and not self.src.from_dump and not sweep["with_corr"]:
             raise SystemExit("prepare: PySCF's source term needs a sweep that "
                              "differentiated E_corr")
@@ -2734,11 +2830,16 @@ class CasscfGradients(Gradients):
 
     def __init__(self, st: State, src: SourceTerms, *, with_corr: bool = True,
                  step: float | None = None, richardson: bool = True,
-                 kappa_step: float | None = None, cp_solve: str = "dense"):
+                 kappa_step: float | None = None, cp_solve: str = "dense",
+                 pc: bool = False, workers: int = 1):
         if not st.casscf:
             raise SystemExit("CasscfGradients needs a --reference casscf state")
+        # ``pc`` changes E_corr and nothing else (#126): the source terms Y, y
+        # and Phi's E_corr become block2's PC energy, at the PC steps, with
+        # the PC guard at every displaced CI vector; (S1), (C1), (O2) and the
+        # coupled operator are the reference's and do not see it.
         super().__init__(st, src, with_corr=with_corr, step=step, richardson=richardson,
-                         pc=False, kappa_step=kappa_step)
+                         pc=pc, kappa_step=kappa_step, workers=workers)
         if cp_solve not in CP_SOLVES:
             raise SystemExit(f"--cp-solve {cp_solve!r} is not one of {CP_SOLVES}")
         self.cp_solve = cp_solve
@@ -3703,18 +3804,19 @@ def run(args) -> dict:
         )
     casscf = args.reference == "casscf"
     if casscf:
-        # What the CASSCF branch (#122) is validated for, and nothing else:
-        # SC-NEVPT2 and its --casci-only smoke test, PySCF's own source terms.
+        # What the CASSCF branch is validated for, and nothing else: SC-NEVPT2
+        # and its --casci-only smoke test (#122) and PC-NEVPT2 (#126), each with
+        # the offline source terms -- PySCF's SC ones, block2's PC ones.
         refused = [flag for flag, on in (
-            ("--pc", args.pc), ("--source dump/both", args.source != "pyscf"),
+            ("--source dump/both", args.source != "pyscf"),
             ("--edot-check", args.edot_check),
             ("--energy-ordered", args.energy_ordered)) if on]
         if refused:
             raise SystemExit(
                 f"--reference casscf: {', '.join(refused)} refused. The CASSCF branch "
-                "differentiates SC-NEVPT2 (or, --casci-only, the CASSCF energy) with "
-                "PySCF's own source terms; no PC or GPU source term is validated on "
-                "it, and its active space is the sidecar's"
+                "differentiates SC- or PC-NEVPT2 (or, --casci-only, the CASSCF energy) "
+                "with the offline source terms (PySCF's SC, block2's PC); no GPU "
+                "source term is validated on it, and its active space is the sidecar's"
             )
         if args.mo_from is None:
             default = REPO / "golden" / f"{args.case}_casscf.mogold"
@@ -3733,7 +3835,10 @@ def run(args) -> dict:
                                      casci_only=args.casci_only,
                                      reference=args.reference)
                        if args.grad_num is not None else None)
-    if args.pc and grad_num_source is None:
+    # The CASSCF branch takes no default grad_num for SC either: without one
+    # its gate is the residual-independent checks, the Hessian-vector ladders
+    # among them, and main() says so.
+    if args.pc and grad_num_source is None and not casscf:
         raise SystemExit(
             "--pc needs --grad-num PATH: a PC numerical gradient has no home "
             "in the gradient sidecar (whose contract is the 24 --gradgold "
@@ -3815,11 +3920,13 @@ def run(args) -> dict:
                 f"{rec['d_e_corr']:.3e}"
             )
         if args.pc:
+            # The golden of this run's own reference: <case>_casscf on the
+            # CASSCF branch, whose PC fields are block2's on those orbitals.
             gold_pc = ngrad.read_golden_pc_total(
-                REPO / "golden" / f"{args.case}.nevpt2gold")
+                REPO / "golden" / f"{gold_name}.nevpt2gold")
             if gold_pc is None:
                 raise SystemExit(
-                    f"--pc: golden/{args.case}.nevpt2gold carries no "
+                    f"--pc: golden/{gold_name}.nevpt2gold carries no "
                     "e_pc_total -- it was generated --no-pc because its PC "
                     "metric is refused as a continuum, so there is no PC "
                     "reference for this state (docs/reference-data.md, \"LiF "
@@ -3829,7 +3936,7 @@ def run(args) -> dict:
             if abs(rec["d_e_corr_pc"]) > REF_STATE_TOL:
                 raise SystemExit(
                     f"the rebuilt state's PC energy is {rec['d_e_corr_pc']:.3e} "
-                    f"from golden/{args.case}.nevpt2gold's e_pc_total"
+                    f"from golden/{gold_name}.nevpt2gold's e_pc_total"
                 )
         print(f"  against the golden: dE_CASCI = {rec['d_e_casci']:+.1e}, "
               f"dE_corr = {rec['d_e_corr']:+.1e}"
@@ -3910,10 +4017,12 @@ def run(args) -> dict:
     if casscf:
         g = CasscfGradients(st, src, with_corr=with_corr, step=args.step,
                             richardson=args.richardson, kappa_step=args.kappa_step,
-                            cp_solve=args.cp_solve)
+                            cp_solve=args.cp_solve, pc=args.pc, workers=args.workers)
     else:
         g = Gradients(st, src, with_corr=with_corr, step=args.step,
-                      richardson=args.richardson, pc=args.pc, kappa_step=args.kappa_step)
+                      richardson=args.richardson, pc=args.pc, kappa_step=args.kappa_step,
+                      workers=args.workers)
+    rec["workers"] = args.workers
     print("\nthe frozen orthonormal path, and one kappa sweep")
     # Under --source both the one sweep differentiates E_corr too, so PySCF's
     # half of A exists to compare the dump's with -- and to solve with.
@@ -4078,7 +4187,8 @@ def run(args) -> dict:
         rec["attrib_ci"] = float(np.abs(rec["grad_gpu_ci_only"] - rec["grad_pyscf"]).max())
     if casscf:
         rec["wall"] = time.perf_counter() - t0
-        rec["wall_budget"] = CASSCF_WALL_BUDGET.get(args.case, float("nan"))
+        rec["wall_budget"] = (CASSCF_WALL_BUDGET_PC if args.pc
+                              else CASSCF_WALL_BUDGET).get(args.case, float("nan"))
     return rec
 
 
@@ -4092,9 +4202,11 @@ def report(rec: dict) -> None:
     if rec.get("reference") == "casscf":
         # The same names, with the reference said: --casci-only on CASSCF
         # orbitals is the CASSCF energy, and SC is on a CASSCF reference.
-        scheme = "CASSCF" if rec["casci_only"] else "SC (CASSCF reference)"
+        scheme = ("CASSCF" if rec["casci_only"]
+                  else f"{'PC' if rec['pc'] else 'SC'} (CASSCF reference)")
         which = ("CASSCF only (the smoke test)" if rec["casci_only"]
-                 else "SC-NEVPT2 on a CASSCF reference (CP-CASSCF)")
+                 else ("PC-NEVPT2 (block2)" if rec["pc"] else "SC-NEVPT2")
+                 + " on a CASSCF reference (CP-CASSCF)")
     print(f"\n== {rec['case']}  {rec['basis']}  CAS({rec['nelecas']},{rec['ncas']})  "
           f"{which}")
     print(f"source terms: {rec['source_origin']}")
@@ -4274,10 +4386,13 @@ def _report_gradient(rec: dict, scheme: str) -> None:
     if "wall_budget" in rec:
         # A declared budget, not a gate: a wall clock depends on the machine.
         within = rec["wall"] <= rec["wall_budget"]
+        where = ("CASSCF_WALL_BUDGET_PC; docs/testing.md, \"PC on a CASSCF reference: "
+                 "acrolein\"" if rec["pc"] else
+                 "CASSCF_WALL_BUDGET; docs/reference-data.md, \"The analytic gradient\"")
         print(f"{'within' if within else 'OVER'} the declared wall-clock budget for "
-              f"--reference casscf on {rec['case']}: {rec['wall']:.1f}s "
-              f"{'<=' if within else '>'} {rec['wall_budget']:g}s (CASSCF_WALL_BUDGET; "
-              "docs/reference-data.md, \"The analytic gradient\")")
+              f"--reference casscf{' --pc' if rec['pc'] else ''} on {rec['case']}: "
+              f"{rec['wall']:.1f}s {'<=' if within else '>'} {rec['wall_budget']:g}s "
+              f"({where})")
 
 
 def main() -> None:
@@ -4360,8 +4475,10 @@ def main() -> None:
                          "instead of PySCF's strongly-contracted one. The "
                          "Lagrangian, the constraints and the Z-vector "
                          "equations are the reference's and do not change; only "
-                         "E_corr does. Needs --grad-num (a PC numerical "
-                         "gradient is not a sidecar array), and is refused on a "
+                         "E_corr does. Needs --grad-num on the CASCI branch (a "
+                         "PC numerical gradient is not a sidecar array; with "
+                         "--reference casscf it is optional, as for SC), and is "
+                         "refused on a "
                          "state with no PC answer -- LiF's metric is a "
                          "continuum. Far slower: one block2 PC solve per "
                          "kappa direction")
@@ -4397,7 +4514,8 @@ def main() -> None:
                          "sections 1.2 and 2.2-2.6) or 'casscf' (a CASCI on the "
                          "converged CASSCF orbitals of --mo-from: CASSCF stationarity "
                          "as the constraint, one coupled CP-CASSCF solve, sections 1.4 "
-                         "and 2.7). SC only, PySCF source terms only")
+                         "and 2.7). SC, or PC with --pc, offline source terms "
+                         "only (PySCF's SC, block2's PC); --grad-num optional")
     ap.add_argument("--mo-from", type=Path, default=None,
                     help="with --reference casscf: the .mogold sidecar of CASSCF "
                          "orbitals (generate_golden.py --casscf --mo-out), read and "
@@ -4409,6 +4527,12 @@ def main() -> None:
                          "gen_g_hop's h_op and factorised, its spectrum printed) or "
                          "'cg' (pyscf.grad.lagrange's own conjugate gradient through "
                          "the same operator, for a case too large to build)")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="run the kappa sweep -- one central difference per non-gauge "
+                         "rotation, the largest share of a --pc run -- in this many "
+                         "forked single-threaded processes (default 1: serial). The "
+                         "result is bit-identical to the serial one; nothing else "
+                         "in the run is parallel")
     ap.add_argument("--show-ladders", action="store_true",
                     help="print every step ladder's table, not only a failing "
                          "one's (docs/testing.md, \"Residual-independent checks "
