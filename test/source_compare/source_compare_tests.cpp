@@ -26,8 +26,11 @@
 //   SourceCompareDirectionalTests
 //                               the same three properties for every committed
 //                               DIRECTIONAL oracle (#105): terms built to meet
-//                               its stored projections pass with all nine rows
-//                               compared, moving one block (or P y) along one
+//                               its stored projections pass with every row the
+//                               partition has compared (all nine on CASCI
+//                               orbitals; act_V's three empty by construction
+//                               on CASSCF ones, #117, and asserted empty
+//                               exactly there), moving one block (or P y) along one
 //                               of its directions fails naming that block, a
 //                               block probed by fewer than two directions
 //                               fails, and a direction labelled with a block it
@@ -92,6 +95,48 @@ void perturb(Terms& t, std::int64_t p, std::int64_t q, double by) {
   }
 }
 
+// The rows of `path`'s comparison that its partition leaves EMPTY BY
+// CONSTRUCTION, named from which reference the oracle was generated on rather
+// than read off the partition the file carries -- so a block that comes out
+// empty for any other reason is still a failure. On CASSCF orbitals (a
+// `<case>_casscf` golden's oracle, #117) there is no RHF partition to split
+// the active space (docs/gradient-theory.md, section 1.4): act_O is all of
+// it and act_V is empty, so its three blocks have no pair. A CASCI oracle
+// has every space, and no empty row. The partition is held to that too.
+std::set<std::string> expectedEmptyRows(const std::string& path, const SrcGoldFile& o) {
+  const bool casscf = sourceOracleStem(path).contains("_casscf");
+  if (casscf) {
+    EXPECT_EQ(o.nActOcc, o.nact) << "a CASSCF oracle's active space is one range";
+  } else {
+    EXPECT_GT(o.nActOcc, 0) << "a CASCI oracle's act_O is empty";
+    EXPECT_LT(o.nActOcc, o.nact) << "a CASCI oracle's act_V is empty";
+  }
+  std::set<std::string> out;
+  if (!casscf) return out;
+  constexpr std::size_t actV = 2;  // kSourceSpaceNames' act_V
+  for (std::size_t s = 0; s < kSourceSpaceNames.size(); ++s)
+    for (std::size_t t = s; t < kSourceSpaceNames.size(); ++t)
+      if ((s == actV || t == actV) && s != t)
+        out.insert(std::format("{}-{}", kSourceSpaceNames[s], kSourceSpaceNames[t]));
+  EXPECT_EQ(std::ssize(out), 3) << "core-act_V, act_O-act_V, act_V-virt";
+  return out;
+}
+
+// Every row of `c` is empty exactly when `empty` names it; the count of the
+// rest, which is what a test then exercises.
+int nonEmptyRows(const SourceComparison& c, const std::set<std::string>& empty) {
+  int n = 0;
+  for (const SourceBlockRow& r : c.rows) {
+    if (empty.contains(r.name)) {
+      EXPECT_EQ(r.n, 0) << r.name << " should be empty in this partition";
+    } else {
+      EXPECT_GT(r.n, 0) << r.name << " is empty, and this partition has pairs in it";
+      ++n;
+    }
+  }
+  return n;
+}
+
 // --- SourceCompareSelfTests ---------------------------------------------------
 
 TEST(SourceCompareSelfTests, EveryCommittedOracleAgreesWithItself) {
@@ -108,6 +153,8 @@ TEST(SourceCompareSelfTests, EveryCommittedOracleAgreesWithItself) {
         compareSourceTerms(o, t.a, t.py, {}, sourceOracleTol(o.scheme));
     EXPECT_TRUE(c.ok) << "blocks out of place: " << join(c.failures);
     ASSERT_EQ(std::ssize(c.rows), 9) << "eight blocks of two spaces and P y";
+    const std::set<std::string> empty = expectedEmptyRows(path, o);
+    EXPECT_EQ(nonEmptyRows(c, empty), 9 - std::ssize(empty));
     for (const SourceBlockRow& r : c.rows) {
       EXPECT_EQ(r.maxDelta, 0.0) << r.name;
       EXPECT_FALSE(r.knownGap) << r.name;
@@ -128,9 +175,17 @@ TEST(SourceCompareSelfTests, ACopyWithOneBlockPerturbedFailsNamingIt) {
     const double tol = sourceOracleTol(o.scheme);
     const Terms own = ownTerms(o);
     const SourceComparison self = compareSourceTerms(o, own.a, own.py, {}, tol);
-    int exercised = 0;
+    // Every row the partition has a pair in: all nine for a CASCI oracle,
+    // the six without act_V for a CASSCF one -- and none empty by accident.
+    const std::set<std::string> empty = expectedEmptyRows(path, o);
+    const int expected = nonEmptyRows(self, empty);
+    EXPECT_EQ(expected, 9 - std::ssize(empty));
+    std::int64_t exercised = 0;
     for (const SourceBlockRow& r : self.rows) {
-      if (r.n == 0) continue;  // a block this partition has no pair in
+      // Empty: by construction (skipped), or by accident -- already a failure
+      // in nonEmptyRows above, and the count below stays short of `expected`.
+      // Either way there is no element to perturb.
+      if (r.n == 0) continue;
       SCOPED_TRACE(r.name);
       // One element of this block, ten tolerances off: the comparison fails,
       // and names this block and nothing else.
@@ -152,10 +207,10 @@ TEST(SourceCompareSelfTests, ACopyWithOneBlockPerturbedFailsNamingIt) {
       EXPECT_TRUE(compareSourceTerms(o, inside.a, inside.py, {}, tol).ok);
       ++exercised;
     }
-    // Every block N2's and LiF's partitions have: core-core, core-virt,
+    // Every block N2's and LiF's CASCI partitions have: core-core, core-virt,
     // act_O-act_V, act_O-virt, act_V-virt, virt-virt, both core-act blocks
-    // and P y.
-    EXPECT_EQ(exercised, 9);
+    // and P y -- nine; the CASSCF ones, those less the three act_V blocks.
+    EXPECT_EQ(exercised, 9 - std::ssize(empty));
   }
 }
 
@@ -334,21 +389,23 @@ Terms directionalTerms(const SrcGoldFile& o) {
   return t;
 }
 
-std::vector<SrcGoldFile> directionalOracles() {
-  std::vector<SrcGoldFile> out;
+// Each committed directional oracle, with its path (which names the
+// reference it was generated on: expectedEmptyRows).
+std::vector<std::pair<std::string, SrcGoldFile>> directionalOracles() {
+  std::vector<std::pair<std::string, SrcGoldFile>> out;
   for (const std::string& path : committedOracles()) {
     SrcGoldFile o = load(path);
-    if (o.flavour == SourceFlavour::Directional) out.push_back(std::move(o));
+    if (o.flavour == SourceFlavour::Directional) out.emplace_back(path, std::move(o));
   }
   return out;
 }
 
 TEST(SourceCompareDirectionalTests, TermsMeetingTheStoredProjectionsPass) {
-  const std::vector<SrcGoldFile> oracles = directionalOracles();
+  const std::vector<std::pair<std::string, SrcGoldFile>> oracles = directionalOracles();
   ASSERT_FALSE(oracles.empty()) << "no committed directional oracle";
   std::set<SourceScheme> schemes;
-  for (const SrcGoldFile& o : oracles) {
-    SCOPED_TRACE(std::format("{} n_mo {}", sourceSchemeName(o.scheme), o.nmo));
+  for (const auto& [path, o] : oracles) {
+    SCOPED_TRACE(path);
     schemes.insert(o.scheme);
     EXPECT_TRUE(checkDirectionBlocks(o).has_value());
     const Terms t = directionalTerms(o);
@@ -356,10 +413,13 @@ TEST(SourceCompareDirectionalTests, TermsMeetingTheStoredProjectionsPass) {
     EXPECT_TRUE(c.ok) << "blocks out of place: " << join(c.failures);
     EXPECT_TRUE(c.directional);
     ASSERT_EQ(std::ssize(c.rows), 9) << "eight blocks of two spaces and P y";
+    const std::set<std::string> empty = expectedEmptyRows(path, o);
+    EXPECT_EQ(nonEmptyRows(c, empty), 9 - std::ssize(empty));
     for (const SourceBlockRow& r : c.rows) {
       EXPECT_LT(r.maxDelta, 1e-3 * sourceOracleTol(o)) << r.name;
-      // Every block of these partitions has pairs, so every one is probed.
-      EXPECT_GE(r.n, kMinBlockDirections) << r.name;
+      // Every block the partition has pairs in is probed; only the ones it
+      // leaves empty by construction (act_V's, on CASSCF orbitals) are not.
+      if (!empty.contains(r.name)) EXPECT_GE(r.n, kMinBlockDirections) << r.name;
     }
   }
   EXPECT_TRUE(schemes.contains(SourceScheme::Sc)) << "no SC directional oracle";
@@ -367,17 +427,21 @@ TEST(SourceCompareDirectionalTests, TermsMeetingTheStoredProjectionsPass) {
 }
 
 TEST(SourceCompareDirectionalTests, OneBlockMovedAlongItsDirectionFailsNamingIt) {
-  for (const SrcGoldFile& o : directionalOracles()) {
-    SCOPED_TRACE(std::format("{} n_mo {}", sourceSchemeName(o.scheme), o.nmo));
+  for (const auto& [path, o] : directionalOracles()) {
+    SCOPED_TRACE(path);
     const double tol = sourceOracleTol(o);
     const Terms own = directionalTerms(o);
     const SourceComparison self = compareSourceOracle(o, own.a, own.py, {}, tol);
     const Tensor& dirs = o.get("kappa_dirs");
     const Tensor& u = o.get("ci_dirs");
+    const std::set<std::string> empty = expectedEmptyRows(path, o);
+    EXPECT_EQ(nonEmptyRows(self, empty), 9 - std::ssize(empty));
     int exercised = 0;
     for (const SourceBlockRow& r : self.rows) {
+      // Empty: by construction (skipped), or by accident -- already a failure
+      // in nonEmptyRows above, and `exercised` stays short. No direction to move.
+      if (r.n == 0) continue;
       SCOPED_TRACE(r.name);
-      ASSERT_GT(r.n, 0);
       // Along the direction this row's worst sits at, by `by`: that one
       // projection moves by exactly `by` (a unit direction), the block's
       // others by at most that, and no other block's at all.
@@ -397,13 +461,13 @@ TEST(SourceCompareDirectionalTests, OneBlockMovedAlongItsDirectionFailsNamingIt)
       EXPECT_TRUE(moved(0.5 * tol).ok);
       ++exercised;
     }
-    EXPECT_EQ(exercised, 9);
+    EXPECT_EQ(exercised, 9 - std::ssize(empty));
   }
 }
 
 TEST(SourceCompareDirectionalTests, AnUnderProbedOrMislabelledBlockIsCaught) {
-  for (SrcGoldFile o : directionalOracles()) {
-    SCOPED_TRACE(std::format("{} n_mo {}", sourceSchemeName(o.scheme), o.nmo));
+  for (auto [path, o] : directionalOracles()) {
+    SCOPED_TRACE(path);
     const double tol = sourceOracleTol(o);
     const Terms own = directionalTerms(o);
     // Relabel direction 0 (core-core: every partition here has core pairs)

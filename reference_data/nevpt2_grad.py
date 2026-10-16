@@ -1010,14 +1010,25 @@ def build_state(case: str, spec: dict, *, pc: bool = False, reference: str = "ca
         ci_golden=ci_golden, act_rot=vec,
     )
     if pc:
-        gaps: list = []
-        st.e_corr_pc = Functional(st, pc=True).pc_energy(
-            mo, st.ci, np.diag(f).copy(), gaps=gaps)
-        gg._check_pc_conditioning(gaps)
-        st.pc_gap = min(g[2] for g in gaps)
-        # What every displaced point's rank is held against (_pc_guard).
-        PC_GUARD.reference_kept = {key: kept for key, _d, _gap, _dropped, kept in gaps}
+        attach_pc_energy(st)
     return st
+
+
+def attach_pc_energy(st: State) -> None:
+    """block2's PC correlation energy on ``st``, gated by
+    ``generate_golden._check_pc_conditioning`` (the golden's own guard), and
+    the reference ranks every displaced point's is held against
+    (:func:`_pc_guard`). :func:`build_state` runs it for ``--pc`` on the
+    CASCI-on-RHF branch; ``sc_source_oracle.py --pc`` on a CASSCF golden calls
+    it itself, because the gradient driver's CASSCF branch refuses ``--pc``
+    (:func:`run`) and :func:`build_state` keeps that refusal."""
+    gaps: list = []
+    st.e_corr_pc = Functional(st, pc=True).pc_energy(
+        st.mo_coeff, st.ci, np.diag(st.f).copy(), gaps=gaps)
+    gg._check_pc_conditioning(gaps)
+    st.pc_gap = min(g[2] for g in gaps)
+    # What every displaced point's rank is held against (_pc_guard).
+    PC_GUARD.reference_kept = {key: kept for key, _d, _gap, _dropped, kept in gaps}
 
 
 # --------------------------------------------------------------------------

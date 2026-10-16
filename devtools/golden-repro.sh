@@ -13,7 +13,7 @@
 # place that re-runs the promise, and the one place a byte comparison is right:
 # everywhere else compares against a tolerance.
 #
-# What it regenerates (fourteen files, twelve generator runs):
+# What it regenerates (eighteen files, sixteen generator runs):
 #   generate_golden.py     n2_ccpvdz_cas44 / cas88 .nevpt2gold + .gradgold,
 #                          their _df twins, the two .mogold sidecars (a fresh
 #                          --casscf each) and the two *_casscf[_df] goldens
@@ -24,7 +24,10 @@
 #                          and their directional twins (#105) *_dir.srcgold /
 #                          *_pc_dir.srcgold (all four read
 #                          golden/n2_ccpvdz_cas44.nevpt2gold, the committed
-#                          one, as their input)
+#                          one, as their input), and the same four on CASSCF
+#                          orbitals (#117), n2_ccpvdz_cas44_casscf[_pc][_dir]
+#                          .srcgold (--mo-from the COMMITTED sidecar, against
+#                          the committed n2_ccpvdz_cas44_casscf.nevpt2gold)
 #
 # What it deliberately does NOT regenerate: golden/n2_ccpvdz_cas44_casscf.gradgold,
 # the CASSCF-reference gradient sidecar (#120). An orbital optimiser sits
@@ -135,6 +138,14 @@ add_run cas44_src_dir "n2_ccpvdz_cas44_dir.srcgold" \
   "python $src --case n2_ccpvdz_cas44 --directional --out $S/n2_ccpvdz_cas44_dir.srcgold"
 add_run cas44_src_pc_dir "n2_ccpvdz_cas44_pc_dir.srcgold" \
   "python $src --case n2_ccpvdz_cas44 --directional --pc --out $S/n2_ccpvdz_cas44_pc_dir.srcgold"
+add_run cas44_casscf_src "n2_ccpvdz_cas44_casscf.srcgold" \
+  "python $src --case n2_ccpvdz_cas44_casscf --mo-from $G/n2_ccpvdz_cas44_casscf.mogold --out $S/n2_ccpvdz_cas44_casscf.srcgold"
+add_run cas44_casscf_src_pc "n2_ccpvdz_cas44_casscf_pc.srcgold" \
+  "python $src --case n2_ccpvdz_cas44_casscf --mo-from $G/n2_ccpvdz_cas44_casscf.mogold --pc --out $S/n2_ccpvdz_cas44_casscf_pc.srcgold"
+add_run cas44_casscf_src_dir "n2_ccpvdz_cas44_casscf_dir.srcgold" \
+  "python $src --case n2_ccpvdz_cas44_casscf --mo-from $G/n2_ccpvdz_cas44_casscf.mogold --directional --out $S/n2_ccpvdz_cas44_casscf_dir.srcgold"
+add_run cas44_casscf_src_pc_dir "n2_ccpvdz_cas44_casscf_pc_dir.srcgold" \
+  "python $src --case n2_ccpvdz_cas44_casscf --mo-from $G/n2_ccpvdz_cas44_casscf.mogold --directional --pc --out $S/n2_ccpvdz_cas44_casscf_pc_dir.srcgold"
 
 # --only: keep a run when any of its files matches.
 declare -a sel=()
