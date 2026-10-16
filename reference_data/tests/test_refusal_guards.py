@@ -1,8 +1,9 @@
 """Hand cases for the guards that keep a noise-dependent state out of
 ``golden/``: ``_check_degeneracy``, ``_check_pc_conditioning`` (with the
-``_pc_cut_gap`` it reads) and ``_check_gradient_invariants``. Each accepts a
-clean case and refuses one just across each threshold, on synthetic inputs --
-no SCF, no CASCI, no block2.
+``_pc_cut_gap`` it reads) and ``_check_gradient_invariants`` (both reference
+kinds), plus the ``--gradgold`` flag combinations ``_parse_args`` refuses. Each
+accepts a clean case and refuses one just across each threshold, on synthetic
+inputs -- no SCF, no CASCI, no block2.
 
 The thresholds are written out here as numbers, NOT read from the module's
 constants: a test that compared against ``DEGENERACY_TOL`` would move with it,
@@ -307,3 +308,70 @@ def test_gradient_o3(act_eigs, refused):
             _check(pt, grad)
     else:
         assert _check(pt, grad)["act_occ"] == 1
+
+
+# --- _check_gradient_invariants on a CASSCF-reference sidecar (#120) ---------
+#
+# --mo-from --gradgold: (O2) is still asserted, (O1) and (O3) are not -- they
+# say the spaces are spanned by RHF canonical orbitals, which converged CASSCF
+# orbitals are not. (O1) is still measured and returned.
+
+
+def _check_casscf(pt, grad):
+    return gg._check_gradient_invariants(pt, grad, NELEC_RHF, MO_ENERGY_RHF,
+                                         reference_kind="casscf")
+
+
+def test_gradient_casscf_skips_o1_and_o3():
+    """An RHF Fock far off block-diagonal (an act-virt element of 0.28, the
+    committed CAS(4,4) CASSCF sidecar's own size) and an active block with an
+    eigenvalue squarely in the RHF gap: refused as casci, accepted as casscf,
+    with (O1) reported."""
+    pt, grad = _grad_case((-0.5, 0.0, 0.6))
+    grad["fock_rhf"][3, 4] = grad["fock_rhf"][4, 3] = 0.28
+    with pytest.raises(SystemExit, match=r"\(O1\) violated"):
+        _check(pt, grad)
+    res = _check_casscf(pt, grad)
+    assert res["o1_each"]["act-virt"] == pytest.approx(0.28)
+    assert res["act_occ"] is None
+
+
+@pytest.mark.parametrize("size, refused", [(0.9 * O2_FOCK_TOL, False),
+                                           (1.1 * O2_FOCK_TOL, True)])
+def test_gradient_casscf_still_asserts_o2(size, refused):
+    pt, grad = _grad_case()
+    grad["f"][4, 5] += size
+    if refused:
+        with pytest.raises(SystemExit, match=r"\(O2\) violated"):
+            _check_casscf(pt, grad)
+    else:
+        _check_casscf(pt, grad)
+
+
+def test_gradient_unknown_reference_kind_refused():
+    with pytest.raises(SystemExit, match=r"unknown reference_kind"):
+        gg._check_gradient_invariants(*_grad_case(), NELEC_RHF, MO_ENERGY_RHF,
+                                      reference_kind="rhf")
+
+
+# --- the --gradgold flag combinations (#120) ---------------------------------
+#
+# Parsed only: _parse_args applies every refusal and solves nothing.
+
+
+def test_gradgold_with_mo_from_permitted():
+    args = gg._parse_args(["--ncas", "4", "--nelecas", "4", "--mo-from", "x.mogold",
+                           "--gradgold"])
+    assert args.gradgold and args.mo_from == "x.mogold"
+
+
+@pytest.mark.parametrize("argv", [
+    ["--casscf", "--mo-out", "x.mogold", "--gradgold"],  # writes no golden to sit beside
+    ["--df", "--gradgold"],                              # conventional integrals only
+    ["--df", "--mo-from", "x.mogold", "--gradgold"],
+])
+def test_gradgold_refused_combinations(argv, capsys):
+    with pytest.raises(SystemExit) as e:
+        gg._parse_args(argv)
+    assert e.value.code == 2
+    assert "--gradgold" in capsys.readouterr().err

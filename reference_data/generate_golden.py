@@ -132,8 +132,28 @@ sidecar. The second step is bit-reproducible like every other golden, and
 :func:`_check_casscf_stationary` refuses orbitals that are not a converged
 stationary point of that state (RHF orbitals handed in as a sidecar, a loosely
 converged optimisation) just as :func:`_check_degeneracy` refuses a state whose
-answer would depend on noise. ``--gradgold`` is refused with either flag: the
-gradient derivation is written for the CASCI-on-RHF Lagrangian.
+answer would depend on noise.
+
+``--gradgold`` is permitted with ``--mo-from`` (and refused with ``--casscf``,
+which writes no golden to sit beside): it writes the same 24 arrays -- the
+one-general-index integrals, ``h``, ``heff``, ``f``, ``f_h``, ``fock_rhf`` and
+``mo_coeff`` -- evaluated on the committed CASSCF orbitals, with no optimiser
+in this step, so a second run reproduces it byte for byte::
+
+    uv run python reference_data/generate_golden.py --ncas 4 --nelecas 4 \\
+        --name n2_ccpvdz_cas44_casscf \\
+        --mo-from golden/n2_ccpvdz_cas44_casscf.mogold --gradgold
+
+Its provenance contract is weaker than a CASCI sidecar's: an orbital optimiser
+sits upstream of it in the regeneration chain (the ``.mogold``), so it is
+reproducible from scratch only to a tolerance, not byte for byte, and
+``devtools/golden-repro.sh`` makes no claim over it (docs/reference-data.md,
+"The CASSCF-reference gradient sidecar"). Of the three invariants
+:func:`_check_gradient_invariants` asserts, only (O2) is asserted on it; (O1)
+and (O3) state that the active space is a set of RHF canonical orbitals, which
+CASSCF orbitals are not. Permitting the integral arrays is not permission to
+difference committed orbitals at a displaced geometry: ``nevpt2_numgrad.py``
+still refuses a ``casscf`` golden.
 """
 
 from __future__ import annotations
@@ -1516,14 +1536,29 @@ def _gradient_arrays(mc, pt, eris, dm1: np.ndarray) -> dict:
     )
 
 
-def _check_gradient_invariants(pt, grad: dict, nelec_rhf: int, mo_energy_rhf) -> dict:
+def _check_gradient_invariants(
+    pt, grad: dict, nelec_rhf: int, mo_energy_rhf, reference_kind: str = "casci"
+) -> dict:
     """The three invariants of docs/gradient-theory.md, §3.6, asserted before
     a sidecar is written. They are exact by construction, so a violation means
     the state is not the one the derivation describes and every multiplier
     downstream would be meaningless -- the same stance
     :func:`_check_degeneracy` takes on a noise-dependent SC energy.
 
+    With ``reference_kind="casscf"`` (a ``--mo-from`` golden) only (O2) is
+    asserted. (O1) and (O3) are the statement that core, active and virtual
+    are each spanned by RHF canonical orbitals (§1.2), and converged CASSCF
+    orbitals are by construction not that: the optimiser rotated them between
+    the spaces. Their stationarity is the ``--mo-from`` gate's job
+    (:func:`_check_casscf_stationary`), which has already run on this state.
+    (O1)'s residual is still measured and returned, so the printout shows how
+    far from RHF-canonical the orbitals are; (O3) is skipped (``act_occ`` is
+    ``None``).
+
     Returns the measured residuals, for the generator's printout."""
+    if reference_kind not in REFERENCE_KIND_CODES:
+        raise SystemExit(f"unknown reference_kind {reference_kind!r}")
+    rhf_canonical = reference_kind == "casci"
     ncore, nact = pt.ncore, pt.ncas
     nocc = ncore + nact
     c, a, v = slice(0, ncore), slice(ncore, nocc), slice(nocc, None)
@@ -1535,7 +1570,7 @@ def _check_gradient_invariants(pt, grad: dict, nelec_rhf: int, mo_energy_rhf) ->
               "act-virt": fock_rhf[a, v]}
     o1_each = {k: (float(np.max(np.abs(b))) if b.size else 0.0) for k, b in blocks.items()}
     o1 = max(o1_each.values())
-    if o1 > O1_FOCK_TOL:
+    if rhf_canonical and o1 > O1_FOCK_TOL:
         raise SystemExit(
             f"(O1) violated: the RHF Fock's core/active/virtual off-blocks reach "
             f"{o1:.1e} (> {O1_FOCK_TOL:g}). The active space is not a set of RHF "
@@ -1562,9 +1597,12 @@ def _check_gradient_invariants(pt, grad: dict, nelec_rhf: int, mo_energy_rhf) ->
     # (O3) Diagonalising F's active block splits the active space into exactly
     # nelec_rhf/2 - ncore eigenvalues below the RHF gap and the rest above it,
     # with none inside: the recovery of act_O / act_V (§2.6) working.
-    w = np.linalg.eigvalsh(fock_rhf[a, a])
     nocc_rhf = nelec_rhf // 2
     homo, lumo = mo_energy_rhf[nocc_rhf - 1], mo_energy_rhf[nocc_rhf]
+    if not rhf_canonical:
+        return {"o1": o1, "o1_each": o1_each, "o2": o2, "act_occ": None,
+                "homo": homo, "lumo": lumo}
+    w = np.linalg.eigvalsh(fock_rhf[a, a])
     n_below = int(np.count_nonzero(w <= homo + O1_FOCK_TOL))
     inside = w[(w > homo + O1_FOCK_TOL) & (w < lumo - O1_FOCK_TOL)]
     if n_below != nocc_rhf - ncore or inside.size:
@@ -1660,7 +1698,8 @@ def generate(
         nmo = pt.mo_coeff.shape[1]
         grad_arrays = _gradient_arrays(mc, pt, eris, dm1)
         res = _check_gradient_invariants(
-            pt, grad_arrays, mc.mol.nelectron, mc._scf.mo_energy
+            pt, grad_arrays, mc.mol.nelectron, mc._scf.mo_energy,
+            reference_kind=meta["reference_kind"],
         )
         grad = (
             dict(
@@ -1673,14 +1712,19 @@ def generate(
             ),
             grad_arrays,
         )
+        asserted = res["act_occ"] is not None
+        o3 = (
+            f"(O3) {res['act_occ']} of {ncas} active orbitals below the RHF HOMO "
+            f"({res['homo']:.6f}; LUMO {res['lumo']:.6f})"
+            if asserted
+            else "(O3) not asserted on casscf orbitals"
+        )
         print(
             f"[{name}] gradient sidecar: {len(grad_arrays)} arrays, "
             f"{sum(a.size for a in grad_arrays.values()) * 8 / 1e6:.2f} MB; "
-            "(O1) "
+            + ("(O1) " if asserted else "(O1, measured, not asserted) ")
             + " ".join(f"{k} {x:.2e}" for k, x in res["o1_each"].items())
-            + f" (O2) {res['o2']:.2e} "
-            f"(O3) {res['act_occ']} of {ncas} active orbitals below the RHF HOMO "
-            f"({res['homo']:.6f}; LUMO {res['lumo']:.6f})"
+            + f" (O2) {res['o2']:.2e} {o3}"
         )
     return meta, arrays, grad
 
@@ -1694,7 +1738,10 @@ def _irrep_counts(text: str) -> dict[str, int]:
     return counts
 
 
-def main() -> None:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """The command line, with every flag-combination refusal applied (each an
+    ``ap.error``, so ``SystemExit(2)``). Split from :func:`main` so the
+    refusals are testable without a solve (``reference_data/tests/``)."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--atom", default="N 0 0 0; N 0 0 1.1")
     ap.add_argument("--basis", default="cc-pvdz")
@@ -1774,7 +1821,7 @@ def main() -> None:
         "MO sidecar's committed CASSCF orbitals instead of on RHF's; the "
         "golden's reference_kind is then casscf",
     )
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     if args.auxbasis is not None and not args.df:
         ap.error("--auxbasis needs --df")
     if args.core_irreps is not None and args.cas_irreps is None:
@@ -1785,20 +1832,28 @@ def main() -> None:
         ap.error("--casscf needs --mo-out FILE (it writes no golden)")
     if args.mo_out is not None and not args.casscf:
         ap.error("--mo-out needs --casscf")
-    # The gradient derivation is written for a CASCI on converged RHF
-    # orbitals: its Lagrangian has no orbital-rotation multipliers, because
-    # the RHF orbitals are stationary for RHF and not for the CAS energy
-    # (docs/gradient-theory.md, sections 1.1 and 1.2). A sidecar for a
-    # CASSCF-orbital state would be a sidecar for a different derivation --
-    # which is also why loadGradGold's consumers refuse a casscf-kind golden.
-    if args.gradgold and (args.casscf or args.mo_from):
-        ap.error("--gradgold is CASCI-on-RHF-orbitals only, not --casscf/--mo-from")
+    # --gradgold beside a --mo-from golden is permitted: the sidecar's arrays
+    # are integrals on the committed CASSCF orbitals, built with no optimiser
+    # in this step. What it costs is the provenance contract -- the .mogold
+    # upstream came out of one, so the sidecar reproduces from scratch only to
+    # a tolerance (docs/reference-data.md, "The CASSCF-reference gradient
+    # sidecar"). --casscf writes no golden, so there is nothing to sit beside.
+    # A numerical gradient over committed orbitals stays refused, by
+    # nevpt2_numgrad.py's reference_kind check.
+    if args.gradgold and args.casscf:
+        ap.error("--gradgold writes beside a golden and --casscf writes none: "
+                 "pass --gradgold to the --mo-from step instead")
     # The gradient derivation (docs/gradient-theory.md) is written for
     # conventional four-index integrals: a DF sidecar would carry fitted
     # blocks whose (O1)/(O2) invariants hold against the DF Fock, not the one
     # the derivation names. Refused rather than quietly written.
     if args.gradgold and args.df:
         ap.error("--gradgold is conventional-integral only, not --df")
+    return args
+
+
+def main() -> None:
+    args = _parse_args()
     auxbasis = (args.auxbasis or f"{args.basis}-jkfit") if args.df else None
     if args.name is None:
         args.name = "n2_ccpvdz_cas1010" + ("_df" if args.df else "")
