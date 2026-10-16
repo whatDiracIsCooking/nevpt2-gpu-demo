@@ -1028,7 +1028,8 @@ electron count are carried so the layout is exactly the CASCI sidecars'; the
 CASSCF branch reads neither ([`gradient-theory.md`](gradient-theory.md),
 §3.5). Without it the GPU source-term
 path on a CASSCF golden has to hold the orbital energies fixed; with it, the
-complete functional is in reach (the measurement is #121's, not this file's).
+complete functional is in reach. The measurement is #121's, not this file's:
+[`testing.md`](testing.md), "The source terms on CASSCF orbitals, measured".
 It is written by the `--mo-from` step with `--gradgold` added:
 
 ```bash
@@ -1933,8 +1934,9 @@ golden/n2_ccpvdz_cas44_casscf.nevpt2gold --tiles 3 [--pc] --source-oracle`
 had held the GPU's terms to every block of each of them at the existing
 tolerances, on the first run. The comparator's host suites
 (`test/source_compare/`) expect act_V's three rows empty on these oracles
-and on no other. No ctest entry runs the GPU comparison yet: #121 registers
-those entries and records the measurement in [`testing.md`](testing.md).
+and on no other. Since #121 four `gpu` ctest entries run the GPU comparison
+against them. The measurement is in [`testing.md`](testing.md), "The source
+terms on CASSCF orbitals, measured".
 
 ```bash
 uv run python reference_data/sc_source_oracle.py --case n2_ccpvdz_cas44_casscf \
@@ -2417,7 +2419,7 @@ not used.
 | `golden/n2_ccpvdz_cas44.srcgold`, `golden/lif_def2svp_cas46.srcgold` | the **SC source-term oracles** (7.4 / 10.1 KB): PySCF's exact `A` and `P y` for those two states (see "The SC source-term oracle" above). Read by `loadSrcGold` and nothing else at run time; `test/golden`'s `GoldenLayoutContractTests` and `SrcGoldLoadErrorTests` hold the reader to them |
 | `golden/*_dir.srcgold` (five on RHF orbitals; the CASSCF-orbital four are the `n2_ccpvdz_cas44_casscf*` and `acrolein_def2svp_cas65_casscf*` rows below) | the **directional source-term oracles** (#105; `NEVPT2SD` / `NEVPT2PD`): seeded directions per block and the oracle's converged derivative along each, for acrolein CAS(6,5) SC and PC, N2 CAS(4,4) SC and PC and LiF SC ("The directional flavour" above has their sizes). `nevpt2_sc_pseudodensity_oracle_dir_*` hold the GPU's terms to them; `test/source_compare/` and `test/golden` hold the comparator and the reader |
 | `golden/n2_ccpvdz_cas44_pc.srcgold` | the **PC source-term oracle** (7.4 KB, `NEVPT2P1`): block2's `A` and `P y` for N2 CAS(4,4)'s PC energy ("The PC flavour" above). `nevpt2_sc_pseudodensity_oracle_pc_n2_ccpvdz_cas44` holds the GPU's PC source terms to it (#74); `test/source_compare/` holds the comparator to it, and `test/golden` the reader |
-| `golden/n2_ccpvdz_cas44_casscf.srcgold`, `_pc.srcgold`, `_dir.srcgold`, `_pc_dir.srcgold` | the **source-term oracles on CASSCF orbitals** (#117): all four kinds (SC/PC, full/directional; 7.4 KB each full, 65 KB each directional) for `n2_ccpvdz_cas44_casscf.nevpt2gold`'s state, built with `sc_source_oracle.py --mo-from` the committed `.mogold` ("On CASSCF orbitals" above). `devtools/golden-repro.sh` regenerates them byte for byte. `test/source_compare/` and `test/golden` hold the comparator and the reader to them; no `gpu` ctest entry compares the device's terms with them yet (#121) |
+| `golden/n2_ccpvdz_cas44_casscf.srcgold`, `_pc.srcgold`, `_dir.srcgold`, `_pc_dir.srcgold` | the **source-term oracles on CASSCF orbitals** (#117): all four kinds (SC/PC, full/directional; 7.4 KB each full, 65 KB each directional) for `n2_ccpvdz_cas44_casscf.nevpt2gold`'s state, built with `sc_source_oracle.py --mo-from` the committed `.mogold` ("On CASSCF orbitals" above). `devtools/golden-repro.sh` regenerates them byte for byte. `test/source_compare/` and `test/golden` hold the comparator and the reader to them, and four `gpu` ctest entries hold the device's terms to them (#121; [`testing.md`](testing.md), "The source terms on CASSCF orbitals, measured") |
 | `golden/acrolein_def2svp_cas65_casscf_dir.srcgold`, `_pc_dir.srcgold` | acrolein CAS(6,5)'s **directional source-term oracles on CASSCF orbitals** (#135; 466 KB each) for `acrolein_def2svp_cas65_casscf.nevpt2gold`'s state, built with `sc_source_oracle.py --mo-from` the committed `.mogold` ("On CASSCF orbitals" above). `nevpt2_sc_pseudodensity_oracle_dir[_pc]_acrolein_def2svp_cas65_casscf` hold the GPU's terms to them where the gitignored sidecar has been regenerated; `test/source_compare/` and `test/golden` hold the comparator and the reader |
 | `reference_data/geometries/n2.xyz` | the N2 geometry as an `.xyz`, byte-for-byte `generate_golden.py`'s own default `--atom "N 0 0 0; N 0 0 1.1"` — so the two gradient scripts, which take a geometry file, can be pointed at the committed `n2_ccpvdz_cas44` state. That it *is* the same state is checked, not assumed: both scripts refuse unless the rebuilt `E_CASCI`, `E_corr` and `e_pc_total` match the golden's (measured 0.0, bit-identical). N2 is the **deliberately symmetric** case of the gradient comparison (see [`testing.md`](testing.md), "The analytic gradient against the numerical one") |
 | `reference_data/geometries/salicylaldimine.xyz`, `reference_data/basis/6-31gss-rifit.nw`, `golden/salicylaldimine_631gss_cas88[_df].nevpt2gold` | the non-N2 case (see "Salicylaldimine CAS(8,8)" above). The two goldens are **gitignored** and regenerate byte-identically in ~2.5 min each; their four ctest entries register only once they exist |

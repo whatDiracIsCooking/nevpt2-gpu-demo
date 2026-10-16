@@ -338,14 +338,16 @@ so the duality still bites.
 
 **Why `--kappa-act` and not `--kappa-full`.** Issue #118 named
 `--kappa-full`. That check reads the `<case>.gradgold` sidecar beside the
-golden. No CASSCF golden has a sidecar yet, so on
-`n2_ccpvdz_cas44_casscf` it stops with an IO error (`could not open gradient
+golden. When #118 landed no CASSCF golden had a sidecar, so on
+`n2_ccpvdz_cas44_casscf` it stopped with an IO error (`could not open gradient
 sidecar`) before computing anything. The issue's description of the check —
 no sidecar, the orbital energies held fixed, the `<kappa, Y>` pairing against
 the forward `Edot(kappa)` — is `--kappa-act`, which is registered instead.
 `--kappa-full` on CASSCF orbitals, and with it the recorded self-variation
-envelope ("The kernels' same-run self-variation"), waits for the CASSCF
-sidecar in #120.
+envelope ("The kernels' same-run self-variation"), waited for the CASSCF
+sidecar in #120. That sidecar is committed now, and since #121
+`nevpt2_sc_pseudodensity_kappa_full_n2_ccpvdz_cas44_casscf` runs it beside
+the CASCI twin ("The source terms on CASSCF orbitals, measured", below).
 
 Measured on an RTX 3080 (CUDA, Release, `--tiles 3`), one run each, both PASS:
 
@@ -376,6 +378,92 @@ carries the canary's weight.
 Nothing in `src/` branches on the reference kind anywhere else: the RDM build,
 the digests, the energy stage and the PC solve see a CI vector and integrals,
 which is exactly the claim these entries make.
+
+### The source terms on CASSCF orbitals, measured
+
+#121 runs every source-term path on `n2_ccpvdz_cas44_casscf`, with its
+`.gradgold` sidecar (#120), so the orbital energies move with the active
+density as on the CASCI twin. The independent check is #117's four
+`.srcgold` oracles, compared block by block. Nine entries are registered,
+each in its CASCI twin's loop and with that twin's labels, PASS line and
+tolerance. Nothing about them is CASSCF-specific:
+
+| entry | binary, flags | labels |
+|---|---|---|
+| `nevpt2_gradient_source_cas44_casscf` | `nevpt2_demo --tiles 3 --gradient-source --gradgold …` | `gpu;small` |
+| `nevpt2_gradient_source_pc_cas44_casscf` | `nevpt2_demo --tiles 3 --pc --gradient-source --gradgold …` | `gpu;small` |
+| `nevpt2_sc_pseudodensity_kappa_full_n2_ccpvdz_cas44_casscf` | `nevpt2_sc_pseudodensity --tiles 3 --kappa-full` | `gpu` |
+| `nevpt2_sc_pseudodensity_dump_n2_ccpvdz_cas44_casscf` | `… --tiles 3 --dump-source-terms build/gradsrc/….gradsrc` | `gpu` |
+| `nevpt2_sc_pseudodensity_dump_pc_n2_ccpvdz_cas44_casscf` | `… --tiles 3 --pc --dump-source-terms …` | `gpu` |
+| `nevpt2_sc_pseudodensity_oracle_n2_ccpvdz_cas44_casscf` | `… --tiles 3 --source-oracle golden/n2_ccpvdz_cas44_casscf.srcgold` | `gpu` |
+| `nevpt2_sc_pseudodensity_oracle_pc_n2_ccpvdz_cas44_casscf` | `… --tiles 3 --pc --source-oracle …_casscf_pc.srcgold` | `gpu` |
+| `nevpt2_sc_pseudodensity_oracle_dir_n2_ccpvdz_cas44_casscf` | `… --tiles 3 --source-oracle …_casscf_dir.srcgold` | `gpu` |
+| `nevpt2_sc_pseudodensity_oracle_dir_pc_n2_ccpvdz_cas44_casscf` | `… --tiles 3 --pc --source-oracle …_casscf_pc_dir.srcgold` | `gpu` |
+
+`--sc-tangent` on this golden is #118's `nevpt2_cas44_casscf_sc_tangent`
+(above). It was re-run in the same pass and still passes. Acrolein's CASSCF
+directional pair (#135) has its own table: "On CASSCF orbitals: acrolein",
+under "The directional source-term oracle".
+
+Measured on an RTX 3080 (CUDA, preset `default`, Release, `--tiles 3`, the
+default digest), one run each. **All nine pass, and no block disagrees.**
+Against the oracles, max \|GPU − oracle\| per block:
+
+| block | SC full (tol 1e-6) | PC full (tol 1e-7) | SC directional (tol 1e-8) | PC directional (tol 2e-8) |
+|---|---:|---:|---:|---:|
+| core–core | 7.6e-11 | 8.7e-11 | 1.0e-11 | 1.0e-11 |
+| core–act_O | 0 | 0 | 0 | 0 |
+| core–virt | 2.0e-10 | 1.9e-10 | 6.4e-11 | 1.3e-11 |
+| act_O–virt | 3.3e-10 | 2.8e-11 | 2.1e-11 | 1.3e-12 |
+| virt–virt | 2.2e-11 | 2.7e-11 | 2.5e-11 | 1.1e-12 |
+| `P y` | 6.0e-10 (12 det.) | 2.5e-10 (12 det.) | 3.3e-11 | 4.5e-13 |
+
+Every block also sits under 1e-7, including on the SC full oracle, whose gate
+is 1e-6 because of PySCF's central difference ("The SC source terms against
+PySCF's, on a card"). The worst is SC `P y` at 6.0e-10. The CASCI twin's
+worst SC block, core–virt at 2.0e-7, is PySCF's truncation on that one pair,
+and it does not appear here.
+
+**Three blocks are empty, and one is zero on both sides.** The four CASSCF
+active orbitals are all act_O in the oracle's partition, so core–act_V,
+act_O–act_V and act_V–virt have no pairs. The comparator requires them to be
+empty on a CASSCF oracle (`test/source_compare/`; see "The PC source terms'
+oracle"). core–act_O is exactly 0.0 on both sides of all four files. On N2
+that block vanishes by symmetry, as on the CASCI twin, so it **checks nothing
+here**. That leaves five blocks with content: core–core, core–virt,
+act_O–virt, virt–virt and `P y`.
+
+The device's own checks, on the same runs:
+
+| entry | check | value |
+|---|---|---|
+| `…gradient_source_cas44_casscf` | worst \|<u, y> − Edot(u)\|: 4 seeded directions, the state, and the full 36-column Jacobian | 1.3e-13 |
+| `…gradient_source_pc_cas44_casscf` | the same for PC | 1.5e-15 |
+| both | `e_core` / `e_virt` rebuilt from the sidecar against the golden's (relative) | 1.6e-14 |
+| `…kappa_full_…_casscf` | integral-half duality, worst of 4 full directions | 3.6e-17 |
+| | full duality with the digests' transpose, worst of 4 | 6.9e-16 |
+| | the sidecar's promotion table (relative) | 4.6e-14 |
+| | same-run self-variation, against the 5.0e-13 envelope | 2.0e-28 |
+| | core-internal / virtual-internal finite difference: halvings, plateau \|err\| | 8, 7.5e-13 / 6, 3.3e-12 |
+| | Park Eqs. 56–57 multipliers: divided / degenerate, left zero | 175 / 6 |
+| `…dump_…_casscf` | the 6 written directions' exact Edot against Σ κ·Y off the matrix | 4.4e-15 |
+| | `.gradsrc` read back | bit for bit |
+| `…dump_pc_…_casscf` | the same 6 directions, PC | 7.0e-17 |
+| | the PC integral halves' duality, 6 directions | within 1e-7, all ≤ 1.2e-17 |
+| | `.gradsrc` read back | bit for bit |
+
+Each wall time is within 0.03 s of its CASCI twin's in the same run, 0.46 s
+to 1.56 s. So the CASSCF orbitals cost nothing extra.
+
+The two `small` entries are the `--gradient-source` pair. They run in the
+sanitizer tier like their twins, but they have **not** been measured under
+any sanitizer preset ("Wall times" below has no row for them).
+
+**The `_df` pair is not included,** because no density-fitted source-term
+path exists: `nevpt2_df_demo` takes none of `--gradient-source`,
+`--sc-tangent`, `--dump-source-terms` or `--source-oracle` (the
+`nevpt2.cli:binary_flags` table refuses them). No `_df` `.gradgold` or
+`.srcgold` exists for either reference kind either.
 
 ## The SC pseudodensity identities
 
@@ -2187,13 +2275,14 @@ empty for every directional file), with two more refusals: a direction with supp
 outside the block it is labelled with is an IO error
 (`checkDirectionBlocks`), and a block that has pairs but fewer than
 `kMinBlockDirections` = 2 directions **fails**, so an oracle cannot skip a
-block silently. Seven entries:
-`nevpt2_sc_pseudodensity_oracle_dir_{n2_ccpvdz_cas44,lif_def2svp_cas46,acrolein_def2svp_cas65,acrolein_def2svp_cas65_casscf}`
-and `…_oracle_dir_pc_{n2_ccpvdz_cas44,acrolein_def2svp_cas65,acrolein_def2svp_cas65_casscf}`.
+block silently. Nine entries:
+`nevpt2_sc_pseudodensity_oracle_dir_{n2_ccpvdz_cas44,n2_ccpvdz_cas44_casscf,lif_def2svp_cas46,acrolein_def2svp_cas65,acrolein_def2svp_cas65_casscf}`
+and `…_oracle_dir_pc_{n2_ccpvdz_cas44,n2_ccpvdz_cas44_casscf,acrolein_def2svp_cas65,acrolein_def2svp_cas65_casscf}`.
 The four acrolein entries are `gpu;slow`, and each is registered only where
 its gitignored gradient sidecar (CASCI or CASSCF) has been regenerated (a
-configure WARNING otherwise). The two `_casscf` ones are "On CASSCF
-orbitals: acrolein" below.
+configure WARNING otherwise). The acrolein `_casscf` pair is "On CASSCF
+orbitals: acrolein" below. The N2 `_casscf` pair is "The source terms on
+CASSCF orbitals, measured" (#121), the home of those two entries' numbers.
 
 ### The steps and the tolerance, measured from long ladders
 
@@ -3009,6 +3098,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_pc_tangent_cas44`, `nevpt2_pc_tangent_cas88` | the PC tangent: a second solve per class, the tangent slab einsums and the `(m, m)` blocks' GEMMs, plus ten RDM builds and PC stages per entry ("The PC tangent against a finite difference", above) |
 | `nevpt2_cas44_casscf`, `nevpt2_cas44_casscf_pc`, `nevpt2_df_cas44_casscf`, `nevpt2_df_cas44_casscf_pc` | the same four paths on **CASSCF orbitals** — a `NEVPT2G2` golden whose `reference_kind` is CASSCF ("The CASSCF-orbital entries", above). Same CAS(4,4) shape, so the same cost |
 | `nevpt2_cas44_casscf_sc_tangent`, `nevpt2_sc_pseudodensity_kappa_cas44_casscf` | the two source-term canaries on **CASSCF orbitals** (`--sc-tangent`, `--kappa-act`; "The source terms on CASSCF orbitals: the wave-0 canary", above). Their CASCI twins' cost |
+| `nevpt2_gradient_source_cas44_casscf`, `nevpt2_gradient_source_pc_cas44_casscf` | the SC and PC CI source terms' duality on **CASSCF orbitals**, with the CASSCF sidecar ("The source terms on CASSCF orbitals, measured", above). Their CASCI twins' cost |
 
 They are ordinary golden checks too, so `ctest --preset fast` and
 `ctest --preset hip` run them on every backend.

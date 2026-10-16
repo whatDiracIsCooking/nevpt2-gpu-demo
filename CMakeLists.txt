@@ -287,9 +287,12 @@ if(NEVPT2_BUILD_TESTING)
   # through, and the adjoint-vs-tangent duality must hold on it exactly as on
   # the CASCI twin -- with no sidecar, no oracle and no new reference data.
   # #118 named --kappa-full here; that check reads a `<case>.gradgold`
-  # sidecar no CASSCF golden has yet, so it waits for #120's, and this sidecar-
-  # free check is the canary instead (docs/testing.md, "The source terms on
-  # CASSCF orbitals: the wave-0 canary"). `small`, like the CASCI twin.
+  # sidecar, which no CASSCF golden had until #120, so this sidecar-free check
+  # was the canary instead (docs/testing.md, "The source terms on CASSCF
+  # orbitals: the wave-0 canary"). `small`, like the CASCI twin. Since #121
+  # --kappa-full runs on this golden too, in its loop below, and so do
+  # --gradient-source, --dump-source-terms and --source-oracle
+  # (docs/testing.md, "The source terms on CASSCF orbitals, measured").
   _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_kappa_cas44_casscf
                         "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_casscf.nevpt2gold"
                         --tiles 3 --kappa-act)
@@ -331,7 +334,7 @@ if(NEVPT2_BUILD_TESTING)
   # either. What checks the response itself -- which no duality can, since
   # both modes share it -- is docs/testing.md, "The GPU as the source-term
   # provider".
-  foreach(_case cas44 cas88 cas1010)
+  foreach(_case cas44 cas44_casscf cas88 cas1010)
     set(_ci_src_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.nevpt2gold")
     set(_ci_src_side "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.gradgold")
     if(_case STREQUAL "cas1010")
@@ -374,7 +377,7 @@ if(NEVPT2_BUILD_TESTING)
   # finite difference (below), as --sc-tangent's is SC's. Both `small`, so the
   # sanitizer tier runs the PC adjoint's device work. What the duality cannot
   # see -- a term both modes leave out -- is the oracle entry's job below.
-  foreach(_case cas44 cas88)
+  foreach(_case cas44 cas44_casscf cas88)
     set(_pc_src_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.nevpt2gold")
     set(_pc_src_side "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.gradgold")
     if(NOT EXISTS "${_pc_src_side}")
@@ -432,7 +435,8 @@ if(NEVPT2_BUILD_TESTING)
   # entry already covers this code's device work there.
   set(_nevpt2_kappa_full_pass
       "PASS: the full orbital source term's adjoint and tangent agree")
-  foreach(_case n2_ccpvdz_cas44 n2_ccpvdz_cas88 lif_def2svp_cas46)
+  foreach(_case n2_ccpvdz_cas44 n2_ccpvdz_cas44_casscf n2_ccpvdz_cas88
+                lif_def2svp_cas46)
     set(_kf_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.nevpt2gold")
     set(_kf_side "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.gradgold")
     # Both files are committed for these three cases; the sidecar is checked
@@ -486,7 +490,8 @@ if(NEVPT2_BUILD_TESTING)
   # because its sidecar is gitignored -- and the dump would cost minutes.
   set(_nevpt2_dump_dir "${CMAKE_CURRENT_BINARY_DIR}/gradsrc")
   file(MAKE_DIRECTORY "${_nevpt2_dump_dir}")
-  foreach(_case n2_ccpvdz_cas44 n2_ccpvdz_cas88 lif_def2svp_cas46)
+  foreach(_case n2_ccpvdz_cas44 n2_ccpvdz_cas44_casscf n2_ccpvdz_cas88
+                lif_def2svp_cas46)
     set(_dump_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.nevpt2gold")
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.gradgold")
       message(WARNING "nevpt2: gradient sidecar missing, test "
@@ -528,7 +533,7 @@ if(NEVPT2_BUILD_TESTING)
   #
   # Not `small`, for the dump's reason: Y is one basis direction per MO pair,
   # each a full slab walk.
-  foreach(_case n2_ccpvdz_cas44 lif_def2svp_cas46)
+  foreach(_case n2_ccpvdz_cas44 n2_ccpvdz_cas44_casscf lif_def2svp_cas46)
     set(_oracle_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.nevpt2gold")
     set(_oracle_file "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.srcgold")
     foreach(_need "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.gradgold" "${_oracle_file}")
@@ -566,7 +571,7 @@ if(NEVPT2_BUILD_TESTING)
   # both leave out, which no duality can.
   set(_nevpt2_pc_dump_dir "${CMAKE_CURRENT_BINARY_DIR}/gradsrc")
   file(MAKE_DIRECTORY "${_nevpt2_pc_dump_dir}")
-  foreach(_case n2_ccpvdz_cas44 n2_ccpvdz_cas88)
+  foreach(_case n2_ccpvdz_cas44 n2_ccpvdz_cas44_casscf n2_ccpvdz_cas88)
     set(_pc_dump_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.nevpt2gold")
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.gradgold")
       message(FATAL_ERROR "nevpt2: committed gradient sidecar missing for ${_case}")
@@ -589,21 +594,29 @@ if(NEVPT2_BUILD_TESTING)
     unset(_pc_dump_gold)
   endforeach()
   unset(_nevpt2_pc_dump_dir)
-  foreach(_need "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44.gradgold"
-                "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_pc.srcgold")
-    if(NOT EXISTS "${_need}")
-      message(FATAL_ERROR "nevpt2: committed source-oracle input missing: ${_need}")
+  #
+  # n2_ccpvdz_cas44_casscf (#121) is the same state's CASSCF-orbital twin
+  # (#117's oracle): the source terms are derivatives at fixed orbitals and CI
+  # vector, so nothing in them depends on how the orbitals were made, and the
+  # same tolerance holds (docs/testing.md, "The source terms on CASSCF
+  # orbitals, measured").
+  foreach(_case n2_ccpvdz_cas44 n2_ccpvdz_cas44_casscf)
+    foreach(_need "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.gradgold"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}_pc.srcgold")
+      if(NOT EXISTS "${_need}")
+        message(FATAL_ERROR "nevpt2: committed source-oracle input missing: ${_need}")
+      endif()
+    endforeach()
+    _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_oracle_pc_${_case}
+                          "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.nevpt2gold"
+                          --tiles 3 --pc --source-oracle
+                          "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}_pc.srcgold")
+    if(TEST nevpt2_sc_pseudodensity_oracle_pc_${_case})
+      set_tests_properties(nevpt2_sc_pseudodensity_oracle_pc_${_case} PROPERTIES
+        PASS_REGULAR_EXPRESSION
+          "PASS: the GPU's PC source terms against block2's committed ones, ${_case}_pc:")
     endif()
   endforeach()
-  _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_oracle_pc_n2_ccpvdz_cas44
-                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44.nevpt2gold"
-                        --tiles 3 --pc --source-oracle
-                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_pc.srcgold")
-  if(TEST nevpt2_sc_pseudodensity_oracle_pc_n2_ccpvdz_cas44)
-    set_tests_properties(nevpt2_sc_pseudodensity_oracle_pc_n2_ccpvdz_cas44 PROPERTIES
-      PASS_REGULAR_EXPRESSION
-        "PASS: the GPU's PC source terms against block2's committed ones, n2_ccpvdz_cas44_pc:")
-  endif()
 
   # --- the directional source-term oracles (#105) --------------------------------
   #
@@ -625,7 +638,8 @@ if(NEVPT2_BUILD_TESTING)
   # comparison assembles the whole Y, one basis direction per MO pair
   # (docs/testing.md, "The directional source-term oracle", has their wall
   # time).
-  foreach(_spec "n2_ccpvdz_cas44|sc" "n2_ccpvdz_cas44|pc" "lif_def2svp_cas46|sc"
+  foreach(_spec "n2_ccpvdz_cas44|sc" "n2_ccpvdz_cas44|pc"
+                "n2_ccpvdz_cas44_casscf|sc" "n2_ccpvdz_cas44_casscf|pc" "lif_def2svp_cas46|sc"
                 "acrolein_def2svp_cas65|sc" "acrolein_def2svp_cas65|pc"
                 "acrolein_def2svp_cas65_casscf|sc" "acrolein_def2svp_cas65_casscf|pc")
     string(REPLACE "|" ";" _spec "${_spec}")
