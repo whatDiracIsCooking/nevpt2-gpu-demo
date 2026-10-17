@@ -106,15 +106,45 @@ def test_dense_operator_is_symmetric_and_positive(grads):
 
 
 @pytest.mark.parametrize("extra", [
-    ["--source", "dump", "--source-path", "x.gradsrc"],
     ["--energy-ordered"],
     ["--pc", "--source", "dump", "--source-path", "x.gradsrc"],
+    ["--pc", "--source", "both", "--source-path", "x.gradsrc"],
 ])
 def test_casscf_refuses_what_it_is_not_validated_for(monkeypatch, extra):
     monkeypatch.setattr(sys, "argv", ["nevpt2_grad.py", "--case", "n2_ccpvdz_cas44",
                                       "--reference", "casscf", *extra])
     with pytest.raises(SystemExit, match="--reference casscf"):
         ng.main()
+
+
+def test_casscf_takes_an_sc_dump_in_its_own_basis(grads, tmp_path):
+    """#125: an SC ``.gradsrc`` on a CASSCF state is read as written. The dump
+    is in the golden's basis, and on this branch the state is held in that
+    basis too (``act_rot`` is the identity: no section-2.6 rotation), so
+    ``A = Y - Y^T`` and ``y`` come through bit for bit -- and the fingerprint
+    still refuses another state's CI vector."""
+    st = grads.st
+    assert np.array_equal(st.act_rot, np.eye(st.nact))
+    rng = np.random.default_rng(125)
+    y_mat = rng.standard_normal((st.nmo, st.nmo))
+    y_ci = rng.standard_normal(st.ci.shape)
+    # Through a file object: np.savez appends ".npz" to a bare path.
+    path = tmp_path / "sc.gradsrc"
+    with path.open("wb") as fh:
+        np.savez(fh, kappa_source=y_mat, ci_source=y_ci, ci=st.ci, e_corr=st.e_corr,
+                 ncore=st.ncore, nact=st.nact, nvirt=st.nvirt)
+    src = ng.load_source_terms(path, st)
+    assert src.from_dump
+    assert np.array_equal(src.kappa, y_mat - y_mat.T)
+    assert np.array_equal(src.ci, y_ci)
+    other = st.ci.ravel().copy()
+    other[int(np.argmax(np.abs(other)))] *= 0.5
+    other = (other / np.linalg.norm(other)).reshape(st.ci.shape)
+    bad = tmp_path / "other.gradsrc"
+    with bad.open("wb") as fh:
+        np.savez(fh, kappa_source=y_mat, ci_source=y_ci, ci=other, e_corr=st.e_corr)
+    with pytest.raises(SystemExit, match="different state"):
+        ng.load_source_terms(bad, st)
 
 
 def test_casscf_pc_state_is_the_goldens():

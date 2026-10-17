@@ -1742,7 +1742,8 @@ at a time, with the numbers, in [`testing.md`](testing.md),
 
 `--reference casscf --mo-from FILE` differentiates SC-NEVPT2 on a CASCI run
 on converged CASSCF orbitals ([`gradient-theory.md`](gradient-theory.md),
-§1.4 and §2.7), with PySCF's own source terms; `--mo-from` defaults to
+§1.4 and §2.7), with PySCF's own source terms or, with `--source dump` /
+`both` (#125, SC only), the GPU's dumped ones; `--mo-from` defaults to
 `golden/<case>_casscf.mogold` where one is committed. Of the four hooks,
 `get_Aop_Adiag` is the one that changes: the operator is
 `pyscf.mcscf.newton_casscf.gen_g_hop`'s orbital+CI Hessian `h_op`, restricted
@@ -1756,7 +1757,9 @@ gradient through the same operator instead (on N2 CAS(4,4) it converges to
 answer). The constraints in `Phi` are `gen_g_hop`'s `g_all` at each
 displaced geometry. Its numerical gradient is `nevpt2_numgrad.py
 --reference casscf --npz PATH`, read with `--grad-num PATH` ("The numerical
-gradient of a CASSCF reference" below; the SC verdict on it is #125's);
+gradient of a CASSCF reference" below; the SC verdict on it, LiF and N2,
+PySCF- and GPU-sourced, is [`testing.md`](testing.md), "SC on a CASSCF
+reference: LiF, and the N2 degeneracy probe");
 without one, the gate is the residual-independent checks, with two of the
 branch's own: **the Hessian-vector ladder** — `h_op`
 against central differences of `g_all` along three seeded random directions,
@@ -1825,7 +1828,9 @@ degenerate near-null pair (2.8e-6), all four pure orbital rotations along
 which the right-hand side vanishes to round-off (`|b·v|/|b|` ≤ 1.4e-15): the
 symmetry-adapted optimiser cannot leave the point group, and these are
 rotations it cannot take. They do not enter the multipliers, and every
-check holds; they are the kind of mode #125 is set up to probe. Acrolein's
+check holds; #125 probed them and they stay out of the solve on the
+committed orbitals too ([`testing.md`](testing.md), "SC on a CASSCF
+reference: LiF, and the N2 degeneracy probe"). Acrolein's
 and N2's spectra are positive, with the right-hand side on acrolein's
 nearest-singular modes at up to 2.5e-2 of `|b|`.
 
@@ -2473,8 +2478,12 @@ Measured on the RTX 3080 box's CPU (PySCF 2.14.0, NumPy 2.5.3, Python
 sidecars carry the provenance contract of "The CASSCF-reference gradient
 sidecar" above: byte-reproducible from the committed `.mogold`, and from
 scratch only to the `--mo-from` gate's tolerance, so `golden-repro.sh` makes
-no claim over them (it regenerates only N2). Neither golden has a ctest entry
-yet.
+no claim over them (it regenerates only N2). Since #125 LiF's golden has two
+ctest entries, `nevpt2_lif_cas46_casscf` (the energy) and
+`nevpt2_sc_pseudodensity_dump_lif_def2svp_cas46_casscf` (its GPU source
+terms, which the SC gradient verdict reads). Acrolein's has #135's two
+directional-oracle entries, registered only where its gitignored sidecar
+has been regenerated.
 
 ## CAS(14,14)
 

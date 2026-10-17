@@ -205,6 +205,11 @@ if(NEVPT2_BUILD_TESTING)
   set(_gold_lif46 "${CMAKE_CURRENT_SOURCE_DIR}/golden/lif_def2svp_cas46.nevpt2gold")
   set(_gold_acr65 "${CMAKE_CURRENT_SOURCE_DIR}/golden/acrolein_def2svp_cas65.nevpt2gold")
   add_golden_test(nevpt2_lif_cas46 "${_gold_lif46}" --tiles 3)
+  # Its CASSCF-orbital twin (#123's golden; #125, which builds LiF's CASSCF SC
+  # gradient from this state's GPU dump, registers it): SC only, like the twin.
+  add_golden_test(nevpt2_lif_cas46_casscf
+                  "${CMAKE_CURRENT_SOURCE_DIR}/golden/lif_def2svp_cas46_casscf.nevpt2gold"
+                  --tiles 3)
   add_golden_test(nevpt2_acrolein_cas65 "${_gold_acr65}" --tiles 3)
   add_pc_golden_test(nevpt2_acrolein_cas65_pc "${_gold_acr65}" --tiles 3)
 
@@ -488,10 +493,13 @@ if(NEVPT2_BUILD_TESTING)
   # out of the sanitizer tier; the writer's host code is the unit tier's
   # (test/gradsrc/), which every sanitizer preset runs. Acrolein is not here
   # because its sidecar is gitignored -- and the dump would cost minutes.
+  # lif_def2svp_cas46_casscf (#125) sits beside its CASCI twin: its dump is the
+  # GPU-sourced half of LiF's CASSCF SC gradient verdict (docs/testing.md, "SC
+  # on a CASSCF reference: LiF, and the N2 degeneracy probe").
   set(_nevpt2_dump_dir "${CMAKE_CURRENT_BINARY_DIR}/gradsrc")
   file(MAKE_DIRECTORY "${_nevpt2_dump_dir}")
   foreach(_case n2_ccpvdz_cas44 n2_ccpvdz_cas44_casscf n2_ccpvdz_cas88
-                lif_def2svp_cas46)
+                lif_def2svp_cas46 lif_def2svp_cas46_casscf)
     set(_dump_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.nevpt2gold")
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.gradgold")
       message(WARNING "nevpt2: gradient sidecar missing, test "
