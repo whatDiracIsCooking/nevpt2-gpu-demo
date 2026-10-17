@@ -259,6 +259,9 @@ SCREEN_SEED = 124
 SCREEN_WALL_BUDGET = 1800.0
 GATE_WALL_BUDGET = {
     "lif_def2svp_cas46": 600.0,
+    # #125's degeneracy probe, declared before it ran from LiF's measured
+    # wall (36 states, 20.4 s at --workers 12): the same 600 s.
+    "n2_ccpvdz_cas44": 600.0,
     "acrolein_def2svp_cas65": 3600.0,
 }
 

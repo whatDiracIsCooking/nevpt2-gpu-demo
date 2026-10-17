@@ -367,7 +367,10 @@ Its numerical gradient is ``nevpt2_numgrad.py --reference casscf --npz
 PATH`` (every displaced state re-optimised), read with ``--grad-num PATH``;
 without one, the gate is the residual-independent checks. The measured
 numbers and the wall-clock budget per case are in docs/reference-data.md,
-"The analytic gradient".
+"The analytic gradient". ``--source dump`` / ``both`` (#125, SC only) read the
+GPU's ``.gradsrc`` unrotated: the dump is in the golden's basis, and so is
+this branch's state. The SC verdict, both providers, is docs/testing.md, "SC
+on a CASSCF reference: LiF, and the N2 degeneracy probe".
 
 **``--pc`` on this branch** (#126) is the CASCI branch's ``--pc`` fed into the
 coupled solve, and nothing more: the source terms ``Y`` and ``y`` are
@@ -420,6 +423,10 @@ Usage::
         --reference casscf
     uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
         --reference casscf --mo-from /tmp/other_orbitals.mogold   # no golden: gate only
+    # SC on the CASSCF branch from the GPU's dump (#125), beside PySCF's:
+    uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46 \
+        --reference casscf --source both --source-path /tmp/lif_casscf.gradsrc \
+        --grad-num /tmp/lif_casscf.numgrad.npz
     # PC on the CASSCF branch (#126), against the GPU-differenced grad_num_pc:
     uv run python reference_data/nevpt2_grad.py --case acrolein_def2svp_cas65 \
         --reference casscf --pc --grad-num /tmp/acrolein_casscf_pc.numgrad.npz
@@ -3805,18 +3812,23 @@ def run(args) -> dict:
     casscf = args.reference == "casscf"
     if casscf:
         # What the CASSCF branch is validated for, and nothing else: SC-NEVPT2
-        # and its --casci-only smoke test (#122) and PC-NEVPT2 (#126), each with
-        # the offline source terms -- PySCF's SC ones, block2's PC ones.
+        # and its --casci-only smoke test (#122) and PC-NEVPT2 (#126) with the
+        # offline source terms -- PySCF's SC ones, block2's PC ones -- and
+        # SC-NEVPT2 with the GPU's dumped ones too (#125: --source dump/both;
+        # the dump is in the golden's basis, which on this branch is the
+        # state's own, act_rot = 1). A PC dump on CASSCF orbitals has not
+        # been through a gradient here, so it stays refused.
         refused = [flag for flag, on in (
-            ("--source dump/both", args.source != "pyscf"),
+            ("--source dump/both with --pc", args.source != "pyscf" and args.pc),
             ("--edot-check", args.edot_check),
             ("--energy-ordered", args.energy_ordered)) if on]
         if refused:
             raise SystemExit(
                 f"--reference casscf: {', '.join(refused)} refused. The CASSCF branch "
                 "differentiates SC- or PC-NEVPT2 (or, --casci-only, the CASSCF energy) "
-                "with the offline source terms (PySCF's SC, block2's PC); no GPU "
-                "source term is validated on it, and its active space is the sidecar's"
+                "with the offline source terms (PySCF's SC, block2's PC), and SC-NEVPT2 "
+                "with the GPU's dumped SC ones (#125); no GPU PC source term has been "
+                "through a gradient on it, and its active space is the sidecar's"
             )
         if args.mo_from is None:
             default = REPO / "golden" / f"{args.case}_casscf.mogold"
@@ -4099,15 +4111,27 @@ def run(args) -> dict:
         def solve_with(terms: SourceTerms) -> tuple[np.ndarray, dict]:
             # The run's own scheme: the skeleton derivative the AO contraction
             # takes is PC's for a PC run (#74), as the GPU-sourced solve's is.
-            gx = Gradients(st, terms, with_corr=True, step=args.step,
-                           richardson=args.richardson, pc=args.pc, kappa_step=args.kappa_step)
+            # On the CASSCF branch the same coupled solve, dense or CG (#125).
+            if casscf:
+                gx = CasscfGradients(st, terms, with_corr=True, step=args.step,
+                                     richardson=args.richardson, kappa_step=args.kappa_step,
+                                     cp_solve=args.cp_solve, pc=args.pc)
+            else:
+                gx = Gradients(st, terms, with_corr=True, step=args.step,
+                               richardson=args.richardson, pc=args.pc,
+                               kappa_step=args.kappa_step)
             gx.prepare(log=lambda *a: None, sweep=g.sweep)
             gx.solve_multipliers(log=lambda *a: None)
             return gx.kernel(), dict(gx.residuals)
 
         rec["grad_pyscf"], rec["residuals_pyscf"] = solve_with(src_pyscf)
-        print(f"  CI |P(H-E)Pz + Py| = {rec['residuals_pyscf']['ci_cg']:.3e}, orbital "
-              f"|M lambda + B| = {rec['residuals_pyscf']['orbital_direct']:.3e}")
+        rp = rec["residuals_pyscf"]
+        if casscf:
+            print(f"  (O2) |M_oo zc + Y| = {rp['o2_direct']:.3e}, coupled |J^T L + b| = "
+                  f"{rp['cp_operator']:.3e} through h_op")
+        else:
+            print(f"  CI |P(H-E)Pz + Py| = {rp['ci_cg']:.3e}, orbital "
+                  f"|M lambda + B| = {rp['orbital_direct']:.3e}")
         # And the attribution: one source term from each provider, so the
         # gradient's distance from PySCF's splits into what Y costs and what y
         # costs (exactly, to first order: the gradient is linear in both).
@@ -4514,8 +4538,10 @@ def main() -> None:
                          "sections 1.2 and 2.2-2.6) or 'casscf' (a CASCI on the "
                          "converged CASSCF orbitals of --mo-from: CASSCF stationarity "
                          "as the constraint, one coupled CP-CASSCF solve, sections 1.4 "
-                         "and 2.7). SC, or PC with --pc, offline source terms "
-                         "only (PySCF's SC, block2's PC); --grad-num optional")
+                         "and 2.7). SC, or PC with --pc, with the offline source "
+                         "terms (PySCF's SC, block2's PC), or SC with the GPU's "
+                         "dumped ones (--source dump/both, #125); --grad-num "
+                         "optional")
     ap.add_argument("--mo-from", type=Path, default=None,
                     help="with --reference casscf: the .mogold sidecar of CASSCF "
                          "orbitals (generate_golden.py --casscf --mo-out), read and "

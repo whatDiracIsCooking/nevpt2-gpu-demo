@@ -295,7 +295,7 @@ char 299953 …)` — the offset past the 48-byte `G1` header — exit 1; byte
 
 ## The CASSCF-orbital entries
 
-Six golden entries read a reference whose orbitals came from a converged
+Seven golden entries read a reference whose orbitals came from a converged
 `mcscf.CASSCF` rather than from RHF ([`reference-data.md`](reference-data.md),
 "The MO sidecar: committed CASSCF orbitals"). They are ordinary golden checks
 — the unmodified binaries, the unmodified flags, every class and the total to
@@ -310,10 +310,13 @@ print in their first line:
 | `nevpt2_df_cas44_casscf_pc` | `nevpt2_df_demo` | `--pc --tiles 3` | `gpu;small` |
 | `nevpt2_cas1010_casscf` | `nevpt2_demo` | `--tiles 3` | `gpu` |
 | `nevpt2_cas1010_casscf_pc` | `nevpt2_demo` | `--pc --tiles 3` | `gpu` |
+| `nevpt2_lif_cas46_casscf` | `nevpt2_demo` | `--tiles 3` | `gpu` |
 
 The CAS(4,4) four are `small`, so the sanitizer tier runs a `NEVPT2G2` file
-too; CAS(10,10) is the production size at the shipped `--tiles 3`. All three
-goldens carry PC fields.
+too; CAS(10,10) is the production size at the shipped `--tiles 3`. The three
+N2 goldens carry PC fields. LiF's (#123's golden, registered by #125 beside
+its CASCI twin `nevpt2_lif_cas46`) is SC only, like that twin, so it has no
+`_pc` entry.
 
 **Two gates, and which paths each one admits.** `nevpt2.golden` has two
 reference-kind gates. The **source-term** gate
@@ -1503,6 +1506,158 @@ CAS(4,4) instead, and weakening the guard to manufacture one would make the
 "reference" an implementation's choice of pseudo-inverse cut rather than a
 number.
 
+### SC on a CASSCF reference: LiF, and the N2 degeneracy probe
+
+**The SC-NEVPT2 nuclear gradient on a CASSCF reference agrees with its
+numerical gradient componentwise on both cases, from PySCF's source terms and
+from the GPU's: LiF CAS(4,6) to 2.9e-8 Eh/bohr and N2 CAS(4,4) to 9.4e-9.
+The gate is 1e-6: four PASS.** This is #125. The analytic side is
+`nevpt2_grad.py --reference casscf` (#122's dense CP-CASSCF solve). The
+numerical side is `nevpt2_numgrad.py --reference casscf` (#124: every
+displaced state re-optimised from a cold start, then finished). Both run on
+the committed `golden/<case>_casscf.mogold` orbitals.
+
+**What was asked of N2, and which outcome it is.** N2 CAS(4,4) is the
+deliberate degeneracy probe: D2h, with six exactly degenerate inactive
+pairs. The pseudocanonical multipliers divide by `ε_i − ε_j`, so the issue
+named three possible outcomes: (1) the degeneracy refusal fires, (2) the
+numerator vanishes too and the `0/0` resolves, giving agreement, or (3)
+neither, and the gradient disagrees. **The result is outcome 2.** The run
+prints all six pairs, from both providers:
+
+```
+(O2): 6 degenerate pair(s) left at zero -- (11,12) gap 7.8e-16 source 0.0e+00;
+(14,15) gap 7.8e-16 source 0.0e+00; (18,19) gap 4.4e-16 source 0.0e+00;
+(20,21) gap 2.2e-16 source 0.0e+00; (22,23) gap 3.1e-15 source 0.0e+00;
+(25,26) gap 0.0e+00 source 0.0e+00
+```
+
+The source term is exactly 0.0 on every pair, from PySCF's quotient and from
+the GPU's dump alike. So `degenerate_constraints` leaves each multiplier at
+zero and does not refuse. 175 pairs are divided out (`|M_oo zc + Y|`
+1.5e-16), and the gradient agrees to 9.4e-9. That is the CASCI twin's
+mechanism ("The deliberately symmetric case, and the SC finding that did not
+appear" above), now on a CASSCF reference. D2h puts each degenerate pair's
+partners in different irreps, so the energy's derivative along the rotation
+that mixes them vanishes identically.
+
+**What this says about Park, and what it does not.** The run-up to this
+issue expected SC to disagree at about benzene's level (~1e-3) once a
+displacement broke the degeneracy. That expectation was inferred from Park's
+Table 3, not measured. It **did not appear**, and the reason is structural.
+A diatomic stays linear under every displacement, so its π degeneracies are
+never broken: symmetry pins the mixing angle at the reference and at all 36
+displaced states. The numerical sweep shows it. Every displaced state
+converged in the reference's irreps, with the continuity guard well inside
+its thresholds (`1 − σ_min` ≤ 1.1e-5, `1 − |⟨c₀|c⟩|` ≤ 1.7e-7), and cold and
+warm starts reached the same point. So this **neither confirms nor
+contradicts** Park's benzene and porphine finding. That finding needs the
+angle chosen by noise, and no case here can produce that, for the reasons
+given in the CASCI subsection. Benzene was not added for this.
+
+**Both cases' coupled Hessians, measured on the same runs.** These are the
+mechanism behind each outcome:
+
+| | LiF CAS(4,6) | N2 CAS(4,4) |
+|---|---|---|
+| coupled dimension (orbital + CI) | 154 + 116 = 270 | 191 + 11 = 202 |
+| smallest eigenvalues of the symmetric part | **−7.3215e-3 (×2)**, +2.8218e-6 (×2), +2.8196e-3 (×2) | +5.5700e-2 (×2), +6.7099e-2 (×2), +1.0069e-1 |
+| negative eigenvalues / condition number | 2 / 4.08e7 | 0 / 1.31e3 |
+| right-hand side on the nearest-singular modes, `\|b·v\|/\|b\|` | ≤ 6.7e-15 on all six listed (3.1e-2 on the next, +6.4212e-3) | ≤ 6.6e-16 |
+| (O2): divided / degenerate, left at zero (gap; source) | 81 / 3: (14,15) 7.8e-9, (18,19) 5.3e-15, (20,21) 1.1e-8; source 0.0 on all three | 175 / 6 (above) |
+| `\|J^T L + b\|` direct / through `h_op` | 1.0e-16 / 4.7e-16 | 3.5e-17 / 1.3e-15 |
+
+N2 is a minimum: every eigenvalue is positive, and the degenerate pairs live
+in (O2), not in the coupled system. LiF's saddle (#122) is the case where
+the issue's outcome 1 could have fired. It does not, and it does not need
+to. Its two negative and two near-null modes are pure orbital rotations,
+and the right-hand side on them is ≤ 6.7e-15 of `|b|`. Since #123 they are
+known to break the symmetry ([`reference-data.md`](reference-data.md), "LiF
+and acrolein on CASSCF orbitals"), so they cost the solve nothing. LiF also
+has three (O2) pairs below the gap floor. Two of them, at 7.8e-9 and 1.1e-8,
+are degenerate only to the CASSCF's convergence. Their source term is
+exactly 0.0 too, so they are left at zero for the same reason.
+
+**Per component** (Eh/bohr; the off-axis components are differenced by both
+sides, because a diatomic stays linear):
+
+| comp | LiF numerical | residual | LiF analytic, PySCF / GPU | \|Δ\| PySCF / GPU | N2 numerical | residual | N2 analytic, PySCF / GPU | \|Δ\| PySCF / GPU |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 x | +3.9e-9 | 3.6e-9 | ~0 / ~0 | 3.9e-9 / 3.9e-9 | ~0 | 2.3e-11 | ~0 / ~0 | 2.8e-11 / 2.8e-11 |
+| 0 z | −0.0088266040 | 2.7e-9 | −0.0088265748 / −0.0088265749 | **2.9e-8** / **2.9e-8** | +0.0502435407 | 7.9e-10 | +0.0502435501 / +0.0502435500 | **9.4e-9** / **9.3e-9** |
+| 1 x | −1.52e-8 | 1.6e-8 | ~0 / ~0 | 1.5e-8 / 1.5e-8 | ~0 | 3.3e-11 | ~0 / ~0 | 7.6e-12 / 7.6e-12 |
+| 1 z | +0.0088266032 | 1.5e-9 | +0.0088265749 / +0.0088265749 | 2.8e-8 / 2.8e-8 | −0.0502435400 | 1.2e-9 | −0.0502435486 / −0.0502435485 | 8.6e-9 / 8.5e-9 |
+| y, both atoms | 0 | 0 | ≤ 3.4e-18 | — | 0 | 0 | ≤ 9.4e-14 | — |
+
+"~0" means below 1e-17 (analytic) or 1e-11 (numerical). LiF's worst
+disagreement, 2.9e-8, is at its numerical side's own floor. #124 measured
+that floor from congruent pairs as 1.9e-8 Eh/bohr ([`reference-data.md`](reference-data.md),
+"The sweeps"). N2's floor is 7.5e-10 from the same measurement, with a
+largest residual of 1.2e-9. N2's 9.4e-9 sits beside its analytic side's
+skeleton bar, 4.9e-9 (an upper bound, "The tolerance, and why it is not
+1e-7" above). Both are inside Park's own SC figure for LiF, an RMS of
+2.4e-6 ([`references.md`](references.md)). That is an anchor, not the gate.
+
+**GPU-sourced.** `nevpt2_sc_pseudodensity --dump-source-terms` writes each
+state's `.gradsrc` on the card. `nevpt2_grad.py --source both` reads it, and
+the CASSCF branch takes it since this change ("The GPU as the source-term
+provider" below has the mechanism). The dump is in the golden's basis. On
+this branch the state is held in that basis too, with no §2.6 rotation, so
+the dump is read unrotated. A PC dump on a CASSCF reference stays refused,
+because none has been through a gradient. The two providers' terms and
+gradients:
+
+| | LiF CAS(4,6) | N2 CAS(4,4) |
+|---|---|---|
+| dump vs PySCF, max \|ΔA\| (worst block) | 4.1e-9 (core–virt) | 3.3e-10 (act_O–virt) |
+| dump vs PySCF, max \|Δ P y\| | 4.6e-9 (117 det.) | 6.0e-10 (12 det.) |
+| max \|GPU-sourced − PySCF-sourced\| gradient | 3.5e-11 | 1.1e-10 |
+| the GPU's `Y` alone / `y` alone | 4.1e-10 / 4.5e-10 | 1.2e-10 / 2.3e-10 |
+| GPU-sourced vs `grad_num` | 2.9e-8: **PASS** | 9.3e-9: **PASS** |
+| residual-independent checks | 14 of 14 | 14 of 14 |
+
+The dumps were taken on the RTX 3080 (CUDA, preset `default`, `--tiles 3`).
+The same two dumps from the RX 9060 XT (gfx1200, preset `hip`) gave every
+figure in this table to the digits shown. N2's per-block figures also match
+the ones the `.srcgold` oracle entry recorded on the same state ("The source
+terms on CASSCF orbitals, measured" above).
+LiF's CASSCF dump had no entry before this. It is now
+`nevpt2_sc_pseudodensity_dump_lif_def2svp_cas46_casscf`, beside its CASCI
+twin, with `nevpt2_lif_cas46_casscf` as its energy entry ("The CASSCF-orbital
+entries" above).
+
+**Walls and budgets** (Ryzen 9 5900X, single-threaded processes; PySCF
+2.14.0; the GPU steps on the RTX 3080, preset `default`, `--tiles 3`):
+
+| run | LiF CAS(4,6) | N2 CAS(4,4) |
+|---|---:|---:|
+| `nevpt2_numgrad.py --reference casscf`, `--workers` 12 / 10 | 20.4 s (#124's; budget 600 s) | 4.9 s (budget 600 s, declared for #125 before the run) |
+| `nevpt2_grad.py --reference casscf`, PySCF-sourced | 59.3 s (budget 300 s) | 13.5 s (budget 120 s) |
+| the same, `--source both` | 75.2 s | 18.2 s |
+| the dump's ctest entry | 2.56 s | 1.34 s |
+
+LiF's numerical gradient is #124's own `.npz`, reused, not re-swept. Its
+reference re-optimised bit-identically to the committed `.mogold`, which is
+the orbitals this run differentiates. The four budgets are bounds, not
+gates (`GATE_WALL_BUDGET`, `CASSCF_WALL_BUDGET`).
+
+Re-run with:
+
+```bash
+uv run python reference_data/nevpt2_numgrad.py --case n2_ccpvdz_cas44 \
+    --reference casscf --workers 10 --states-dir /tmp/n2_casscf_states \
+    --npz /tmp/n2_casscf.numgrad.npz
+uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 \
+    --reference casscf --grad-num /tmp/n2_casscf.numgrad.npz      # PySCF-sourced
+ctest --preset default -R 'nevpt2_sc_pseudodensity_dump_(n2_ccpvdz_cas44|lif_def2svp_cas46)_casscf$'
+uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 \
+    --reference casscf --source both \
+    --source-path build/gradsrc/n2_ccpvdz_cas44_casscf.gradsrc \
+    --grad-num /tmp/n2_casscf.numgrad.npz                         # GPU-sourced
+# LiF: the same with --case lif_def2svp_cas46, and its numerical gradient from
+# "The sweeps" in reference-data.md (nevpt2_numgrad.py ... --npz /tmp/lif_casscf.numgrad.npz)
+```
+
 ### PC on a CASSCF reference: acrolein
 
 **The PC-NEVPT2 nuclear gradient of acrolein CAS(6,5) on a CASSCF reference
@@ -1700,6 +1855,9 @@ This section is SC's; PC's GPU-sourced gradient (#74, `--pc` on both
 programs) is [`pc-nevpt2.md`](pc-nevpt2.md), "The source terms by reverse
 mode". The gate is the same 1e-6 per
 component, for the reason "The tolerance, and why it is not 1e-7" gives.
+Everything here is on CASCI references. The same GPU-sourced comparison on a
+CASSCF reference (#125, LiF and N2 CAS(4,4), SC) is "SC on a CASSCF
+reference: LiF, and the N2 degeneracy probe" above.
 
 **Since #89 the GPU-sourced gradient passes** — within 1e-6 of `grad_num` on
 LiF, acrolein and N2 CAS(4,4), and componentwise the PySCF-sourced one's to
