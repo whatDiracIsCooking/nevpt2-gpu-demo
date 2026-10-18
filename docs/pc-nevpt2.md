@@ -873,6 +873,61 @@ run different default digests (emitted on CUDA, BLAS on HIP); which part of
 `Y`'s 2,850 basis directions carries the difference was not separated. Both
 are at least five times inside the tolerance.
 
+### On a CASSCF reference
+
+#160 holds the same PC terms on `n2_ccpvdz_cas44_casscf` (the CAS(4,4)
+state on its CASSCF orbitals, #117) to that golden's full PC oracle,
+`golden/n2_ccpvdz_cas44_casscf_pc.srcgold` — block2's exact PC source terms,
+written by `sc_source_oracle.py --pc --mo-from`. Nothing on the device
+changes: `Y` and `y` are derivatives of the energy functional at fixed
+orbitals and CI vector, so `requireSourceTermReference` accepts both
+reference kinds. What changes is the oracle's **partition**. With no RHF to
+split the active space, it is one range (`n_act_occ = n_act`, every
+active–active rotation a gauge), and the state stays in its canonicalised
+basis, so `act_rot` is the identity ([`gradient-theory.md`](gradient-theory.md),
+§1.4). `act_V` is therefore empty, and core–act_V, act_O–act_V and
+act_V–virt have no pairs; the comparator requires exactly those three rows
+empty on a `_casscf` oracle (`test/source_compare/`).
+
+`nevpt2_sc_pseudodensity --golden golden/n2_ccpvdz_cas44_casscf.nevpt2gold
+--tiles 3 --pc --source-oracle golden/n2_ccpvdz_cas44_casscf_pc.srcgold`
+(`nevpt2_sc_pseudodensity_oracle_pc_n2_ccpvdz_cas44_casscf`), RTX 3080,
+preset `default`, against the PC oracle tolerance (1e-7), `kKnownGaps`
+empty. Max \|GPU − block2\| per block:
+
+| block | pairs | RTX 3080 |
+|---|---:|---:|
+| core–core | 10 | 8.7e-11 |
+| core–act_O | 20 | 0 |
+| core–act_V / act_O–act_V / act_V–virt | 0 / 0 / 0 | empty |
+| core–virt | 95 | 1.9e-10 |
+| act_O–virt | 76 | 2.8e-11 |
+| virt–virt | 171 | 2.7e-11 |
+| `P y` | 12 determinants | 2.5e-10 |
+
+**PASS, 6 blocks agree, 0 known gaps.** The worst block is two and a half
+decades inside the tolerance, as on the CASCI twin above. core–act_O is 0.0
+on both sides: on N2 it vanishes by symmetry, as on the CASCI twin, so it
+checks nothing here, and five blocks carry content.
+
+`--pc --dump-source-terms` on the same golden
+(`nevpt2_sc_pseudodensity_dump_pc_n2_ccpvdz_cas44_casscf`), same run, its
+five checks:
+
+| check | value |
+|---|---|
+| 1. the pairing: Σ κ·Y off the matrix vs `<kappa, Y>` direct, one seeded full direction | 3.1e-17 (gate 1e-9) |
+| 2. `y`'s walk ran on this state: its `E_corr` vs `pcEnergiesDevice` | 1.1e-16 (gate 1e-7) |
+| 3. the `.gradsrc` read back | bit for bit |
+| 4. each direction's exact `Edot` (frozen + digest) vs Σ κ·Y off the matrix, 6 directions | 5.7e-17 (gate 1e-7) |
+| 5. the PC integral halves' duality, adjoint vs forward tangent, 6 directions | ≤ 8.0e-18 (gate 1e-7) |
+
+The orbital energies' response is in `y` here too: `e_core` / `e_virt`
+rebuilt from the CASSCF sidecar agree with the golden's to 1.6e-14
+(relative). ctest walls: dump 1.58 s, oracle 1.44 s. The SC and directional
+twins on this golden have their numbers in [`testing.md`](testing.md),
+"The source terms on CASSCF orbitals, measured".
+
 ### The nuclear gradient from the GPU's terms
 
 `nevpt2_grad.py --pc --source both --source-path <dump> --grad-num <npz>`,

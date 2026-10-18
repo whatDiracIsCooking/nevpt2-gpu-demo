@@ -606,8 +606,9 @@ if(NEVPT2_BUILD_TESTING)
   # n2_ccpvdz_cas44_casscf (#121) is the same state's CASSCF-orbital twin
   # (#117's oracle): the source terms are derivatives at fixed orbitals and CI
   # vector, so nothing in them depends on how the orbitals were made, and the
-  # same tolerance holds (docs/testing.md, "The source terms on CASSCF
-  # orbitals, measured").
+  # same tolerance holds (docs/pc-nevpt2.md, "On a CASSCF reference", under
+  # "The source terms by reverse mode", #160: the PC dump and the PC full
+  # oracle on this golden, block by block, kKnownGaps empty).
   foreach(_case n2_ccpvdz_cas44 n2_ccpvdz_cas44_casscf)
     foreach(_need "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.gradgold"
                   "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}_pc.srcgold")
