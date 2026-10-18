@@ -429,14 +429,19 @@ Measured on an RTX 3080 (CUDA, preset `default`, Release, `--tiles 3`, the
 default digest), one run each. **All nine pass, and no block disagrees.**
 Against the oracles, max \|GPU − oracle\| per block:
 
-| block | SC full (tol 1e-6) | PC full (tol 1e-7) | SC directional (tol 1e-8) | PC directional (tol 2e-8) |
-|---|---:|---:|---:|---:|
-| core–core | 7.6e-11 | 8.7e-11 | 1.0e-11 | 1.0e-11 |
-| core–act_O | 0 | 0 | 0 | 0 |
-| core–virt | 2.0e-10 | 1.9e-10 | 6.4e-11 | 1.3e-11 |
-| act_O–virt | 3.3e-10 | 2.8e-11 | 2.1e-11 | 1.3e-12 |
-| virt–virt | 2.2e-11 | 2.7e-11 | 2.5e-11 | 1.1e-12 |
-| `P y` | 6.0e-10 (12 det.) | 2.5e-10 (12 det.) | 3.3e-11 | 4.5e-13 |
+| block | SC full (tol 1e-6) | SC directional (tol 1e-8) | PC directional (tol 2e-8) |
+|---|---:|---:|---:|
+| core–core | 7.6e-11 | 1.0e-11 | 1.0e-11 |
+| core–act_O | 0 | 0 | 0 |
+| core–virt | 2.0e-10 | 6.4e-11 | 1.3e-11 |
+| act_O–virt | 3.3e-10 | 2.1e-11 | 1.3e-12 |
+| virt–virt | 2.2e-11 | 2.5e-11 | 1.1e-12 |
+| `P y` | 6.0e-10 (12 det.) | 3.3e-11 | 4.5e-13 |
+
+The PC **full** oracle (`…oracle_pc_n2_ccpvdz_cas44_casscf`) and the PC dump
+(`…dump_pc_n2_ccpvdz_cas44_casscf`) have their numbers in one home,
+[`pc-nevpt2.md`](pc-nevpt2.md), "On a CASSCF reference", under "The source
+terms by reverse mode" (#160).
 
 Every block also sits under 1e-7, including on the SC full oracle, whose gate
 is 1e-6 because of PySCF's central difference ("The SC source terms against
@@ -467,9 +472,6 @@ The device's own checks, on the same runs:
 | | core-internal / virtual-internal finite difference: halvings, plateau \|err\| | 8, 7.5e-13 / 6, 3.3e-12 |
 | | Park Eqs. 56–57 multipliers: divided / degenerate, left zero | 175 / 6 |
 | `…dump_…_casscf` | the 6 written directions' exact Edot against Σ κ·Y off the matrix | 4.4e-15 |
-| | `.gradsrc` read back | bit for bit |
-| `…dump_pc_…_casscf` | the same 6 directions, PC | 7.0e-17 |
-| | the PC integral halves' duality, 6 directions | within 1e-7, all ≤ 1.2e-17 |
 | | `.gradsrc` read back | bit for bit |
 
 Each wall time is within 0.03 s of its CASCI twin's in the same run, 0.46 s
