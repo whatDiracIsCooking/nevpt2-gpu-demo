@@ -29,6 +29,7 @@ once:
 | §2.2–§2.6 — decoupled CI equation, selection multipliers, CPHF, solve order, `act_O`/`act_V` recovery | **CASCI** (§2.3's `z^c` half is shared) |
 | §2.7 — the coupled CP-CASSCF system and its solve order | **CASSCF** |
 | §3 — the integral inventory Eq. 28 reads | shared (§3.5–§3.6 mark their CASCI-only rows) |
+| §3.8 — the same inventory in three-index, density-fitted form | shared |
 | §4.1–§4.2 — the active-space-selection hazard | **CASCI** |
 | §4.3 — the in-plane-`Cs` displacement rule | shared |
 | §4.4 — what is not that hazard, Park's SC non-invariance included | shared |
@@ -48,7 +49,8 @@ array and file sizes the inventory in §3 implies are measurements of a
 particular case and belong in [`reference-data.md`](reference-data.md), the
 finite-difference tolerances in [`testing.md`](testing.md), the costs in
 [`performance.md`](performance.md). What appears here instead are *size
-formulas* in `n_mo`, `n_core`, `n_act` and `n_virt`, which are algebra.
+formulas* in `n_mo`, `n_core`, `n_act`, `n_virt` and, density-fitted,
+`naux`, which are algebra.
 
 It settles three things the rest of the gradient work rests on:
 
@@ -61,7 +63,9 @@ It settles three things the rest of the gradient work rests on:
 2. **§3** — the inventory of MO-integral arrays Park's Eq. 28 actually reads,
    the same for both. Seventeen arrays, each with exactly one index over the
    full MO range. The one array of the eighteen that is *not* needed is the
-   expensive one.
+   expensive one. Density-fitted (§3.8), `κ` never reaches the fitting
+   metric, and `Y` reads the whole three-index `(L|pq)`: the `--df` goldens
+   carry four of its six space blocks, and lack `(L|cc)` and `(L|vv)`.
 3. **§4** — the CASCI branch's active-space-selection hazard, and the settled
    rule for numerical validation, which both branches share: **in-plane
    displacements of a planar `Cs` molecule only**.
@@ -782,7 +786,8 @@ labels.** That is the same structural fact the density-fitted path already
 turns to account — no class puts two virtuals in one charge distribution, so
 there is no `(L|vv)` block
 ([`reference-data.md`](reference-data.md), "Density fitting"). §3.4 is what it
-is worth to the gradient.
+is worth to the gradient, and §3.8 why the density-fitted gradient does not
+keep the missing `(L|vv)`.
 
 ### 3.3 What the gradient needs
 
@@ -959,6 +964,178 @@ as the scaling bottleneck of the whole method, at `O(n_act^9)`. So the gradient
 does **not** raise the density order the energy already pays for; it adds a
 derivative of it.
 
+### 3.8 The density-fitted inventory
+
+The density-fitted energy ([`reference-data.md`](reference-data.md), "Density
+fitting") reads three-index blocks instead of §3.2's four-index arrays, in the
+symmetric-metric convention:
+
+```
+  (pq|rs) = sum_L B[L,p,q] B[L,r,s]
+  B[L,p,q] = sum_M W_LM (M|pq),        W^T W = V^{-1},   V_LM = (L|M)
+```
+
+with the metric already absorbed into `B` (any factor `W` of `V^{-1}`;
+`generate_golden.py`'s `_df_blocks` and `src/df_integrals/`'s module header).
+`B` is symmetric in its two MO indices. The question this section answers is
+the DF counterpart of §3.3's: **which blocks of `B` does `Y`, over its full
+`n_mo × n_mo` range (§2.1), read** — against the four a `--df` golden
+carries: `B_aa` `(L|aa)`, `B_ca` `(L|ca)`, `B_va` `(L|va)` and `B_cv`
+`(L|cv)`, of extents `naux × n_act × n_act`, `naux × n_core × n_act`,
+`naux × n_virt × n_act` and `naux × n_core × n_virt`. Every committed
+`*_df.nevpt2gold` carries exactly those four, and no other `B_*` array.
+
+**κ never reaches the fitting metric.** An orbital rotation `C(κ) = C exp(κ)`
+transforms the MO indices of the three-centre integrals `(M|pq) = Σ_{μν}
+(M|μν) C_μp C_νq` and nothing else: `(M|μν)` and `V_LM = (L|M)` are integrals
+over AO and auxiliary functions alone, which sit at the nuclei and do not see
+`C`. So `W` is a constant under `κ`, the auxiliary index is inert, and
+
+```
+  δ B[L,p,q] = sum_x [ κ_xp B[L,x,q] + κ_xq B[L,p,x] ]
+```
+
+— §0's one-electron rule, applied to each auxiliary slice. Substituted into
+`(pq|rs) = Σ_L B B`, the product rule gives back §0's four-term rule for
+`δ(pq|rs)` exactly. So §3.1's promotion rule carries over unchanged, and in
+three-index form it is simpler: **one `B` factor is one charge distribution**,
+so "keeping the pairing" is automatic — promote one MO index of one `B`
+factor, `B[L,y,q] → B[L,x,q]`. The metric's derivative appears only under a
+*nuclear* displacement, where `(M|μν)` and `V` both move with the atoms; that
+is the derivative-integral contraction on the AO side, not part of `Y`, and
+this inventory does not size it.
+
+**What the energy reads.** The DF energy is a function of `h`, `B` and the CI
+vector, and `B` enters it in two ways. The class blocks are products of the
+four carried blocks (the table in `src/df_integrals/df_integrals.cpp`'s
+`slab()`; the active `h2e` is `B_aa · B_aa`). The **finished** quantities —
+the `h^eff` slices and `e_core`/`e_virt` — are contractions of `B` too, and
+substituting their definitions (§3.1) shows two more blocks, which the golden
+does not need because it carries those quantities as numbers:
+
+- `B_cc`, **in full**: `h^eff`'s exchange dressing `Σ_j (pj|jq)` on its
+  core-indexed slices (`h1e_v_Si`, `h1e_v_Sir`) is `Σ_{L,j} B[L,p,j]
+  B[L,j,i]`, with `j ≠ i`; `ε_i` reads `(ij|ji)` the same way. Its Coulomb
+  dressing `(pq|jj)` reads only the diagonal `B[L,j,j]`.
+- `B_vv`, **on its diagonal only**: `ε_r` reads `(rr|jj)` and `(rr|tu)`,
+  i.e. `B[L,r,r]`. Its exchange terms `(rj|jr)` and `(rt|ur)` are `B_vc ·
+  B_cv` and `B_va · B_av`, carried. Nothing reads `B_vv` off its diagonal:
+  that is §3.2's "no class puts two virtuals in one charge distribution",
+  and it is why the energy needs no `(L|vv)`.
+
+**What `Y` reads.** Write `Γ[L,q,y] = ∂E/∂B[L,q,y] + ∂E/∂B[L,y,q]`, the
+three-index adjoint of the energy. Then the two-electron part of `Y` is
+
+```
+  Y_xy = sum_{L,q} B[L,x,q] Γ[L,q,y]          (plus the one-electron h terms, §3.5)
+```
+
+Two factors, two questions. Building `Γ` reads what the energy reads — the
+four carried blocks, `B_cc` in full, the diagonal of `B_vv`. The promoted
+factor `B[L,x,q]` is read for **every** `x` and for every `q` in `Γ`'s
+support, and that support covers all three spaces (`Γ[L,v,a]` is non-zero
+from `Sr` alone, `Γ[L,c,a]` from `Si`, `Γ[L,a,a]` from every class). So row
+`x` of `Y` reads `B[L,x,·]` over the whole MO range:
+
+| rows of `Y` | promoted factor | carried? |
+|---|---|---|
+| `x` core | `B[L,i,q]` = `B_cc`, `B_ca`, `B_cv` | **no**: `B_cc` |
+| `x` active | `B[L,t,q]` = `B_ac`, `B_aa`, `B_av` | yes (`B_ac`, `B_av` are `B_ca`, `B_va` transposed) |
+| `x` virtual | `B[L,r,q]` = `B_vc`, `B_va`, `B_vv` | **no**: `B_vv`, in full |
+
+**`Y` over its full range reads the whole `(L|pq)` tensor.** Row by row
+against §3.3, each array is `(xP|QR) = Σ_L B[L,x,p] B[L,q,r]`: a strip
+`B_xP` (`x` general, `p` in `P`) times the block `B_QR`, and a restricted row
+reads the diagonal of its tied block:
+
+| array | three-index form | rebuildable from the carried four? |
+|---|---|---|
+| `(xa\|aa)` | `B_xa · B_aa` | **yes** |
+| `(xv\|aa)` | `B_xv · B_aa` | no: `B_vv` (rows `x` virtual) |
+| `(xa\|va)` | `B_xa · B_va` | **yes** |
+| `(xc\|aa)` | `B_xc · B_aa` | no: `B_cc` (rows `x` core) |
+| `(xa\|ca)` | `B_xa · B_ca` | **yes** |
+| `(xv\|va)` | `B_xv · B_va` | no: `B_vv` (rows `x` virtual) |
+| `(xc\|ca)` | `B_xc · B_ca` | no: `B_cc` (rows `x` core) |
+| `(xa\|cv)` | `B_xa · B_cv` | **yes** |
+| `(xv\|ca)` | `B_xv · B_ca` | no: `B_vv` (rows `x` virtual) |
+| `(xc\|va)` | `B_xc · B_va` | no: `B_cc` (rows `x` core) |
+| `(xc\|cv)` | `B_xc · B_cv` | no: `B_cc` (rows `x` core) |
+| `(xv\|cv)` | `B_xv · B_cv` | no: `B_vv` (rows `x` virtual) |
+| `(xa\|cc)` | `B_xa · B_cc` | no: `B_cc` in full, every row |
+| `(xv\|cc)` | `B_xv · B_cc` | no: `B_cc` in full, every row; `B_vv` (rows `x` virtual) |
+| `(xc\|cc)`, tied | `(xi\|jj)` = `B_xc · diag B_cc`; `(xj\|ji)` = `B_xc · B_cc` | no: `B_cc` in full, both factors |
+| `(xa\|vv)`, tied | `(xt\|rr)` = `B_xa · diag B_vv` | no: `diag B_vv`, every row |
+| `(xc\|vv)`, tied | `(xi\|rr)` = `B_xc · diag B_vv` | no: `B_cc` (rows `x` core); `diag B_vv` |
+
+Where §3.3 has `B_xc`, `B_xa`, `B_xv`, the strip is three blocks: `B_xa` is
+`B_ca`, `B_aa`, `B_va`, all carried; `B_xc` is `B_cc`, `B_ac`, `B_vc`; `B_xv`
+is `B_cv`, `B_av`, `B_vv`. Four of the seventeen rows — the four `(xa|QR)`
+with `QR` in a carried block — rebuild from the golden as it is. The other
+thirteen need one of two blocks, and nothing else is missing.
+
+**The missing blocks**, in `B`'s six-block decomposition by space pair, are
+exactly two:
+
+| block | needed | stored square | packed (`B[L,p,q] = B[L,q,p]`) | its diagonal alone |
+|---|---|---|---|---|
+| `B_cc` `(L\|cc)` | in full: `Y`'s core rows; `Γ` (the `h^eff` and `ε_i` exchange) | `naux · n_core^2` | `naux · n_core (n_core + 1) / 2` | `naux · n_core` |
+| `B_vv` `(L\|vv)` | in full: `Y`'s virtual rows; its diagonal also in `Γ` (`ε_r`) | `naux · n_virt^2` | `naux · n_virt (n_virt + 1) / 2` | `naux · n_virt` |
+
+against the carried four's `naux · (n_act^2 + n_core n_act + n_virt n_act +
+n_core n_virt)`. With both added, the six blocks are the complete tensor:
+`naux · (n_core^2 + n_act^2 + n_virt^2 + n_core n_act + n_act n_virt +
+n_core n_virt)` stored square, `naux · n_mo (n_mo + 1) / 2` fully packed.
+
+**`B_vv` is the energy's DF economy, and the gradient does not keep it.**
+The energy needs no `(L|vv)` because no charge distribution it reads holds
+two virtuals off the diagonal. Promotion puts a general index beside a
+virtual one, so `Y`'s virtual row — `x = s` against a `q = r` in `Γ`'s
+support — reads `B[L,s,r]` for every pair. That is not only `Y`'s
+virtual–virtual block: `Y_sb` (virtual–active) reads `Σ B[L,s,r]
+Γ[L,r,b]` through `Sr`'s `Γ[L,r,b]`, and `Y_si` (virtual–core) likewise
+through every class that reads `B_cv`. So `B_vv` is wanted by every block in the
+virtual row, and the two mixed ones are non-redundant on both branches
+(§2.1). What *does* survive is §3.4's saving in its strongest form: the
+gradient never forms a four-index array at all, so `(xv|vv)` — the one §3.4
+names — is never built, and the largest three-index block is `naux ·
+n_virt^2` where the conventional inventory's largest rows are `n_mo ·
+n_virt^2 · n_core` and `n_mo · n_virt^2 · n_act` (§3.3). Since `naux` is
+`O(n_mo)` for a fitting basis, the DF inventory is `O(n_mo^3)` against the
+conventional one's `O(n_mo · n_virt^2 · n_occ)`: smaller by a factor of
+order `n_occ`. The bytes for a given case are a measurement and belong in
+[`reference-data.md`](reference-data.md).
+
+**§1.3's trap, in three-index form.** `Y`'s active–active block needed two
+arrays the energy never reads, `(a'a|jj)` and `(a'a|rr)` — `(xa|cc)` and
+`(xa|vv)` restricted to `x` active, both on tied pairs. Their counterparts are
+
+```
+  (a'a|jj) = sum_L B[L,a',a] B[L,j,j]        B_aa against diag B_cc
+  (a'a|rr) = sum_L B[L,a',a] B[L,r,r]        B_aa against diag B_vv
+```
+
+`B_aa` is carried; the two diagonals, `naux · n_core` and `naux · n_virt`,
+are not. So the active–active block wants only the **diagonals** of the two
+missing blocks — and the same holds of the orbital energies' response to the
+active density, which `y_I` and the active block both read: of its four tied
+arrays (`gradient_plan.cppm`'s `OrbitalEnergyResponse`), `(ii|ut)` and
+`(rr|ut)` are `B_aa` against the two diagonals, and `(iu|ti)` and `(ru|tr)`
+are `B_ac · B_ca` and `B_av · B_va`, carried. The trap is the same one: the
+active block is not "what the golden already carries". The full active
+*row* asks for more — `Y_tj` (active–core) reads `(ut|ji)` with `j ≠ i`,
+`(xa|cc)` off its tie, from the exchange dressing of `h1e_v_Si`, so `B_cc` in
+full — and the full range more again, both blocks in full.
+
+**The rest carries over.** The digests' own orbital response (§3.7's
+`f3ac`/`f3ca`) reads `h2e = B_aa · B_aa` alone, whose promotion is `B_xa ·
+B_aa`: carried, so that term needs no new block. §2.2's `W_tu` reads `B_cc`
+and `B_vv` off their diagonals (`(pq|tu)` with `p < q`), a consumer of the
+same two blocks outside `Y`. §3.5's `n_mo × n_mo` list is unchanged in shape;
+its matrices must be the density-fitted calculation's own (every integral
+inside `h^eff`, `f` and `F` is `Σ_L B B`), and §3.6's invariants hold against
+those.
+
 ## 4. The active-space-selection hazard, and the settled rule
 
 §4.1–§4.2 are the **CASCI branch's** hazard. It does not exist on the CASSCF
@@ -1099,6 +1276,7 @@ them leads to chasing the wrong bug. All three apply to both branches:
 | Is the RHF partition (`act_O`/`act_V`) needed? | Yes, recovered by one `n_act × n_act` diagonalisation (§2.6). | No. There is no RHF partition; §2.6 is unnecessary (§1.4). |
 | Which MO-integral arrays does Eq. 28 read? | Seventeen one-general-index arrays, §3.3's table, three of them only on restricted slices. | The same seventeen. |
 | Which does it not read? | `(xv\|vv)`, and that omission is the whole saving over an `n_mo^4` dump (§3.4). | The same. |
+| Density-fitted, which `B` blocks does `Y` read? | All six: the whole `(L\|pq)`. The `--df` goldens carry `B_aa`, `B_ca`, `B_va`, `B_cv`; `B_cc` (`naux·n_core^2`) and `B_vv` (`naux·n_virt^2`) are missing, and the active–active block needs only their diagonals. `κ` never reaches the metric (§3.8). | The same. |
 | What else must the reference data carry? | §3.5: `mo_coeff`, `h`, `f`, `f^h`, the three `h^eff` variants and the RHF Fock, each `n_mo × n_mo`, plus the RHF electron count. | §3.5 less the RHF Fock and the RHF electron count. |
 | What can make the derivative ill-defined? | The selection: a reordering or a lost point group puts a kink in the energy; a small gap across an active-space boundary makes the selection multipliers large (§4.1–§4.2). | Not a selection. A near-singular CASSCF Hessian (§2.7), and a displaced optimisation landing on a different stationary branch (§4.4). |
 | How is numerical validation set up? | In-plane displacements of a planar `Cs` molecule, refusing any displacement whose detected point group changes; out-of-plane components checked against zero instead (§4.3). | The same rule (§4.3). |
