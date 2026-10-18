@@ -95,7 +95,8 @@ checked in two halves:
 - **C++**: `test/golden`'s `GoldenLayoutContractTests` (unit tier,
   host-only, no card) loads every `golden/*.nevpt2gold` and
   `golden/*.gradgold` present at configure time with `loadGolden` /
-  `loadGradGold`, requires both layouts to be among them, and requires every
+  `loadGradGold`, requires both golden layouts and both sidecar flavours
+  (`NEVPT2D1`, density-fitted `NEVPT2F1`) to be among them, and requires every
   file of one layout to have its array table at the same derived offset
   (`GoldenFile::arraysAt`) and the two layouts' to differ.
 - **Python**: `uv run python reference_data/golden_layout_check.py` — every
@@ -144,7 +145,8 @@ still writes a golden, and every entry downstream then passes against it.
 What they are, all on synthetic inputs, no PySCF solve, no card, no network:
 
 - **`test_golden_format.py`** — every magic (`NEVPT2G2`, the `G1` golden,
-  `NEVPT2D1`, `NEVPT2M1`, `NEVPT2S1`/`NEVPT2P1` and the directional
+  `NEVPT2D1` and the density-fitted `NEVPT2F1` with its trailing `naux`,
+  #164, `NEVPT2M1`, `NEVPT2S1`/`NEVPT2P1` and the directional
   `NEVPT2SD`/`NEVPT2PD`) written by its writer
   (`write_golden`, `write_gradgold`, `write_mo_sidecar`, `write_srcgold`, or
   `pack_header` + `write_arrays` for `G1`, which no writer produces any more)
@@ -220,14 +222,14 @@ nothing skips.
 `devtools/golden-repro.sh` re-runs the promise CLAUDE.md makes — the
 generators are bit-reproducible, so a regenerated file that differs from the
 committed one means something changed — for every committed N2 CAS(4,4) /
-CAS(8,8) reference. Eighteen files from sixteen generator runs, each with the
+CAS(8,8) reference. Twenty files from sixteen generator runs, each with the
 generator's own settings (`--out` into a scratch directory is the only flag
 added):
 
 | files | run |
 |---|---|
 | `n2_ccpvdz_cas44.nevpt2gold`, `.gradgold`; `n2_ccpvdz_cas88.nevpt2gold`, `.gradgold` | `generate_golden.py --gradgold` |
-| `n2_ccpvdz_cas44_df.nevpt2gold`, `n2_ccpvdz_cas88_df.nevpt2gold` | `generate_golden.py --df` |
+| `n2_ccpvdz_cas44_df.nevpt2gold`, `.gradgold`; `n2_ccpvdz_cas88_df.nevpt2gold`, `.gradgold` | `generate_golden.py --df --gradgold` (the density-fitted `NEVPT2F1` sidecar, #164) |
 | `n2_ccpvdz_cas44_casscf[_df].mogold` | `generate_golden.py --casscf --mo-out` (a fresh optimisation) |
 | `n2_ccpvdz_cas44_casscf[_df].nevpt2gold` | `generate_golden.py --mo-from` the **committed** sidecar, so a drifted sidecar fails as itself and not as its golden too |
 | `n2_ccpvdz_cas44.srcgold`, `n2_ccpvdz_cas44_pc.srcgold` | `sc_source_oracle.py [--pc]`, reading the committed golden |
@@ -242,7 +244,7 @@ four the state fields must be byte-identical, the new `reference_kind` must
 be `casci`, and everything from the array count on byte-identical, each
 file's header length read with `golden_format.py arrays-at`. It prints one
 `PASS:`/`FAIL:` line per file (naming it) and exits 0 only if all
-eighteen reproduce. `--committed DIR` compares against a copy instead of `golden/`
+twenty reproduce. `--committed DIR` compares against a copy instead of `golden/`
 (the generator inputs stay `golden/`'s), `--only REGEX` narrows the set,
 `--out DIR` keeps the regenerated files and each run's log.
 
@@ -265,6 +267,7 @@ before #105 added the two directional files:
 | `-j 10` | 144 s |
 | `-j 12`, fourteen files, #105 (the two-card box's CPU, 24 cores, both cards running other jobs) | 152 s, all fourteen `PASS:` |
 | `-j 2`, eighteen files, #117 (RTX 3080 box's CPU, measured with a concurrent sweep on the CPU) | 307 s, all eighteen `PASS:` |
+| `-j 6`, twenty files, #164 (RTX 3080 box's CPU, a sibling build sharing it) | 179 s, all twenty `PASS:` |
 
 Per generator run (the `-j 1` run): `--casscf` sidecars 2–3 s,
 `n2_ccpvdz_cas44.srcgold` 9 s, the CAS(4,4) goldens 26–27 s, the CAS(8,8)
@@ -482,8 +485,12 @@ any sanitizer preset ("Wall times" below has no row for them).
 **The `_df` pair is not included,** because no density-fitted source-term
 path exists: `nevpt2_df_demo` takes none of `--gradient-source`,
 `--sc-tangent`, `--dump-source-terms` or `--source-oracle` (the
-`nevpt2.cli:binary_flags` table refuses them). No `_df` `.gradgold` or
-`.srcgold` exists for either reference kind either.
+`nevpt2.cli:binary_flags` table refuses them). The two small `_df` cases do
+carry a density-fitted `.gradgold` since #164 (reference-data.md, "The
+density-fitted gradient sidecar"), which only `nevpt2_demo`'s
+`nevpt2_gradient_source_cas44_df` reads so far ("The CI source term's
+forward-reverse duality"); no `_df` `.srcgold` exists for either reference
+kind.
 
 ## The SC pseudodensity identities
 
@@ -1058,6 +1065,22 @@ preset's ctest run of #87:
 | CAS(4,4) | orbital energies moving | 36 | 0.6581 | 6.4e-15 | 1.1e-12 | 2.2e-12 | 3.4e-12 |
 | CAS(8,8) | orbital energies moving | 4900 | 1.3760 | 3.8e-16 | 6.7e-14 | 6.7e-14 | 4.9e-14 |
 | CAS(10,10) | orbital energies fixed | 63504 | 0.4023 | 5.1e-17 | 2.0e-14 | 2.0e-14 | 5.4e-14 |
+
+**The density-fitted CAS(4,4), `nevpt2_gradient_source_cas44_df` (#164).**
+The same binary and flags on `golden/n2_ccpvdz_cas44_df.nevpt2gold`, with
+the density-fitted sidecar `golden/n2_ccpvdz_cas44_df.gradgold` as
+`--gradgold`. It is the end-to-end read of that sidecar's `eps`-response arrays
+([`reference-data.md`](reference-data.md), "The density-fitted gradient
+sidecar"). `nevpt2_demo` runs a `*_df` golden off the fitted four-index
+arrays it also carries, so this is the fitted energy's `y`. It is not
+`nevpt2_df_demo`'s slab path, which takes no `--gradient-source` until #162.
+The loader first rebuilds the fitted golden's `e_core`/`e_virt` from the
+sidecar to 7.56e-15 relative. Measured in the `default` preset's ctest run of
+#164 on the RTX 3080, it comes out at `n_det` 36 and `|y|` 0.6580. The worst
+seeded residual is 3.1e-15, the state itself 1.1e-12, and the worst Jacobian
+column 1.7e-12 at `I = 0`, which is also the worst overall (relative
+2.6e-12). Two earlier hand runs of the same binary gave 2.8e-12 and 3.6e-12
+worst, the same `atomicAdd` wander as the CAS(4,4) row above.
 
 `relative` is the worst overall residual over `|Edot(c)|`, the state
 direction's own dot product. The seeded directions' residuals are smaller in
@@ -3436,6 +3459,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_cas44_casscf`, `nevpt2_cas44_casscf_pc`, `nevpt2_df_cas44_casscf`, `nevpt2_df_cas44_casscf_pc` | the same four paths on **CASSCF orbitals** — a `NEVPT2G2` golden whose `reference_kind` is CASSCF ("The CASSCF-orbital entries", above). Same CAS(4,4) shape, so the same cost |
 | `nevpt2_cas44_casscf_sc_tangent`, `nevpt2_sc_pseudodensity_kappa_cas44_casscf` | the two source-term canaries on **CASSCF orbitals** (`--sc-tangent`, `--kappa-act`; "The source terms on CASSCF orbitals: the wave-0 canary", above). Their CASCI twins' cost |
 | `nevpt2_gradient_source_cas44_casscf`, `nevpt2_gradient_source_pc_cas44_casscf` | the SC and PC CI source terms' duality on **CASSCF orbitals**, with the CASSCF sidecar ("The source terms on CASSCF orbitals, measured", above). Their CASCI twins' cost |
+| `nevpt2_gradient_source_cas44_df` | the SC CI source term's duality on the **density-fitted** CAS(4,4) golden with its density-fitted sidecar (#164; "The CI source term's forward-reverse duality", above). Its CASCI twin's shape; not yet run under any sanitizer preset |
 
 They are ordinary golden checks too, so `ctest --preset fast` and
 `ctest --preset hip` run them on every backend.

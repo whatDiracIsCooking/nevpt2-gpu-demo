@@ -25,7 +25,10 @@ different times, the last by luck (issue #71). Since then there is one parser,
    ``nevpt2_numgrad.read_golden_pc_total``, ``block2_pc_probe.read_golden``,
    ``pyscf_contract_time.read_golden``) must return the same header and the
    same arrays. Each ``golden/*.gradgold`` and ``golden/*.mogold`` likewise,
-   through its reader and back through its writer, byte for byte -- and each
+   through its reader and back through its writer, byte for byte (both
+   gradient-sidecar flavours must be present: ``NEVPT2D1`` and the
+   density-fitted ``NEVPT2F1``, #164, which must sit beside a density-fitted
+   golden of its own ``naux``) -- and each
    ``golden/*.srcgold`` source-term oracle (#92) through
    ``golden_format.read_srcgold`` / ``write_srcgold``, held to the golden
    beside it (partition, determinant count and CI vector, bit for bit); all
@@ -87,7 +90,7 @@ PY_PARSER = re.compile(
 )
 #: What only src/golden/ may do in the C++ tree: open, read or seek a file, or
 #: spell a magic.
-CPP_PARSER = re.compile(r"\bfopen\b|\bfread\b|\bfseek\b|\bseekg\b|\bifstream\b|NEVPT2[GDM]\d")
+CPP_PARSER = re.compile(r"\bfopen\b|\bfread\b|\bfseek\b|\bseekg\b|\bifstream\b|NEVPT2[GDFM]\d")
 #: C++ files outside src/golden/ that read a file which is NOT one of the three
 #: golden layouts, each with why. They may open a file; they are still held to
 #: CPP_GOLDEN_SIGNS, so one that grows a seek or a golden magic fails as before.
@@ -98,7 +101,7 @@ CPP_NON_GOLDEN_READERS = {
     "apps/sc_pseudodensity/gradsrc.cpp": ".gradsrc (.npz) reader",
 }
 #: What even a CPP_NON_GOLDEN_READERS file may not do: seek, or spell a magic.
-CPP_GOLDEN_SIGNS = re.compile(r"\bfseek\b|\bseekg\b|NEVPT2[GDM]\d")
+CPP_GOLDEN_SIGNS = re.compile(r"\bfseek\b|\bseekg\b|NEVPT2[GDFM]\d")
 
 
 class Failures:
@@ -242,11 +245,19 @@ def committed_goldens(fail: Failures, tmp: Path) -> set[bytes]:
 
 
 def committed_sidecars(fail: Failures, tmp: Path) -> None:
+    flavours: set[bytes] = set()
     for path in sorted(GOLDEN.glob("*.gradgold")):
         r = fail.run(f"{path.name}: golden_format.read_gradgold", gf.read_gradgold, path)
         if r is None:
             continue
         header, arrays = r
+        # The magic is the first eight bytes; read_gradgold reports the
+        # flavour as the presence of naux, and the two must agree.
+        magic = path.read_bytes()[:8]
+        flavours.add(magic)
+        fail.check(("naux" in header) == (magic == gf.GRADGOLD_MAGIC_DF),
+                   f"{path.name}: {magic!r} but naux {'in' if 'naux' in header else 'not in'} "
+                   "the header read back")
         out = tmp / path.name
         gg.write_gradgold(out, **header, arrays=arrays)
         fail.check(out.read_bytes() == path.read_bytes(),
@@ -254,10 +265,24 @@ def committed_sidecars(fail: Failures, tmp: Path) -> None:
         out.unlink()
         twin = path.with_suffix(".nevpt2gold")
         if twin.exists():
-            g = gf.read_golden_header(twin)
+            g, ga = gf.read_golden(twin, want={"B_aa"})
             fail.check((header["nact"], header["ncore"]) == (g["ncas"], g["ncore"]),
                        f"{path.name}: its partition is not its golden's")
-        print(f"  {path.name}: {len(arrays)} arrays", flush=True)
+            # A density-fitted sidecar sits beside a density-fitted golden (one
+            # carrying B_aa) of the same auxiliary basis, and a conventional
+            # one beside a conventional golden.
+            fail.check(("naux" in header) == ("B_aa" in ga),
+                       f"{path.name}: its flavour is not its golden's (density-fitted "
+                       "sidecar beside a conventional golden, or the reverse)")
+            if "naux" in header and "B_aa" in ga:
+                fail.check(ga["B_aa"].shape[0] == header["naux"],
+                           f"{path.name}: naux {header['naux']} but its golden's B_aa "
+                           f"is {ga['B_aa'].shape}")
+        extra = f", naux {header['naux']}" if "naux" in header else ""
+        print(f"  {path.name}: {magic.decode()}, {len(arrays)} arrays{extra}", flush=True)
+    for magic in gf.GRADGOLD_MAGICS:
+        fail.check(magic in flavours, f"no committed {magic.decode()} *.gradgold was read, "
+                   "so that flavour is untested")
 
     for path in sorted(GOLDEN.glob("*.mogold")):
         r = fail.run(f"{path.name}: golden_format.read_mo_sidecar", gf.read_mo_sidecar, path)

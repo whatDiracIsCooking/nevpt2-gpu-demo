@@ -1,7 +1,8 @@
 """Hand cases for the guards that keep a noise-dependent state out of
 ``golden/``: ``_check_degeneracy``, ``_check_pc_conditioning`` (with the
 ``_pc_cut_gap`` it reads) and ``_check_gradient_invariants`` (both reference
-kinds), plus the ``--gradgold`` flag combinations ``_parse_args`` refuses. Each
+kinds), plus the ``--gradgold`` flag combinations ``_parse_args`` refuses (and
+the ones it permits, ``--df`` among them since #164). Each
 accepts a clean case and refuses one just across each threshold, on synthetic
 inputs -- no SCF, no CASCI, no block2.
 
@@ -366,9 +367,19 @@ def test_gradgold_with_mo_from_permitted():
 
 
 @pytest.mark.parametrize("argv", [
-    ["--casscf", "--mo-out", "x.mogold", "--gradgold"],  # writes no golden to sit beside
-    ["--df", "--gradgold"],                              # conventional integrals only
+    ["--df", "--gradgold"],
     ["--df", "--mo-from", "x.mogold", "--gradgold"],
+])
+def test_gradgold_with_df_permitted(argv):
+    """#164: the density-fitted sidecar (NEVPT2F1) is written, no longer
+    refused -- docs/gradient-theory.md, section 3.8."""
+    args = gg._parse_args(argv)
+    assert args.gradgold and args.df
+
+
+@pytest.mark.parametrize("argv", [
+    ["--casscf", "--mo-out", "x.mogold", "--gradgold"],  # writes no golden to sit beside
+    ["--df", "--casscf", "--mo-out", "x.mogold", "--gradgold"],
 ])
 def test_gradgold_refused_combinations(argv, capsys):
     with pytest.raises(SystemExit) as e:

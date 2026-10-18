@@ -603,10 +603,13 @@ TEST(GoldenLayoutContractTests, EveryCommittedGoldenOfBothLayoutsLoads) {
 TEST(GoldenLayoutContractTests, EveryCommittedGradientSidecarLoadsAgainstItsGolden) {
   const std::vector<std::string> paths = splitPaths(NEVPT2_TEST_COMMITTED_GRADGOLDS);
   ASSERT_FALSE(paths.empty()) << "test/golden/CMakeLists.txt globbed no gradient sidecar";
+  // Both flavours must be read: NEVPT2D1 and the density-fitted NEVPT2F1 (#164).
+  int conventional = 0, fitted = 0;
   for (const std::string& path : paths) {
     SCOPED_TRACE(path);
     const Result<GradGoldFile> side = loadGradGold(path);
     ASSERT_TRUE(side.has_value()) << side.error().message;
+    ++(side->densityFitted() ? fitted : conventional);
     EXPECT_TRUE(side->require({"mo_coeff"}).has_value());
     std::filesystem::path twin(path);
     twin.replace_extension(".nevpt2gold");
@@ -615,6 +618,8 @@ TEST(GoldenLayoutContractTests, EveryCommittedGradientSidecarLoadsAgainstItsGold
     ASSERT_TRUE(golden.has_value()) << golden.error().message;
     EXPECT_TRUE(side->checkAgainst(*golden).has_value());
   }
+  EXPECT_GT(conventional, 0) << "no committed NEVPT2D1 sidecar was read";
+  EXPECT_GT(fitted, 0) << "no committed NEVPT2F1 (density-fitted) sidecar was read";
 }
 
 // The golden and gradient sidecar beside an oracle path: <case>.<ext>, where

@@ -22,9 +22,15 @@
 //                           invariant of its §3.6, and the one-electron
 //                           matrices against the slices of them the committed
 //                           golden beside it carries (§3.5)
+//   GradGoldDfCas44Tests    the committed density-fitted (NEVPT2F1, #164)
+//                           golden/n2_ccpvdz_cas44_df.gradgold: header and
+//                           inventory, pairing with its *_df golden only, its
+//                           tied arrays as the six B blocks contracted, and
+//                           its matrices and orbital energies as the fitted
+//                           golden's (§3.8)
 //
 // The malformed and synthetic files are written to a per-test temp directory,
-// removed in TearDown. The two committed files are only ever read; their paths
+// removed in TearDown. The committed files are only ever read; their paths
 // come from CMake, not from this source.
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
@@ -40,6 +46,9 @@ import nevpt2.golden;
 #ifndef NEVPT2_TEST_GOLDEN_CAS44
 #error "NEVPT2_TEST_GOLDEN_CAS44 must be defined by test/golden/CMakeLists.txt"
 #endif
+#if !defined(NEVPT2_TEST_GRADGOLD_CAS44_DF) || !defined(NEVPT2_TEST_GOLDEN_CAS44_DF)
+#error "NEVPT2_TEST_GRADGOLD_CAS44_DF/_GOLDEN_CAS44_DF must be defined by test/golden/CMakeLists.txt"
+#endif
 
 // Not a module unit (gtest is a textual header), so no partition: the helpers
 // and suites live in a named namespace instead of an anonymous one.
@@ -47,6 +56,8 @@ namespace nevpt2::test::gradgold {
 
 constexpr std::string_view kGradGoldCas44 = NEVPT2_TEST_GRADGOLD_CAS44;
 constexpr std::string_view kGoldenCas44 = NEVPT2_TEST_GOLDEN_CAS44;
+constexpr std::string_view kGradGoldCas44Df = NEVPT2_TEST_GRADGOLD_CAS44_DF;
+constexpr std::string_view kGoldenCas44Df = NEVPT2_TEST_GOLDEN_CAS44_DF;
 
 // The committed CAS(4,4) sidecar's partition. Not a measured number: the
 // active space is the case's definition and the rest follows from cc-pVDZ on
@@ -227,9 +238,66 @@ TEST_F(GradGoldRoundTripTests, RowMajorOrderSurvivesTheRoundTrip) {
           EXPECT_LE(std::abs(t(x, p, i, v) - data[static_cast<std::size_t>(k)]), kExactTol);
 }
 
+TEST_F(GradGoldRoundTripTests, TheDensityFittedFlavourReadsItsNaux) {
+  // "NEVPT2F1" (#164): D1's six header fields, then naux, then the same
+  // array section. The flavour is the magic's, so the reader reports it.
+  constexpr int64_t nao = 7, ncore = 2, nact = 3, nvirt = 4, nmo = ncore + nact + nvirt;
+  constexpr int64_t naux = 5;
+  std::string bytes = sidecarHeader("NEVPT2F1", nao, nmo, ncore, nact, nvirt, 2 * ncore + 2);
+  appendI32(bytes, static_cast<std::int32_t>(naux));
+  appendI32(bytes, 2);
+  const std::vector<double> bcc = filled(naux * ncore * ncore, 3);
+  const std::vector<double> bvv = filled(naux * nvirt * nvirt, 300);
+  appendArray(bytes, "B_cc", {naux, ncore, ncore}, bcc);
+  appendArray(bytes, "B_vv", {naux, nvirt, nvirt}, bvv);
+
+  const Result<GradGoldFile> r = loadGradGold(write("mini_df.gradgold", bytes));
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_TRUE(r->densityFitted());
+  EXPECT_EQ(r->naux, naux);
+  EXPECT_EQ(r->nmo, nmo);
+  EXPECT_EQ(r->nelecRhf, 2 * ncore + 2);
+  const Tensor& t = r->get("B_vv");
+  EXPECT_EQ(t.dims(), (std::vector<int64_t>{naux, nvirt, nvirt}));
+  for (int64_t k = 0; k < t.size(); ++k)
+    EXPECT_LE(std::abs(t.flat(k) - bvv[static_cast<std::size_t>(k)]), kExactTol);
+}
+
+TEST_F(GradGoldRoundTripTests, AConventionalSidecarIsNotDensityFitted) {
+  std::string bytes = sidecarHeader("NEVPT2D1", 3, 4, 1, 1, 2, 2);
+  appendI32(bytes, 0);
+  const Result<GradGoldFile> r = loadGradGold(write("d1.gradgold", bytes));
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_FALSE(r->densityFitted());
+  EXPECT_EQ(r->naux, 0);
+}
+
 // --- GradGoldLoadErrorTests ---------------------------------------------------
 
 using GradGoldLoadErrorTests = GradGoldTempDir;
+
+TEST_F(GradGoldLoadErrorTests, ADensityFittedHeaderWithNoAuxiliaryBasisIsAnIoError) {
+  std::string bytes = sidecarHeader("NEVPT2F1", 3, 4, 1, 1, 2, 2);
+  appendI32(bytes, 0);  // naux
+  appendI32(bytes, 0);
+  expectIoError(loadGradGold(write("naux0.gradgold", bytes)), "naux = 0");
+}
+
+TEST_F(GradGoldLoadErrorTests, ATruncatedDensityFittedHeaderIsAnIoError) {
+  // D1's six fields present, F1's seventh missing.
+  const std::string bytes = sidecarHeader("NEVPT2F1", 3, 4, 1, 1, 2, 2);
+  expectIoError(loadGradGold(write("trunc_naux.gradgold", bytes)), "unexpected EOF");
+}
+
+TEST_F(GradGoldLoadErrorTests, AThreeIndexBlockOfTheWrongShapeIsAnIoError) {
+  // B_vv is [naux, nvirt, nvirt]; one sized by another naux is refused.
+  std::string bytes = sidecarHeader("NEVPT2F1", 3, 4, 1, 1, 2, 2);
+  appendI32(bytes, 5);
+  appendI32(bytes, 1);
+  appendArray(bytes, "B_vv", {6, 2, 2}, filled(24, 9));
+  expectIoError(loadGradGold(write("bad_bvv.gradgold", bytes)),
+                "B_vv has shape [6, 2, 2] but the header says [5, 2, 2]");
+}
 
 // A well-formed one-array sidecar, as the base for each corruption below.
 std::string goodSidecar() {
@@ -533,6 +601,209 @@ TEST_F(GradGoldCas44Tests, TheActiveIntegralBlockRestrictsToTheGoldensH2e) {
         for (int64_t w = 0; w < g.nact; ++w)
           worst = std::max(worst, std::abs(gAA(g.ncore + t, b, u, w) - h2e(t, u, b, w)));
   EXPECT_LE(worst, kExactTol);
+}
+
+// --- GradGoldDfCas44Tests -----------------------------------------------------
+//
+// The committed DENSITY-FITTED sidecar golden/n2_ccpvdz_cas44_df.gradgold
+// (#164) against the *_df golden beside it: its header and inventory, that it
+// pairs with that golden and refuses the conventional one, that its four tied
+// orbital-energy arrays are exactly the six B blocks contracted (the golden's
+// four and its own B_cc / B_vv -- which pins both of its blocks, B_vv off its
+// diagonal included, to the golden's fitted tensor), and that its matrices
+// are the fitted calculation's own: (O2) on the golden's e_core / e_virt, h^eff
+// on the golden's one-electron fields, and the orbital energies rebuilt from
+// the tied arrays.
+
+// The fitted golden's auxiliary-basis size: cc-pVDZ-JKFIT on N2. Not a
+// measured number, a property of the basis (docs/reference-data.md, "The
+// gradient sidecar").
+constexpr int64_t kNauxDf = 140;
+
+class GradGoldDfCas44Tests : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    Result<GradGoldFile> g = loadGradGold(std::string(kGradGoldCas44Df));
+    ASSERT_TRUE(g.has_value()) << g.error().message;
+    sidecar_ = std::make_unique<GradGoldFile>(std::move(*g));
+    Result<GoldenFile> r = loadGolden(std::string(kGoldenCas44Df));
+    ASSERT_TRUE(r.has_value()) << r.error().message;
+    golden_ = std::make_unique<GoldenFile>(std::move(*r));
+  }
+  static void TearDownTestSuite() {
+    sidecar_.reset();
+    golden_.reset();
+  }
+  void SetUp() override {
+    ASSERT_NE(sidecar_, nullptr) << "loadGradGold failed in SetUpTestSuite";
+    ASSERT_NE(golden_, nullptr) << "loadGolden failed in SetUpTestSuite";
+    ASSERT_TRUE(golden_->require({"B_aa", "B_ca", "B_va", "B_cv"}).has_value());
+  }
+
+  // B[L, p, q] over the whole MO range, from the six blocks: the golden's
+  // four (each stored once, so the transposed pairs read it swapped) and the
+  // sidecar's two.
+  static double b(const int64_t l, const int64_t p, const int64_t q) {
+    const GradGoldFile& g = *sidecar_;
+    const int64_t nocc = g.ncore + g.nact;
+    const auto space = [&](const int64_t i) { return i < g.ncore ? 0 : (i < nocc ? 1 : 2); };
+    const auto local = [&](const int64_t i) {
+      return i < g.ncore ? i : (i < nocc ? i - g.ncore : i - nocc);
+    };
+    const int sp = space(p), sq = space(q);
+    const int64_t lp = local(p), lq = local(q);
+    const GoldenFile& gold = *golden_;
+    if (sp == 0 && sq == 0) return g.get("B_cc")(l, lp, lq);
+    if (sp == 2 && sq == 2) return g.get("B_vv")(l, lp, lq);
+    if (sp == 1 && sq == 1) return gold.get("B_aa")(l, lp, lq);
+    if (sp == 0 && sq == 1) return gold.get("B_ca")(l, lp, lq);
+    if (sp == 1 && sq == 0) return gold.get("B_ca")(l, lq, lp);
+    if (sp == 2 && sq == 1) return gold.get("B_va")(l, lp, lq);
+    if (sp == 1 && sq == 2) return gold.get("B_va")(l, lq, lp);
+    if (sp == 0 && sq == 2) return gold.get("B_cv")(l, lp, lq);
+    return gold.get("B_cv")(l, lq, lp);  // virtual, core
+  }
+  // (pq|rs) = sum_L B[L,p,q] B[L,r,s]
+  static double eri(const int64_t p, const int64_t q, const int64_t r, const int64_t s) {
+    double acc = 0.0;
+    for (int64_t l = 0; l < sidecar_->naux; ++l) acc += b(l, p, q) * b(l, r, s);
+    return acc;
+  }
+
+  static std::unique_ptr<GradGoldFile> sidecar_;
+  static std::unique_ptr<GoldenFile> golden_;
+};
+
+std::unique_ptr<GradGoldFile> GradGoldDfCas44Tests::sidecar_;
+std::unique_ptr<GoldenFile> GradGoldDfCas44Tests::golden_;
+
+TEST_F(GradGoldDfCas44Tests, HeaderAndInventory) {
+  const GradGoldFile& g = *sidecar_;
+  EXPECT_TRUE(g.densityFitted());
+  EXPECT_EQ(g.naux, kNauxDf);
+  EXPECT_EQ(g.nao, kNao);
+  EXPECT_EQ(g.nmo, kNmo);
+  EXPECT_EQ(g.ncore, kNcore);
+  EXPECT_EQ(g.nact, kNact);
+  EXPECT_EQ(g.nvirt, kNvirt);
+  EXPECT_EQ(g.nelecRhf, kNelecRhf);
+  EXPECT_EQ(golden_->get("B_aa").dim(0), g.naux);
+  const int64_t m = g.nmo, c = g.ncore, a = g.nact, v = g.nvirt, l = g.naux;
+  // docs/gradient-theory.md, §3.8: the two blocks the golden lacks, §3.5's
+  // matrices of the fitted calculation, and the four tied arrays the orbital
+  // energies' response reads, under their conventional names and shapes.
+  const std::vector<std::pair<std::string, std::vector<int64_t>>> expected = {
+      {"mo_coeff", {g.nao, m}}, {"h", {m, m}},         {"heff", {m, m}},
+      {"f", {m, m}},            {"f_h", {m, m}},       {"fock_rhf", {m, m}},
+      {"B_cc", {l, c, c}},      {"B_vv", {l, v, v}},   {"g_xa_cc", {m, a, c, c}},
+      {"g_xc_ca", {m, c, c, a}}, {"g_xa_vv", {m, a, v}}, {"g_xv_va", {m, v, v, a}},
+  };
+  EXPECT_EQ(std::ssize(g.arrays), std::ssize(expected));
+  for (const auto& [name, dims] : expected) {
+    ASSERT_TRUE(g.require({name}).has_value()) << name;
+    EXPECT_EQ(g.get(name).dims(), dims) << name;
+  }
+}
+
+TEST_F(GradGoldDfCas44Tests, PairsWithItsFittedGoldenAndNoOther) {
+  EXPECT_TRUE(sidecar_->checkAgainst(*golden_).has_value());
+  // The conventional CAS(4,4) golden has the same partition, so only the
+  // flavour check can refuse it -- and the conventional sidecar beside the
+  // fitted golden likewise.
+  const Result<GoldenFile> conv = loadGolden(std::string(kGoldenCas44));
+  ASSERT_TRUE(conv.has_value()) << conv.error().message;
+  const Status s = sidecar_->checkAgainst(*conv);
+  ASSERT_FALSE(s.has_value());
+  EXPECT_EQ(s.error().kind, ErrorKind::IO);
+  EXPECT_NE(s.error().message.find("density-fitted (NEVPT2F1)"), std::string::npos)
+      << s.error().message;
+  const Result<GradGoldFile> convSide = loadGradGold(std::string(kGradGoldCas44));
+  ASSERT_TRUE(convSide.has_value()) << convSide.error().message;
+  const Status t = convSide->checkAgainst(*golden_);
+  ASSERT_FALSE(t.has_value());
+  EXPECT_NE(t.error().message.find("conventional (NEVPT2D1)"), std::string::npos)
+      << t.error().message;
+}
+
+TEST_F(GradGoldDfCas44Tests, TheTiedArraysAreTheSixBlocksContracted) {
+  // Every element of the four, rebuilt as sum_L B B with one index over the
+  // whole MO range: g_xa_cc's core rows read B_cc in full, g_xv_va's virtual
+  // rows read B_vv in full, so this holds both new blocks to the golden's
+  // fitted tensor, not only the diagonals the orbital energies need.
+  const GradGoldFile& g = *sidecar_;
+  const int64_t c = g.ncore, a = g.nact, v = g.nvirt, nocc = c + a;
+  const Tensor& xaCc = g.get("g_xa_cc");
+  const Tensor& xcCa = g.get("g_xc_ca");
+  const Tensor& xaVv = g.get("g_xa_vv");
+  const Tensor& xvVa = g.get("g_xv_va");
+  double worst = 0.0;
+  for (int64_t x = 0; x < g.nmo; ++x) {
+    for (int64_t t = 0; t < a; ++t) {
+      for (int64_t i = 0; i < c; ++i)
+        for (int64_t j = 0; j < c; ++j) {
+          worst = std::max(worst, std::abs(xaCc(x, t, i, j) - eri(x, c + t, i, j)));
+          worst = std::max(worst, std::abs(xcCa(x, i, j, t) - eri(x, i, j, c + t)));
+        }
+      for (int64_t r = 0; r < v; ++r) {
+        worst = std::max(worst, std::abs(xaVv(x, t, r) - eri(x, c + t, nocc + r, nocc + r)));
+        for (int64_t s = 0; s < v; ++s)
+          worst = std::max(worst, std::abs(xvVa(x, r, s, t) - eri(x, nocc + r, nocc + s, c + t)));
+      }
+    }
+  }
+  EXPECT_LE(worst, kExactTol);
+}
+
+TEST_F(GradGoldDfCas44Tests, TheFittedMatricesAreTheGoldensCalculation) {
+  // (O2) of §3.6, against the fitted golden's own orbital energies, and h^eff
+  // restricted to the fitted golden's one-electron fields: both files come
+  // out of one fitted canonicalisation, so to the f64 round trip.
+  const GradGoldFile& g = *sidecar_;
+  ASSERT_TRUE(golden_->require({"e_core", "e_virt", "h1e", "h1e_v_Si", "h1e_v_Sir"}).has_value());
+  const Tensor& f = g.get("f");
+  const Tensor& heff = g.get("heff");
+  const int64_t nocc = g.ncore + g.nact;
+  for (int64_t i = 0; i < g.ncore; ++i)
+    EXPECT_LE(std::abs(f(i, i) - golden_->get("e_core")(i)), kExactTol) << "core " << i;
+  for (int64_t r = 0; r < g.nvirt; ++r)
+    EXPECT_LE(std::abs(f(nocc + r, nocc + r) - golden_->get("e_virt")(r)), kExactTol)
+        << "virt " << r;
+  for (int64_t t = 0; t < g.nact; ++t) {
+    for (int64_t u = 0; u < g.nact; ++u)
+      EXPECT_LE(std::abs(heff(g.ncore + t, g.ncore + u) - golden_->get("h1e")(t, u)), kExactTol);
+    for (int64_t i = 0; i < g.ncore; ++i)
+      EXPECT_LE(std::abs(heff(g.ncore + t, i) - golden_->get("h1e_v_Si")(t, i)), kExactTol);
+  }
+  for (int64_t r = 0; r < g.nvirt; ++r)
+    for (int64_t i = 0; i < g.ncore; ++i)
+      EXPECT_LE(std::abs(heff(nocc + r, i) - golden_->get("h1e_v_Sir")(r, i)), kExactTol);
+}
+
+TEST_F(GradGoldDfCas44Tests, TheTiedArraysRebuildTheOrbitalEnergies) {
+  // What --gradient-source's eps-response mode reads (gradient_plan.cppm's
+  // OrbitalEnergyResponse): e_p = h^eff_pp + sum_ut dm1_ut W_p[u, t], with
+  //   core i:     W_i[u, t] = g_xa_cc[u, t, i, i] - 1/2 g_xc_ca[u, i, i, t]
+  //   virtual r:  W_r[u, t] = g_xa_vv[u, t, r]    - 1/2 g_xv_va[u, r, r, t]
+  // (u, t at their general index ncore + u), against the fitted golden's.
+  const GradGoldFile& g = *sidecar_;
+  ASSERT_TRUE(golden_->require({"dm1", "e_core", "e_virt"}).has_value());
+  const Tensor& dm1 = golden_->get("dm1");
+  const Tensor& heff = g.get("heff");
+  const int64_t c = g.ncore, a = g.nact, nocc = c + a;
+  for (int64_t i = 0; i < c; ++i) {
+    double e = heff(i, i);
+    for (int64_t u = 0; u < a; ++u)
+      for (int64_t t = 0; t < a; ++t)
+        e += dm1(u, t) * (g.get("g_xa_cc")(c + u, t, i, i) - 0.5 * g.get("g_xc_ca")(c + u, i, i, t));
+    EXPECT_LE(std::abs(e - golden_->get("e_core")(i)), kExactTol) << "core " << i;
+  }
+  for (int64_t r = 0; r < g.nvirt; ++r) {
+    double e = heff(nocc + r, nocc + r);
+    for (int64_t u = 0; u < a; ++u)
+      for (int64_t t = 0; t < a; ++t)
+        e += dm1(u, t) * (g.get("g_xa_vv")(c + u, t, r) - 0.5 * g.get("g_xv_va")(c + u, r, r, t));
+    EXPECT_LE(std::abs(e - golden_->get("e_virt")(r)), kExactTol) << "virt " << r;
+  }
 }
 
 }  // namespace nevpt2::test::gradgold

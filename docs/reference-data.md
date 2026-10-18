@@ -355,6 +355,10 @@ uv run python reference_data/generate_golden.py --df --basis cc-pvtz --name n2_c
 # the small cases, with their gradient sidecars (see "The gradient sidecar")
 uv run python reference_data/generate_golden.py --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44 --gradgold
 uv run python reference_data/generate_golden.py --ncas 8 --nelecas 8 --name n2_ccpvdz_cas88 --gradgold
+# ... and their _df twins, with the density-fitted sidecar (see "The
+# density-fitted gradient sidecar")
+uv run python reference_data/generate_golden.py --df --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_df --gradgold
+uv run python reference_data/generate_golden.py --df --ncas 8 --nelecas 8 --name n2_ccpvdz_cas88_df --gradgold
 
 # the 12-orbital files: CAS(10,12) is the PC case, CAS(12,12) is refused one
 uv run python reference_data/generate_golden.py --ncas 12 --nelecas 10 --name n2_ccpvdz_cas1012
@@ -716,8 +720,8 @@ never from a length it knows:
 |---|---|---|
 | `.nevpt2gold` | C++: `loadGolden` (`src/golden/golden.cpp`, over the `nevpt2.golden:reader` cursor); `GoldenFile::arraysAt` is the derived offset | every demo's `main` (`apps/integral_direct`, `apps/density_fit`, `apps/pc_tangent`, `apps/sc_pseudodensity`) |
 | `.nevpt2gold` | Python: `golden_format.read_golden` / `read_golden_header` (`reference_data/golden_format.py`); `arrays_at` is the derived offset | `nevpt2_numgrad.py` (`read_golden_header`, `read_golden_pc_total`), `nevpt2_grad.py` (the same two), `block2_pc_probe.read_golden`, `pyscf_contract_time.read_golden` |
-| `.gradgold` | C++: `loadGradGold` (`src/golden/gradgold.cpp`) | `apps/sc_pseudodensity` (`--kappa-full`, `--dump-source-terms`, `--source-oracle`), `apps/integral_direct` (`--gradient-source --gradgold`) |
-| `.gradgold` | Python: `golden_format.read_gradgold` | `nevpt2_numgrad.py` (rewrites the sidecar with `grad_num`), `nevpt2_grad.py` (reads `grad_num`) |
+| `.gradgold` (`NEVPT2D1`; density-fitted `NEVPT2F1`, #164) | C++: `loadGradGold` (`src/golden/gradgold.cpp`); `GradGoldFile::densityFitted()` / `naux` are the flavour | `apps/sc_pseudodensity` (`--kappa-full`, `--dump-source-terms`, `--source-oracle`), `apps/integral_direct` (`--gradient-source --gradgold`) |
+| `.gradgold` (both flavours) | Python: `golden_format.read_gradgold` (`naux` in the header only for `NEVPT2F1`) | `nevpt2_numgrad.py` (rewrites the sidecar with `grad_num`), `nevpt2_grad.py` (reads `grad_num`) |
 | `.mogold` | Python: `golden_format.read_mo_sidecar` | `generate_golden.read_mo_sidecar` (`--mo-from`, which adds its own checks); no C++ reader — it is generator input |
 | `.srcgold` (`NEVPT2S1` SC, `NEVPT2P1` PC; directional `NEVPT2SD` / `NEVPT2PD`, #105) | C++: `loadSrcGold` (`src/golden/srcgold.cpp`); `SrcGoldFile::scheme` and `::flavour` are the kind, `srcGoldCase` the golden a `<case>[_pc][_dir].srcgold` belongs to | `apps/sc_pseudodensity` (`--source-oracle`; a PC one with `--pc`, #74; a directional one through `compareSourceDirections`, #105); `test/source_compare/` (all four kinds, through `nevpt2.source_compare`) |
 | `.srcgold` (all four) | Python: `golden_format.read_srcgold` (`header["scheme"]`, `header["flavour"]`), `srcgold_name`, `srcgold_case` | `sc_source_oracle.py` (reads back what it wrote, `--pc` and `--directional` too); `golden_layout_check.py` |
@@ -1013,9 +1017,83 @@ beside it **is** committed, so only the gradient half needs regenerating (~31 s,
 byte-identical). Both goldens stayed byte-identical with and without
 `--gradgold`, as at CAS(4,4)/CAS(8,8).
 
-`--gradgold` is conventional-integral only and is refused with `--df`: the
-derivation names the conventional Fock, and a fitted sidecar's (O1)/(O2) would
-hold against a different one.
+#### The density-fitted gradient sidecar
+
+`--df --gradgold` writes the **density-fitted** flavour (#164), beside a
+`*_df` golden: the same `.gradgold` suffix, its own magic `NEVPT2F1`, and the
+`NEVPT2D1` header followed by one more `int32`, `naux`
+(`golden_format.GRADGOLD_HEADERS`; `loadGradGold` reads both flavours and
+reports this one as `GradGoldFile::densityFitted()`). A new magic rather than
+more arrays under `NEVPT2D1`, because its integrals belong to a different
+calculation, the fitted one. The magic is what says so, and no consumer has
+to guess it from which arrays are present. `GradGoldFile::checkAgainst`
+refuses a fitted sidecar beside a conventional golden, a conventional one
+beside a fitted golden, and an `naux` that is not the golden's `B_aa` leading
+extent. [`gradient-theory.md`](gradient-theory.md), §3.8 is the inventory it
+carries out:
+
+- **`B_cc` and `B_vv`**, `[naux, ncore, ncore]` and `[naux, nvirt, nvirt]`:
+  the two blocks of `(L|pq)` the golden lacks. With the golden's `B_aa`,
+  `B_ca`, `B_va` and `B_cv` they make the whole tensor, and the whole tensor
+  is what `Y` reads over its full range. They are stored square, like the
+  golden's four.
+- **§3.5's six matrices** (`mo_coeff`, `h`, `heff`, `f`, `f_h`, `fock_rhf`)
+  of the *fitted* calculation, built by the same code as the conventional
+  ones (`_gradient_matrices`) out of `dfnevpt2._ERIS` and the density-fitted
+  RHF.
+- **The four tied orbital-energy arrays**, `g_xa_cc`, `g_xc_ca`, `g_xa_vv`,
+  `g_xv_va`, with the conventional sidecar's names and shapes, each `Σ_L B B`.
+  They are what `--gradient-source`'s `eps`-response mode reads, with `heff`
+  (`OrbitalEnergyResponse`, `loadOrbitalEnergyResponse`). Carrying them under
+  the conventional layout means the one C++ reader of that response reads a
+  fitted sidecar unchanged. They are redundant with the six `B` blocks.
+
+No other conventional `(xP|QR)` array is carried: the density-fitted gradient
+never forms one (§3.8). The generator asserts (O1)–(O3) against the fitted
+Fock, the one §3.8 says a fitted gradient's invariants hold against. It also
+requires the four tied arrays and `heff` to rebuild the golden's
+`e_core`/`e_virt` (`DF_EPS_REBUILD_TOL`, 1e-10 relative) before it writes the
+file. Both small cases are committed:
+
+```bash
+uv run python reference_data/generate_golden.py --df --ncas 4 --nelecas 4 \
+    --name n2_ccpvdz_cas44_df --gradgold
+uv run python reference_data/generate_golden.py --df --ncas 8 --nelecas 8 \
+    --name n2_ccpvdz_cas88_df --gradgold
+```
+
+Measured on those two (cc-pVDZ-JKFIT, `naux` = 140, nmo = 28):
+
+| | CAS(4,4) `_df` | CAS(8,8) `_df` |
+|---|---|---|
+| ncore / nact / nvirt | 5 / 4 / 19 | 3 / 8 / 17 |
+| `*_df.nevpt2gold` | 0.47 MB | 0.79 MB |
+| `*_df.gradgold` (12 arrays) | 0.86 MB | 0.95 MB |
+| `B_cc` / `B_vv` | 0.028 / 0.404 MB | 0.010 / 0.324 MB |
+| the four tied arrays, `g_xv_va` of them | 0.38 MB, 0.32 MB | 0.58 MB, 0.52 MB |
+| the six matrices | 0.04 MB | 0.04 MB |
+| (O1) core–act / core–virt / act–virt | 0.0 / 9.28e-8 / 1.00e-7 | 7.32e-8 / 5.57e-8 / 1.00e-7 |
+| (O2) | 2.10e-13 | 4.22e-13 |
+| (O3) active orbitals below the RHF HOMO | 2 of 4 | 4 of 8 |
+| `e_core`/`e_virt` from `heff` + the tied arrays, relative | 7.56e-15 | 1.83e-14 |
+
+Both `_df` goldens stay byte-identical with and without `--gradgold`, and
+`devtools/golden-repro.sh` regenerates both sidecars byte for byte. The
+largest array is `g_xv_va`, the full `(x r | s t)`, and it is the price of
+reusing the conventional reader. The response reads only its `r = s` tie,
+which `B_vv`'s diagonal and `B_va` already give. A DF-specific builder of
+`OrbitalEnergyResponse` would drop it, but at these sizes it costs less than
+`B_vv`. `test/golden`'s `GradGoldDfCas44Tests` checks the CAS(4,4) one against
+its golden card-free: every element of the four tied arrays against `Σ_L B B`
+over the six blocks (which pins `B_cc` and `B_vv` in full, off-diagonal
+included, to the golden's fitted tensor), `f` against `e_core`/`e_virt`,
+`heff` against the golden's one-electron fields, and the orbital energies
+rebuilt from the tied arrays. **What reads it**, so far, is the `eps`-response
+mode of `nevpt2_demo --gradient-source --gradgold`, which runs a `*_df`
+golden off its four-index arrays: the `gpu;small` entry
+`nevpt2_gradient_source_cas44_df` ([`testing.md`](testing.md), "The CI source
+term's forward-reverse duality"). `nevpt2_df_demo`'s own `--gradient-source`
+(#162) and the density-fitted `Y` (#165) are the consumers it exists for.
 
 ### The CASSCF-reference gradient sidecar
 
@@ -2170,7 +2248,8 @@ sizes (see [`testing.md`](testing.md)), and they are ordinary `small`-labelled
 entries in `ctest --preset fast` too. CAS(8,8) is the one with all eight
 classes non-zero. They are also the two cases that carry a gradient sidecar
 (see "The gradient sidecar" above), for the same reason: small enough that the
-general-range integral inventory is cheap.
+general-range integral inventory is cheap. Their `_df` twins carry the
+density-fitted one ("The density-fitted gradient sidecar").
 
 CAS(4,4) is the small case that also exists on **CASSCF orbitals**,
 conventional and DF (`n2_ccpvdz_cas44_casscf[_df]`, see "The MO sidecar:
@@ -2526,6 +2605,7 @@ not used.
 | `golden/n2_ccpvdz_cas1010_casscf.mogold`, `golden/n2_ccpvdz_cas1010_casscf.nevpt2gold` | the same at the **production size**, CAS(10,10) (1.13 MB, SC and PC; `--tiles 3`). Its sidecar's optimisation takes 16 macro iterations and its golden ~2 min to rebuild, nearly all of it block2's dense 4-RDM |
 | `golden/n2_ccpvdz_cas44_casscf_df.mogold`, `golden/n2_ccpvdz_cas44_casscf_df.nevpt2gold` | the **density-fitted** CASSCF-orbital case, `nevpt2_df_demo`'s CASSCF reference (0.47 MB, SC and PC): fitted throughout, the orbital optimisation included, so the aux basis is part of the sidecar's fingerprint |
 | `golden/n2_ccpvdz_cas44.gradgold`, `golden/n2_ccpvdz_cas88.gradgold` | the **gradient sidecars** for those two cases: the general-range MO-integral blocks an analytic gradient reads, plus the full-range Fock matrices and `mo_coeff` (see "The gradient sidecar" above). Separate files, so the goldens beside them are untouched. `test/golden/gradgold_tests.cpp` round-trips the reader and checks the CAS(4,4) one against the golden beside it. Neither holds a `grad_num`: they stay the 24 arrays `--gradgold` writes, and CAS(4,4)'s numerical gradient goes to an `--npz` instead — `nevpt2_numgrad.py` refuses the in-place write for that case rather than move these bytes ([`testing.md`](testing.md), "The analytic gradient against the numerical one") |
+| `golden/n2_ccpvdz_cas44_df.gradgold`, `golden/n2_ccpvdz_cas88_df.gradgold` | the **density-fitted gradient sidecars** (#164, `NEVPT2F1`; 0.86 / 0.95 MB) beside the two small `_df` goldens: `B_cc` and `B_vv` (the blocks of `(L\|pq)` the golden lacks), the fitted calculation's six full-range matrices, and the four tied orbital-energy arrays (see "The density-fitted gradient sidecar" above). `devtools/golden-repro.sh` regenerates both byte for byte; `test/golden/gradgold_tests.cpp`'s `GradGoldDfCas44Tests` holds the CAS(4,4) one to its golden, and `nevpt2_gradient_source_cas44_df` reads it on a card; `nevpt2_df_demo` does not read either yet (#162, #165) |
 | `golden/n2_ccpvdz_cas44_casscf.gradgold` | the **CASSCF-reference gradient sidecar** (1.52 MB): the same 24 arrays on the committed CASSCF orbitals of `n2_ccpvdz_cas44_casscf.mogold`, written by its `--mo-from` step with `--gradgold`. Reproducible from the committed `.mogold` byte for byte, from scratch only to a tolerance, so `golden-repro.sh` makes no claim over it; (O2) asserted, (O1)/(O3) not (see "The CASSCF-reference gradient sidecar" above) |
 | `golden/n2_ccpvdz_cas44.srcgold`, `golden/lif_def2svp_cas46.srcgold` | the **SC source-term oracles** (7.4 / 10.1 KB): PySCF's exact `A` and `P y` for those two states (see "The SC source-term oracle" above). Read by `loadSrcGold` and nothing else at run time; `test/golden`'s `GoldenLayoutContractTests` and `SrcGoldLoadErrorTests` hold the reader to them |
 | `golden/*_dir.srcgold` (five on RHF orbitals; the CASSCF-orbital four are the `n2_ccpvdz_cas44_casscf*` and `acrolein_def2svp_cas65_casscf*` rows below) | the **directional source-term oracles** (#105; `NEVPT2SD` / `NEVPT2PD`): seeded directions per block and the oracle's converged derivative along each, for acrolein CAS(6,5) SC and PC, N2 CAS(4,4) SC and PC and LiF SC ("The directional flavour" above has their sizes). `nevpt2_sc_pseudodensity_oracle_dir_*` hold the GPU's terms to them; `test/source_compare/` and `test/golden` hold the comparator and the reader |

@@ -70,6 +70,13 @@ def _write_gradgold(path):
     gg.write_gradgold(path, **GRAD_HEADER, arrays=_arrays())
 
 
+GRAD_HEADER_DF = dict(GRAD_HEADER, naux=17)
+
+
+def _write_gradgold_df(path):
+    gg.write_gradgold(path, **GRAD_HEADER_DF, arrays=_arrays())
+
+
 def _write_mo_sidecar(path, fields=None, arrays=None):
     gg.write_mo_sidecar(
         path, **MO_HEADER,
@@ -152,6 +159,37 @@ def test_gradgold_round_trip_and_rewrite(tmp_path):
     assert p.read_bytes()[:8] == gf.GRADGOLD_MAGIC == b"NEVPT2D1"
     gg.write_gradgold(q, **header, arrays=arrays)
     assert p.read_bytes() == q.read_bytes()
+
+
+def test_gradgold_df_header(tmp_path):
+    """The density-fitted sidecar (#164): magic ``NEVPT2F1``, the six
+    partition fields in ``D1``'s order and then ``naux`` -- seven int32s, so
+    the array table starts at byte 36 -- read back with ``naux`` in the header
+    and written back byte for byte from it."""
+    p, q = tmp_path / "a.gradgold", tmp_path / "b.gradgold"
+    _write_gradgold_df(p)
+    raw = p.read_bytes()
+    assert raw[:8] == gf.GRADGOLD_MAGIC_DF == b"NEVPT2F1"
+    assert _header_len(gf.GRADGOLD_HEADERS, gf.GRADGOLD_MAGIC_DF) == 36
+    assert struct.unpack_from("<7i", raw, 8) == (10, 10, 3, 4, 3, 14, 17)
+    header, arrays = gf.read_gradgold(p)
+    assert header == GRAD_HEADER_DF
+    assert list(header) == [*GRAD_HEADER, "naux"]
+    _assert_arrays_equal(arrays, _arrays())
+    gg.write_gradgold(q, **header, arrays=arrays)
+    assert raw == q.read_bytes()
+
+
+def test_gradgold_flavours_differ_only_in_magic_and_naux(tmp_path):
+    """The same partition and arrays in both flavours: the D1 file is the F1
+    one with its magic's letter D for F and less the four naux bytes."""
+    _write_gradgold(tmp_path / "d")
+    _write_gradgold_df(tmp_path / "f")
+    d, f = (tmp_path / "d").read_bytes(), (tmp_path / "f").read_bytes()
+    assert (d[6:7], f[6:7]) == (b"D", b"F")
+    assert d[:6] + d[7:32] == f[:6] + f[7:32]
+    assert f[32:36] == struct.pack("<i", 17)
+    assert d[32:] == f[36:]
 
 
 def test_mo_sidecar_round_trip(tmp_path):
@@ -243,6 +281,7 @@ WRITERS = {
     "golden": (_write_golden, gf.read_golden),
     "golden_v1": (_write_golden_v1, gf.read_golden),
     "gradgold": (_write_gradgold, gf.read_gradgold),
+    "gradgold_df": (_write_gradgold_df, gf.read_gradgold),
     "mogold": (_write_mo_sidecar, gf.read_mo_sidecar),
     "srcgold_sc": (lambda p: _write_srcgold(p, "sc"), gf.read_srcgold),
     "srcgold_pc": (lambda p: _write_srcgold(p, "pc"), gf.read_srcgold),
