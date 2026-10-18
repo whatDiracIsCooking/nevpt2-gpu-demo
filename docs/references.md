@@ -40,6 +40,66 @@
   amplitude and multipliers are Eqs. 12 and 36-38, the pseudodensities
   Eqs. 41-47, and the consistency identity its ctest entries assert is Eq. 40.
 
+- Y. Nishimoto, *Analytic first-order derivatives of partially contracted
+  n-electron valence state second-order perturbation theory (PC-NEVPT2)*,
+  J. Chem. Phys. **151**, 114103 (2019).
+  [doi:10.1063/1.5115819](https://doi.org/10.1063/1.5115819). An independent
+  PC-NEVPT2 first-derivative implementation, contemporaneous with Park's. Cited
+  by [`hessian-theory.md`](hessian-theory.md), §8 for its *second* derivatives:
+  they are seminumerical — a stencil over the analytic gradient — which is the
+  state of the art for this class of method and the reason that document's
+  level 3 has no analytic oracle to be checked against.
+
+## Derivative theory: Lagrangians, and what order of response a derivative needs
+
+The framework [`hessian-theory.md`](hessian-theory.md), §7–§8 rests on. Park's
+Eq. 31 Lagrangian is an instance of it; what these add is the **rule for which
+responses a given derivative order needs**, which is what separates a gradient
+(one Z-vector solve) from a Hessian (`3N` response solves).
+
+- T. Helgaker, P. Jørgensen, *Analytical calculation of geometrical
+  derivatives in molecular electronic structure theory*, Adv. Quantum Chem.
+  **19**, 183 (1988).
+  [doi:10.1016/S0065-3276(08)60616-4](https://doi.org/10.1016/S0065-3276(08)60616-4)
+- T. Helgaker, P. Jørgensen, *Configuration-interaction energy derivatives in
+  a fully variational formulation*, Theor. Chim. Acta **75**, 111 (1989).
+  [doi:10.1007/BF00527713](https://doi.org/10.1007/BF00527713). The
+  fully-variational Lagrangian in which the state and orbital response
+  parameters obey the **2n+1** rule and the Lagrange multipliers the stronger
+  **2n+2** rule. That pair is what fixes
+  [`hessian-theory.md`](hessian-theory.md), §8's cost: a second derivative
+  needs the wavefunction parameters only to **first** order and the multipliers
+  only to **zeroth** — the gradient's own `Z`, undifferentiated.
+- P. Jørgensen, T. Helgaker, *A numerically stable procedure for calculating
+  Møller–Plesset energy derivatives, derived using the theory of Lagrangians*,
+  Theor. Chim. Acta (1988).
+  [doi:10.1007/BF00532006](https://doi.org/10.1007/BF00532006)
+
+- R. Shepard, H. Lischka, *Analytic energy second derivatives for general
+  MCSCF wave functions*, J. Chem. Phys. **80**, 2660 (1984).
+  [doi:10.1063/1.447061](https://doi.org/10.1063/1.447061). The general MCSCF
+  second-derivative formulation, including the redundant variables that the
+  active–active gauge ([`gradient-theory.md`](gradient-theory.md), §1.3) puts
+  into the coupled-perturbed equations.
+- T. J. Dudley, R. M. Olson, M. W. Schmidt, M. S. Gordon, *Parallel coupled
+  perturbed CASSCF equations and analytic CASSCF second derivatives*,
+  J. Comput. Chem. **27**, 352 (2006).
+  [doi:10.1002/jcc.20350](https://doi.org/10.1002/jcc.20350). An implemented
+  CP-CASSCF / analytic CASSCF second derivative. Cited by
+  [`hessian-theory.md`](hessian-theory.md), §1.1 and §8 as the evidence that
+  the reference-side half of a nuclear NEVPT2 Hessian — the `3N` response
+  solves — is established machinery rather than an open problem.
+
+## Numerical linear algebra
+
+- G. H. Golub, V. Pereyra, *The differentiation of pseudo-inverses and
+  nonlinear least squares problems whose variables separate*, SIAM J. Numer.
+  Anal. **10**, 413 (1973).
+  [doi:10.1137/0710036](https://doi.org/10.1137/0710036). The derivative of a
+  Moore–Penrose pseudo-inverse at locally constant rank, which
+  [`hessian-theory.md`](hessian-theory.md), §6 differentiates a second time.
+  Note the two range-complement terms carry `A^+ A^+`, **not** `A^+`.
+
 ## Related work
 
 - A. Y. Sokolov, G. K.-L. Chan, *A time-dependent formulation of
