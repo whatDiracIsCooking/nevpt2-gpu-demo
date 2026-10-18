@@ -1,6 +1,7 @@
-// loadGradGold: the `*.gradgold` sidecar reader. An implementation unit of
+// loadGradGold: the `*.gradgold` sidecar reader, both flavours (conventional
+// "NEVPT2D1", density-fitted "NEVPT2F1", #164). An implementation unit of
 // nevpt2.golden, so it shares the one byte-level cursor and array parser with
-// loadGolden (`import :reader;`) -- the two formats differ only in their magic
+// loadGolden (`import :reader;`) -- the formats differ only in their magic
 // and their scalar header.
 module;
 
@@ -27,6 +28,20 @@ Status GradGoldFile::checkAgainst(const GoldenFile& golden) const {
         "gradient sidecar: its partition is {} core / {} active orbitals, but the golden it "
         "was given with has {} / {} -- the two files do not describe the same state",
         ncore, nact, golden.ncore, golden.ncas));
+  // A *_df golden is the one carrying the three-index blocks.
+  const auto bAa = golden.arrays.find("B_aa");
+  const bool goldenFitted = bAa != golden.arrays.end();
+  if (densityFitted() != goldenFitted)
+    return err_io(std::format(
+        "gradient sidecar: it is {} but the golden it was given with is {} -- a gradient "
+        "needs both files from one calculation",
+        densityFitted() ? "density-fitted (NEVPT2F1)" : "conventional (NEVPT2D1)",
+        goldenFitted ? "density-fitted (it carries B_aa)" : "conventional (no B_aa)"));
+  if (goldenFitted && (bAa->second.dims().empty() || bAa->second.dims()[0] != naux))
+    return err_io(std::format(
+        "gradient sidecar: naux = {}, but the golden's B_aa has a different leading extent -- "
+        "the two were fitted with different auxiliary bases",
+        naux));
   return {};
 }
 
@@ -40,9 +55,12 @@ const Tensor& GradGoldFile::get(const std::string& name) const {
 Result<GradGoldFile> loadGradGold(const std::string& path) {
   Reader r = NEVPT2_TRY(Reader::open(path, "gradient sidecar"));
   const std::string magic = NEVPT2_TRY(r.str(8));
-  if (magic != "NEVPT2D1")
+  // Two flavours, one layout but for the density-fitted one's trailing naux
+  // (reference_data/golden_format.py's GRADGOLD_HEADERS).
+  const bool fitted = magic == "NEVPT2F1";
+  if (magic != "NEVPT2D1" && !fitted)
     return err_io("gradient sidecar: bad magic (got '" + magic +
-                  "', expected 'NEVPT2D1') -- " + path);
+                  "', expected 'NEVPT2D1' or 'NEVPT2F1') -- " + path);
 
   GradGoldFile g;
   g.nao = NEVPT2_TRY(r.i32());
@@ -51,6 +69,14 @@ Result<GradGoldFile> loadGradGold(const std::string& path) {
   g.nact = NEVPT2_TRY(r.i32());
   g.nvirt = NEVPT2_TRY(r.i32());
   g.nelecRhf = NEVPT2_TRY(r.i32());
+  if (fitted) {
+    g.naux = NEVPT2_TRY(r.i32());
+    // densityFitted() is naux > 0, so a zero here would read as the other
+    // flavour.
+    if (g.naux < 1)
+      return err_io(std::format(
+          "gradient sidecar: a density-fitted header with naux = {} -- {}", g.naux, path));
+  }
   // Every array's shape is written in terms of this partition, so a header
   // that does not add up would size the shape checks against nothing.
   if (g.nao < 1 || g.nmo < 1 || g.ncore < 0 || g.nact < 1 || g.nvirt < 0)
@@ -83,6 +109,20 @@ Result<GradGoldFile> loadGradGold(const std::string& path) {
       return err_io(std::format(
           "gradient sidecar: mo_coeff has shape [{}] but the header says [{}, {}] -- {}", got,
           g.nao, g.nmo, path));
+    }
+  }
+  // The two three-index blocks are the ones shaped by naux, so they are what
+  // the header's auxiliary count is checked against.
+  for (const auto& [name, rows] : {std::pair{"B_cc", g.ncore}, std::pair{"B_vv", g.nvirt}}) {
+    const auto b = g.arrays.find(name);
+    if (b == g.arrays.end()) continue;
+    if (b->second.dims() != std::vector<int64_t>{g.naux, rows, rows}) {
+      std::string got;
+      for (const int64_t d : b->second.dims())
+        got += (got.empty() ? "" : ", ") + std::to_string(d);
+      return err_io(
+          std::format("gradient sidecar: {} has shape [{}] but the header says [{}, {}, {}] -- {}",
+                      name, got, g.naux, rows, rows, path));
     }
   }
   return g;

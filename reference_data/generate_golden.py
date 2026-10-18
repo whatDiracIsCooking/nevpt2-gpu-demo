@@ -97,6 +97,17 @@ cases::
     uv run python reference_data/generate_golden.py --ncas 8 --nelecas 8 \\
         --name n2_ccpvdz_cas88 --gradgold
 
+With ``--df`` the sidecar is the **density-fitted** flavour (magic
+``NEVPT2F1``, :func:`_df_gradient_arrays`; docs/gradient-theory.md, section
+3.8): the two three-index blocks the ``_df`` golden lacks (``B_cc``,
+``B_vv``), the fitted calculation's own full-range matrices, and the four tied
+orbital-energy arrays, committed for the same two small cases::
+
+    uv run python reference_data/generate_golden.py --df --ncas 4 --nelecas 4 \\
+        --name n2_ccpvdz_cas44_df --gradgold
+    uv run python reference_data/generate_golden.py --df --ncas 8 --nelecas 8 \\
+        --name n2_ccpvdz_cas88_df --gradgold
+
 and the salicylaldimine CAS(8,8)/6-31G** pair (gitignored, 145/166 MB; the
 pi space picked by irrep, the DF one fitted with 6-31G**-RIFIT)::
 
@@ -494,8 +505,16 @@ def write_gradgold(
     nvirt: int,
     nelec_rhf: int,
     arrays: dict[str, np.ndarray],
+    naux: int | None = None,
 ) -> None:
     """Write the gradient sidecar (``*.gradgold``) for the golden beside it.
+
+    ``naux`` given writes the **density-fitted** flavour instead (#164):
+    magic ``NEVPT2F1``, the same six header fields followed by ``i naux``,
+    and :func:`_df_gradient_arrays`'s arrays -- see that function for what
+    they are and why. ``golden_format.read_gradgold`` hands ``naux`` back in
+    the header of such a file and only there, so a read-back header written
+    with ``**header`` picks the magic it was read with.
 
     Same named-array section as :func:`write_golden` (``gf.write_arrays``),
     a different magic and a different scalar header -- the sidecar's header is
@@ -529,9 +548,11 @@ def write_gradgold(
     and ``golden_format.read_gradgold`` is the Python reader (the header is
     ``golden_format.GRADGOLD_HEADERS``).
     """
+    magic = GRADGOLD_MAGIC if naux is None else gf.GRADGOLD_MAGIC_DF
     with open(path, "wb") as f:
-        f.write(gf.pack_header(gf.GRADGOLD_HEADERS, GRADGOLD_MAGIC, dict(
+        f.write(gf.pack_header(gf.GRADGOLD_HEADERS, magic, dict(
             nao=nao, nmo=nmo, ncore=ncore, nact=nact, nvirt=nvirt, nelec_rhf=nelec_rhf,
+            naux=naux,
         )))
         gf.write_arrays(f, arrays)
 
@@ -1470,20 +1491,16 @@ def _integral_blocks(pt, eris) -> dict:
     )
 
 
-def _df_blocks(pt, with_df, eris) -> dict:
-    """The MO three-index blocks ``B[L,p,q]`` with ``(pq|rs) = sum_L
-    B[L,p,q] B[L,r,s]`` -- the same fitted integrals ``dfnevpt2._ERIS`` built
-    its four-index blocks from (PySCF stores ``_cderi`` already multiplied by
-    the inverse square root of the metric, so no metric appears here).
-
-    Checked before returning: every four-index block ``eris`` holds is rebuilt
-    from these and must agree to 1e-10, so a file whose ``B`` and four-index
-    arrays disagree is never written."""
+def _df_lpq(pt, with_df) -> np.ndarray:
+    """The whole MO three-index tensor ``B[L,p,q]``, ``(naux, nmo, nmo)``,
+    with ``(pq|rs) = sum_L B[L,p,q] B[L,r,s]`` -- the same fitted integrals
+    ``dfnevpt2._ERIS`` built its four-index blocks from (PySCF stores
+    ``_cderi`` already multiplied by the inverse square root of the metric, so
+    no metric appears here). :func:`_df_blocks` slices the golden's four
+    blocks out of it and :func:`_df_gradient_arrays` the sidecar's two."""
     from pyscf import lib
 
     mo = pt.mo_coeff
-    ncore, ncas = pt.ncore, pt.ncas
-    nocc = ncore + ncas
     naux = with_df.get_naoaux()
     nmo = mo.shape[1]
     lpq = np.empty((naux, nmo, nmo))
@@ -1494,6 +1511,21 @@ def _df_blocks(pt, with_df, eris) -> dict:
         lpq[p0 : p0 + n] = lib.einsum("Lmn,mp,nq->Lpq", lao, mo, mo)
         p0 += n
     assert p0 == naux
+    return lpq
+
+
+def _df_blocks(pt, lpq: np.ndarray, eris) -> dict:
+    """The four MO three-index blocks a ``--df`` golden carries, sliced from
+    :func:`_df_lpq`'s tensor.
+
+    Checked before returning: every four-index block ``eris`` holds is rebuilt
+    from these and must agree to 1e-10, so a file whose ``B`` and four-index
+    arrays disagree is never written."""
+    from pyscf import lib
+
+    ncore, ncas = pt.ncore, pt.ncas
+    nocc = ncore + ncas
+    nmo = lpq.shape[1]
 
     c, a, v = slice(0, ncore), slice(ncore, nocc), slice(nocc, None)
 
@@ -1598,27 +1630,8 @@ def _gradient_arrays(mc, pt, eris, dm1: np.ndarray) -> dict:
     gj = np.einsum("mp,Pmn,nq->Ppq", mo, vj, mo)  # [P, x, q] = (x q | P P)
     gk = np.einsum("mp,Pmn,nq->Ppq", mo, vk, mo)  # [P, x, q] = (x P | P q)
 
-    heff = np.asarray(eris["h1eff"])  # h^eff: h + the core dressing
-    h = heff - np.asarray(eris["vhf_c"])
-    papa = np.asarray(eris["papa"]).reshape(nmo, nact, nmo, nact)
-
-    def fock(gamma: np.ndarray) -> np.ndarray:
-        """``h^eff + sum_tu gamma_tu [ (pq|tu) - (1/2)(pt|uq) ]`` over the
-        full MO range: the generalized Fock of the active density ``gamma``."""
-        return (
-            heff
-            + np.einsum("tu,pqtu->pq", gamma, g_aa)
-            - 0.5 * np.einsum("tu,ptqu->pq", gamma, papa)
-        )
-
     return dict(
-        mo_coeff=mo,
-        h=h,
-        heff=heff,
-        f=fock(dm1),
-        # f^h: the same Fock with the active space fully occupied (gamma = 2I).
-        f_h=fock(2.0 * np.eye(nact)),
-        fock_rhf=mo.T @ mf.get_fock() @ mo,
+        **_gradient_matrices(mc, pt, eris, dm1),
         g_xa_aa=g_aa[:, a],
         g_xv_aa=g_aa[:, v],
         g_xc_aa=g_aa[:, c],
@@ -1640,6 +1653,124 @@ def _gradient_arrays(mc, pt, eris, dm1: np.ndarray) -> dict:
         g_xa_vv=gj[ncore:, :, a].transpose(1, 2, 0),
         g_xc_vv=gj[ncore:, :, c].transpose(1, 2, 0),
     )
+
+
+def _gradient_matrices(mc, pt, eris, dm1: np.ndarray) -> dict:
+    """§3.5's full-MO-range matrices and ``mo_coeff``, the first six arrays of
+    a gradient sidecar of either flavour: ``h``, ``h^eff``, the generalized
+    Fock ``f`` of the golden's ``dm1`` and ``f^h`` of a full active space, and
+    the RHF Fock. Every one of them comes out of ``eris`` and ``mc._scf``, so
+    on a ``--df`` state they are the fitted calculation's own, as
+    docs/gradient-theory.md, §3.8 requires: ``eris`` is ``dfnevpt2._ERIS``
+    and the RHF is density-fitted on the same ``with_df``."""
+    mf = mc._scf
+    mo = pt.mo_coeff
+    nmo = mo.shape[1]
+    nact = pt.ncas
+    g_aa = np.asarray(eris["ppaa"]).reshape(nmo, nmo, nact, nact)
+    heff = np.asarray(eris["h1eff"])  # h^eff: h + the core dressing
+    h = heff - np.asarray(eris["vhf_c"])
+    papa = np.asarray(eris["papa"]).reshape(nmo, nact, nmo, nact)
+
+    def fock(gamma: np.ndarray) -> np.ndarray:
+        """``h^eff + sum_tu gamma_tu [ (pq|tu) - (1/2)(pt|uq) ]`` over the
+        full MO range: the generalized Fock of the active density ``gamma``."""
+        return (
+            heff
+            + np.einsum("tu,pqtu->pq", gamma, g_aa)
+            - 0.5 * np.einsum("tu,ptqu->pq", gamma, papa)
+        )
+
+    return dict(
+        mo_coeff=mo,
+        h=h,
+        heff=heff,
+        f=fock(dm1),
+        # f^h: the same Fock with the active space fully occupied (gamma = 2I).
+        f_h=fock(2.0 * np.eye(nact)),
+        fock_rhf=mo.T @ mf.get_fock() @ mo,
+    )
+
+
+#: How closely the density-fitted sidecar's four tied orbital-energy arrays,
+#: with its ``h^eff``, must rebuild the golden's ``e_core`` / ``e_virt``
+#: (``e_p = h^eff_pp + sum_ut gamma_ut [(pp|ut) - (1/2)(pu|tp)]``), relative,
+#: before :func:`_df_gradient_arrays` lets a file be written. The C++ consumer
+#: (``loadOrbitalEnergyResponse``, ``--gradient-source``) makes the same check
+#: at its own tolerance; this one is (O2)'s, since both sides are one
+#: canonicalisation's arithmetic.
+DF_EPS_REBUILD_TOL = 1e-10
+
+
+def _df_gradient_arrays(mc, pt, eris, dm1: np.ndarray, lpq: np.ndarray) -> dict:
+    r"""The **density-fitted** gradient sidecar's arrays (#164;
+    docs/gradient-theory.md, §3.8), beside a ``--df`` golden that already
+    carries ``B_aa``, ``B_ca``, ``B_va`` and ``B_cv``:
+
+    * :func:`_gradient_matrices`' six -- ``mo_coeff``, ``h``, ``heff``,
+      ``f``, ``f_h``, ``fock_rhf`` -- of the fitted calculation;
+    * ``B_cc`` ``(naux, ncore, ncore)`` and ``B_vv`` ``(naux, nvirt, nvirt)``:
+      the two blocks of ``(L|pq)`` the golden lacks, §3.8's "missing blocks".
+      With the golden's four they are the whole tensor, which is what ``Y``
+      over its full range reads. Stored square, like the golden's four (the
+      packed and diagonal-only sizes are in §3.8's table): every consumer
+      indexes them the same way as the four, and at the committed sizes the
+      packing would save well under a megabyte;
+    * the four tied arrays the orbital energies' response to the active
+      density reads (``gradient_plan.cppm``'s ``OrbitalEnergyResponse``),
+      under the **same names and shapes** as a conventional sidecar's --
+      ``g_xa_cc`` ``(x t | i j)``, ``g_xc_ca`` ``(x i | j t)``, ``g_xa_vv``
+      ``(x t | r r)`` (tied), ``g_xv_va`` ``(x r | s t)`` -- so the one C++
+      reader of that response reads a fitted sidecar unchanged. Each is
+      ``sum_L B B``: redundant with the six blocks, carried so the
+      ``eps``-response mode needs nothing but this file and its golden.
+
+    No conventional ``(xP|QR)`` array beyond those four: the gradient's
+    density-fitted form never builds a four-index array (§3.8), and these
+    four exist only for the orbital energies. Before returning, the four with
+    ``h^eff`` must rebuild the golden's ``e_core`` / ``e_virt`` to
+    :data:`DF_EPS_REBUILD_TOL`, so a sidecar whose response does not belong
+    to its golden is never written."""
+    ncore, nact = pt.ncore, pt.ncas
+    nocc = ncore + nact
+    c, a, v = slice(0, ncore), slice(ncore, nocc), slice(nocc, None)
+    b_cc = lpq[:, c, c]
+    b_vv = lpq[:, v, v]
+    b_vv_diag = np.einsum("Lrr->Lr", b_vv)
+
+    tied = dict(
+        g_xa_cc=np.einsum("Lxt,Lij->xtij", lpq[:, :, a], b_cc),
+        g_xc_ca=np.einsum("Lxi,Ljt->xijt", lpq[:, :, c], lpq[:, c, a]),
+        g_xa_vv=np.einsum("Lxt,Lr->xtr", lpq[:, :, a], b_vv_diag),
+        g_xv_va=np.einsum("Lxr,Lst->xrst", lpq[:, :, v], lpq[:, v, a]),
+    )
+
+    mats = _gradient_matrices(mc, pt, eris, dm1)
+    heff = mats["heff"]
+    e_core = np.array([
+        heff[i, i] + np.einsum("ut,ut->", dm1, tied["g_xa_cc"][a, :, i, i]
+                               - 0.5 * tied["g_xc_ca"][a, i, i, :])
+        for i in range(ncore)
+    ])
+    e_virt = np.array([
+        heff[nocc + r, nocc + r]
+        + np.einsum("ut,ut->", dm1, tied["g_xa_vv"][a, :, r]
+                    - 0.5 * tied["g_xv_va"][a, r, r, :])
+        for r in range(lpq.shape[1] - nocc)
+    ])
+    mine = np.concatenate([e_core, e_virt])
+    gold = np.concatenate([pt.mo_energy[:ncore], pt.mo_energy[nocc:]])
+    gap = float(np.linalg.norm(mine - gold) / max(np.linalg.norm(gold), 1e-300))
+    if gap > DF_EPS_REBUILD_TOL:
+        raise SystemExit(
+            f"the density-fitted sidecar's h^eff and orbital-energy integrals rebuild "
+            f"the golden's e_core / e_virt only to {gap:.1e} relative "
+            f"(> {DF_EPS_REBUILD_TOL:g}): the fitted integrals are not the ones the "
+            "golden's canonicalisation used."
+        )
+    print(f"  df sidecar: e_core / e_virt rebuilt from h^eff + <dm1, W_p>: "
+          f"{gap:.2e} relative")
+    return dict(**mats, B_cc=b_cc, B_vv=b_vv, **tied)
 
 
 def _check_gradient_invariants(
@@ -1744,8 +1875,10 @@ def generate(
     dm1, dm2, dms, eris = _pyscf_dms(pt, with_df)
     ref = _pyscf_per_class(pt, dms, eris)
     blocks = _integral_blocks(pt, eris)
+    lpq = None
     if with_df is not None:
-        blocks.update(_df_blocks(pt, with_df, eris))
+        lpq = _df_lpq(pt, with_df)
+        blocks.update(_df_blocks(pt, lpq, eris))
     pc_ref = _block2_pc(mc, pt, with_df, {c: ref[c][1] for c in CLASSES},
                         rdm4_threads) if pc else None
     wall = time.perf_counter() - t0
@@ -1802,7 +1935,12 @@ def generate(
     grad = None
     if gradgold:
         nmo = pt.mo_coeff.shape[1]
-        grad_arrays = _gradient_arrays(mc, pt, eris, dm1)
+        # Density-fitted: the fitted calculation's own matrices, the two
+        # missing B blocks and the four tied eps arrays (#164, §3.8), and the
+        # same invariants asserted against the fitted Fock -- which is the one
+        # this state's derivation names (§3.8, "The rest carries over").
+        grad_arrays = (_gradient_arrays(mc, pt, eris, dm1) if lpq is None
+                       else _df_gradient_arrays(mc, pt, eris, dm1, lpq))
         res = _check_gradient_invariants(
             pt, grad_arrays, mc.mol.nelectron, mc._scf.mo_energy,
             reference_kind=meta["reference_kind"],
@@ -1815,6 +1953,7 @@ def generate(
                 nact=ncas,
                 nvirt=nmo - pt.ncore - ncas,
                 nelec_rhf=mc.mol.nelectron,
+                **({} if lpq is None else dict(naux=lpq.shape[0])),
             ),
             grad_arrays,
         )
@@ -1898,7 +2037,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="also write the gradient sidecar <out>.gradgold beside the golden "
         "(the MO-integral inventory an analytic NEVPT2 gradient reads, plus the "
-        "full-range Fock matrices and mo_coeff; docs/gradient-theory.md, section 3)",
+        "full-range Fock matrices and mo_coeff; docs/gradient-theory.md, section 3). "
+        "With --df, the density-fitted flavour: B_cc, B_vv, the fitted matrices "
+        "and the four tied orbital-energy arrays (section 3.8)",
     )
     ap.add_argument(
         "--core-irreps",
@@ -1949,12 +2090,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.gradgold and args.casscf:
         ap.error("--gradgold writes beside a golden and --casscf writes none: "
                  "pass --gradgold to the --mo-from step instead")
-    # The gradient derivation (docs/gradient-theory.md) is written for
-    # conventional four-index integrals: a DF sidecar would carry fitted
-    # blocks whose (O1)/(O2) invariants hold against the DF Fock, not the one
-    # the derivation names. Refused rather than quietly written.
-    if args.gradgold and args.df:
-        ap.error("--gradgold is conventional-integral only, not --df")
+    # --df --gradgold is permitted (#164): docs/gradient-theory.md, section 3.8
+    # carries the derivation over to three-index integrals unchanged (the
+    # fitting metric is inert under an orbital rotation), and names the
+    # matrices a fitted gradient reads as the fitted calculation's own, so
+    # (O1)-(O3) are asserted against the fitted Fock. The sidecar is the
+    # NEVPT2F1 flavour (_df_gradient_arrays).
     return args
 
 

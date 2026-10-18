@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 r"""The one Python reader (and the byte-level writer) of the three binary
 formats in ``golden/``: the ``*.nevpt2gold`` golden, the ``*.gradgold``
-gradient sidecar and the ``*.mogold`` MO sidecar -- and of the
+gradient sidecar (conventional or density-fitted) and the ``*.mogold`` MO
+sidecar -- and of the
 ``*.srcgold`` source-term oracle, which ends in the same array section. It
 also reads ``states.json``, the manifest a CASSCF-reference sweep keeps its
 displaced states' ``.mogold`` files under (:func:`read_states_manifest`).
@@ -70,6 +71,19 @@ REFERENCE_KIND_CODES = {name: code for code, name in REFERENCE_KINDS.items()}
 #: Magic bytes identifying a gradient sidecar (``*.gradgold``).
 GRADGOLD_MAGIC = b"NEVPT2D1"
 
+#: The DENSITY-FITTED gradient sidecar (#164), ``generate_golden.py --df
+#: --gradgold``: beside a ``*_df`` golden, carrying the two three-index blocks
+#: that golden lacks (``B_cc``, ``B_vv``; docs/gradient-theory.md, section
+#: 3.8), the same full-range matrices as a ``D1`` file but of the fitted
+#: calculation, and the four tied orbital-energy arrays. Its own magic because
+#: its integrals are a different calculation's: the magic says which, so no
+#: consumer guesses it from the array names. Its header is ``D1``'s plus
+#: ``naux``.
+GRADGOLD_MAGIC_DF = b"NEVPT2F1"
+
+#: Every magic a gradient sidecar may carry.
+GRADGOLD_MAGICS = (GRADGOLD_MAGIC, GRADGOLD_MAGIC_DF)
+
 #: Magic bytes identifying an MO sidecar (``*.mogold``).
 MO_SIDECAR_MAGIC = b"NEVPT2M1"
 
@@ -125,11 +139,15 @@ GOLDEN_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
     GOLDEN_MAGIC_V1: _GOLDEN_STATE,
 }
 
-#: THE gradient sidecar's scalar header: the orbital-space partition.
+#: THE gradient sidecar's scalar header: the orbital-space partition, and in
+#: the density-fitted flavour also the auxiliary-basis size, every ``B_*``
+#: block's leading extent.
+_GRADGOLD_PARTITION = tuple(
+    (n, "i") for n in ("nao", "nmo", "ncore", "nact", "nvirt", "nelec_rhf")
+)
 GRADGOLD_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
-    GRADGOLD_MAGIC: tuple(
-        (n, "i") for n in ("nao", "nmo", "ncore", "nact", "nvirt", "nelec_rhf")
-    ),
+    GRADGOLD_MAGIC: _GRADGOLD_PARTITION,
+    GRADGOLD_MAGIC_DF: _GRADGOLD_PARTITION + (("naux", "i"),),
 }
 
 #: THE MO sidecar's scalar header. Its text section and array table follow.
@@ -327,9 +345,12 @@ def read_golden(path, want: set[str] | None = None) -> tuple[dict, dict[str, np.
 
 
 def read_gradgold(path) -> tuple[dict, dict[str, np.ndarray]]:
-    """``(header, arrays)`` from a gradient sidecar. ``header`` holds exactly
-    the six partition fields, so ``generate_golden.write_gradgold(path,
-    **header, arrays=arrays)`` writes the same file back."""
+    """``(header, arrays)`` from a gradient sidecar of either flavour.
+    ``header`` holds exactly the six partition fields of a conventional
+    (``NEVPT2D1``) sidecar, plus ``naux`` for a density-fitted (``NEVPT2F1``)
+    one -- which is how a caller tells the two apart -- so
+    ``generate_golden.write_gradgold(path, **header, arrays=arrays)`` writes
+    the same file back."""
     with open(path, "rb") as f:
         header = _read_header(f, path, GRADGOLD_HEADERS, "gradient sidecar")
         del header["magic"]

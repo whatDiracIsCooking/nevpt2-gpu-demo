@@ -84,12 +84,20 @@ set(_gradgold_cas44 "${PROJECT_SOURCE_DIR}/golden/n2_ccpvdz_cas44.gradgold")
 if(NOT EXISTS "${_gradgold_cas44}")
   message(FATAL_ERROR "test/golden: committed gradient sidecar missing: ${_gradgold_cas44}")
 endif()
+# And its density-fitted twin (NEVPT2F1, #164) beside the *_df golden.
+set(_gradgold_cas44_df "${PROJECT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_df.gradgold")
+if(NOT EXISTS "${_gradgold_cas44_df}")
+  message(FATAL_ERROR "test/golden: committed gradient sidecar missing: ${_gradgold_cas44_df}")
+endif()
 target_compile_definitions(
   gradgold_tests
   PRIVATE NEVPT2_TEST_GRADGOLD_CAS44="${_gradgold_cas44}"
-          NEVPT2_TEST_GOLDEN_CAS44="${PROJECT_SOURCE_DIR}/golden/n2_ccpvdz_cas44.nevpt2gold")
+          NEVPT2_TEST_GOLDEN_CAS44="${PROJECT_SOURCE_DIR}/golden/n2_ccpvdz_cas44.nevpt2gold"
+          NEVPT2_TEST_GRADGOLD_CAS44_DF="${_gradgold_cas44_df}"
+          NEVPT2_TEST_GOLDEN_CAS44_DF="${PROJECT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_df.nevpt2gold")
 unset(_gradgold_cas44)
+unset(_gradgold_cas44_df)
 
 add_gtest_suite_tests(
   TARGET gradgold_tests
-  SUITES GradGoldRoundTripTests GradGoldLoadErrorTests GradGoldCas44Tests)
+  SUITES GradGoldRoundTripTests GradGoldLoadErrorTests GradGoldCas44Tests GradGoldDfCas44Tests)

@@ -1086,6 +1086,10 @@ against the carried four's `naux · (n_act^2 + n_core n_act + n_virt n_act +
 n_core n_virt)`. With both added, the six blocks are the complete tensor:
 `naux · (n_core^2 + n_act^2 + n_virt^2 + n_core n_act + n_act n_virt +
 n_core n_virt)` stored square, `naux · n_mo (n_mo + 1) / 2` fully packed.
+The two missing blocks are carried, stored square, by the density-fitted
+gradient sidecar beside a `--df` golden (#164;
+[`reference-data.md`](reference-data.md), "The density-fitted gradient
+sidecar"), so the goldens themselves stay as they are.
 
 **`B_vv` is the energy's DF economy, and the gradient does not keep it.**
 The energy needs no `(L|vv)` because no charge distribution it reads holds

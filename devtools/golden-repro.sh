@@ -13,9 +13,10 @@
 # place that re-runs the promise, and the one place a byte comparison is right:
 # everywhere else compares against a tolerance.
 #
-# What it regenerates (eighteen files, sixteen generator runs):
+# What it regenerates (twenty files, sixteen generator runs):
 #   generate_golden.py     n2_ccpvdz_cas44 / cas88 .nevpt2gold + .gradgold,
-#                          their _df twins, the two .mogold sidecars (a fresh
+#                          their _df twins (each with its density-fitted
+#                          NEVPT2F1 .gradgold, #164), the two .mogold sidecars (a fresh
 #                          --casscf each) and the two *_casscf[_df] goldens
 #                          (--mo-from the COMMITTED sidecar, as
 #                          docs/reference-data.md's commands do, so a sidecar
@@ -116,12 +117,12 @@ declare -a run_names=() run_files=() run_cmds=()
 add_run() { run_names+=("$1"); run_files+=("$2"); run_cmds+=("$3"); }
 add_run cas44 "n2_ccpvdz_cas44.nevpt2gold n2_ccpvdz_cas44.gradgold" \
   "python $gen --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44 --gradgold --out $S/n2_ccpvdz_cas44.nevpt2gold"
-add_run cas44_df "n2_ccpvdz_cas44_df.nevpt2gold" \
-  "python $gen --df --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_df --out $S/n2_ccpvdz_cas44_df.nevpt2gold"
+add_run cas44_df "n2_ccpvdz_cas44_df.nevpt2gold n2_ccpvdz_cas44_df.gradgold" \
+  "python $gen --df --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_df --gradgold --out $S/n2_ccpvdz_cas44_df.nevpt2gold"
 add_run cas88 "n2_ccpvdz_cas88.nevpt2gold n2_ccpvdz_cas88.gradgold" \
   "python $gen --ncas 8 --nelecas 8 --name n2_ccpvdz_cas88 --gradgold --out $S/n2_ccpvdz_cas88.nevpt2gold"
-add_run cas88_df "n2_ccpvdz_cas88_df.nevpt2gold" \
-  "python $gen --df --ncas 8 --nelecas 8 --name n2_ccpvdz_cas88_df --out $S/n2_ccpvdz_cas88_df.nevpt2gold"
+add_run cas88_df "n2_ccpvdz_cas88_df.nevpt2gold n2_ccpvdz_cas88_df.gradgold" \
+  "python $gen --df --ncas 8 --nelecas 8 --name n2_ccpvdz_cas88_df --gradgold --out $S/n2_ccpvdz_cas88_df.nevpt2gold"
 add_run cas44_casscf_mo "n2_ccpvdz_cas44_casscf.mogold" \
   "python $gen --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_casscf --casscf --mo-out $S/n2_ccpvdz_cas44_casscf.mogold"
 add_run cas44_casscf "n2_ccpvdz_cas44_casscf.nevpt2gold" \

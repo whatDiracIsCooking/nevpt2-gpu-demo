@@ -9,7 +9,8 @@
 //   loadGradGold   `*.gradgold`: the analytic-gradient SIDECAR beside a
 //                  golden, carrying the one-general-index MO-integral
 //                  inventory a gradient reads plus the full-MO-range Fock
-//                  matrices and mo_coeff.
+//                  matrices and mo_coeff -- or, density-fitted (#164), the
+//                  three-index blocks a `*_df` golden lacks.
 //   loadSrcGold    `*.srcgold`: PySCF's exact SC source terms for a golden's
 //                  state, written by reference_data/sc_source_oracle.py (#92)
 //                  -- or, in its PC flavour, block2's PC ones (#95); and
@@ -159,7 +160,20 @@ struct GradGoldFile {
   int64_t nvirt = 0;
   int64_t nelecRhf = 0;  // the RHF electron count: which side of F's active
                          // spectrum is occupied (gradient-theory.md, §2.6)
+  // The auxiliary-basis size, which only the DENSITY-FITTED flavour carries
+  // ("NEVPT2F1", #164; 0 for a conventional "NEVPT2D1" sidecar). Such a
+  // sidecar sits beside a `*_df` golden and holds, instead of §3.3's
+  // four-index inventory, the two three-index blocks that golden lacks --
+  // `B_cc` [naux, ncore, ncore] and `B_vv` [naux, nvirt, nvirt]
+  // (gradient-theory.md, §3.8) -- plus the same full-range matrices of the
+  // fitted calculation and the four tied orbital-energy arrays `g_xa_cc`,
+  // `g_xc_ca`, `g_xa_vv`, `g_xv_va` under their conventional names and shapes.
+  int64_t naux = 0;
   std::unordered_map<std::string, Tensor> arrays;
+
+  // Whether this is the density-fitted flavour -- off the magic, never off
+  // the array names.
+  [[nodiscard]] bool densityFitted() const { return naux > 0; }
 
   // An IO Error naming the first of `names` the sidecar does not carry --
   // GoldenFile::require's contract, on the sidecar's arrays.
@@ -171,7 +185,12 @@ struct GradGoldFile {
   // pairing it with the wrong one is a plain user mistake -- and one whose
   // arrays would otherwise be read with the wrong shapes much deeper in.
   // (The sidecar header carries no determinant count, and the golden carries
-  // no n_mo, so these two are everything the two headers share.)
+  // no n_mo, so these two are everything the two headers share.) And the two
+  // must be the same calculation's: a density-fitted sidecar only beside a
+  // density-fitted golden (one carrying `B_aa`) whose auxiliary basis is its
+  // `naux`, a conventional one only beside a conventional golden -- fitted
+  // integrals differentiated against exact ones, or the reverse, would be a
+  // gradient of neither energy.
   [[nodiscard]] Status checkAgainst(const GoldenFile& golden) const;
 
   // The array `name`. Aborts (check) if it is absent: the caller should have
@@ -179,11 +198,14 @@ struct GradGoldFile {
   const Tensor& get(const std::string& name) const;
 };
 
-// The parsed sidecar, or an IO Error if it cannot be opened, ends early, has
-// the wrong magic, carries a space partition that does not add up to nmo or a
-// non-even RHF electron count that cannot fill its core, carries a malformed
-// array header (as loadGolden refuses one), has bytes after its last array, or
-// carries an `mo_coeff` whose shape is not [nao, nmo].
+// The parsed sidecar of either flavour ("NEVPT2D1" conventional, "NEVPT2F1"
+// density-fitted), or an IO Error if it cannot be opened, ends early, has
+// another magic, carries a space partition that does not add up to nmo or a
+// non-even RHF electron count that cannot fill its core (or, density-fitted,
+// an naux < 1), carries a malformed array header (as loadGolden refuses one),
+// has bytes after its last array, or carries an `mo_coeff` whose shape is not
+// [nao, nmo] -- or a `B_cc` / `B_vv` not [naux, ncore, ncore] /
+// [naux, nvirt, nvirt].
 [[nodiscard]] Result<GradGoldFile> loadGradGold(const std::string& path);
 
 // ---------------------------------------------------------------------------

@@ -864,6 +864,32 @@ if(NEVPT2_BUILD_TESTING)
     endif()
   endforeach()
 
+  # --- the density-fitted gradient sidecar, read end to end (#164) --------------
+  #
+  # golden/n2_ccpvdz_cas44_df.gradgold is the NEVPT2F1 sidecar beside the DF
+  # golden (docs/reference-data.md, "The density-fitted gradient sidecar"). Its
+  # four tied orbital-energy arrays and h^eff are what --gradient-source's
+  # eps-response mode reads, so this runs that mode on the DF case: the
+  # unmodified nevpt2_demo (which runs a *_df golden off its four-index arrays,
+  # as nevpt2_cas1010_df_blocks does) loads the fitted sidecar, checks it against
+  # the fitted golden (flavour, naux, and e_core / e_virt rebuilt from it), and
+  # gates on the same exact forward-reverse duality as nevpt2_gradient_source_*.
+  # The regex requires the response to be carried. nevpt2_df_demo's own
+  # --gradient-source is #162.
+  set(_ci_src_df_side "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_df.gradgold")
+  if(NOT EXISTS "${_ci_src_df_side}")
+    message(FATAL_ERROR "nevpt2: committed gradient sidecar missing: ${_ci_src_df_side}")
+  endif()
+  _add_golden_test_with(nevpt2_demo nevpt2_gradient_source_cas44_df "${_gold_44_df}"
+                        --tiles 3 --gradient-source --gradgold "${_ci_src_df_side}")
+  if(TEST nevpt2_gradient_source_cas44_df)
+    set_tests_properties(nevpt2_gradient_source_cas44_df PROPERTIES
+      PASS_REGULAR_EXPRESSION
+        "PASS: the CI source term and the forward tangent agree .*, the orbital energies moving with the active density"
+      LABELS "gpu;small")
+  endif()
+  unset(_ci_src_df_side)
+
   # --- --rdm-tangent, small ------------------------------------------------------
   #
   # The tangent RDM build (nevpt2.rdm_build's :tangent partition) beside the
