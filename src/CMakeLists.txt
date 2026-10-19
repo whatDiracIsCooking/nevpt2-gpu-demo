@@ -19,7 +19,8 @@
 # kernels, device library), linked by its `::` alias. Every directory here is
 # something both methods run -- the RDM build, the class energies, and the
 # layers under them -- except df_integrals, the density-fitted demo's alone,
-# and gradient, which only apps/sc_pseudodensity/ and apps/pc_tangent/ drive. The host binaries are in ../apps/, a sibling of src/ but
+# and gradient, which apps/sc_pseudodensity/ and apps/pc_tangent/ drive (the
+# demos only through nevpt2.ci_checks). The host binaries are in ../apps/, a sibling of src/ but
 # built from here so the standalone `cmake -S src` path keeps them:
 #
 #   ../apps/integral_direct/  SC- and PC-NEVPT2 from the full MO-integral blocks (nevpt2_demo)
@@ -84,6 +85,10 @@
 #                                the RDM build and the energy stage both --
 #                                a displaced state needs its own RDMs
 #                       (energy, rdm_build, rdm_host_dm)
+#            nevpt2.ci_checks    --sc-tangent and --gradient-source: the CI
+#                                derivative's checks, over any IntegralSource,
+#                                so both demos run them. A LEAF
+#                       (gradient, golden, rdm_host_dm)
 #   ../apps/integral_direct      nevpt2_demo     main.cppm
 #   ../apps/density_fit          nevpt2_df_demo  main.cppm
 #   ../apps/sc_pseudodensity     nevpt2_sc_pseudodensity  the SC pseudodensity

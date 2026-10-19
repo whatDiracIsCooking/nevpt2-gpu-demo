@@ -21,6 +21,13 @@
 // block whole and compares it with the four-index arrays a --df golden file
 // also carries; the PASS line is about the energies alone.
 //
+// `--sc-tangent` and `--gradient-source` (#162) replace the golden comparison
+// with the integral-direct demo's two checks of the energy's CI-vector
+// derivative (nevpt2.ci_checks), run over the same DF slabs: both
+// differentiate the CI vector at FIXED integrals, so nothing in them
+// differentiates a B tensor. The orbital energies are held fixed -- this demo
+// reads no gradient sidecar -- and the --gradient-source PASS line says so.
+//
 // A module unit nothing imports; see apps/integral_direct/main.cppm.
 module;
 
@@ -37,6 +44,9 @@ export import :block_check;
 // nevpt2.cli: every flag this demo takes, which flags it implements, and the
 // checks that span them (--cublas is refused there on a build without it).
 import nevpt2.cli;
+// --sc-tangent / --gradient-source: the CI derivative's checks, shared with
+// the integral-direct demo (re-exports nevpt2.gradient and nevpt2.golden).
+import nevpt2.ci_checks;
 import nevpt2.df_integrals;   // re-exports nevpt2.energy, .einsum, .device_tensor, .wwr
 import nevpt2.golden;
 import nevpt2.link_tables;
@@ -62,6 +72,18 @@ int main(int argc, char** argv) {
   // (nevpt2::cli::kDefaultBatch says why 8); 0 = one slab per block.
   const std::int64_t batchArg = parsedOpts.batch;
   const bool checkBlocksArg = parsedOpts.checkBlocks;
+  // --sc-tangent / --gradient-source: instead of the golden comparison, the
+  // SC tangent's checks or the CI source term's duality, over this demo's
+  // slabs (nevpt2.ci_checks). parseArgs has already refused them together,
+  // with an approximate digest, with --pc, with --profile and with
+  // --check-blocks.
+  const bool scTangentArg = parsedOpts.scTangent;
+  const bool gradientSourceArg = parsedOpts.gradientSource;
+  const bool differentiates = scTangentArg || gradientSourceArg;
+  const char* const whichFlag = scTangentArg ? "--sc-tangent" : "--gradient-source";
+  // --sc-tangent's one direction: the integral-direct demo's seed, so the
+  // two demos differentiate along the same u for a given determinant space.
+  constexpr std::uint64_t kTangentSeed = 0x5eed'0032u;
 
   // A missing, unreadable or malformed golden file -- or one without an
   // array this demo reads -- is the user's input: reported once, here, with a
@@ -114,6 +136,15 @@ int main(int argc, char** argv) {
   if (const nevpt2::Status st = g.checkNdet(ndet); !st) {
     nevpt2::report(st.error());
     return 1;
+  }
+  // The SOURCE-TERM gate, as on the integral-direct demo: both checks stop
+  // at the derivative at fixed orbitals, so a CASSCF-orbital golden is as
+  // good as a CASCI one. Before DeviceResources::create: no card touched.
+  if (differentiates) {
+    if (const nevpt2::Status st = g.requireSourceTermReference(whichFlag); !st) {
+      nevpt2::report(st.error());
+      return 1;
+    }
   }
 
   // `reference=`: which reference built the orbitals, as the golden's header
@@ -196,6 +227,39 @@ int main(int argc, char** argv) {
 
   nevpt2::DeviceTensor dDm1 = nevpt2::uploadTensor(g.get("dm1"), *res);
   nevpt2::DeviceTensor dDm2 = nevpt2::uploadTensor(g.get("dm2"), *res);
+
+  // --sc-tangent / --gradient-source (#162): the integral-direct demo's two
+  // checks, walking this demo's DfIntegralSource in --batch slabs, with the
+  // DF-rebuilt active h2e the RDM build above read -- so every displaced and
+  // tangent build below contracts the same block. Each prints its own PASS
+  // line and the golden comparison does not run.
+  const nevpt2::CiCheckIntegrals checkInts{active, src, batchArg, h2eHost};
+  if (scTangentArg) {
+    const nevpt2::Result<bool> ok =
+        nevpt2::checkScTangent(g, opt.rdm, checkInts, rdm, kTangentSeed, *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
+  if (gradientSourceArg) {
+    // FROZEN orbital energies: e_core / e_virt held at the golden's on both
+    // sides. Their response to the active density needs the gradient
+    // sidecar's arrays, which this demo does not read (no --gradgold here).
+    const nevpt2::EnergyResult base = nevpt2::energiesDevice(
+        active, src, batchArg, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, *res);
+    const nevpt2::Result<bool> ok = nevpt2::checkCiSource(
+        g, opt.rdm, checkInts, rdm, base, /*gradgoldPath=*/"",
+        "frozen-orbital-energy mode: the density-fitted demo reads no gradient sidecar", *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
 
   // --pc: the PC-NEVPT2 classes instead of the SC ones, over the
   // same DF slabs; see apps/integral_direct/main.cppm.

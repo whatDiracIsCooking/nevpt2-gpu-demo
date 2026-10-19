@@ -157,8 +157,9 @@ inline constexpr int kMaxFdSteps = 8;
 // refuses another binary's flag before it could set one.
 struct Options {
   CommonOptions common;
-  // nevpt2_demo: --sc-tangent, --gradient-source (one at a time; SC only),
-  // and --gradgold PATH beside --gradient-source (the field below).
+  // Both demos: --sc-tangent, --gradient-source (one at a time; SC only,
+  // except nevpt2_demo's --gradient-source --pc); nevpt2_demo also takes
+  // --gradgold PATH beside --gradient-source (the field below).
   bool scTangent = false;
   bool gradientSource = false;
   // nevpt2_df_demo: --batch N (>= 0), --check-blocks.

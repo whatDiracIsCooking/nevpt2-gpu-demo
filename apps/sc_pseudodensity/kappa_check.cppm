@@ -37,7 +37,7 @@
 // that: it rotates every stored block with nevpt2.kappa_rotation's finite
 // exp(t kappa) on the host, uploads, and reruns the energy. So the finite
 // difference is here for the same reason it is in
-// apps/integral_direct/:tangent_check -- one cross-check that licenses the
+// --sc-tangent (nevpt2.ci_checks) -- one cross-check that licenses the
 // exact test, with the plateau and the Richardson ratio printed.
 //
 // AND Y_act AS A MATRIX, where the probe count is affordable: the same
@@ -83,7 +83,7 @@ constexpr std::int64_t kMatrixMaxPairs = 64;
 // Chunk: how many basis directions share one slab walk.
 constexpr std::int64_t kMatrixChunk = 16;
 
-// The finite-difference sweep, as apps/integral_direct/:tangent_check's:
+// The finite-difference sweep, as --sc-tangent's (src/gradient/ci_checks_tangent.cpp):
 // h = 2^-k, halving, powers of two so h is exact and the ratio across a
 // halving is exactly the Richardson factor.
 constexpr int kFirstStepExp = 6;

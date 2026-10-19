@@ -20,9 +20,9 @@ add_cxx_module_library(
 # No GPU and no kernel: it is the reference the golden file's dm1/dm2 (PySCF
 # inputs, never computed here) are checked against, and the differentiable
 # bilinear forms the gradient work needs. The unit tier tests it card-free
-# (test/rdm_host_dm/); nevpt2_demo links it for --sc-tangent alone (the
-# displaced dm1/dm2 its finite difference rebuilds), and the density-fitted
-# demo not at all.
+# (test/rdm_host_dm/); nevpt2.ci_checks links it for both demos'
+# --sc-tangent and --gradient-source (the displaced dm1/dm2 the finite
+# difference rebuilds, and the dm1/dm2 tangents along a CI direction).
 add_cxx_module_library(
   NAME nevpt2.rdm_host_dm
   PRIMARY_INTERFACE rdm_host_dm.cppm

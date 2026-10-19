@@ -497,15 +497,15 @@ The two `small` entries are the `--gradient-source` pair. They run in the
 sanitizer tier like their twins, but they have **not** been measured under
 any sanitizer preset ("Wall times" below has no row for them).
 
-**The `_df` pair is not included,** because no density-fitted source-term
-path exists: `nevpt2_df_demo` takes none of `--gradient-source`,
-`--sc-tangent`, `--dump-source-terms` or `--source-oracle` (the
-`nevpt2.cli:binary_flags` table refuses them). The two small `_df` cases do
-carry a density-fitted `.gradgold` since #164 (reference-data.md, "The
-density-fitted gradient sidecar"), which only `nevpt2_demo`'s
-`nevpt2_gradient_source_cas44_df` reads so far ("The CI source term's
-forward-reverse duality"); no `_df` `.srcgold` exists for either reference
-kind.
+**The `_df` pair is not included.** `nevpt2_df_demo` has taken
+`--gradient-source` and `--sc-tangent` since #162, at frozen orbital
+energies ("The CI source term's forward-reverse duality"), but not on the
+CASSCF golden, and it takes neither `--dump-source-terms` nor
+`--source-oracle` (the `nevpt2.cli:binary_flags` table refuses them). The
+two small `_df` cases do carry a density-fitted `.gradgold` since #164
+(reference-data.md, "The density-fitted gradient sidecar"), which only
+`nevpt2_demo`'s `nevpt2_gradient_source_cas44_df` reads so far; no `_df`
+`.srcgold` exists for either reference kind.
 
 ## The SC pseudodensity identities
 
@@ -558,7 +558,7 @@ validates `energiesTangentDevice` (`nevpt2.energy`'s `:sc_tangent`
 partition) so that
 every later check of the reverse-mode assembly can be an exact dot-product
 identity against the tangent at this tree's usual 1e-7, with no step size
-anywhere. `apps/integral_direct/tangent_check.cppm` has the derivation; the
+anywhere. `src/gradient/ci_checks_tangent.cpp` has the derivation; the
 entry checks three things.
 
 **The two exact checks.** A class norm is affine in the RDMs, so displacing
@@ -1050,6 +1050,16 @@ and requires `the orbital energies held fixed`. The duality is exact on either
 functional — and therefore says nothing about whether that response is right,
 since both modes read the same one: "The orbital energies' CI response" below
 and "The GPU as the source-term provider" are what check it.
+
+**Density-fitted (#162).** `nevpt2_df_gradient_source_cas44` and `_cas88`
+(both `gpu;small`) run the same check in `nevpt2_df_demo --tiles 3
+--gradient-source` over its `DfIntegralSource` (the default `--batch 8`, so
+a ragged last slab), and `nevpt2_df_cas44_sc_tangent` (`gpu;small`) and
+`nevpt2_df_cas88_sc_tangent` (`gpu`) the SC tangent's. They are the same
+`nevpt2.ci_checks` bodies with a different `IntegralSource` and the
+DF-rebuilt active `h2e`, so the same tolerances. The orbital energies are
+held fixed (that demo reads no gradient sidecar), and the regex requires
+`the orbital energies held fixed (frozen-orbital-energy mode`.
 
 `nevpt2.gradient`'s `scCiSourceDevice` assembles the CI source term
 `y_I = dE/dc_I` — Park Eq. 48's `<I|(O_D + O_D^dagger)|Psi>` — in reverse
@@ -3475,6 +3485,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_cas44_casscf_sc_tangent`, `nevpt2_sc_pseudodensity_kappa_cas44_casscf` | the two source-term canaries on **CASSCF orbitals** (`--sc-tangent`, `--kappa-act`; "The source terms on CASSCF orbitals: the wave-0 canary", above). Their CASCI twins' cost |
 | `nevpt2_gradient_source_cas44_casscf`, `nevpt2_gradient_source_pc_cas44_casscf` | the SC and PC CI source terms' duality on **CASSCF orbitals**, with the CASSCF sidecar ("The source terms on CASSCF orbitals, measured", above). Their CASCI twins' cost |
 | `nevpt2_gradient_source_cas44_df` | the SC CI source term's duality on the **density-fitted** CAS(4,4) golden with its density-fitted sidecar (#164; "The CI source term's forward-reverse duality", above). Its CASCI twin's shape; not yet run under any sanitizer preset |
+| `nevpt2_df_gradient_source_cas44`, `nevpt2_df_gradient_source_cas88`, `nevpt2_df_cas44_sc_tangent` | the CI source term's duality and the SC tangent over **density-fitted** slabs (#162): the gradient walk and the tangent on owning, freed-per-slab DF slabs ("The CI source term's forward-reverse duality", above). Not yet measured under any sanitizer preset |
 
 They are ordinary golden checks too, so `ctest --preset fast` and
 `ctest --preset hip` run them on every backend.

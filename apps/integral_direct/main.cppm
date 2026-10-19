@@ -43,18 +43,15 @@ module;
 export module nevpt2.app.integral_direct;
 
 import std;
-// This demo's own helpers, in interface partitions that export nothing (see
-// their headers): `export import` only because [module.unit] requires a
-// primary interface to re-export its interface partitions.
-export import :gradient_source_check;
-export import :tangent_check;
 
 // nevpt2.cli: every flag this demo takes, which flags it implements, and the
 // checks that span them (--cublas is refused there on a build without it).
 import nevpt2.cli;
+// --sc-tangent / --gradient-source: the CI derivative's checks, shared with
+// the density-fitted demo (re-exports nevpt2.gradient and nevpt2.golden).
+import nevpt2.ci_checks;
 import nevpt2.energy;  // re-exports nevpt2.einsum, .device_tensor, .wwr, .tensor
 import nevpt2.golden;
-import nevpt2.gradient;  // --gradient-source: scCiSourceDevice
 import nevpt2.link_tables;
 import nevpt2.profile;
 import nevpt2.rdm_build;
@@ -79,13 +76,13 @@ int main(int argc, char** argv) {
   const nevpt2::cli::CommonOptions& opt = parsedOpts.common;
   // --sc-tangent: instead of the golden comparison, differentiate the SC
   // total with respect to the CI vector and check it against Euler's identity
-  // and a central finite difference of the energy itself (:tangent_check).
-  // --gradient-source: instead of the golden comparison, assemble the CI
-  // source term y_I = dE/dc_I and check it against the forward tangent by
-  // duality (:gradient_source_check). Both are this demo's alone (the
-  // density-fitted demo has no tangent path), and parseArgs has already
-  // refused them together, with an approximate digest, with --pc and with
-  // --profile.
+  // and a central finite difference of the energy itself (nevpt2.ci_checks'
+  // checkScTangent). --gradient-source: instead of the golden comparison,
+  // assemble the CI source term y_I = dE/dc_I and check it against the
+  // forward tangent by duality (checkCiSource). The density-fitted demo runs
+  // the same two over its slabs (#162); parseArgs has already refused them
+  // together, with an approximate digest, --sc-tangent with --pc, and either
+  // with --profile.
   const bool scTangentArg = parsedOpts.scTangent;
   const bool gradientSourceArg = parsedOpts.gradientSource;
   const bool differentiates = scTangentArg || gradientSourceArg;
@@ -222,9 +219,19 @@ int main(int argc, char** argv) {
   // vector, so it reads `ci` and the integrals, not the golden's per-class
   // energies: its own PASS line is the gate, and the golden comparison below
   // does not run.
+  //
+  // The SC checks walk an IntegralSource, as the density-fitted demo's do:
+  // here FullBlockSource, one slab per block, viewing dInts (which keeps
+  // owning everything), and the golden's own active h2e.
+  nevpt2::FullBlockSource fullSource(dInts);
+  const nevpt2::ActiveIntegralsDevice activeView{
+      dInts.h1e.view(),      dInts.h2e.view(),      dInts.e_core.view(),
+      dInts.e_virt.view(),   dInts.h1e_v_Sr.view(), dInts.h1e_v_Si.view(),
+      dInts.h1e_v_Sir.view()};
+  const nevpt2::CiCheckIntegrals checkInts{activeView, fullSource, /*batch=*/0, g.get("h2e")};
   if (scTangentArg) {
     const nevpt2::Result<bool> ok =
-        checkScTangent(g, opt.rdm, dInts, rdm, kTangentSeed, *res);
+        nevpt2::checkScTangent(g, opt.rdm, checkInts, rdm, kTangentSeed, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;
@@ -236,7 +243,7 @@ int main(int argc, char** argv) {
   // --gradient-source: the CI source term y_I = dE/dc_I (nevpt2.gradient's
   // scCiSourceDevice) against the forward tangent, by the duality
   // <u, y> = Edot(u) -- exact for every direction, so this is a 1e-7 gate and
-  // not a difference quotient (:gradient_source_check, and docs/testing.md,
+  // not a difference quotient (nevpt2.ci_checks, and docs/testing.md,
   // "The CI source term's forward-reverse duality"). It rebuilds dm1/dm2 on
   // the host from `ci` so both sides read one state's arrays, and its own
   // PASS line is the gate: the golden comparison below does not run. The
@@ -246,7 +253,7 @@ int main(int argc, char** argv) {
   if (gradientSourceArg && opt.pc) {
     // #74: PC-NEVPT2's y against the PC forward tangent.
     const nevpt2::Result<bool> ok =
-        checkPcCiSource(g, opt.rdm, dInts, rdm, parsedOpts.gradgoldPath, *res);
+        nevpt2::checkPcCiSource(g, opt.rdm, dInts, rdm, parsedOpts.gradgoldPath, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;
@@ -259,7 +266,8 @@ int main(int argc, char** argv) {
     const nevpt2::EnergyResult base =
         nevpt2::energiesDevice(dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, *res);
     const nevpt2::Result<bool> ok =
-        checkCiSource(g, opt.rdm, dInts, rdm, base, parsedOpts.gradgoldPath, *res);
+        nevpt2::checkCiSource(g, opt.rdm, checkInts, rdm, base, parsedOpts.gradgoldPath,
+                              "no --gradgold", *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;
