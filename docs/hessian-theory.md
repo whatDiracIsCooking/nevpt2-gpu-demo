@@ -472,25 +472,125 @@ the design:
   d^2 E / dkappa^2 [u,v]  =  <Ehat' , I''[u,v]>  +  I'[u]^T Ehat'' I'[v]
 ```
 
-- **The first term is the integrals' own curvature, and it reuses `Y`
-  untouched.** `Ehat'` is the energy's *first* derivative with respect to the
-  integrals — the pseudodensity set that the existing orbital source term is
-  already built from and already validated as, the digests' own response (#89)
-  included. `I''` is a purely one-electron-and-two-electron *transformation*
-  question: for `I(kappa) = U^dag I U` with `U = exp(kappa)`, `I''` collects
-  both `exp`'s `kappa^2/2` term and the terms where each of an integral's
-  indices is rotated once. No new energy-side machinery at all — the whole term
-  is `Y` contracted against a second-order integral transformation.
+- **The first term is the integrals' own curvature, and it reuses the
+  machinery `Y` is built from — not the matrix `Y`.** `Ehat'` is the energy's
+  *first* derivative with respect to the integrals — the pseudodensity set
+  that the existing orbital source term is already built from and already
+  validated as, the digests' own response (#89) included. `I''` is a purely
+  one-electron-and-two-electron *transformation* question: for
+  `I(kappa) = U^dag I U` with `U = exp(kappa)`, `I''` collects both `exp`'s
+  `kappa^2/2` term and the terms where two of an integral's indices are
+  rotated once each. No new energy-side machinery — but the two halves of
+  `I''` read very different data, and on a conventional case one of them
+  reaches arrays the gradient sidecar does not carry (the enumeration below,
+  and §5.4).
 - **The second term is the energy's own curvature in the integrals**, from the
   fact that each `N_t`, `H_t` contracts several integral factors, so the two
   derivatives can land on different ones. This is the genuinely new term, and
   it is a finite sum over which factor each derivative hits.
 
-Every piece of the second term is an existing contraction with one or two
+Every piece of either term is an existing contraction with one or two
 integral factors replaced by dotted ones — exactly the shape #88's forward
 digest tangent already has, "that build at the dotted integrals". So the
 orbital Hessian's terms are enumerated rather than invented, and the
-enumeration is the cost estimate §10 lists as still open.
+enumeration below is the cost estimate.
+
+**The parameterisation's own second-order term.** With `U = exp(kappa)` and
+`kappa = s u + t v`, the mixed derivative `d^2 U / ds dt` at zero is
+
+```
+  W = (u v + v u) / 2          symmetric, since u and v are antisymmetric
+```
+
+so the second-order change of anything that depends on the orbitals has two
+parts, and the split between them is what decides §5.4:
+
+```
+  z''[u,v] = z'[W] + z^x[u,v]
+
+  z'[W]      every slot rotated once by W: §3.1's promotion rule, ONE
+             general index, evaluated at a symmetric argument
+  z^x[u,v]   two DIFFERENT slots rotated once each, one by u and one by v,
+             plus u <-> v: TWO general indices
+```
+
+for every `kappa`-dependent input `z` the energy reads — the external integral
+blocks `X`, the active `h1e` / `h2e`, the digests `f3(h2e)`, and the orbital
+energies `eps` (which at fixed MO densities are affine in the integrals, their
+tied core and active density labels being rotated slots like any other —
+`src/gradient/gradient_general.cppm`'s header writes their first-order rule).
+
+Two facts about the parameterisation follow, and both matter to whoever
+checks this term. It exists **because `Y != 0`**: NEVPT2 is not stationary in
+`kappa`, so `z'[W]` does not drop the way the same term drops from a CASSCF
+Hessian at convergence. And it is **parameterisation-dependent**: a ladder
+that displaces along `exp(s u) exp(t v)` instead of `exp(s u + t v)` has the
+mixed derivative `Eddot(u,v) + (1/2) Edot([u,v])` (Baker–Campbell–Hausdorff;
+`[u,v]` is antisymmetric, so the extra term is the gradient's own pairing), and
+is checking a different bilinear form.
+
+**The five terms.** Write each tuple's scalars as the class energies build
+them — `N_t` and `H_t` quadratic forms in the tuple's external integrals `x_t`
+(`src/gradient/gradient.cppm`'s header), `H_t`'s active-space operand a Dyall
+block `K` that is **linear** in `(h1e, h2e, f3)` (every `make_*` is; §5.2 has
+`f3` linear in `h2e`), and `Delta_t` linear in `eps`. The chain rule through
+`E = sum_t f(N_t, H_t, Delta_t)` at fixed `c` then has exactly five terms, and
+there is no sixth: `N_t` reads no active integral, `K` has no second
+derivative in the integrals, and `Delta_t` none in `eps`.
+
+| # | term | what it is | existing contraction it reuses | arrays it reads |
+|---|---|---|---|---|
+| K1 | **same-slot curvature** (§5.1's first term, half one) | `<Ehat', z'[W]>`: the full first-order pairing at `W` | `scFullRotationDevice`'s pairing, either mode — `adjoint` = `ext + act + eps` plus the digests' `<hbar, h2e'[W]>` (#89), or `tangent` plus #88's digest term — at `W` instead of an antisymmetric `kappa` | **exactly `Y`'s**: the sidecar's eighteen integral arrays (§3.3's seventeen rows, `(xc\|cc)` on its two slices), `h`, `heff`, `f`, plus the golden's stored blocks for the intra-active part |
+| K2 | **cross-slot curvature** (§5.1's first term, half two) | `<Ehat', z^x[u,v]>` | the same pairings — `<D, X>` per external block, `<M_G, G>` per active block, `<hbar, h2e>` for the digests, `R_t` against `Delta_t` — at a new input | **two-general-index arrays**: §5.4's table. **Not in the sidecar** |
+| K3 | **the finish's curvature** (§5.1's second term) | `sum_t (Ndot, Hdot, Ddot)_t[u] . Hess f_t . (Ndot, Hdot, Ddot)_t[v]` | the forward tangent's per-tuple `Ndot_t` / `Hdot_t` (`assembleSlab`'s `normDot` / `hDot`, before they meet `P` and `Q`) and `Ddot_t` (the class's `deltaOf` at `deps`), at `u` and at `v`; §2's 3×3 between them | the sidecar only: first-order dotted inputs `z'[u]`, `z'[v]` |
+| K4 | **both external slots, one per direction** (second term) | `sum_t [ P_t N_t^{uv} + Q_t H_t^{uv} ]`: every norm and H term with its two `x` slots filled by `X'[u]` and `X'[v]`, symmetrised, `K` undotted | the class term lists under the product rule (`:terms`' `evalTermsTangent`), with the two slots' dotted operands drawn from different directions | the sidecar only |
+| K5 | **one external slot and the Dyall block** (second term) | `sum_t Q_t [ H terms with one x slot at X'[u] and K at K'[v] ] + (u <-> v)` | the same evaluator; `K'[v]` is the forward tangent's own block tangent — `make_*` at `h1e'[v]`, `h2e'[v]` (`rotationTangentBlocks`) — plus `f3'[v]`, `buildRdmsDevice` at `h2e'[v]` (#88) | the sidecar only (`h2e'` reads `g_xa_aa`, `h1e'` reads `heff`) |
+
+So `Eddot_kk(u, v)` is **five terms, every one an existing contraction at new
+arguments**, and the new code is two *input generators* — the promotion at a
+symmetric argument (K1) and the two-slot promotion (K2) — plus §2's 3×3. Per
+direction pair `(u, v)` that is:
+
+- **one slab walk holding both directions' first-order dotted inputs**, for
+  K3–K5 — the same "several tangent sets at once" shape §4.1 found for
+  `H_cc`, with the same consequence for its working set;
+- **one first-order pairing at `W`** (K1) and **one at `z^x[u,v]`** (K2) —
+  which can share a walk, since both are linear in their input and pair the
+  same pseudodensities;
+- **the digests' share**: K3 and K5 need `f3'[u]` and `f3'[v]`, one #88
+  rebuild per *direction*, reusable across every pair that direction enters;
+  K1's and K2's is `<hbar, h2e'[W] + h2e^x[u,v]>` with #89's `hbar`, which is
+  direction-independent and built **once per state**. So reverse mode is the
+  cheaper of the two for the first term's digest part.
+
+Three things K1 needs that the first-order path does not do, each read off the
+code that would be reused:
+
+- **The entry points refuse a symmetric argument.** `makeRotation` and
+  `makeGeneralRotation` (`src/gradient/gradient_rotation.cppm`) return
+  `err_config` for a `kappa` that is not antisymmetric, and `W` is symmetric by
+  construction. The promotion rules themselves are the product rule and hold
+  for any matrix; the refusal is the only thing in the way of most of them.
+- **Three places drop a traced pair's promotions because they cancel against
+  an antisymmetric `kappa`**: `h1e_v_Sr`'s subtracted trace `sum_b (rb|bt)`
+  (`accumGeneralOneElectron`'s step 3), the hoisted `V2tr` trace of `Sir`
+  (`slabDots`, `rotBlockInfo`) and, in the `Sir` class, the statement that
+  `v2tr` does not move. At `W` those parts do **not** vanish and have to be
+  restored. What *is* invariant is a traced pair's dependence on the rotated
+  projector `U P U^T`, whose second order is `(W P + P W) - (u P v + v P u)`
+  — K1's traced-pair terms plus K2's on the same pair — and that vanishes when
+  both `u` and `v` are active–active. A free exact zero for the restored terms,
+  and the reason neither half may be dropped alone.
+- **The matrix `Y` cannot stand in for the pairing.** `scFullRotationMatrix`
+  returns `Y`'s antisymmetric part; `<Ehat', z'[W]>` pairs the symmetric `W`
+  with the *symmetric* part of the unsymmetrised integral-side matrix — the
+  part that function's own comment calls invisible to an antisymmetric
+  `kappa`. K1 is the pairing run at `W`, never a contraction with a stored `Y`.
+
+And one thing K3 needs: its sandwich is **nonlinear per tuple**, so the
+per-tuple `Hdot_t[u]` must carry the digests' share *before* the 3×3 meets it.
+Today #88's term is a separate walk reduced to one scalar per class; K3 needs
+the two merged per tuple.
 
 ### 5.2 The digests are linear in `h2e`, so there is no second-order digest kernel
 
@@ -552,25 +652,106 @@ deliverable is a matrix-free operator, not a matrix. Two consequences:
 a non-obvious answer for `Y`: the active–active block alone needed two arrays
 no class energy reads (`(xa|cc)` and `(xa|vv)`, §1.3), and "assuming the active
 block needs only what the golden already carries" is called out there as the
-easiest mistake to make. The second derivative deserves the same question
-asked, and it is **not yet answered**:
+easiest mistake to make. The second derivative has the same trap, and it sits
+where the expectation was that the answer would be cheap.
 
-- §5.1's **first** term is `Y` against `I''`. `Y`'s inventory is §3's, already
-  in the `.gradgold` sidecar, and `I''` is built *from those same arrays* by a
-  second transformation rather than read from anywhere. So this term plausibly
-  needs **nothing new** — a strong claim, and the reason to expect the answer is
-  cheap.
-- §5.1's **second** term, `I'^T Ehat'' I'`, reads *pairs* of integral factors.
-  Whether every pair that appears is a pair of arrays §3 already lists, or
-  whether some pairing reaches an array the gradient never needed, is exactly
-  the enumeration §10 lists as open. §3.1's promotion rule is the tool: the
-  same mechanical argument that produced `Y`'s list, run on the second
-  derivative's terms.
+**The verdict.**
 
-Until that enumeration is done, the sidecar's sufficiency is an open question
-and not an assumption. A Hessian path must therefore **refuse** a case whose
-sidecar lacks an array it needs rather than silently computing a partial
-second derivative — §9.1.
+| block / term | needs anything the `.gradgold` sidecar lacks? |
+|---|---|
+| `H_kc` | **no.** One `kappa` derivative: the first-order dotted inputs `z'[u]` (sidecar), the RDM tangent at `(c, w)` (§3), the digests' mixed path at dotted `h2e` (§5.2, #88), and the orbital energies' CI response, whose `gamma` line reads the same tied rows `deps` already does (`g_xa_cc`, `g_xc_ca`, `g_xa_vv`, `g_xv_va`) |
+| `H_kk`, K1 and K3–K5 | **no.** K1 reads exactly `Y`'s arrays at a symmetric argument; K3–K5 read only first-order dotted inputs (§5.1's table) |
+| `H_kk`, K2 | **yes**, on a conventional case: **twelve two-general-index arrays, whose union is the whole MO-integral tensor** (below). On a density-fitted case, **no**: the golden and its `NEVPT2F1` sidecar already carry all of `B[L,p,q]` |
+
+So the expectation recorded here before the enumeration — that §5.1's first
+term "plausibly needs nothing new" because `I''` is "built from those same
+arrays" — holds for its same-slot half (K1) and is **wrong** for its cross-slot
+half (K2). §5.1's *second* term, the one that looked like the risk, needs
+nothing new at all.
+
+**§3.1's rule, run at second order.** For every array the energy reads —
+§3.2's two-electron table and, through their definitions, the `h^eff` slices
+and the orbital energies — promote **two** slots, each to its own general
+index, keeping the charge-distribution pairing. Two slots in the same
+distribution give `(xy|QR)`, the other distribution's two labels kept; two in
+different distributions give `(xP|yQ)`. The union over all arrays and all six
+slot pairs is:
+
+| array | shape | reached from |
+|---|---|---|
+| `(xy\|aa)` | `n_mo^2·n_act^2` | every block with an `aa` distribution: `h2e`, `Sr`, `Si`, `Sir`'s `(ri\|tu)`; `h^eff`'s Coulomb dressing on `h1e` |
+| `(xy\|va)` | `n_mo^2·n_virt·n_act` | `Sr`, `Srs`, `Srsi`, `Sir`'s `(rt\|iu)`; `eps_r`'s active exchange |
+| `(xy\|ca)` | `n_mo^2·n_core·n_act` | `Si`, `Sij`, `Sijr`, `Sir`'s `(rt\|iu)`; `eps_i`'s active exchange |
+| `(xy\|cv)` | `n_mo^2·n_core·n_virt` | `Sijrs`, `Sijr`, `Srsi`, `Sir`'s `(ri\|tu)`; `eps_r`'s core exchange |
+| `(xy\|cc)` | `n_mo^2·n_core^2` | **no class block** — `h^eff`'s core exchange `(pj\|jq)` on its core-indexed slices (`h1e_v_Si`, `h1e_v_Sir`) and `eps_i`'s `(ij\|ji)`, each with `p` and `j` promoted. In full: `j` and the free core label are different indices |
+| `(xy\|vv)`, tied | `n_mo^2·n_virt` | **no class block** — `eps_r`'s Coulomb `(rr\|jj)` and `(rr\|tu)` with the density pair promoted; the two virtual labels coincide |
+| `(xa\|ya)` | `n_mo^2·n_act^2` | `h2e`, `Sr`, `Si`, `Srs`, `Sij`, `Sir`'s `(rt\|iu)` |
+| `(xv\|ya)` | `n_mo^2·n_virt·n_act` | `Sr`, `Srs`, `Srsi`, `Sir` (both blocks), `Sijr`'s mirror `(xa\|yv)` |
+| `(xc\|ya)` | `n_mo^2·n_core·n_act` | `Si`, `Sij`, `Sijr`, `Srsi`, `Sir` (both blocks) |
+| `(xc\|yc)` | `n_mo^2·n_core^2` | `Sijrs`, `Sijr`, `Sij`; `h^eff`'s and `eps_i`'s core dressing |
+| `(xc\|yv)` | `n_mo^2·n_core·n_virt` | `Sijrs`, `Sijr`, `Srsi`, `Sir`'s `(rt\|iu)` |
+| `(xv\|yv)` | `n_mo^2·n_virt^2` | `Sijrs`, `Srs`, `Srsi`; `eps_r`'s exchange, on its tied slice |
+
+(`(xa|yv)` and `(xv|ya)` are one array with `x` and `y` exchanged, as are
+`(xc|ya)` / `(xa|yc)` and `(xc|yv)` / `(xv|yc)`; the `h^eff` and orbital-energy
+routes also reach the ten class-block rows, so only the two they alone reach
+are attributed to them above.)
+
+**The first-order bound does not survive, and the eighteenth array comes
+back.** §3.4's omission rested on "no integral the energy reads carries three
+virtual labels, and promotion cannot create one" — a statement about the
+*fixed* labels, which one promotion leaves at most two of. Two promotions turn
+two labels general, and the general indices range over the virtuals: `Sijrs`'s
+`(ir|js)` along two core–virtual rotations, or `Srs`'s `(rt|su)` along two
+active–virtual ones, reads `(xv|yv)` at `x`, `y` virtual — integrals with
+**four** virtual labels. `(xv|vv)`, the array §3.4 is built on never needing,
+is `(xv|yv)`'s `y`-virtual slice. And the six `(xP|yQ)` rows alone are already
+**every** MO integral: any `(pq|rs)` is `(xP|yQ)` with `x = p`, `P` the space of
+`q`, `y = r`, `Q` the space of `s`. So no block list smaller than the full
+tensor serves K2 for a general direction pair — §5.3's observation that a
+materialised `H_kk` is the size of the full integral dump is, for K2's *input*,
+literally true.
+
+**What follows, per case kind:**
+
+- **Conventional (`NEVPT2D1`) — the sidecar does not suffice, and the missing
+  data is the full `n_mo^4` MO-integral tensor** that
+  [`gradient-theory.md`](gradient-theory.md), §3 opens by declining. Nothing
+  writes it today. Its natural writer is `generate_golden.py`'s
+  `_gradient_arrays`, the `--gradgold` path, as one more named array (a full
+  `ao2mo` transform; `ppaa` is already one of its groups) — **opt-in**, so the
+  committed `.gradgold` files do not grow, and whether it is an array in a `D1`
+  file or a sidecar of its own is the implementing issue's decision; either
+  must pass `reference_data/golden_layout_check.py`. The alternative that stores
+  nothing is AO-direct — each cross-slot integral is a four-index transformation
+  with `C u` and `C v` in place of two coefficient columns — and needs AO
+  integrals, which no file in `golden/` carries and the runtime does not
+  compute. Which committed cases a full dump is affordable for is a size
+  question for [`reference-data.md`](reference-data.md), not this document.
+- **Conventional, restricted directions — the sidecar suffices when one of `u`,
+  `v` is active–active.** Then one general index is active, and every row above
+  collapses to a §3.3 array with its ties intact (`(xy|vv)` tied to `g_xa_vv`,
+  `(xy|cc)` to the full `g_xa_cc`, `(xv|yv)` to `g_xv_va`, and so on down the
+  table). That is the second-order counterpart of §1.3's active block, reachable
+  today, and it is where the traced-pair zero of §5.1 lives.
+- **Density-fitted (`NEVPT2F1`) — the sidecar suffices.** The golden's `B_aa`,
+  `B_ca`, `B_va`, `B_cv` and the sidecar's `B_cc`, `B_vv` (in full) are the
+  whole `B[L,p,q]` ([`gradient-theory.md`](gradient-theory.md), §3.8). In
+  three-index form `z^x` for a two-electron block is a product of two
+  *first-order* dotted factors across the two distributions — #168's `Bdot`,
+  one per direction — plus one *second-order* dotted factor within a
+  distribution, `sum_xy (u_xp v_yq + v_xp u_yq) B[L,x,y]`, which reads `B`
+  over the full range. All carried. The twelve arrays need never be formed —
+  forming them would be the `n_mo^4` cost again — which makes K2 on a fitted
+  case a three-index contraction, the slab-wise kind
+  [`gradients.md`](gradients.md), §6.2 records as not in tree.
+
+A Hessian path must still **refuse** what it cannot compute rather than return
+a partial second derivative (§9.1) — and the refusal now has a definite
+trigger: K2 on a conventional case without the full tensor, for any direction
+pair with neither member active–active. An omitted K2 is invisible to the
+forward/reverse duality (both modes would omit it) and to the symmetry check;
+only a Hessian-vector ladder sees it.
 
 ## 6. PC at second order: the eigen-derivative still does not appear
 
@@ -881,7 +1062,7 @@ code because two of its entries are not obvious.
 |---|---|---|
 | `--cublas`, `--ozaki` or `--fused-digest` with any Hessian | **refuse**, `err_unsupported` at flag parsing, as the tangent flags already are ([`gradients.md`](gradients.md), §8) | a second derivative built from an approximate digest is not the derivative of anything the energy stage computed — the same argument as for a tangent, with the same force |
 | a PC class the gap or denominator check refuses | **refuse** that class, `err_numerical` naming it, through the same status the energy, tangent and adjoint use | §6.2's licence is the structural cut. A refused class has no valid second derivative, and a zero would be a wrong answer rather than a missing one |
-| a case whose `.gradgold` lacks an array §5.4's enumeration needs | **refuse** the orbital blocks | a partial `H_kk` is not a Hessian, and the omission would be invisible in every identity that pairs the two modes (both would omit it) — exactly how the §6 digest gap survived until #89 |
+| a conventional case whose sidecar lacks the full MO-integral tensor K2 reads (§5.4), for a direction pair with neither member active–active | **refuse** `H_kk` | a partial `H_kk` is not a Hessian, and the omission would be invisible in every identity that pairs the two modes (both would omit it) — exactly how the §6 digest gap survived until #89 |
 | `N_t = 0` exactly | **not** a refusal: contribute zero | `E_t = -N_t^2/d_t -> 0` and §2.1's `d` forms all stay finite. A NaN here would be an implementation bug, so this is a `check`-able invariant, not an error path |
 | the Euler gate with the orbital-energy response on | **not** a refusal: skip the gate and **say so** | §4.3 — the identity does not hold in that mode, but the *computation* is perfectly valid and is the one a nuclear gradient would consume. Refusing it would be refusing the useful mode. The PASS line names which mode ran, as `--gradient-source`'s already does |
 | a `casscf`-kind golden | **not** a refusal, unlike the in-tree Lagrangian path | level 1 is **reference-agnostic**: it differentiates the energy functional, which does not know how its orbitals were made ([`gradient-theory.md`](gradient-theory.md), §2.1 makes this argument for `Y` and `y`, and §2 of this document inherits it). Only levels 2 and 3 branch on the reference |
@@ -912,6 +1093,20 @@ do not apply here.
   would have left behind drop for a stronger reason — the cut is structural, so
   `S`, `K` and all their CI derivatives annihilate the dropped subspace
   identically (§6.2).
+- `H_kk` is **five terms**, every one an existing contraction at new
+  arguments (§5.1's table): the first-order pairing at the parameterisation's
+  symmetric `W = (uv + vu)/2` (K1), the same pairings at a two-slot promotion
+  (K2), and three terms that read only first-order dotted inputs — §2's 3×3
+  between the forward tangent's per-tuple scalars (K3), the class terms with
+  their two external slots dotted along different directions (K4), and one
+  external slot against the Dyall block's tangent (K5). The new code is two
+  input generators and the 3×3.
+- **The sidecar's sufficiency, settled (§5.4).** `H_kc` needs nothing new;
+  `H_kk`'s K1 and K3–K5 need nothing new; K2 needs twelve two-general-index
+  arrays whose union is the **whole MO-integral tensor** — four-virtual
+  integrals included, so §3.4's omitted `(xv|vv)` comes back — on a
+  conventional case, unless one direction is active–active, and **nothing new**
+  on a density-fitted one, whose golden and sidecar already carry all of `B`.
 - The exactness budget costs **one** new finite difference (§9).
 - A second derivative needs the wavefunction parameters only to **first** order
   and the multipliers only to **zeroth** — the 2n+1/2n+2 rules, §7. So no
@@ -928,10 +1123,12 @@ do not apply here.
 - The three-tangent-set slab walk's working set, and therefore its tile floors
   (§4.1). This is a measurement, and it decides which committed cases can run a
   Hessian at all.
-- The term enumeration for `H_kk` (§5.1): how many distinct dotted-integral
-  contractions the two curvature sources actually produce, written out. §5
-  argues each one is an existing contraction; it does not yet say how many
-  there are, and that count is the real cost estimate for the orbital block.
+- Where a conventional case's K2 gets its data (§5.4): an opt-in full
+  MO-integral array written by `generate_golden.py`'s `--gradgold` path —
+  affordable only where a full dump is, which is a size question for
+  [`reference-data.md`](reference-data.md) — or an AO-direct second-order
+  transformation, which needs AO integrals nothing in the tree carries; or
+  K2 on the density-fitted pair alone, in three-index form.
 - Whether `H_kc` should be computed from the digests' transpose applied to
   tangent digests, or from the tangent build at dotted integrals, or both —
   given that the duality between the two is what would check it.
@@ -961,13 +1158,14 @@ does not make an earlier one worse.
 | 2 | `Eddot(u, v)`, SC, scalar (§4.1) | §4.3's Euler, frozen `eps` — against the *already-gated* `Edot(u)`. Plus the one finite difference of `Edot` (§9) | the three-argument slab walk (§4.4) |
 | 3 | `H_cc u`, SC, vector (§4.2) | the duality `<v, H_cc u> == Eddot(u,v)` against stage 2, round-off exact; column by column where `ndet` allows (§4.4) | `gdot` through the pseudodensity walk, two sigma calls |
 | 4 | PC's `Eddot` and `H_cc u` (§6) | PC's Euler covers **five** classes against SC's three, plus the same duality; the refusals of §9.1 carried | extra solves against the existing factorisation. No new derivation (§6.3) |
-| 5 | `H_kc`, `H_kk` as an action (§5) | §5.1's first term reuses `Y`, already validated block by block against PySCF, so only its second term is new; Hessian-vector ladders (§5.3) | **the §5.1 enumeration first** (§10), then the second-order integral transformation. The expensive stage |
+| 5 | `H_kc`, `H_kk` as an action (§5) | K1 reuses the pairing `Y` is built from, already validated block by block against PySCF, at a symmetric argument; the traced-pair zero for active–active pairs (§5.1); Hessian-vector ladders along `exp(s u + t v)` (§5.3) | the symmetric-argument and two-slot promotions (§5.1's table), and K2's data source (§5.4) — the full tensor on a conventional case. The expensive stage |
 | 6 | levels 2 and 3, offline (§7–§8) | a stencil over `nevpt2_grad.py`'s analytic gradient — the oracle §8 argues against | `3N` reference response solves, second-derivative integrals, the constraints' second derivatives. A different kind of project |
 
 Stage 1 is a prerequisite for all five others and is the smallest piece in the
 document. Stages 2–4 are the ones §9's "one new finite difference" claim covers
-in full. Stage 5 is gated on an enumeration that is algebra, not code, and that
-enumeration is the honest next step for anyone who wants the orbital blocks.
+in full. Stage 5's enumeration is done (§5.1, §5.4), and what it found is that
+the orbital block's cost is set by its data, not its algebra: K2 reads the
+whole integral tensor on a conventional case.
 Stage 6 is where the character of the work changes, and §8 is the argument for
 not starting there.
 
