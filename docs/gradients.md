@@ -31,7 +31,7 @@ respect to a nuclear coordinate.
 | the PC energy's derivative w.r.t. the CI vector | **in tree, both modes**: forward (§4.3), checked against a finite difference, and reverse — `y_I = dE_pc/dc_I` by the PC solve's adjoint (§5.6, #74) — checked against it exactly, with the orbital energies' response in both, and against block2's committed derivative |
 | the PC orbital source term `Y_xy = dE_pc/dkappa_xy` | **in tree, both modes** (§6.1, #74): over the whole `kappa` space, the digests' transpose and the orbital energies' response in it, the adjoint against the PC forward tangent exactly, and against block2's committed `A` block by block |
 | the orbital source term `Y_xy = dE/dkappa_xy` (Park Eq. 26) | **in tree over the whole `kappa` space** — active–active, core–core, virtual–virtual and mixed — both modes, checked against each other exactly (§6), and **exact**: with the digests' term below in it, the full `<kappa, Y>` against the full forward `Edot(kappa)` holds to round-off too |
-| the orbital source term on a **density-fitted** case, `Y_xy` of the fitted energy | **frozen-digest term in tree** over the whole `kappa` space (§6.2, #165): `nevpt2_sc_pseudodensity --kappa-full` on a `*_df` golden contracts the inventory out of the whole `B[L,p,q]` and gates the frozen-digest duality, the promotion table, the active block, the two intra-space finite differences and Eqs. 56–57. The digests' own term on that path is **not in tree** (#168), so a fitted case's `--dump-source-terms` and `--source-oracle` are refused, and no density-fitted nuclear gradient is built from the GPU's terms (#166) |
+| the orbital source term on a **density-fitted** case, `Y_xy` of the fitted energy | **in tree, both terms, both modes** over the whole `kappa` space (§6.2): `nevpt2_sc_pseudodensity --kappa-full` on a `*_df` golden contracts the inventory out of the whole `B[L,p,q]` (#165) and gates the frozen-digest duality, the promotion table, the active block, the two intra-space finite differences and Eqs. 56–57, and (#168) the digests' own term — the full duality, its own finite difference forward and reverse, the exact zeros, and the transpose carried onto the three-index `B` against the four-index pairing. `--dump-source-terms` writes the fitted `Y` and `y` with both terms; `--source-oracle` stays refused (no fitted oracle exists), as does `--pc` there. No density-fitted nuclear gradient is built from the GPU's terms yet (#166) |
 | the digests' own orbital response, the `f3ac`/`f3ca` digests' `h2e` dependence | **in tree, both modes** (§6): forward, along any direction as a term of its own beside the frozen-digest tangent (#88) — checked against PySCF's exact directional derivative offline and a finite difference on the card; reverse, `Y` carrying it through the digests' **transpose**, a tiled kernel that never forms the 4-RDM (#89) — checked against the forward term exactly, and against PySCF's exact `Y` block by block on the card |
 | the RDMs' own derivatives w.r.t. the CI vector | **in tree**, host `dm1`/`dm2` and device `dm3`/`f3ac`/`f3ca` (§4.1) |
 | the pseudocanonical multipliers `z^c` (Park Eqs. 56–57) | **in tree**, divided out of `Y`'s two inactive blocks, refusing a degeneracy the division cannot resolve (§6) |
@@ -159,7 +159,7 @@ Dependency order; `src/gradient/`'s components are in
 | `nevpt2.sc_amplitudes` (`src/gradient/`) | the amplitude `T`, the multipliers `P`/`Q`/`R`, the pseudocanonical multipliers `z^c` (Park Eqs. 56–57) and `derivativeSubscripts`. Host only | `test/gradient/`, card-free |
 | `nevpt2.kappa_rotation` (`src/gradient/`) | the orbital-rotation parameterisation: antisymmetric `kappa`, `exp(kappa)`, an array's active axes transformed. Host only | `test/gradient/`, card-free |
 | `nevpt2.gradient_plan` (`src/gradient/`) | `nevpt2.gradient`'s pure host arithmetic: the promotion table, the classes' `Delta` vectors and slab multipliers, `termHasActive`, the CI source term's host fold; and `longestFourfoldRun`, the step-ladder rule every finite-difference check of the gradient path gates on ([`testing.md`](testing.md), "Residual-independent checks of the gradient path"). Host only | `test/gradient_plan/`, card-free |
-| `nevpt2.gradient` (`src/gradient/`) | the SC pseudodensities, the orbital source term `Y_xy` over the whole `kappa` space, and `y_I = dE/dc_I`; and `dfGeneralIntegralsDevice` (`gradient_df.cpp`, #165), the density-fitted case's general-range inventory contracted out of the whole `B` tensor (§6.2) | `nevpt2_sc_pseudodensity` (identities, `--kappa-act` and `--kappa-full`), `nevpt2_demo --gradient-source` (duality) |
+| `nevpt2.gradient` (`src/gradient/`) | the SC pseudodensities, the orbital source term `Y_xy` over the whole `kappa` space, and `y_I = dE/dc_I`; and `dfGeneralIntegralsDevice` (`gradient_df.cpp`, #165), the density-fitted case's general-range inventory contracted out of the whole `B` tensor, and `dfDigestSourceDevice` (#168), the digests' transpose carried onto the three-index `B` (§6.2) | `nevpt2_sc_pseudodensity` (identities, `--kappa-act` and `--kappa-full`), `nevpt2_demo --gradient-source` (duality) |
 | `nevpt2.gradient`'s `:pc_classes` partition | PC's reverse mode (#74): each PC class's solve differentiated through its own `S`, `K` and `S_1` (`pcClassMatrices`, `pcSolveClass`, exported from `nevpt2.energy` for this), giving `y_I`, `Y_xy`, the digests' adjoint and the PC rotation tangent (`pcCiSourceDevice`, `pcFullRotationDevice` / `Matrix`, `pcDigestAdjointDevice`, `pcDigestRotationTangentDevice`). Its per-tuple arithmetic is `nevpt2.energy_finish`'s `pcAdjoint*` / `pcRotationTangent*` | `nevpt2_demo --gradient-source --pc` (CI duality), `nevpt2_sc_pseudodensity --pc --dump-source-terms` (rotation dualities) and `--pc --source-oracle` (block2's `A`, `P y`); `test/energy_finish/` card-free; `test/pc_adjoint/` the refusals |
 | `nevpt2.pc_tangent` (`src/gradient/`) | the PC tangent's finite-difference check: the analytic tangent against re-solves at displaced states | `nevpt2_pc_tangent`; the gate itself in `test/pc_tangent/` |
 | `nevpt2.golden`'s `loadGradGold` | the `*.gradgold` sidecar reader — the one-general-index MO-integral arrays and full-MO-range Fock matrices the core, virtual and mixed blocks of `Y` read — and `checkAgainst`, which says a sidecar and a golden describe one state (and, since #164, one calculation: a density-fitted `NEVPT2F1` sidecar, carrying `B_cc` / `B_vv` and the four tied orbital-energy arrays, pairs only with a `*_df` golden of its `naux`) | `test/golden/gradgold_tests.cpp`, host-only; `--kappa-full` is the consumer, and `--gradient-source --gradgold` reads either flavour's orbital-energy response |
@@ -736,10 +736,11 @@ committed (`--pc --source-oracle`), and a nuclear gradient against `grad_num`
 can, and are held ([`pc-nevpt2.md`](pc-nevpt2.md), "The source terms by
 reverse mode"). Park Eqs. 56–57 stay offline, as for SC.
 
-### 6.2 The density-fitted orbital source term (#165), and which binary runs it
+### 6.2 The density-fitted orbital source term (#165, #168), and which binary runs it
 
-**The frozen-digest term over the full `kappa` range is in tree on a
-density-fitted case; the digests' own term is #168.** A `*_df` golden is a
+**Both of `Y`'s terms over the full `kappa` range are in tree on a
+density-fitted case: the frozen-digest term (#165) and the digests' own
+(#168).** A `*_df` golden is a
 different calculation — every integral is `Σ_L B B` — so its `Y` needs the
 general-range inventory *of the fitted integrals*.
 [`gradient-theory.md`](gradient-theory.md), §3.8, settles that this needs no
@@ -766,28 +767,69 @@ array is about what the derivation *reads*; the slab-wise contraction that
 would honour it on the device — a strip of `B` dotted by `kappa`, contracted
 against `B` per block — is not in tree. The file stays the three-index one.
 
-**What is checked** is `--kappa-full`'s list (§6, §8) on the frozen-digest
-half: the integral halves' duality and, with the orbital energies' response
-added to both, the frozen-digest duality, at 1e-7; the promotion table
+**What is checked** is `--kappa-full`'s whole list (§6, §8). #165 landed it
+on the frozen-digest half: the integral halves' duality and, with the
+orbital energies' response added to both, the frozen-digest duality, at
+1e-7; the promotion table
 against the fitted golden's stored blocks and the sidecar's `h^eff` / `f` /
 `e_core` / `e_virt`, plus one row of its own — the built inventory against
 the four tied orbital-energy arrays the sidecar carries ready-made; the active
 block against `--kappa-act`'s own entry point; the two intra-space finite
 differences, which displace the fitted golden's blocks; and Eqs. 56–57 with
-the degeneracy refusal. Checks 4 and 5 lose nothing to the missing term: an
-intra-space rotation moves no active integral, so the digests do not move
-there. The PASS line says `on the frozen-digest half (density-fitted`, as
-`--kappa-full`'s did between #88 and #89. Numbers:
-[`testing.md`](testing.md), "The density-fitted orbital source term
-(frozen-digest half)".
+the degeneracy refusal. #168 adds the digests' own term, and with it every
+check §6 lists for the integral-direct path: the **full** duality (the
+transpose's term in `<kappa, Y>` against the rebuilt digests' term in
+`Edot`) on the four seeded directions, the digests' term against its own
+finite difference along an active direction (the golden's fitted `h2e`
+rotated on all four axes, which is both `B_aa` factors rotated) in forward
+mode and the transpose held to it, and an exact zero along the two
+intra-space directions. The frozen-digest duality stays beside the full one.
+The PASS line says `(density-fitted: both Y terms`. Numbers:
+[`testing.md`](testing.md), "The density-fitted orbital source term".
 
-**Where #168 slots in.** The fitted path has §6's two-term shape already: the
-frozen-digest `Y` is `scFullRotationDevice` / `scFullRotationMatrix` with no
-`digestAdjoint`, and the digests' forward term and transpose take the same
-`GeneralIntegralsDevice` (their `h2e_dot` reads only its `g_xa_aa`, `B_xa ·
-B_aa`) — `:kappa_full_check` skips exactly the calls #89 added, on
-`gg.densityFitted()`. #168 restores them there, with whatever fitted-specific
-transpose it decides on.
+**The digests' own term on the fitted path (#168): the same calls, and a
+three-index transpose beside them.** §6's two-term shape carries over with
+no new derivation (#161; [`gradient-theory.md`](gradient-theory.md), §3.8):
+the fitted golden's `h2e` *is* `Σ_L B_aa B_aa`, so the forward term —
+`buildRdmsDevice` at `h2e_dot(kappa)` — and the transpose —
+`scDigestAdjointDevice`, leaving `hbar = dE/d(h2e)` — are the
+integral-direct calls run on the fitted `h2e`, with `h2e_dot`'s general part
+reading the built inventory's `g_xa_aa`. That is what `Y` carries
+(`scFullRotationDevice` / `scFullRotationMatrix` with `digestAdjoint`), on
+both the check and the dump.
+
+The issue asked for a transpose that reaches the three-index `B` rather than
+a four-index block. `hbar` is `n_act^4`, the transpose's own output, so the
+four-index object the fitted path does not need is `g_xa_aa`
+(`n_mo · n_act^3`), which `h2e_dot`'s general part reads. In `nevpt2.energy`'s
+layout `h2e[p,q,r,s] = Σ_L B[L,p,r] B[L,q,s]`, and §3.1's rule on each `B`
+factor gives `Bdot[L,t,u] = Σ_x (κ_xt B[L,x,u] + κ_xu B[L,t,x])`, so
+
+```
+  <hbar, h2e_dot(kappa)> = <Bbar, Bdot> = Σ_{x, t∈act} κ_xt D[x, t]
+  Bbar[L,t,u] = Σ_{v,w} (hbar[t,v,u,w] + hbar[v,t,w,u]) B_aa[L,v,w]
+  D[x, t]     = Σ_{L,u} B[L,x,u] (Bbar[L,t,u] + Bbar[L,u,t])
+```
+
+— the digests' term of `Y` as an `(n_mo, n_act)` matrix, out of `hbar` and
+the strip `B[L, x, a]`, i.e. the golden's `B_ca`, `B_aa`, `B_va` and nothing
+of the sidecar's (`nevpt2.gradient`'s `dfDigestSourceDevice`; the 4-RDM is
+still never formed, since `hbar` comes from the tiled transpose).
+
+**What is in tree, and why it is not the only route.** The three-index route
+is computed and **gated against** the four-index pairing — on `--kappa-full`'s
+four directions, along check 6's active direction, as one more exact zero on
+the two intra-space directions, and on every direction the dump writes — at
+the duality's 1e-7, the same functional in a different association. It does
+not *replace* the four-index pairing in the `Y` that is written: that `Y` is
+probed basis direction by basis direction through the integral halves, which
+already read the whole inventory built from `B` (#165's economy of code, not
+of memory, above), so `g_xa_aa` is formed either way and routing one of
+`Y`'s terms around it would save nothing at these sizes. Where it matters —
+a fitted gradient that never forms the inventory — `D` is the digests' term
+ready-made; the inventory-free integral halves it would sit beside are not in
+tree (the slab-wise contraction above). Cost: [`performance.md`](performance.md),
+"The density-fitted orbital source term".
 
 **The binary decision: `nevpt2_sc_pseudodensity`, with no `--df` flag.** A
 fitted case is known by its sidecar's NEVPT2F1 magic, and `checkAgainst`
@@ -808,10 +850,24 @@ reasons, in order:
   contradiction to refuse; `densityFitted()` is read off the magic and never
   off the array names, and that is the one switch.
 
-`--dump-source-terms` and `--source-oracle` **refuse** a fitted sidecar as
-*unsupported* until #168: they write or compare the exact `Y`, which a
-nuclear gradient (#166) is built from, and half a dump is refused rather than
-written — the rule `nevpt2_demo`'s `y_I` already follows. `README.md`, "Which
+`--dump-source-terms` on a fitted sidecar writes the exact `Y` with both
+terms (#168), `y` with the orbital energies' response read from the same
+sidecar, and `edot_kappa` / `edot_frozen` / `edot_digest` along its seeded
+directions, read back bit for bit — the file #166's nuclear gradient is built
+from. Until #168 it was refused, since half a dump is refused rather than
+written. Two combinations stay refused as *unsupported*:
+
+- **`--source-oracle`**: there is nothing to compare against.
+  `reference_data/sc_source_oracle.py` writes PySCF's (or block2's) exact
+  source terms of the *conventional* calculation, through `nevpt2_grad.py`'s
+  machinery, which has no fitted path, so no fitted `.srcgold` exists. The
+  fitted `Y`'s independent provider is the nuclear gradient built from the
+  dump against the fitted `grad_num` (#166, #167).
+- **`--pc --dump-source-terms`**: PC's rotation tangent over the fitted
+  inventory has no gate of its own in tree (`--kappa-full` is SC's), and a
+  dump is never written ungated.
+
+`README.md`, "Which
 binary takes which flag", and `test/cli/` follow the decision: no binary
 parses `--df`, and `nevpt2_df_demo` refuses `--kappa-act`, `--kappa-full` and
 `--dump-source-terms`, naming `nevpt2_sc_pseudodensity`.
@@ -901,9 +957,9 @@ its own, and each prints one `PASS:` line a ctest entry matches
 | `nevpt2_df_demo --gradient-source` | the same duality and Jacobian over the density-fitted slabs (#162), always at **frozen** orbital energies: the demo reads no sidecar, and the PASS line says `frozen-orbital-energy mode` |
 | `nevpt2_sc_pseudodensity` | the Eqs. 40–47 identities for all eight classes |
 | `nevpt2_sc_pseudodensity --kappa-act` | the active–active orbital source term: adjoint against tangent, with a finite difference beside them |
-| `nevpt2_sc_pseudodensity --kappa-full` | the same over the whole `kappa` space, out of the `*.gradgold` sidecar (`--gradgold PATH` overrides the derived path): the duality, the sidecar's promotion table against the arrays it reads, the active block against `--kappa-act`'s own entry point, two intra-space finite differences, and Eqs. 56–57; and `Edot(kappa)` in its two terms — the frozen-digest tangent and the digests' own (§6) — with the **full** duality against `<kappa, Y>` carrying the digests' transpose (#89), the digests' term held to its own finite difference along an active direction (forward and reverse) and to an exact zero along the two intra-space ones. On a `*_df` golden beside its density-fitted sidecar (#165, §6.2), the inventory is contracted out of the whole `B` and checked against the sidecar's carried tied arrays too, and the digests' term is left out (#168): the gate is the frozen-digest duality, and the PASS line says so |
-| `nevpt2_sc_pseudodensity --dump-source-terms PATH` | not a check of the derivatives but their **export**: `Y_xy` over every MO pair (`scFullRotationMatrix`, out of the sidecar as `--kappa-full` reads it) and `y_I` (`scCiSourceDevice`, with the orbital energies' response out of the same sidecar), written to `PATH` as a `.gradsrc` — a NumPy `.npz` holding `kappa_source`, `ci_source`, the `ci` they were taken at, the partition and `e_corr`, all in the golden's own basis, and (#88) `edot_kappa` / `edot_frozen` / `edot_digest`: seeded directions — `--kappa-full`'s four full ones, one purely active–virtual, one purely core–active — and `Edot` along each in its two terms — then read back. `Y` carries the digests' transpose (#89). Its gate is that the matrix is the pairing, that each direction's exact `Edot` (frozen + digest) is `<kappa, Y>` off the matrix written, that `y`'s walk ran on this state and that the file reads back bit for bit. `reference_data/nevpt2_grad.py --source dump` builds the SC-NEVPT2 nuclear gradient from it, carrying both terms into its own active basis; `--source both` puts that gradient beside PySCF's and `grad_num`; `--edot-check` holds the directions' `Edot` against PySCF's exact directional derivative |
-| `nevpt2_sc_pseudodensity --source-oracle PATH` | the dump's two terms checked against an **independent** provider: PySCF's exact `A = Y − Y^T` and `P y`, committed as `golden/<case>.srcgold` for N2 CAS(4,4) and LiF (`reference_data/sc_source_oracle.py`), compared block by block. Every block must meet the measured tolerance: `source_compare.cppm`'s `kKnownGaps`, which pinned the §6 digest omission's blocks until #89, is empty (docs/testing.md, "The SC source terms against PySCF's, on a card") |
+| `nevpt2_sc_pseudodensity --kappa-full` | the same over the whole `kappa` space, out of the `*.gradgold` sidecar (`--gradgold PATH` overrides the derived path): the duality, the sidecar's promotion table against the arrays it reads, the active block against `--kappa-act`'s own entry point, two intra-space finite differences, and Eqs. 56–57; and `Edot(kappa)` in its two terms — the frozen-digest tangent and the digests' own (§6) — with the **full** duality against `<kappa, Y>` carrying the digests' transpose (#89), the digests' term held to its own finite difference along an active direction (forward and reverse) and to an exact zero along the two intra-space ones. On a `*_df` golden beside its density-fitted sidecar (#165, §6.2), the inventory is contracted out of the whole `B` and checked against the sidecar's carried tied arrays too; every check above runs, the digests' term included (#168), plus the frozen-digest duality kept beside the full one and the transpose carried onto the three-index `B` held to the four-index pairing; the PASS line names the fitted case |
+| `nevpt2_sc_pseudodensity --dump-source-terms PATH` | not a check of the derivatives but their **export**: `Y_xy` over every MO pair (`scFullRotationMatrix`, out of the sidecar as `--kappa-full` reads it) and `y_I` (`scCiSourceDevice`, with the orbital energies' response out of the same sidecar), written to `PATH` as a `.gradsrc` — a NumPy `.npz` holding `kappa_source`, `ci_source`, the `ci` they were taken at, the partition and `e_corr`, all in the golden's own basis, and (#88) `edot_kappa` / `edot_frozen` / `edot_digest`: seeded directions — `--kappa-full`'s four full ones, one purely active–virtual, one purely core–active — and `Edot` along each in its two terms — then read back. `Y` carries the digests' transpose (#89). Its gate is that the matrix is the pairing, that each direction's exact `Edot` (frozen + digest) is `<kappa, Y>` off the matrix written, that `y`'s walk ran on this state and that the file reads back bit for bit. `reference_data/nevpt2_grad.py --source dump` builds the SC-NEVPT2 nuclear gradient from it, carrying both terms into its own active basis; `--source both` puts that gradient beside PySCF's and `grad_num`; `--edot-check` holds the directions' `Edot` against PySCF's exact directional derivative. On a `*_df` golden (#168, §6.2) the same file from the fitted inventory, with a sixth check: each direction's `edot_digest` against the transpose carried onto `B` |
+| `nevpt2_sc_pseudodensity --source-oracle PATH` | the dump's two terms checked against an **independent** provider: PySCF's exact `A = Y − Y^T` and `P y`, committed as `golden/<case>.srcgold` for N2 CAS(4,4) and LiF (`reference_data/sc_source_oracle.py`), compared block by block. Every block must meet the measured tolerance: `source_compare.cppm`'s `kKnownGaps`, which pinned the §6 digest omission's blocks until #89, is empty (docs/testing.md, "The SC source terms against PySCF's, on a card"). Refused on a `*_df` golden: there is no fitted oracle (§6.2) |
 | `nevpt2_sc_pseudodensity --pc --dump-source-terms PATH` / `--pc --source-oracle PATH` | the same two jobs for PC-NEVPT2's `Y` and `y` (§5.6, §6.1, #74): the dump marked `pc`, its four checks plus a fifth — the PC integral halves' duality on the six directions — and the oracle against block2's `golden/n2_ccpvdz_cas44_pc.srcgold`. Both require the golden's PC fields and first hold the PC energy to them |
 | `nevpt2_pc_tangent` | the PC tangent: Euler, and a Richardson-verified central difference. `--fd-steps` and `--fd-start-pow` set the sweep |
 
@@ -965,7 +1021,7 @@ the cases that carry one can run those.
 | a nuclear gradient built from the GPU's own source terms, against PySCF-sourced and `grad_num`, and which omission costs what | [`testing.md`](testing.md), "The GPU as the source-term provider" |
 | the digests' orbital response in forward mode: the GPU's `Edot(kappa)` against PySCF's exact one, the ladders, the on-card checks and the negative control | [`testing.md`](testing.md), "The digests' orbital response, forward mode" |
 | the digests' orbital response in reverse mode: the full duality, the source oracle with no known gap, the GPU-sourced nuclear gradient and the negative control | [`testing.md`](testing.md), "The digests' orbital response, reverse mode" |
-| the density-fitted orbital source term's frozen-digest checks, and what it costs | [`testing.md`](testing.md), "The density-fitted orbital source term (frozen-digest half)"; [`performance.md`](performance.md), "The density-fitted orbital source term" |
+| the density-fitted orbital source term's checks (both terms) and dump, and what it costs | [`testing.md`](testing.md), "The density-fitted orbital source term"; [`performance.md`](performance.md), "The density-fitted orbital source term" |
 | what the digests' transpose costs, and its tile floors | [`performance.md`](performance.md), "The digests' transpose", "Tile floors" |
 | PC's source terms by reverse mode: the dualities, block2's oracle, the PC nuclear gradient from the GPU's terms, the refusals and the negative controls | [`pc-nevpt2.md`](pc-nevpt2.md), "The source terms by reverse mode" |
 | the derivation this implements (its CASCI branch), and the CASSCF branch only the offline `nevpt2_grad.py --reference casscf` implements | [`gradient-theory.md`](gradient-theory.md) |

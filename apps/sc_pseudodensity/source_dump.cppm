@@ -65,6 +65,15 @@
 // class the gap or denominator check refuses has no derivative: the dump is
 // refused, naming it, and nothing is written.
 //
+// ON A DENSITY-FITTED CASE (#168), a `*_df` golden beside its NEVPT2F1
+// sidecar, the SC dump is the same: the inventory is built from the whole B
+// (generalIntegrals, --kappa-full's path), Y carries both terms -- the
+// frozen-digest one and the digests' transpose on the golden's fitted h2e --
+// and the file is the same `.gradsrc`. One check more: 6, each direction's
+// edot_digest against the transpose carried onto the three-index B
+// (dfDigestSourceDevice), 1e-7. --pc on a fitted case is refused by main
+// (docs/gradients.md, Sec. 6.2).
+//
 // Everything runs on the caller's one DeviceResources and its one stream.
 module;
 
@@ -81,7 +90,7 @@ import nevpt2.gradient;        // scFullRotationMatrix, scCiSourceDevice
 import nevpt2.kappa_rotation;  // antisymmetricKappa: check 1's direction
 import nevpt2.golden;
 import nevpt2.gradsrc;         // the .gradsrc writer and its reader
-// requireGradientArrays / uploadGeneral: the sidecar as --kappa-full reads it.
+// generalIntegrals: the sidecar as --kappa-full reads it, either flavour.
 import :kappa_full_check;
 
 // How many basis directions share one slab walk while Y is probed -- the
@@ -134,7 +143,7 @@ struct GpuSourceTerms {
 };
 
 // Assembles GpuSourceTerms. `gen` is the sidecar's uploaded general integrals
-// (uploadGeneral), which the caller keeps for whatever else it probes.
+// (generalIntegrals), which the caller keeps for whatever else it probes.
 nevpt2::Result<GpuSourceTerms> assembleSourceTerms(
     const nevpt2::GoldenFile& g, const nevpt2::GradGoldFile& gg, const bool pc,
     const double energyTotal, const nevpt2::NevptIntegralsDevice& ints,
@@ -239,15 +248,17 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
                                      const nevpt2::RdmBuildOptions& rdmOpt,
                                      const std::string& path,
                                      const nevpt2::DeviceResources& res) {
-  NEVPT2_TRY(gg.checkAgainst(g));
-  NEVPT2_TRY(requireGradientArrays(gg));
+  const bool fitted = gg.densityFitted();
+  // checkAgainst and the arrays the inventory reads, uploaded from a
+  // conventional sidecar or contracted out of the whole B for a fitted one
+  // (#165, #168) -- --kappa-full's own path.
+  const nevpt2::GeneralIntegralsDevice gen = NEVPT2_TRY(generalIntegrals(g, gg, res));
   const std::int64_t nmo = gg.nmo;
-  std::printf("\n--dump-source-terms: the GPU's %s Y_xy and y_I (Park Eqs. 26-27) -> %s\n",
-              pc ? "PC-NEVPT2" : "SC-NEVPT2", path.c_str());
+  std::printf("\n--dump-source-terms: the GPU's %s Y_xy and y_I (Park Eqs. 26-27)%s -> %s\n",
+              pc ? "PC-NEVPT2" : "SC-NEVPT2", fitted ? ", density-fitted" : "", path.c_str());
   std::printf("  partition: n_mo = %lld = %lld core + %lld active + %lld virtual\n",
               static_cast<long long>(nmo), static_cast<long long>(gg.ncore),
               static_cast<long long>(gg.nact), static_cast<long long>(gg.nvirt));
-  const nevpt2::GeneralIntegralsDevice gen = uploadGeneral(gg, res);
   // The digests' transpose (#89): Y and every pairing below carry their term.
   const nevpt2::DeviceTensor hbar =
       pc ? NEVPT2_TRY(nevpt2::pcDigestAdjointDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB,
@@ -335,6 +346,23 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
               "matrix: max |delta| = %.2e (<= %.0e: %s)\n",
               kappas.size(), edotGapMax, kDumpEdotTol, edotOk ? "ok" : "FAILED");
 
+  // 6 (density-fitted, #168): each direction's digests' term, forward, against
+  // the transpose carried onto the three-index B -- the route a fitted
+  // gradient reads, held across the very directions the file carries.
+  bool viaBOk = true;
+  if (fitted) {
+    const nevpt2::Tensor dfD = NEVPT2_TRY(
+        nevpt2::dfDigestSourceDevice(hbar, g.get("B_aa"), g.get("B_ca"), g.get("B_va"), res));
+    double gapMax = 0.0;
+    for (std::size_t d = 0; d < kappas.size(); ++d)
+      gapMax = std::max(gapMax, std::fabs(nevpt2::dfDigestPairing(dfD, kappas[d], gg.ncore) -
+                                          digest[d].total));
+    viaBOk = gapMax <= kDumpEdotTol;
+    std::printf("  6. the %zu directions' edot_digest vs sum kappa.D, the digests' transpose "
+                "onto B: max |delta| = %.2e (<= %.0e: %s)\n",
+                kappas.size(), gapMax, kDumpEdotTol, viaBOk ? "ok" : "FAILED");
+  }
+
   // --- the file, and the file read back ----------------------------------------
   nevpt2::GradSrc out;
   out.kappaSource = y;
@@ -372,8 +400,14 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
   std::printf("  3. %s read back: %s\n", path.c_str(),
               roundTrip ? "every member identical, bit for bit" : "DIFFERS from what was written");
 
-  const bool ok = matrixOk && walkOk && epsOk && roundTrip && edotOk && halvesOk;
-  if (pc)
+  const bool ok = matrixOk && walkOk && epsOk && roundTrip && edotOk && halvesOk && viaBOk;
+  if (fitted)
+    std::printf("\n%s: the GPU's source terms Y_xy and y_I were assembled, written to %s and "
+                "read back unchanged, with Edot(kappa) along %zu seeded directions in its "
+                "frozen-digest and digest terms (density-fitted: both Y terms, the digests' "
+                "term also through the three-index B)\n",
+                ok ? "PASS" : "FAIL", path.c_str(), kappas.size());
+  else if (pc)
     std::printf("\n%s: the GPU's PC source terms Y_xy and y_I were assembled, written to %s and "
                 "read back unchanged; the adjoint and the forward tangent agree along %zu "
                 "seeded directions, integral halves and exact\n",
