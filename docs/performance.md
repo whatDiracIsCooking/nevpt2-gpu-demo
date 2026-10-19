@@ -658,6 +658,39 @@ binary invocation; every probe of `Y` then pairs `hbar` with that
 direction's `h2e_dot`, one `n^4` dot product. The ctest walls it moved are in
 [`testing.md`](testing.md), "The digests' orbital response, reverse mode".
 
+### The density-fitted orbital source term
+
+`nevpt2_sc_pseudodensity --kappa-full` on a `*_df` golden (#165;
+[`gradients.md`](gradients.md), §6.2) contracts the one-general-index
+inventory on the device out of the whole `B[L,p,q]` — one contraction over
+the auxiliary index per array — and then runs the integral-direct path's
+checks on it, less the digests' own term (#168). RTX 3080, CUDA, Release (the
+`default` preset), 584 MiB of the card held by other processes
+(`nvidia-smi`), one run per row, wall clock of the whole binary:
+
+| case | `--tiles` | wall | `Y`'s inactive blocks probed | pool used, whole run |
+|---|---:|---:|---:|---:|
+| N2 CAS(4,4) DF | 1 | 1.14 s | 181 directions, 0.48 s | 2.6 MB |
+| N2 CAS(4,4) DF | 3 | 1.04 s | 181 directions, 0.47 s | 2.6 MB |
+| N2 CAS(8,8) DF | 1 | 13.36 s | 139 directions, 7.73 s | 166.1 MB |
+| N2 CAS(8,8) DF | 3 | 13.42 s | 139 directions, 7.74 s | 60.8 MB |
+| N2 CAS(4,4), integral-direct (with the digests' term) | 3 | 1.13 s | 181 directions, 0.48 s | 2.3 MB |
+| N2 CAS(8,8), integral-direct (with the digests' term) | 3 | 17.27 s | 139 directions, 7.75 s | 71.2 MB |
+
+**No tile floor of its own.** Both cases pass at one tile, the lowest count
+there is; `--tiles` moves only the RDM build's per-tile blocks (the CAS(8,8)
+pool peak at 1 tile against 3), and the inventory build has no tiled buffer.
+The inventory's arrays are the conventional sidecar's sizes
+([`gradient-theory.md`](gradient-theory.md), §3.3) plus one `naux · n_mo^2`
+copy of `B` while they are built, and at these sizes the fitted run's pool
+peak is no higher than the integral-direct one's (which also holds the
+digests' term's buffers). The wall is the probing of `Y`'s inactive blocks and
+the two finite-difference sweeps, as on the integral-direct path; the fitted
+CAS(8,8) run is faster than its twin by what it does not run, the digests'
+forward term and transpose. The inventory's own contractions are not timed
+separately (they are enqueued and overlap the rest; at these sizes they are
+not visible in the totals above).
+
 ### `--tiles` on the CI source term (`--gradient-source`)
 
 `nevpt2_demo --gradient-source` (`nevpt2.gradient`'s `scCiSourceDevice`: the

@@ -695,6 +695,70 @@ if(NEVPT2_BUILD_TESTING)
   unset(_dir_oracle)
   unset(_dir_side)
 
+  # --- the density-fitted orbital source term (#165) ---------------------------
+  #
+  # nevpt2_sc_pseudodensity on a `*_df` golden, beside its NEVPT2F1 sidecar
+  # (golden/n2_ccpvdz_cas44_df.gradgold, #164). No --df flag: the golden
+  # carries its fitted four-index blocks, so the identities and --kappa-act
+  # read it unchanged, and --kappa-full knows the case by the sidecar's magic,
+  # contracts the one-general-index inventory out of the whole B[L,p,q] (the
+  # golden's four blocks and the sidecar's B_cc / B_vv) and runs the same
+  # checks on the FROZEN-DIGEST half -- the duality (integral halves, then
+  # with the orbital energies' response; 1e-7), the promotion table and the
+  # sidecar's carried tied arrays against the built inventory (1e-10), the
+  # active block against --kappa-act's entry point, the two intra-space finite
+  # differences and Eqs. 56-57 -- and its PASS line names the half. The
+  # digests' own term on the fitted path is #168 (docs/gradients.md, Sec. 6.2).
+  # --dump-source-terms refuses a fitted sidecar until then, since it writes
+  # the exact Y; the last entry holds that refusal (its regex is the error).
+  #
+  # The identity and --kappa-act entries are `small`, as their integral-direct
+  # CAS(4,4) twins are; --kappa-full is not, for the twins' reason (its
+  # sweeps and probes are each a full pass).
+  set(_df_y_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_df.nevpt2gold")
+  set(_df_y_side "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_df.gradgold")
+  if(NOT EXISTS "${_df_y_side}")
+    message(FATAL_ERROR "nevpt2: committed gradient sidecar missing: ${_df_y_side}")
+  endif()
+  _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_cas44_df
+                        "${_df_y_gold}" --tiles 3)
+  if(TEST nevpt2_sc_pseudodensity_cas44_df)
+    set_tests_properties(nevpt2_sc_pseudodensity_cas44_df PROPERTIES
+      PASS_REGULAR_EXPRESSION "PASS: SC pseudodensity identities hold" LABELS "gpu;small")
+  endif()
+  _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_kappa_cas44_df
+                        "${_df_y_gold}" --tiles 3 --kappa-act)
+  if(TEST nevpt2_sc_pseudodensity_kappa_cas44_df)
+    set_tests_properties(nevpt2_sc_pseudodensity_kappa_cas44_df PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_kappa_pass}" LABELS "gpu;small")
+  endif()
+  # CAS(8,8)'s fitted sidecar is committed too (#164), so --kappa-full runs
+  # there as well, as its integral-direct twin does.
+  foreach(_case cas44_df cas88_df)
+    set(_df_kf_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.nevpt2gold")
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.gradgold")
+      message(FATAL_ERROR "nevpt2: committed gradient sidecar missing for n2_ccpvdz_${_case}")
+    endif()
+    _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_kappa_full_${_case}
+                          "${_df_kf_gold}" --tiles 3 --kappa-full)
+    if(TEST nevpt2_sc_pseudodensity_kappa_full_${_case})
+      set_tests_properties(nevpt2_sc_pseudodensity_kappa_full_${_case} PROPERTIES
+        PASS_REGULAR_EXPRESSION
+          "PASS: the full orbital source term's adjoint and tangent agree on the frozen-digest half \\(density-fitted")
+    endif()
+    unset(_df_kf_gold)
+  endforeach()
+  _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_dump_cas44_df_refused
+                        "${_df_y_gold}" --tiles 3
+                        --dump-source-terms "${CMAKE_CURRENT_BINARY_DIR}/gradsrc/refused_df.gradsrc")
+  if(TEST nevpt2_sc_pseudodensity_dump_cas44_df_refused)
+    set_tests_properties(nevpt2_sc_pseudodensity_dump_cas44_df_refused PROPERTIES
+      PASS_REGULAR_EXPRESSION
+        "--dump-source-terms on a density-fitted case: it writes or compares the exact orbital source term Y")
+  endif()
+  unset(_df_y_gold)
+  unset(_df_y_side)
+
   # --- *_pc: PC-NEVPT2 ----------------------------------------------
   #
   # The same RDM build as the SC entry at the same --tiles; the PC stage runs

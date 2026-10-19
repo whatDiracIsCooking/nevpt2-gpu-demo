@@ -286,6 +286,16 @@ ignores it. `test/cli/` holds this matrix against the table:
 | `--dump-source-terms`, `--source-oracle` | refused | refused | ✓ | refused |
 | `--fd-steps`, `--fd-start-pow` | refused | refused | refused | ✓ |
 
+There is no `--df` row, on purpose (#165): a density-fitted case is a
+`*_df` golden, and the orbital-source-term flags (`--kappa-act`,
+`--kappa-full`) take one in `nevpt2_sc_pseudodensity` with no flag of its
+own — `--kappa-full` knows it by its sidecar's density-fitted magic and runs
+the frozen-digest half there (the digests' own term is #168). No binary
+parses `--df`, `nevpt2_df_demo` keeps refusing the orbital-source-term flags,
+and `--dump-source-terms` / `--source-oracle` refuse a fitted sidecar at run
+time until #168, since they carry the exact `Y` ([`docs/gradients.md`](docs/gradients.md),
+§6.2, has the decision and its reasons).
+
 Why the refusals: `nevpt2_pc_tangent` is a tangent path throughout, and the
 tangent RDM build is the emitted or the native-fp64 BLAS digest only; it is
 also PC throughout, so `--pc` would change nothing. `nevpt2_sc_pseudodensity`
@@ -328,7 +338,7 @@ against the other. They read the same reference files, and each prints its own
 | `nevpt2_demo --sc-tangent` (also `nevpt2_df_demo`) | — | the SC total's derivative with respect to the CI vector |
 | `nevpt2_demo --gradient-source` | `[--gradgold PATH]`, `[--pc]` | the CI source term `y_I = dE/dc_I`, against that tangent by duality; with the `*.gradgold` sidecar, both carry the orbital energies' response to the active density, without it both hold them fixed. With `--pc`, PC-NEVPT2's `y_I` (the PC solve's adjoint) against the PC tangent (#74) |
 | `nevpt2_df_demo --gradient-source` | — | the SC CI source term against the tangent by the same duality, over the density-fitted slabs, with the orbital energies held fixed (#162) |
-| `nevpt2_sc_pseudodensity` | `--kappa-act`, or `--kappa-full [--gradgold PATH]` | the SC pseudodensity identities; with `--kappa-act`, the active–active orbital source term instead; with `--kappa-full`, the whole orbital source term out of the `*.gradgold` sidecar |
+| `nevpt2_sc_pseudodensity` | `--kappa-act`, or `--kappa-full [--gradgold PATH]` | the SC pseudodensity identities; with `--kappa-act`, the active–active orbital source term instead; with `--kappa-full`, the whole orbital source term out of the `*.gradgold` sidecar — on a `*_df` golden, out of the whole three-index `B`, its frozen-digest half (#165) |
 | `nevpt2_sc_pseudodensity --source-oracle PATH` | `[--gradgold PATH]` | the GPU's own `Y_xy` and `y_I` against PySCF's exact ones, committed as a `golden/*.srcgold`, block by block: every block must stay within the measured tolerance (the known-gap list is empty since #89) ([`docs/testing.md`](docs/testing.md), "The SC source terms against PySCF's, on a card"). With `--pc`, PC-NEVPT2's against block2's, `golden/n2_ccpvdz_cas44_pc.srcgold` (#74; docs/testing.md, "The PC source terms' oracle"); the oracle's scheme must be the run's. A directional oracle (`golden/*_dir.srcgold`, #105) is compared along its seeded directions per block instead (docs/testing.md, "The directional source-term oracle") |
 | `nevpt2_sc_pseudodensity --dump-source-terms PATH` | `[--gradgold PATH]`, `[--pc]` | writes the GPU's own `Y_xy` and `y_I` to a `.gradsrc` (a NumPy `.npz`) for `reference_data/nevpt2_grad.py --source dump` / `both`, and reads it back; what a nuclear gradient built from it comes out at is [`docs/testing.md`](docs/testing.md), "The GPU as the source-term provider". With `--pc`, PC-NEVPT2's, marked as such, with the PC adjoint held to the PC forward tangent along seeded rotations (#74; [`docs/pc-nevpt2.md`](docs/pc-nevpt2.md), "The source terms by reverse mode") |
 | `nevpt2_pc_tangent` | `--fd-steps N` (3..8, default 4), `--fd-start-pow N` (1..30, default 12: the first step is `2^-N`) | PC's derivative with respect to the CI vector, against a Richardson-verified finite difference |

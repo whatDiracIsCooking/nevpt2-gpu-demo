@@ -388,6 +388,38 @@ struct GeneralIntegralsDevice {
   DeviceTensor g_xa_vv, g_xc_vv;      // (x t | r r) and (x i | r r)
 };
 
+// --- the density-fitted inventory (#165) -------------------------------------
+//
+// The SAME struct for a density-fitted case, BUILT on the device instead of
+// read: a `*_df` golden carries four blocks of the fitted three-index tensor
+// (B_aa, B_ca, B_va, B_cv) and its NEVPT2F1 sidecar the two it lacks (B_cc,
+// B_vv), which together are the whole of B[L, p, q] over the MO range
+// (docs/gradient-theory.md, Sec. 3.8). The aux index is inert under an
+// orbital rotation (the metric is absorbed into B and never sees kappa), so
+// Sec. 3.1's promotion rule acts on one B factor at a time, and every
+// one-general-index array is
+//
+//   (x p | q r) = sum_L B[L, x, p] B[L, q, r]
+//
+// -- the promoted STRIP B[:, x, P] (x over the whole MO range) against the
+// block B_QR, one contraction over L each, with the three tied rows reading a
+// diagonal of B_cc or B_vv. So everything downstream -- the promotion table,
+// the dressing and orbital-energy rules, the duality, the checks -- runs
+// unchanged on a fitted case, and what is new is only where the arrays come
+// from. The arrays are formed on the device at the conventional inventory's
+// sizes (Sec. 3.3), which a validation case affords; the file read stays the
+// three-index one, and the slab-wise contraction that would never form them
+// is not in tree (docs/gradients.md, Sec. 6.2).
+//
+// `h`, `heff` and `f` are the sidecar's (n_mo, n_mo) matrices of the fitted
+// calculation, uploaded as they are. Blocks whose ranks or extents do not
+// agree with one another -- a malformed golden or sidecar, or a pair from two
+// calculations -- are the caller's input: an IO Error, before any upload.
+Result<GeneralIntegralsDevice> dfGeneralIntegralsDevice(
+    const Tensor& bAA, const Tensor& bCA, const Tensor& bVA, const Tensor& bCV, const Tensor& bCC,
+    const Tensor& bVV, const Tensor& h, const Tensor& heff, const Tensor& f,
+    const DeviceResources& res);
+
 // One direction's answer over the full kappa space, summed over the eight
 // classes. `integral` and `tangentIntegral` are the two modes of the integral
 // half -- the pair the duality gate reads, and the number that is bit-for-bit

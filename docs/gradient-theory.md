@@ -1101,7 +1101,9 @@ virtual–virtual block: `Y_sb` (virtual–active) reads `Σ B[L,s,r]
 through every class that reads `B_cv`. So `B_vv` is wanted by every block in the
 virtual row, and the two mixed ones are non-redundant on both branches
 (§2.1). What *does* survive is §3.4's saving in its strongest form: the
-gradient never forms a four-index array at all, so `(xv|vv)` — the one §3.4
+gradient never forms a four-index array at all (the derivation's statement:
+the in-tree code, #165, does form §3.3's arrays on the device from `B` —
+[`gradients.md`](gradients.md), §6.2, says why), so `(xv|vv)` — the one §3.4
 names — is never built, and the largest three-index block is `naux ·
 n_virt^2` where the conventional inventory's largest rows are `n_mo ·
 n_virt^2 · n_core` and `n_mo · n_virt^2 · n_act` (§3.3). Since `naux` is

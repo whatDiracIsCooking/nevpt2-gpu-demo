@@ -990,6 +990,34 @@ TEST(CliScPseudodensityFlagTests, OtherBinariesRefuseSourceOracle) {
   }
 }
 
+// The density-fitted orbital source term (#165; docs/gradients.md, Sec. 6.2):
+// nevpt2_sc_pseudodensity takes a `*_df` golden with no flag of its own --
+// the sidecar's NEVPT2F1 magic says the case is fitted -- so there is no
+// --df anywhere, and the orbital-source-term flags stay that binary's alone:
+// nevpt2_df_demo refuses them, naming it, rather than growing a second copy.
+TEST(CliScPseudodensityFlagTests, ADensityFittedCaseTakesNoFlag) {
+  for (const Binary b : kBinaries) {
+    const Result<Options> r = parse(b, {"--df"});
+    ASSERT_FALSE(r.has_value()) << binaryName(b);
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig) << binaryName(b);
+    EXPECT_TRUE(r.error().message.starts_with("unrecognized argument \"--df\""))
+        << r.error().message;
+  }
+  for (const std::vector<std::string_view>& args :
+       {std::vector<std::string_view>{"--kappa-act"}, std::vector<std::string_view>{"--kappa-full"},
+        std::vector<std::string_view>{"--dump-source-terms", "x.gradsrc"}}) {
+    const Result<Options> df = parse(Binary::DfDemo, args);
+    ASSERT_FALSE(df.has_value()) << args.front();
+    EXPECT_EQ(df.error().kind, ErrorKind::Unsupported) << args.front();
+    EXPECT_NE(df.error().message.find("nevpt2_sc_pseudodensity"), std::string::npos)
+        << df.error().message;
+    // And the binary that does take them takes them for a fitted golden
+    // exactly as for any other: the flags carry no flavour.
+    const Result<Options> sc = parse(Binary::ScPseudodensity, args);
+    EXPECT_TRUE(sc.has_value()) << args.front() << ": " << sc.error().message;
+  }
+}
+
 TEST(CliScPseudodensityFlagTests, TakesAnyDigestTheDemosTake) {
   // The identities, --kappa-act and --source-oracle build no tangent RDMs, so
   // the approximate digests are theirs to run.
