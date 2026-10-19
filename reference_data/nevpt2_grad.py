@@ -385,6 +385,41 @@ gradient is the GPU's PC energy differenced over the same re-optimised states
 numbers and its own wall-clock budget are in docs/testing.md, "PC on a
 CASSCF reference: acrolein".
 
+THE DENSITY-FITTED ENERGY (--df)
+--------------------------------
+
+``--df`` (#166) differentiates the **density-fitted** SC-NEVPT2 energy:
+``golden/<case>_df``'s state, built as ``generate_golden.py --df`` builds it
+(a fitted RHF, a ``DFCASCI`` sharing its ``with_df``), and every
+:class:`Functional` -- at the reference geometry and at each displaced one --
+on its own fitted RHF and ``dfnevpt2._ERIS``. Nothing else changes, and that
+is the argument: the Lagrangian is a statement about the reference (RHF ->
+CASCI, canonicalised), the fitted RHF is still an RHF, so (O1), (O2), (C1),
+the frozen path and the solve are the CASCI branch's; the fit enters only
+through the scalars every quotient differences. A nuclear displacement moves
+the auxiliary functions and the metric with the nuclei because each
+displaced Functional fits on its own molecule, so the fit's derivative is in
+the quotient with no term written out -- the argument
+``nevpt2_numgrad.py --df`` makes for its re-converged states.
+
+**"PySCF-sourced" means PySCF's DF-NEVPT2 here**: ``--source pyscf`` (and
+PySCF's side of ``--source both``) are central differences of PySCF's own
+fitted energy, ``dfnevpt2._ERIS`` called directly -- PySCF has no NEVPT2
+gradient of either flavour, so its source terms are quotients of its energy
+in both. The GPU's dump on a fitted case (``nevpt2_sc_pseudodensity
+--dump-source-terms`` on the ``_df`` golden, #168) carries both of ``Y``'s
+terms, the frozen-digest one and the digests' transpose, summed into
+``kappa_source``; it is read and carried into section 2.6's basis exactly as
+an integral-direct dump is (:func:`load_source_terms`). A ``.gradsrc`` names
+no flavour; the CI vector it was taken at does (the fitted and exact states
+differ there far beyond :data:`DUMP_CI_TOL`), so a dump of the other flavour
+is refused as a different state. The gate is ``grad_num`` of the
+``NEVPT2F1`` sidecar beside the ``_df`` golden (#167), at :data:`GRAD_NUM_TOL`.
+SC, ``--reference casci`` and the committed case only, as ``nevpt2_numgrad.py
+--df`` is; ``--pc``, ``--reference casscf``, ``--casci-only`` and
+``--grad-num`` are refused. The verdict is docs/testing.md, "The
+density-fitted gradient against the numerical one".
+
 Usage::
 
     uv run python reference_data/nevpt2_grad.py --case lif_def2svp_cas46
@@ -439,6 +474,14 @@ Usage::
         --reference casscf --pc --source both \
         --source-path /tmp/acrolein_casscf_pc.gradsrc \
         --grad-num /tmp/acrolein_casscf_pc.numgrad.npz
+    # the DENSITY-FITTED gradient (#166): PySCF's DF-NEVPT2 source terms, or
+    # the GPU's dump on the _df golden beside them, against the NEVPT2F1
+    # sidecar's grad_num (#167):
+    uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 --df
+    ./build/src/nevpt2_sc_pseudodensity --golden golden/n2_ccpvdz_cas44_df.nevpt2gold \
+        --tiles 3 --dump-source-terms /tmp/n2_cas44_df.gradsrc
+    uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 --df \
+        --source both --source-path /tmp/n2_cas44_df.gradsrc
 
 ``--out`` writes the gradient and every residual as an ``.npz``; nothing is
 written by default, and **no committed file is ever touched** (the
@@ -889,10 +932,22 @@ class State:
     #: :func:`kappa_pairs`, :func:`constraints` and
     #: :func:`non_gauge_rotations` then read off it.
     reference: str = "casci"
+    #: The auxiliary basis of a **density-fitted** state (``--df``, #166), or
+    #: ``None`` for a conventional one. Set, the state is the ``_df``
+    #: golden's -- a fitted RHF, a ``DFCASCI`` sharing its ``with_df``,
+    #: ``dfnevpt2._ERIS`` -- and every :class:`Functional` built on it, at the
+    #: reference geometry and at every displaced one, fits its own integrals
+    #: in this basis: the energy differentiated is the fitted one throughout
+    #: (docs/gradients.md, section 6.2).
+    auxbasis: str | None = None
 
     @property
     def casscf(self) -> bool:
         return self.reference == "casscf"
+
+    @property
+    def df(self) -> bool:
+        return self.auxbasis is not None
 
     @property
     def nocc(self) -> int:
@@ -950,7 +1005,7 @@ class State:
 
 
 def build_state(case: str, spec: dict, *, pc: bool = False, reference: str = "casci",
-                mo_from: Path | None = None) -> State:
+                mo_from: Path | None = None, auxbasis: str | None = None) -> State:
     """``generate_golden._build_state``'s own state -- same single-threading,
     same Davidson tolerance, same auto-detected point group, same
     irrep-selected active space -- plus the generalized and RHF Fock matrices
@@ -965,17 +1020,28 @@ def build_state(case: str, spec: dict, *, pc: bool = False, reference: str = "ca
     path and every refusal it runs (fingerprint, symmetry purity, the
     stationarity gate). The state is then kept in its canonicalised basis: no
     RHF partition exists to recover (section 1.4), so section 2.6's rotation
-    is skipped and only (O2) is asserted."""
+    is skipped and only (O2) is asserted.
+
+    With ``auxbasis`` (``--df``, #166) the state is ``generate_golden.py
+    --df``'s: the same builder with the fit switched on, its integrals
+    ``dfnevpt2._ERIS`` on the RHF's own ``with_df``, and ``f``/``F`` the
+    fitted calculation's (``generate_golden._gradient_matrices``, the
+    density-fitted sidecar's own builder). SC on the CASCI branch only, as
+    ``nevpt2_numgrad.py --df`` is: the GPU refuses a fitted PC dump, and no
+    fitted ``grad_num`` of a CASSCF reference exists."""
     casscf = reference == "casscf"
+    if auxbasis is not None and (pc or casscf):
+        raise SystemExit("build_state: a density-fitted state is SC on the CASCI branch only")
     geom_path = Path(spec["geometry"])
     if not geom_path.is_absolute():
         geom_path = REPO / geom_path
     geom = ngrad.read_xyz(geom_path)
     mc, pt = gg._build_state(
-        geom, spec["basis"], spec["ncas"], spec["nelecas"],
+        geom, spec["basis"], spec["ncas"], spec["nelecas"], auxbasis,
         cas_irreps=spec.get("cas_irreps"), core_irreps=spec.get("core_irreps"),
         mo_from=mo_from if casscf else None,
     )
+    with_df = mc.with_df if auxbasis is not None else None
     nmo = pt.mo_coeff.shape[1]
     nact, ncore = pt.ncas, pt.ncore
     nelec_rhf = pt.mol.nelectron
@@ -991,10 +1057,15 @@ def build_state(case: str, spec: dict, *, pc: bool = False, reference: str = "ca
     # needs (an act_O-act_V rotation moves the RHF occupied space, so it is
     # not a gauge for (O1) and cannot be carried as a subspace).
     def arrays_for(pt_state):
-        dm1, _dm2, dms, eris = gg._pyscf_dms(pt_state)
+        dm1, _dm2, dms, eris = gg._pyscf_dms(pt_state, with_df)
         per = gg._pyscf_per_class(pt_state, dms, eris)
         e_corr = float(sum(per[c][1] for c in gg.CLASSES))
-        ga = gg._gradient_arrays(mc, pt_state, eris, dm1)
+        # f and F are all this reads. A fitted state takes them from the
+        # fitted eris and the fitted RHF (_gradient_matrices, the NEVPT2F1
+        # sidecar's own builder); _gradient_arrays would add conventional
+        # one-general-index transforms a fitted state has no use for.
+        ga = (gg._gradient_matrices(mc, pt_state, eris, dm1) if with_df is not None
+              else gg._gradient_arrays(mc, pt_state, eris, dm1))
         return e_corr, ga
 
     e_corr0, ga0 = arrays_for(pt)
@@ -1052,7 +1123,7 @@ def build_state(case: str, spec: dict, *, pc: bool = False, reference: str = "ca
         nelecas=tuple(pt.nelecas), nelec_rhf=nelec_rhf,
         f=f, fock_rhf=fock_rhf, n_act_occ=n_act_occ,
         act_eps=eps, e_casci=float(mc.e_tot), e_corr=e_corr, invariants=invariants,
-        ci_golden=ci_golden, act_rot=vec,
+        ci_golden=ci_golden, act_rot=vec, auxbasis=auxbasis,
     )
     if pc:
         attach_pc_energy(st)
@@ -1092,12 +1163,26 @@ class Functional:
         mol = gg._build_mol(geom if geom is not None else state.geom, state.basis)
         mol.incore_anyway = True  # force pn._ERIS's incore transform
         mf = scf.RHF(mol)
-        mf._eri = mol.intor("int2e", aosym="s8")
+        #: the fitting object of a density-fitted state, built on THIS
+        #: geometry's molecule: the auxiliary functions ride on the displaced
+        #: nuclei and the metric (P|Q) is this geometry's, so the frozen
+        #: path's nuclear quotient carries the fit's own derivative with no
+        #: term written out -- the same argument nevpt2_numgrad.py --df makes
+        #: for its re-converged states. ``None`` on a conventional state.
+        self.with_df = None
+        if state.df:
+            mf = mf.density_fit(auxbasis=state.auxbasis)
+            mf.with_df.build()
+            self.with_df = mf.with_df
+        else:
+            mf._eri = mol.intor("int2e", aosym="s8")
         mf.mo_coeff = state.mo_coeff
         mf.mo_occ = np.asarray(state.mc._scf.mo_occ)
         mf.mo_energy = np.asarray(state.mc._scf.mo_energy)
         mf.converged = True
-        mc = mcscf.CASCI(mf, state.nact, state.nelecas)
+        mc = (mcscf.DFCASCI(mf, state.nact, state.nelecas) if state.df
+              else mcscf.CASCI(mf, state.nact, state.nelecas))
+        assert not state.df or mc.with_df is mf.with_df, "DFCASCI built its own DF object"
         mc.fcisolver.conv_tol = gg.FCI_CONV_TOL
         mc.mo_coeff = state.mo_coeff
         mc.ci = state.ci
@@ -1184,11 +1269,24 @@ class Functional:
     def eris(self, C: np.ndarray) -> dict:
         """PySCF's own NEVPT2 integral set at these orbitals. ``pn._ERIS``
         reads ``mc._scf._eri`` and ``mc.get_hcore()``, both bound to this
-        geometry, so it is a pure function of ``C``."""
+        geometry, so it is a pure function of ``C``.
+
+        On a density-fitted state it is ``dfnevpt2._ERIS`` on this geometry's
+        ``with_df``, called directly as ``generate_golden._pyscf_dms`` calls
+        it (``NEVPT.kernel``'s own dispatch can fall back to conventional
+        integrals without saying so), with ``vhf_c`` from the fitted RHF's
+        ``get_jk``: every block, the one-electron dressing included, is the
+        fitted calculation's."""
         self.pt.mo_coeff = C
         self.mc.mo_coeff = C
         self.nevals += 1
-        return pn._ERIS(self.pt, C)
+        if self.with_df is None:
+            return pn._ERIS(self.pt, C)
+        from pyscf.mrpt import dfnevpt2
+
+        eris = dfnevpt2._ERIS(self.pt, C, self.with_df)
+        assert isinstance(eris["cvcv"], np.ndarray), "DF eris went out of core"
+        return eris
 
     def generalized_fock(self, eris: dict, dm1: np.ndarray) -> np.ndarray:
         """``h^eff + sum_tu gamma_tu [ (pq|tu) - (1/2)(pt|uq) ]`` over the full
@@ -3850,6 +3948,33 @@ def run(args) -> dict:
             args.mo_from = default
     elif args.mo_from is not None or args.cp_solve != "dense":
         raise SystemExit("--mo-from and --cp-solve belong to --reference casscf")
+    naux = None
+    if args.df:
+        # #166: the fitted state is golden/<case>_df's, and nothing else --
+        # its grad_num is that golden's NEVPT2F1 sidecar's (#167), so an
+        # overridden selection (a state with no _df golden) has no oracle,
+        # and the golden must be a fitted one in this auxiliary basis. The
+        # same refusal nevpt2_numgrad.py --df runs, before any SCF.
+        overridden = [f"--{k.replace('_', '-')}" for k in
+                      ("geometry", "basis", "ncas", "nelecas", "cas_irreps", "core_irreps")
+                      if getattr(args, k) is not None]
+        if args.energy_ordered:
+            overridden.append("--energy-ordered")
+        gold_df = REPO / "golden" / f"{args.case}_df.nevpt2gold"
+        if overridden or args.case not in CASES or not gold_df.exists():
+            raise SystemExit(
+                "--df differentiates a committed *_df golden's state, and its grad_num "
+                "is that golden's NEVPT2F1 sidecar's: "
+                + (f"{', '.join(overridden)} make this a different state. "
+                   if overridden else f"there is no golden/{args.case}_df.nevpt2gold. ")
+                + "The committed ones: "
+                + ", ".join(f"{c}_df" for c in CASES
+                            if (REPO / "golden" / f"{c}_df.nevpt2gold").exists())
+            )
+        geom_path = Path(spec["geometry"])
+        geom_path = geom_path if geom_path.is_absolute() else REPO / geom_path
+        naux = ngrad._check_golden_flavour(gold_df, ngrad.read_xyz(geom_path),
+                                           dict(spec, auxbasis=args.auxbasis))
     # Read (and check) the numerical gradient BEFORE the expensive part, so a
     # mismatched or missing file costs nothing.
     grad_num_source = (load_grad_num(args.grad_num, args.case, pc=args.pc,
@@ -3872,10 +3997,14 @@ def run(args) -> dict:
     if casscf:
         print(f"[{args.case}] building the CASCI-on-CASSCF state from {args.mo_from} "
               "(docs/gradient-theory.md, section 1.4)")
+    elif args.df:
+        print(f"[{args.case}] building golden/{args.case}_df's own DENSITY-FITTED "
+              f"CASCI-on-RHF state (auxbasis {args.auxbasis}, naux {naux}; "
+              "docs/gradients.md, section 6.2)")
     else:
         print(f"[{args.case}] building the golden's own CASCI-on-RHF state")
     st = build_state(args.case, spec, pc=args.pc, reference=args.reference,
-                     mo_from=args.mo_from)
+                     mo_from=args.mo_from, auxbasis=args.auxbasis if args.df else None)
     print(f"  n_mo = {st.nmo} = {st.ncore} core + {st.nact} active + {st.nvirt} virtual; "
           f"ndet = {st.ci.size}; n_elec(RHF) = {st.nelec_rhf}")
     if casscf:
@@ -3898,7 +4027,9 @@ def run(args) -> dict:
                nvirt=st.nvirt, ndet=int(st.ci.size), natm=len(st.geom),
                e_casci=st.e_casci, e_corr=st.e_corr, casci_only=args.casci_only,
                pc=args.pc, step=args.step, show_ladders=args.show_ladders,
-               reference=args.reference,
+               reference=args.reference, df=args.df,
+               auxbasis=args.auxbasis if args.df else "",
+               naux=naux if naux is not None else 0,
                mo_from=str(args.mo_from) if args.mo_from is not None else "",
                invariants={k: v for k, v in st.invariants.items()
                            if k != "o1_each"})
@@ -3917,7 +4048,7 @@ def run(args) -> dict:
     # The CASSCF branch's golden is <case>_casscf, where one is committed --
     # and only for its committed orbitals: the same case on other orbitals
     # (a scratch sidecar) is a different state with no golden to hold it to.
-    gold_name = args.case
+    gold_name = f"{args.case}_df" if args.df else args.case
     if casscf:
         gold_name = f"{args.case}_casscf"
         committed = (committed and (REPO / "golden" / f"{gold_name}.nevpt2gold").exists()
@@ -4198,9 +4329,13 @@ def run(args) -> dict:
         # is reported above where it is an oracle at all.
         pass
     else:
-        sidecar = REPO / "golden" / f"{args.case}.gradgold"
+        # A --df run's is the NEVPT2F1 sidecar beside the _df golden (#167's
+        # grad_num), and its header's naux must be this run's: the
+        # flavour check nevpt2_numgrad.py runs before writing it.
+        sidecar = REPO / "golden" / f"{gold_name}.gradgold"
         if committed and sidecar.exists():
-            _h, arrays = gf.read_gradgold(sidecar)
+            header, arrays = gf.read_gradgold(sidecar)
+            ngrad._check_sidecar_flavour(sidecar, header, args.df, naux)
             if "grad_num" in arrays:
                 rec["grad_num"] = np.asarray(arrays["grad_num"])
                 rec["grad_num_probed"] = np.asarray(arrays["grad_num_probed"])
@@ -4240,6 +4375,11 @@ def report(rec: dict) -> None:
         which = ("CASSCF only (the smoke test)" if rec["casci_only"]
                  else ("PC-NEVPT2 (block2)" if rec["pc"] else "SC-NEVPT2")
                  + " on a CASSCF reference (CP-CASSCF)")
+    if rec.get("df"):
+        # The fitted energy (#166), said in the PASS/FAIL line too: its
+        # grad_num is the _df golden's, a different function of the geometry.
+        scheme = f"{scheme} (density-fitted)"
+        which = f"{which}, DENSITY-FITTED ({rec['auxbasis']}, naux {rec['naux']})"
     print(f"\n== {rec['case']}  {rec['basis']}  CAS({rec['nelecas']},{rec['ncas']})  "
           f"{which}")
     print(f"source terms: {rec['source_origin']}")
@@ -4520,7 +4660,8 @@ def main() -> None:
                          "`nevpt2_numgrad.py --npz PATH`: its grad_num, "
                          "grad_num_pc or grad_casci array, whichever this run "
                          "differentiates. Default: the grad_num arrays in "
-                         "golden/<case>.gradgold, where there are any (SC "
+                         "golden/<case>.gradgold (golden/<case>_df.gradgold "
+                         "with --df, which refuses this flag), where there are any (SC "
                          "only; with --casci-only nothing there applies, since "
                          "that grad_num is the NEVPT2 gradient)")
     ap.add_argument("--ci-step", type=float, default=None,
@@ -4568,11 +4709,48 @@ def main() -> None:
                          "forked single-threaded processes (default 1: serial). The "
                          "result is bit-identical to the serial one; nothing else "
                          "in the run is parallel")
+    ap.add_argument("--df", action="store_true",
+                    help="differentiate the DENSITY-FITTED SC-NEVPT2 energy (#166): "
+                         "golden/<case>_df's state, every Functional -- at the "
+                         "reference and at each displaced geometry -- on its own "
+                         "fitted RHF and dfnevpt2._ERIS, so PySCF's source terms "
+                         "are PySCF's DF-NEVPT2 ones, and gated against the "
+                         "grad_num of the NEVPT2F1 sidecar beside it (#167). SC, "
+                         "--reference casci, the committed case only; a "
+                         "--source dump must be nevpt2_sc_pseudodensity's on the "
+                         "_df golden (its E_corr is checked against the fitted one)")
+    ap.add_argument("--auxbasis", default=None,
+                    help="--df: the auxiliary basis (default <basis>-jkfit, "
+                         "generate_golden.py --df's); refused unless the golden "
+                         "was fitted in it")
     ap.add_argument("--show-ladders", action="store_true",
                     help="print every step ladder's table, not only a failing "
                          "one's (docs/testing.md, \"Residual-independent checks "
                          "of the gradient path\" is read off these)")
     args = ap.parse_args()
+    if args.auxbasis is not None and not args.df:
+        ap.error("--auxbasis needs --df")
+    if args.df:
+        # What the fitted route is validated for (#166), and the same limits
+        # nevpt2_numgrad.py --df has: its oracle is SC on a CASCI reference,
+        # written into the NEVPT2F1 sidecar, and nothing else.
+        refused = [flag for flag, on in (
+            ("--pc", args.pc),
+            ("--reference casscf", args.reference == "casscf"),
+            ("--casci-only", args.casci_only),
+            ("--grad-num", args.grad_num is not None)) if on]
+        if refused:
+            ap.error(f"--df: {', '.join(refused)} refused. The density-fitted gradient is "
+                     "SC-NEVPT2 on a CASCI reference, gated against the grad_num of the "
+                     "committed NEVPT2F1 sidecar (an --npz names no flavour, so it "
+                     "cannot be told from a conventional one); the GPU refuses a fitted "
+                     "PC dump, and no fitted CASSCF or CASCI-only grad_num exists")
+        if args.auxbasis is None:
+            basis = args.basis or CASES.get(args.case, {}).get("basis")
+            if basis is None:
+                ap.error("--df needs --basis (or a --case that names one) to default "
+                         "--auxbasis")
+            args.auxbasis = f"{basis}-jkfit"
     default_step, default_kappa = scheme_steps(args.pc)
     if args.step is None:
         args.step = default_step

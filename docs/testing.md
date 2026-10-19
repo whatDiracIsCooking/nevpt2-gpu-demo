@@ -2075,6 +2075,103 @@ gitignored. Regenerate it with the `--mo-from … --gradgold` command in
 It came out at its recorded sha256, and the golden beside it
 byte-identical.
 
+### The density-fitted gradient against the numerical one
+
+#166 is the density-fitted twin of this section: `nevpt2_grad.py --df`
+differentiates golden/`n2_ccpvdz_cas44_df`'s fitted SC-NEVPT2 energy (fitted
+RHF, `DFCASCI`, `dfnevpt2._ERIS`, every displaced geometry fitting its own
+integrals), gated against #167's `grad_num` in the `NEVPT2F1` sidecar beside
+it. Both providers, on one sweep:
+
+- **GPU-sourced**: `nevpt2_sc_pseudodensity --dump-source-terms` on the
+  `_df` golden (#168), whose `Y` carries both terms, the frozen-digest one
+  and the digests' transpose, carried into the gradient's own active basis
+  by `load_source_terms` exactly as an integral-direct dump is.
+- **PySCF-sourced**: central differences of **PySCF's own DF-NEVPT2
+  energy**, the same `dfnevpt2._ERIS` the `_df` golden is built from. PySCF
+  has no NEVPT2 gradient of either flavour, so "PySCF-sourced" means
+  quotients of its energy here as it does in the conventional runs. It is
+  not a conventional calculation: the fitted and exact `E_corr` differ by
+  1.2e-5 on this state, and `test_grad_df.py` holds the state to the `_df`
+  golden and away from the conventional one.
+
+**The tolerance is this section's 1e-6, unchanged.** Both sides are finite
+differences, which is the case "The tolerance, and why it is not 1e-7"
+covers, and the fitted case's bars sit where the conventional N2's do:
+`grad_num`'s Richardson residual is **9.8e-10** (its stencil h, h/2, h/4 at
+0.0025 bohr, the step read off the plateau in
+[`reference-data.md`](reference-data.md), "The numerical gradient";
+the fitted sidecar's own figure is "The density-fitted numerical
+gradient"), and the analytic side's frozen-path bars are **5.1e-8**
+(skeleton) and **2.2e-11** / 2.3e-11 (multipliers, the PySCF-sourced / both
+runs), against conventional N2's 1.1e-9 / 5.1e-8 / 1.6e-11. The worst
+agreement below is 4.3e-8, so the gate keeps the decade of margin that
+section sets it at. Nothing about fitting moves either bar's order, so no
+new number was set.
+
+Run on the RTX 3080 box (the dump on the card, CUDA `default` preset,
+Release, `--tiles 3`; everything else single-threaded on its CPU, PySCF
+2.14.0):
+
+```bash
+uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 --df
+./build/src/nevpt2_sc_pseudodensity --golden golden/n2_ccpvdz_cas44_df.nevpt2gold \
+    --tiles 3 --dump-source-terms /tmp/n2_cas44_df.gradsrc
+uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 --df \
+    --source both --source-path /tmp/n2_cas44_df.gradsrc --localise
+uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 --df \
+    --source dump --source-path /tmp/n2_cas44_df.gradsrc --edot-check
+```
+
+| | N2 CAS(4,4) `_df` (cc-pVDZ-JKFIT, `naux` 140) |
+|---|---|
+| state vs the `_df` golden, `E_CASCI` / `E_corr` | 0.0 / 5.0e-16 |
+| components compared | 6 (linear under every displacement) |
+| **GPU-sourced, max \|g − grad_num\|** | **1.38e-8** — `PASS` |
+| **PySCF-sourced, max \|g − grad_num\|** | **4.32e-8** — `PASS` |
+| max \|GPU-sourced − PySCF-sourced\| | 2.94e-8; the GPU's `Y` alone moves it 2.63e-8, its `y` alone 3.05e-9 |
+| the axial component, GPU / PySCF / `grad_num` (atom 0 z, Eh/bohr) | +0.0448030161 / +0.0448029867 / +0.0448030289 |
+| the source terms, dump vs PySCF's exact ones: worst `A` block, worst `P y` | 1.98e-7 (core–virtual), 8.9e-9 |
+| ... vs PySCF with the digests frozen in `A` and `e_core`/`e_virt` in `y` (`--localise`) | 2.9e-1 (act_O–virtual), 3.2e-4 |
+| `--edot-check`: the dump's `Edot(kappa)`, frozen-digest + digests' terms, vs PySCF's exact directional derivative of the fitted energy | 18 of 18 ladders within 1e-6, `PASS` |
+| zero-by-symmetry axes, \|g\|; sum over atoms (z) | ≤8.7e-15; 1.8e-9 |
+| Z-vector residuals, CI / orbital direct / orbital GMRES; condition number | 8.7e-16 / 1.2e-15 / 1.7e-12 PySCF-sourced, 5.5e-15 / 1.2e-15 / 1.7e-12 GPU-sourced; 7.6e3 |
+| **residual-independent checks** | **10 of 11 — `FAIL`**, both runs: the nuclear ladder, seed 70 (below) |
+| wall, PySCF-sourced / both (`--localise` included) / `--edot-check` | 14.2 s / 23.3 s / 5.0 s |
+
+**Both `Y` terms are load-bearing, and the `--localise` row is the
+evidence.** The dump matches PySCF's exact fitted `A` to 2e-7 and misses the
+frozen-digest one by 0.29, so it is the digests' transpose, not the
+frozen-digest term alone, that the gradient reads. A scratch negative
+control (not committed) solved the same sweep with PySCF's frozen-digest `A`
+and the dump's `y`: **9.8e-2** from `grad_num`, the axial component +0.1425
+against +0.0448. A dump without #168's term is a wrong gradient, not a
+looser one.
+
+**Flavour.** A `.gradsrc` names no flavour, but the CI vector it was taken
+at does: the conventional N2 CAS(4,4) dump handed to `--df` and the fitted
+one handed to the conventional run are both refused as a different state,
+8.5e-5 from the golden's CI vector against `DUMP_CI_TOL`'s 1e-8. A dump with
+the fitted CI vector and the conventional `E_corr` is refused by the energy
+check behind it (`test_grad_df.py`).
+
+**The one failing check is the nuclear ladder's run length, at N2's known
+edge.** "What the committed cases come out at", below, records that N2 SC's
+nuclear ladder closes its run of three only at its last rung, `2^-16`, with
+round-off below it, and fails on run length alone under small changes to
+the steps. The fitted state's frozen path has the same shape (seed 70's
+ratios 2.86, 3.20, 3.60 at `2^-13`–`2^-15`, against conventional 2.87,
+3.21, 3.70), and the round-off rung is where the two part: **5.105**
+PySCF-sourced and **4.800** GPU-sourced at `2^-16`, against the window
+(3.2, 4.8) and conventional's 3.302. Seed 2026, the same direction
+reversed, passes in both runs with a run of three ending at `2^-16`. The
+seed-70 ladder's Richardson value is 7.8e-9 (6.8e-9 GPU-sourced) from
+`<d, g>`, well inside its 1e-6, so the quotient it checks has converged;
+the check fails because the rule demands a run the ladder cannot lengthen
+at this case's round-off. Neither the window nor the run length was
+changed. `nevpt2_grad.py --df` exits 1 on this case for that reason, with
+both `grad_num` lines reading `PASS`.
+
 ### Why there is no ctest entry for it
 
 Three reasons, each sufficient on its own:
@@ -3221,6 +3318,8 @@ limits on N2, not the steps':**
   run length is at the rule's edge: in the step scans below, seed 70's last
   ratio drops to 3.19 at two neighbouring CI steps (`2^-15`, `2^-20`) and
   one nuclear step (`2^-16`), and the check fails there on run length alone.
+  The density-fitted twin falls off that edge at the committed steps:
+  "The density-fitted gradient against the numerical one", above.
 
 ### N2 CAS(4,4) SC fails, and that is the finding
 
