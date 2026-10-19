@@ -27,7 +27,8 @@
 //                           inventory, pairing with its *_df golden only, its
 //                           tied arrays as the six B blocks contracted, and
 //                           its matrices and orbital energies as the fitted
-//                           golden's (§3.8)
+//                           golden's (§3.8), and the shape of the numerical
+//                           gradient nevpt2_numgrad.py --df appended (#167)
 //
 // The malformed and synthetic files are written to a per-test temp directory,
 // removed in TearDown. The committed files are only ever read; their paths
@@ -619,6 +620,8 @@ TEST_F(GradGoldCas44Tests, TheActiveIntegralBlockRestrictsToTheGoldensH2e) {
 // measured number, a property of the basis (docs/reference-data.md, "The
 // gradient sidecar").
 constexpr int64_t kNauxDf = 140;
+// N2's atom count: the leading extent of the grad_num* arrays.
+constexpr int64_t kNatm = 2;
 
 class GradGoldDfCas44Tests : public ::testing::Test {
  protected:
@@ -691,18 +694,44 @@ TEST_F(GradGoldDfCas44Tests, HeaderAndInventory) {
   const int64_t m = g.nmo, c = g.ncore, a = g.nact, v = g.nvirt, l = g.naux;
   // docs/gradient-theory.md, §3.8: the two blocks the golden lacks, §3.5's
   // matrices of the fitted calculation, and the four tied arrays the orbital
-  // energies' response reads, under their conventional names and shapes.
+  // energies' response reads, under their conventional names and shapes --
+  // then the four grad_num* arrays nevpt2_numgrad.py --df appends (#167,
+  // docs/reference-data.md, "The numerical gradient"), N2's two atoms.
   const std::vector<std::pair<std::string, std::vector<int64_t>>> expected = {
       {"mo_coeff", {g.nao, m}}, {"h", {m, m}},         {"heff", {m, m}},
       {"f", {m, m}},            {"f_h", {m, m}},       {"fock_rhf", {m, m}},
       {"B_cc", {l, c, c}},      {"B_vv", {l, v, v}},   {"g_xa_cc", {m, a, c, c}},
       {"g_xc_ca", {m, c, c, a}}, {"g_xa_vv", {m, a, v}}, {"g_xv_va", {m, v, v, a}},
+      {"grad_num", {kNatm, 3}}, {"grad_num_residual", {kNatm, 3}},
+      {"grad_num_probed", {kNatm, 3}}, {"grad_num_step", {1}},
   };
   EXPECT_EQ(std::ssize(g.arrays), std::ssize(expected));
   for (const auto& [name, dims] : expected) {
     ASSERT_TRUE(g.require({name}).has_value()) << name;
     EXPECT_EQ(g.get(name).dims(), dims) << name;
   }
+}
+
+// The numerical gradient's structure, not its value (the value is the
+// oracle; docs/reference-data.md, "The numerical gradient", records it): N2
+// stays linear under every displacement, so all six components were
+// differenced, and an energy that does not depend on where the molecule sits
+// has equal and opposite axial components and no transverse ones. The bound is
+// the stencil's own error-bar scale, not a measured number.
+TEST_F(GradGoldDfCas44Tests, CarriesTheDensityFittedNumericalGradient) {
+  const GradGoldFile& g = *sidecar_;
+  ASSERT_TRUE(
+      g.require({"grad_num", "grad_num_residual", "grad_num_probed", "grad_num_step"}).has_value());
+  const Tensor& grad = g.get("grad_num");
+  const Tensor& probed = g.get("grad_num_probed");
+  EXPECT_GT(g.get("grad_num_step")(0), 0.0);
+  for (int64_t i = 0; i < kNatm; ++i)
+    for (int64_t c = 0; c < 3; ++c) EXPECT_EQ(probed(i, c), 1.0) << i << ", " << c;
+  constexpr double kStructureTol = 1e-8;
+  EXPECT_GT(std::abs(grad(0, 2)), 1e3 * kStructureTol);
+  EXPECT_LE(std::abs(grad(0, 2) + grad(1, 2)), kStructureTol);
+  for (int64_t i = 0; i < kNatm; ++i)
+    for (int64_t c = 0; c < 2; ++c) EXPECT_LE(std::abs(grad(i, c)), kStructureTol);
 }
 
 TEST_F(GradGoldDfCas44Tests, PairsWithItsFittedGoldenAndNoOther) {

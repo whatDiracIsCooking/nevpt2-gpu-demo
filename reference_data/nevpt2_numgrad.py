@@ -36,6 +36,20 @@ files hold exactly that. ``--npz PATH`` is how a PC (or SC) numerical
 gradient leaves this script for ``nevpt2_grad.py --grad-num PATH`` to compare
 against, without a committed byte moving.
 
+**``--df`` differences the density-fitted energy** (#167): every displaced
+state is the one ``generate_golden.py --df`` builds (a fitted RHF, a
+``DFCASCI`` sharing its ``with_df``, ``dfnevpt2._ERIS`` called directly),
+checked against ``golden/<case>_df.nevpt2gold`` and written into the
+``NEVPT2F1`` sidecar beside it, ``golden/<case>_df.gradgold``, through
+``golden_format.read_gradgold`` and ``generate_golden.write_gradgold`` (which
+keeps the magic and ``naux`` it read). A nuclear displacement moves the
+fitting metric too, and each displaced geometry builds its own fitting object,
+so that derivative is in the difference for free. The rules are the
+conventional route's, unchanged: the same stencil, the same point-group and
+selection refusals. A golden or sidecar of the other flavour, or fitted in
+another auxiliary basis (its ``naux``), is refused before any SCF. SC and
+``--reference casci`` only.
+
 **Why a numerical gradient is possible for this reference at all: it is a
 CASCI, not a CASSCF.** RHF followed by a CASCI diagonalisation is
 deterministic at every displaced geometry, so two displaced energies are two
@@ -118,6 +132,8 @@ differentiate::
         --components all                     # refused: 0z breaks Cs
     uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65 \
         --pc --npz /tmp/acrolein.numgrad.npz # SC and PC, nothing written in golden/
+    uv run python reference_data/nevpt2_numgrad.py --case n2_ccpvdz_cas44 --df
+                                             # golden/n2_ccpvdz_cas44_df.gradgold
     uv run python reference_data/nevpt2_numgrad.py --case acrolein_def2svp_cas65 \
         --reference casscf --directional 4 --analytic /tmp/acrolein.grad.npz \
         --workers 12 --states-dir /tmp/acrolein_states --npz /tmp/screen.npz
@@ -285,6 +301,13 @@ WARM_PROBE_DEFAULT = 2
 #: holds **no** ``grad_num`` -- it stays the 24 arrays ``--gradgold`` writes --
 #: so ``sidecar_grad_num`` is False for it and the in-place write is refused
 #: rather than moving a committed file's bytes; ``--npz`` is the route.
+#:
+#: ``sidecar_grad_num_df`` is the same switch for the case's ``--df`` twin,
+#: ``golden/<case>_df.gradgold`` (#167): N2 CAS(4,4)'s density-fitted sidecar
+#: DOES carry ``grad_num`` -- the oracle the density-fitted analytic gradient
+#: (#166) is held to -- while CAS(8,8)'s stays the 12 arrays ``--df
+#: --gradgold`` writes. A case with no ``_df`` golden has no entry, and
+#: ``--df`` on it is refused.
 CASES = {
     "lif_def2svp_cas46": dict(
         geometry="reference_data/geometries/lif.xyz",
@@ -312,6 +335,7 @@ CASES = {
         cas_irreps=None,
         core_irreps=None,
         sidecar_grad_num=False,
+        sidecar_grad_num_df=True,
     ),
     # Here for nevpt2_grad.py --source both --sources-only (#73): the second
     # size its GPU source terms are compared with PySCF's at. Its committed
@@ -324,6 +348,7 @@ CASES = {
         cas_irreps=None,
         core_irreps=None,
         sidecar_grad_num=False,
+        sidecar_grad_num_df=False,
     ),
 }
 
@@ -379,6 +404,103 @@ def _check_reference_kind(kind: str, path: Path, reference: str = "casci") -> No
                "Pass --reference casci.")
             + " Refused rather than differenced."
         )
+
+
+def fitted_naux(geom, basis: str, auxbasis: str) -> int:
+    """The auxiliary-basis size of ``auxbasis`` on this molecule, from the
+    basis alone (no integrals): what ``with_df.get_naoaux()`` reports for the
+    fitted state ``generate_golden._build_state`` builds."""
+    from pyscf import df
+
+    return int(df.make_auxmol(gg._build_mol(geom, basis), auxbasis).nao_nr())
+
+
+def _check_golden_flavour(path: Path, geom, case: dict) -> int | None:
+    """Refuse a golden of the other flavour from the run's, and return the
+    run's ``naux`` (``None`` for a conventional run).
+
+    A density-fitted golden is one carrying ``B_aa`` (as
+    ``golden_layout_check.py`` tells them apart); with ``--df`` it must be
+    one, and its ``B_aa`` leading extent must be this run's ``naux`` -- the
+    auxiliary basis the golden was fitted in is the one differentiated. A
+    conventional run handed a fitted golden is refused the same way: either
+    mismatch would compare two different functions' energies. Read through
+    ``golden_format.read_golden`` with only ``B_aa`` wanted, so it costs one
+    small array."""
+    _h, arrays = gf.read_golden(path, {"B_aa"})
+    fitted = "B_aa" in arrays
+    auxbasis = case.get("auxbasis")
+    if fitted != (auxbasis is not None):
+        raise SystemExit(
+            f"{path} is a {'density-fitted' if fitted else 'conventional'} golden "
+            f"(it {'carries' if fitted else 'lacks'} B_aa), and this run "
+            f"differentiates the {'density-fitted' if auxbasis else 'conventional'} "
+            "energy. "
+            + ("Pass --df." if fitted else "Drop --df, or pass a *_df golden.")
+            + " Refused rather than differenced: the two are different functions "
+            "of the geometry."
+        )
+    if auxbasis is None:
+        return None
+    naux = fitted_naux(geom, case["basis"], auxbasis)
+    if arrays["B_aa"].shape[0] != naux:
+        raise SystemExit(
+            f"{path}: its B_aa is fitted in {arrays['B_aa'].shape[0]} auxiliary "
+            f"functions, but --auxbasis {auxbasis} on this molecule has {naux}. "
+            "The golden was fitted in another auxiliary basis, so its energy is "
+            "not the function this run would difference."
+        )
+    return naux
+
+
+def _check_sidecar_flavour(path: Path, header: dict, df: bool,
+                           naux: int | None = None) -> None:
+    """Refuse to write ``grad_num`` into a sidecar of the other flavour: a
+    density-fitted gradient goes into the ``NEVPT2F1`` sidecar beside the
+    ``_df`` golden (``naux`` in its header, and equal to the run's when
+    ``naux`` is given), and a conventional one into an ``NEVPT2D1`` one.
+    ``golden_format.read_gradgold`` reports the flavour as the presence of
+    ``naux``."""
+    got = header.get("naux")
+    if (got is not None) == df and (naux is None or got == naux):
+        return
+    side = (f"density-fitted (NEVPT2F1, naux {got})" if got is not None
+            else "conventional (NEVPT2D1)")
+    run = (("density-fitted" + (f", naux {naux}" if naux is not None else ""))
+           if df else "conventional")
+    raise SystemExit(
+        f"{path}: a {side} sidecar, but this run's gradient is {run}. Refused "
+        "rather than written: the sidecar's arrays and the gradient beside them "
+        "would describe different calculations."
+    )
+
+
+def _check_sidecar_write(args, stem: str) -> None:
+    """Refuse, before any SCF, a ``grad_num`` write the sweep would end in
+    refusing: into a committed sidecar that is committed without one, or into
+    a sidecar of the other flavour (:func:`_check_sidecar_flavour` repeats
+    the flavour check with the run's own ``naux`` once it has it)."""
+    in_place = args.out is None and args.sidecar.resolve() == (
+        REPO / "golden" / f"{stem}.gradgold").resolve()
+    switch = "sidecar_grad_num_df" if args.df else "sidecar_grad_num"
+    if in_place and not CASES.get(args.case, {}).get(switch, True):
+        # Some sidecars are committed holding only the arrays --gradgold
+        # writes (N2 CAS(4,4) conventional, CAS(8,8) both flavours). Adding
+        # grad_num* to one of those would move a committed golden's bytes,
+        # which is never what a run of this script should do silently.
+        raise SystemExit(
+            f"golden/{stem}.gradgold is committed as the arrays "
+            f"generate_golden.py {'--df ' if args.df else ''}--gradgold writes, "
+            "with no grad_num in it, so writing one there would move a committed "
+            "file's bytes. Pass --npz PATH (which is what nevpt2_grad.py "
+            "--grad-num reads), --out PATH, or --no-write."
+        )
+    if not args.sidecar.exists():
+        raise SystemExit(f"{args.sidecar}: no such gradient sidecar; write it with "
+                         f"generate_golden.py {'--df ' if args.df else ''}--gradgold, "
+                         "or pass --no-write / --npz")
+    header, _arrays = gf.read_gradgold(args.sidecar)
+    _check_sidecar_flavour(args.sidecar, header, args.df)
 
 
 def read_golden_pc_total(path: Path) -> float | None:
@@ -576,16 +698,26 @@ def energy(geom, case: dict, *, pc: bool = False) -> tuple[float, float, float |
     selection signature)``, from ``generate_golden``'s own state builder and
     PySCF's own per-class energies -- the golden's answer, at a displaced
     geometry. With ``pc`` the same state is handed to block2 as well
-    (:func:`pc_energy`), so both gradients come out of one sweep."""
+    (:func:`pc_energy`), so both gradients come out of one sweep.
+
+    With ``case["auxbasis"]`` set (``--df``) the state is the ``_df``
+    golden's: a density-fitted RHF, a ``DFCASCI`` sharing its ``with_df``,
+    and ``dfnevpt2._ERIS`` called directly (``generate_golden._pyscf_dms``),
+    exactly as ``generate_golden.py --df`` builds it. Each geometry builds its
+    own fitting object, so the three-index tensor and the metric ``(P|Q)``
+    move with the nuclei as every other integral does: a nuclear derivative
+    of the fitted energy that the displaced runs pick up for free."""
+    auxbasis = case.get("auxbasis")
     mc, pt = gg._build_state(
         geom,
         case["basis"],
         case["ncas"],
         case["nelecas"],
+        auxbasis,
         cas_irreps=case["cas_irreps"],
         core_irreps=case["core_irreps"],
     )
-    _dm1, _dm2, dms, eris = gg._pyscf_dms(pt)
+    _dm1, _dm2, dms, eris = gg._pyscf_dms(pt, mc.with_df if auxbasis is not None else None)
     per_class = gg._pyscf_per_class(pt, dms, eris)
     e_corr = float(sum(per_class[c][1] for c in gg.CLASSES))
     e_pc = pc_energy(mc, pt) if pc else None
@@ -1484,6 +1616,14 @@ def run(args) -> dict:
     # The golden's header first: reading it costs nothing, and its reference
     # kind decides whether differencing this state means anything at all, so
     # the refusal lands before the reference energy is computed.
+    if args.df and not args.golden.exists():
+        raise SystemExit(
+            f"--df: {args.golden} does not exist. --df differentiates a committed "
+            "*_df golden's state, and the committed ones are "
+            + ", ".join(f"{c}_df" for c, v in CASES.items() if "sidecar_grad_num_df" in v)
+            + "; for another case pass --golden (and --sidecar) for one "
+            "generate_golden.py --df --gradgold wrote."
+        )
     gold = gf.read_golden_header(args.golden)
     rec["reference_kind"] = gold["reference_kind"]
     _check_reference_kind(gold["reference_kind"], args.golden, args.reference)
@@ -1493,8 +1633,21 @@ def run(args) -> dict:
         rec["pc"] = False
         return run_casscf(args, case, geom, rec)
 
+    # The flavour: a --df run differentiates the fitted energy, so the golden
+    # it is checked against (and the sidecar it writes into) must be a
+    # fitted one of the same auxiliary basis, and a conventional run must not
+    # be handed one. Refused before any SCF; the energy check below would
+    # catch a mismatch too, but only as an unexplained ~1e-5 Eh difference.
+    case["auxbasis"] = args.auxbasis
+    rec["auxbasis"] = args.auxbasis
+    rec["naux"] = _check_golden_flavour(args.golden, geom, case)
+
     t0 = time.perf_counter()
     ref_group = point_group(geom, case["basis"])
+    # The components first: the point-group check is symmetry detection only,
+    # so a refused displacement costs no SCF at all -- not even the reference.
+    want = _parse_components(args.components, len(geom))
+    probed, skipped = select_components(geom, case["basis"], ref_group, args.step, want)
     e_casci, e_corr, e_pc, ref_labels = energy(geom, case, pc=args.pc)
     rec.update(group=ref_group, e_casci=e_casci, e_corr=e_corr, e_pc=e_pc,
                labels=ref_labels, pc=args.pc)
@@ -1535,13 +1688,12 @@ def run(args) -> dict:
             "different function."
         )
 
-    want = _parse_components(args.components, len(geom))
-    probed, skipped = select_components(geom, case["basis"], ref_group, args.step, want)
     rec["probed"] = probed
     rec["zero_by_symmetry"] = skipped
     print(f"[{args.case}] {len(probed)} components to difference, "
           f"{len(skipped)} zero by symmetry, "
-          f"{6 * len(probed)} displaced CASCI+NEVPT2"
+          f"{6 * len(probed)} displaced "
+          f"{'density-fitted ' if args.df else ''}CASCI+NEVPT2"
           f"{'+block2 PC' if args.pc else ''} runs:")
     rec.update(numgrad(geom, case, probed, args.step, ref_labels, pc=args.pc))
     rec["wall"] = time.perf_counter() - t0
@@ -1550,7 +1702,9 @@ def run(args) -> dict:
 
 def report(rec: dict) -> None:
     print(f"== {rec['case']}  {rec['geometry']}  {rec['basis']} "
-          f"CAS({rec['nelecas']},{rec['ncas']})  irreps {rec['cas_irreps']}")
+          f"CAS({rec['nelecas']},{rec['ncas']})  irreps {rec['cas_irreps']}"
+          + (f"  density-fitted: {rec['auxbasis']}, naux {rec['naux']}"
+             if rec.get("auxbasis") else ""))
     print(f"reference: group {rec['group'][0]} (used {rec['group'][1]}), core "
           f"{rec['labels'][0]} active {rec['labels'][1]}, "
           f"E_CASCI={rec['e_casci']:.10f} ({rec['d_e_casci']:+.1e} vs golden) "
@@ -1769,8 +1923,33 @@ def main() -> None:
                          "--grad-num (#126). Refused if any state lacks a guarded "
                          "PC energy. --analytic is then a --pc gradient, and the "
                          "screen directions in the file are gated against it")
+    ap.add_argument("--df", action="store_true",
+                    help="differentiate the DENSITY-FITTED energy (#167): every "
+                         "displaced state built as generate_golden.py --df builds "
+                         "one (fitted RHF, DFCASCI, dfnevpt2 integrals), checked "
+                         "against golden/<case>_df.nevpt2gold and written into "
+                         "its NEVPT2F1 sidecar golden/<case>_df.gradgold. SC, "
+                         "--reference casci only")
+    ap.add_argument("--auxbasis", default=None,
+                    help="--df: the auxiliary basis (default <basis>-jkfit, "
+                         "generate_golden.py --df's)")
     args = ap.parse_args()
     casscf = args.reference == "casscf"
+    if args.auxbasis is not None and not args.df:
+        ap.error("--auxbasis needs --df")
+    if args.df:
+        if casscf:
+            ap.error("--df is --reference casci only: the density-fitted CASSCF "
+                     "route has no displaced-state optimiser here")
+        if args.pc:
+            ap.error("--df is SC only: the density-fitted PC energy is block2's on "
+                     "the fitted integrals, which this sweep does not difference")
+    if args.df and args.auxbasis is None:
+        basis = args.basis or CASES.get(args.case, {}).get("basis")
+        if basis is None:
+            ap.error("--df needs --basis (or a --case that names one) to default "
+                     "--auxbasis")
+        args.auxbasis = f"{basis}-jkfit"
     if not casscf:
         named = [f for f, on in (("--mo-from", args.mo_from), ("--directional",
                  args.directional), ("--analytic", args.analytic), ("--states-dir",
@@ -1796,7 +1975,7 @@ def main() -> None:
                      "numerical directional derivative to <g, d>")
         if args.warm_probe is None:
             args.warm_probe = WARM_PROBE_DEFAULT
-    stem = f"{args.case}_casscf" if casscf else args.case
+    stem = f"{args.case}_casscf" if casscf else (f"{args.case}_df" if args.df else args.case)
     if args.golden is None:
         args.golden = REPO / "golden" / f"{stem}.nevpt2gold"
     if args.sidecar is None:
@@ -1820,6 +1999,9 @@ def main() -> None:
             raise SystemExit(1)
         return
     analytic = load_analytic(args.analytic, args.case) if args.analytic else None
+    if not (casscf or args.pc or args.no_write):
+        # Before the sweep, so a write that would be refused costs nothing.
+        _check_sidecar_write(args, stem)
 
     rec = run(args)
     if casscf:
@@ -1855,20 +2037,8 @@ def main() -> None:
     if args.no_write:
         print("--no-write: the sidecar is unchanged")
         return
-    if not CASES.get(args.case, {}).get("sidecar_grad_num", True):
-        # Some sidecars are committed holding only the 24 arrays --gradgold
-        # writes (N2 CAS(4,4)). Adding grad_num* to one of those would move a
-        # committed golden's bytes, which is never what a run of this script
-        # should do silently.
-        raise SystemExit(
-            f"golden/{args.case}.gradgold is committed as the 24 arrays "
-            "generate_golden.py --gradgold writes, with no grad_num in it, so "
-            "writing one there would move a committed file's bytes. Pass "
-            "--npz PATH (which is what nevpt2_grad.py --grad-num reads), "
-            "--out PATH, or --no-write."
-        )
-
     header, arrays = gf.read_gradgold(args.sidecar)
+    _check_sidecar_flavour(args.sidecar, header, args.df, rec.get("naux"))
     # Replace rather than append on a re-run, so the file is a function of the
     # inputs: same order, same bytes.
     arrays = {k: v for k, v in arrays.items() if not k.startswith("grad_num")}
