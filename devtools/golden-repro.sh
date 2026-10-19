@@ -29,6 +29,16 @@
 #                          orbitals (#117), n2_ccpvdz_cas44_casscf[_pc][_dir]
 #                          .srcgold (--mo-from the COMMITTED sidecar, against
 #                          the committed n2_ccpvdz_cas44_casscf.nevpt2gold)
+#   nevpt2_numgrad.py      the four grad_num* arrays in n2_ccpvdz_cas44_df.gradgold
+#                          (#167): run inside the cas44_df run, right after its
+#                          generator and on the sidecar that generator just
+#                          wrote, as docs/reference-data.md's two commands do,
+#                          so the file compared is the committed one in full
+#                          (the 12 --df --gradgold arrays AND the numerical
+#                          gradient), not the 12 alone. The reference state is
+#                          checked against the COMMITTED _df golden. LiF's and
+#                          acrolein's conventional grad_num sidecars are not
+#                          covered here.
 #
 # What it deliberately does NOT regenerate: golden/n2_ccpvdz_cas44_casscf.gradgold,
 # the CASSCF-reference gradient sidecar (#120). An orbital optimiser sits
@@ -107,18 +117,23 @@ in_locked_env python -c "" || exit 1
 
 gen="$REPO_ROOT/reference_data/generate_golden.py"
 src="$REPO_ROOT/reference_data/sc_source_oracle.py"
+num="$REPO_ROOT/reference_data/nevpt2_numgrad.py"
 G="$REPO_ROOT/golden"
 S=$scratch
 
 # One generator run per line: <run name> | <files it writes> | <command>.
 # The flags are docs/reference-data.md, "Regenerating the golden file"'s, plus
 # --out into the scratch directory.
-declare -a run_names=() run_files=() run_cmds=()
-add_run() { run_names+=("$1"); run_files+=("$2"); run_cmds+=("$3"); }
+# An optional fourth field is a second command run after the first succeeds,
+# in the same run (same log, one exit status): a step that rewrites a file
+# the first one wrote.
+declare -a run_names=() run_files=() run_cmds=() run_posts=()
+add_run() { run_names+=("$1"); run_files+=("$2"); run_cmds+=("$3"); run_posts+=("${4:-}"); }
 add_run cas44 "n2_ccpvdz_cas44.nevpt2gold n2_ccpvdz_cas44.gradgold" \
   "python $gen --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44 --gradgold --out $S/n2_ccpvdz_cas44.nevpt2gold"
 add_run cas44_df "n2_ccpvdz_cas44_df.nevpt2gold n2_ccpvdz_cas44_df.gradgold" \
-  "python $gen --df --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_df --gradgold --out $S/n2_ccpvdz_cas44_df.nevpt2gold"
+  "python $gen --df --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_df --gradgold --out $S/n2_ccpvdz_cas44_df.nevpt2gold" \
+  "python $num --df --case n2_ccpvdz_cas44 --sidecar $S/n2_ccpvdz_cas44_df.gradgold"
 add_run cas88 "n2_ccpvdz_cas88.nevpt2gold n2_ccpvdz_cas88.gradgold" \
   "python $gen --ncas 8 --nelecas 8 --name n2_ccpvdz_cas88 --gradgold --out $S/n2_ccpvdz_cas88.nevpt2gold"
 add_run cas88_df "n2_ccpvdz_cas88_df.nevpt2gold n2_ccpvdz_cas88_df.gradgold" \
@@ -169,7 +184,10 @@ launch() {
   local i=$1 name=${run_names[$1]} t
   t=$(date +%s)
   # shellcheck disable=SC2086  # the command is a word list built above
-  ( in_locked_env ${run_cmds[$i]} >"$S/$name.log" 2>&1; echo $? >"$S/$name.rc" )
+  # shellcheck disable=SC2086
+  ( { in_locked_env ${run_cmds[$i]} &&
+      { [ -z "${run_posts[$i]}" ] || in_locked_env ${run_posts[$i]}; }
+    } >"$S/$name.log" 2>&1; echo $? >"$S/$name.rc" )
   echo $(( $(date +%s) - t )) >"$S/$name.secs"
   echo "golden-repro: [$name] done in $(cat "$S/$name.secs") s (exit $(cat "$S/$name.rc"))"
 }

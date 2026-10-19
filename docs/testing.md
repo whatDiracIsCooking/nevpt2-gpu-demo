@@ -193,6 +193,18 @@ What they are, all on synthetic inputs, no PySCF solve, no card, no network:
   table's gaps to `_check_pc_conditioning` at 0.99 / 1.01 of 1e3. The
   transient golden's NaN PC placeholders round-trip through
   `read_golden_pc_total`, and a `--work-dir` inside `golden/` is refused.
+- **`test_numgrad_df.py`** (#167) — `nevpt2_numgrad.py --df`. On the fitted
+  route, a named out-of-plane component of acrolein (`0z`, Cs → C1) is
+  refused with the group it breaks to, before any SCF: a stand-in for
+  `energy` fails the test if one runs. `--components auto` keeps the eight
+  out-of-plane components as symmetry zeros. Also refused: a golden of the
+  other flavour, a golden fitted in another auxiliary basis (`cc-pvdz-ri`'s
+  `naux` against the golden's 140), and a sidecar of the other flavour.
+  Writing into the committed CAS(8,8) `_df` sidecar, which holds no
+  `grad_num`, is refused before the sweep, and so are the `--df --pc`,
+  `--df --reference casscf` and bare `--auxbasis` flags. The committed
+  CAS(4,4) `_df` sidecar carries its four `grad_num*` arrays after the
+  twelve, read through `golden_format` only.
 
 **The thresholds are written into the tests as numbers**, not read from the
 module: a test comparing against `DEGENERACY_TOL` would move with it.
@@ -229,7 +241,7 @@ added):
 | files | run |
 |---|---|
 | `n2_ccpvdz_cas44.nevpt2gold`, `.gradgold`; `n2_ccpvdz_cas88.nevpt2gold`, `.gradgold` | `generate_golden.py --gradgold` |
-| `n2_ccpvdz_cas44_df.nevpt2gold`, `.gradgold`; `n2_ccpvdz_cas88_df.nevpt2gold`, `.gradgold` | `generate_golden.py --df --gradgold` (the density-fitted `NEVPT2F1` sidecar, #164) |
+| `n2_ccpvdz_cas44_df.nevpt2gold`, `.gradgold`; `n2_ccpvdz_cas88_df.nevpt2gold`, `.gradgold` | `generate_golden.py --df --gradgold` (the density-fitted `NEVPT2F1` sidecar, #164); for CAS(4,4), then `nevpt2_numgrad.py --df` on the sidecar it just wrote, in the same run, so its `grad_num*` arrays are regenerated too (#167) |
 | `n2_ccpvdz_cas44_casscf[_df].mogold` | `generate_golden.py --casscf --mo-out` (a fresh optimisation) |
 | `n2_ccpvdz_cas44_casscf[_df].nevpt2gold` | `generate_golden.py --mo-from` the **committed** sidecar, so a drifted sidecar fails as itself and not as its golden too |
 | `n2_ccpvdz_cas44.srcgold`, `n2_ccpvdz_cas44_pc.srcgold` | `sc_source_oracle.py [--pc]`, reading the committed golden |
@@ -268,6 +280,7 @@ before #105 added the two directional files:
 | `-j 12`, fourteen files, #105 (the two-card box's CPU, 24 cores, both cards running other jobs) | 152 s, all fourteen `PASS:` |
 | `-j 2`, eighteen files, #117 (RTX 3080 box's CPU, measured with a concurrent sweep on the CPU) | 307 s, all eighteen `PASS:` |
 | `-j 6`, twenty files, #164 (RTX 3080 box's CPU, a sibling build sharing it) | 179 s, all twenty `PASS:` |
+| `-j 6`, twenty files, `n2_ccpvdz_cas44_df.gradgold` with its `grad_num`, #167 (same box, a sibling agent sharing it) | 178 s, all twenty `PASS:`; the `cas44_df` run, generator plus `nevpt2_numgrad.py --df`, 33 s |
 
 Per generator run (the `-j 1` run): `--casscf` sidecars 2–3 s,
 `n2_ccpvdz_cas44.srcgold` 9 s, the CAS(4,4) goldens 26–27 s, the CAS(8,8)
