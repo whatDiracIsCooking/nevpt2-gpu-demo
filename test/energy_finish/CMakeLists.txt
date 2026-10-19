@@ -5,7 +5,10 @@
 # tangent's only calculus -- Park Eqs. 36-37, their Eq. 40 identity, and
 # Richardson tables against a central difference of the finish itself -- and
 # normToEnergyDeltaDerivative / normToEnergyDeltaTangent, its derivative in
-# Delta, Park Eq. 38, for the orbital energies' response, #87), the
+# Delta, Park Eq. 38, for the orbital energies' response, #87) and ITS SECOND
+# DERIVATIVE (normToEnergyHessian in the d form and the multiplier tangents,
+# #150: docs/hessian-theory.md Sec. 2's exact zeros and structural relations,
+# N = 0 giving zero, Richardson tables against differences of P, Q, R), the
 # PC rank cut and gap decision (pcRankCut, #94), the PC finish and denominator
 # check (finishSingle, checkDenominator) and the PC
 # TANGENT's per-tuple arithmetic (pcCoefficients, pcQuadForm, tangentSingle),
@@ -24,12 +27,14 @@ add_gtest_suite_tests(
   SUITES ForBatchesTests NormToEnergyTests CheckDenominatorTests PcRankCutTests FinishSingleTests
          NormToEnergyDerivativeTests NormToEnergyTangentTests NormToEnergyDeltaTests
          PcCoefficientsTests PcQuadFormTests TangentSingleTests PcAdjointTests
-         PcRotationTangentTests PcDeltaTangentTests)
+         PcRotationTangentTests PcDeltaTangentTests NormToEnergyHessianTests
+         NormToEnergyMultiplierTangentTests)
 
-# The abort tier: normToEnergyTangent's five vectors must be one class's, so
-# differing lengths are check(). EXPECT_DEATH forks per assertion, hence its
-# own `death` label.
+# The abort tier: normToEnergyTangent's five vectors (and the Delta and
+# multiplier tangents' four and six) must be one class's, so differing lengths
+# are check(). EXPECT_DEATH forks per assertion, hence its own `death` label.
 add_gtest_suite_tests(
   TARGET energy_finish_tests
   SUITES NormToEnergyTangentDeathTest NormToEnergyDeltaDeathTest
+         NormToEnergyMultiplierTangentDeathTest
   DEATH)
