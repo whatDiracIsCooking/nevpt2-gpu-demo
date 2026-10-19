@@ -312,10 +312,15 @@ The third line is `--rdm-tangent`'s existing Euler gate
 which means **the Hessian's RDM half is already under test in its degenerate
 case** — and that the general case's own check is the one
 `test/rdm/rdm_tangent_tests.cpp` already runs for a general direction, at a new
-argument pair.
+argument pair. That check is the file's `RdmSecondDerivativeTests` (#151): the
+builder at two independent random directions `(u, v)` against a central
+difference of the tangent build along `v` at `(c, u)`, symmetric under
+`u <-> v` and the same about a second, unrelated base state.
 
 The second line — the third derivative vanishing — is what bounds the whole
-problem: there is no tower of higher-order builders behind this.
+problem: there is no tower of higher-order builders behind this. The same
+suite asserts it, as a mixed central difference of the tangent build along two
+further directions.
 
 ## 4. The CI block, `H_cc`
 

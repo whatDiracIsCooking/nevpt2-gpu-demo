@@ -16,6 +16,13 @@
 //                              --rdm-tangent checks at the sizes they run)
 //   RdmTangentPathTests        every digest / consume / tile count gives one
 //                              tangent
+//   RdmSecondDerivativeTests   the builder at two ARBITRARY vectors (u, v) is
+//                              the RDMs' second derivative d^2X/dc^2[u, v]
+//                              (docs/hessian-theory.md, section 3): against a
+//                              central difference of the tangent build along v
+//                              at (c, u), symmetric in (u, v), the same at any
+//                              base state -- and the third derivative, a mixed
+//                              difference of the tangent, vanishes exactly
 //   RdmDigestAdjointTests      buildDigestAdjointDevice (the :adjoint
 //                              partition, #89) is the TRANSPOSE of the f3
 //                              path's h2e dependence: <hbar, h2e_dot> against
@@ -388,6 +395,108 @@ TEST(RdmTangentPathTests, EveryDigestConsumeAndTileCountGivesTheSameTangent) {
       EXPECT_LT(maxDiff(got.t[k], ref.t[k]), tol) << kNames[k];
   }
   EXPECT_TRUE(shortLastTile) << "no tile count leaves a short last tile";
+}
+
+// --- RdmSecondDerivativeTests -------------------------------------------------
+//
+// Write each output as X(c) = B(c, c) with B bilinear. The tangent build is
+// T(c, u) = B(c, u) + B(u, c), the first derivative along u; differentiating
+// it again along v gives d^2X/dc^2[u, v] = B(u, v) + B(v, u) = T(u, v) -- the
+// SAME builder, handed the two directions in place of (state, direction). The
+// Euler gate above is its u = v = c case; these are the general one. T is
+// linear in its first slot, so a central difference of T(., u) along v has no
+// truncation error (as in RdmTangentDifferenceTests): only the 1/2h roundoff
+// amplification, which is what kDifferenceTol is sized for. For the same
+// reason a mixed second difference of T(., u) along (v, w) -- the third
+// derivative of X -- is zero up to roundoff amplified by 1/4hk: at h = k =
+// 1/64 a factor of 1024 on ~1e-16 relative, still three orders inside
+// kDifferenceTol, and many orders below any genuinely cubic term.
+
+// (T(base + h v, u) - T(base - h v, u)) / 2h: the tangent's own derivative
+// along v.
+Built tangentDifference(const CasCase& c, const Tensor& base, const Tensor& u, const Tensor& v,
+                        const Tensor& h2e, double h, const RdmBuildOptions& opt,
+                        const DeviceResources& res) {
+  const Built hi = tangentBuild(c, step(base, h, v), u, h2e, opt, res);
+  const Built lo = tangentBuild(c, step(base, -h, v), u, h2e, opt, res);
+  Built out;
+  for (std::size_t k = 0; k < out.t.size(); ++k) {
+    out.t[k].resize(hi.t[k].size());
+    for (std::size_t i = 0; i < out.t[k].size(); ++i)
+      out.t[k][i] = (hi.t[k][i] - lo.t[k][i]) * (0.5 / h);
+  }
+  return out;
+}
+
+TEST(RdmSecondDerivativeTests, BuilderAtUVIsTheCentralDifferenceOfTheTangentAlongV) {
+  const DeviceResources* res = resourcesOrFail();
+  ASSERT_NE(res, nullptr);
+  for (const CasCase& c : cases()) {
+    SCOPED_TRACE(caseName(c));
+    const RdmBuildOptions opt = options(c.nTiles, /*blasDigest=*/false, /*consumeEmitted=*/false);
+    const Tensor ci = randomCi(c);
+    const Tensor h2e = randomH2e(c);
+    // Two independent random directions (each orthogonal to ci, not to each
+    // other): the identity needs neither relation.
+    const Tensor u = direction(ci, c.seed ^ 0xd1'5ec7u);
+    const Tensor v = direction(ci, c.seed ^ 0x5ec0'0d02u);
+    const Built hess = tangentBuild(c, u, v, h2e, opt, *res);
+    const double scale = std::max(1.0, maxAbs(hess));
+    EXPECT_GT(maxAbs(hess), 1e-3) << "a vacuous second derivative";
+
+    for (const double h : {0.125, 0.015625}) {
+      SCOPED_TRACE(std::format("h={}", h));
+      const Built cd = tangentDifference(c, ci, u, v, h2e, h, opt, *res);
+      for (std::size_t k = 0; k < kNames.size(); ++k)
+        EXPECT_LT(maxDiff(cd.t[k], hess.t[k]), kDifferenceTol * scale) << kNames[k];
+    }
+
+    // A second derivative is a symmetric bilinear form: (v, u) is the same
+    // build with its two produce passes swapped.
+    const Built swapped = tangentBuild(c, v, u, h2e, opt, *res);
+    for (std::size_t k = 0; k < kNames.size(); ++k)
+      EXPECT_LT(maxDiff(swapped.t[k], hess.t[k]), kSameFormTol * scale) << kNames[k] << " (v,u)";
+
+    // And it does not depend on the state it is taken at: the same central
+    // difference about an unrelated random state gives the same T(u, v).
+    CasCase other = c;
+    other.seed = c.seed ^ 0x07e2'0001u;
+    const Built cd2 = tangentDifference(c, randomCi(other), u, v, h2e, 0.125, opt, *res);
+    for (std::size_t k = 0; k < kNames.size(); ++k)
+      EXPECT_LT(maxDiff(cd2.t[k], hess.t[k]), kDifferenceTol * scale)
+          << kNames[k] << " about a second state";
+  }
+}
+
+TEST(RdmSecondDerivativeTests, ThirdDerivativeVanishesExactly) {
+  const DeviceResources* res = resourcesOrFail();
+  ASSERT_NE(res, nullptr);
+  for (const CasCase& c : cases()) {
+    SCOPED_TRACE(caseName(c));
+    const RdmBuildOptions opt = options(c.nTiles, /*blasDigest=*/false, /*consumeEmitted=*/false);
+    const Tensor ci = randomCi(c);
+    const Tensor h2e = randomH2e(c);
+    const Tensor u = direction(ci, c.seed ^ 0xd1'5ec7u);
+    const Tensor v = direction(ci, c.seed ^ 0x5ec0'0d02u);
+    const Tensor w = direction(ci, c.seed ^ 0x3e0'0d03u);
+    // The scale the stencil's roundoff is a fraction of: the tangent at the
+    // base point, the size of every term in it.
+    const double scale = std::max(1.0, maxAbs(tangentBuild(c, ci, u, h2e, opt, *res)));
+    // d^3X/dc^3[u, v, w] = d^2/(dh dk) T(c + h v + k w, u), by the mixed
+    // central difference: zero for a quadratic X, at any step.
+    for (const double h : {0.125, 0.015625}) {
+      SCOPED_TRACE(std::format("h=k={}", h));
+      const Built p = tangentDifference(c, step(ci, h, w), u, v, h2e, h, opt, *res);
+      const Built m = tangentDifference(c, step(ci, -h, w), u, v, h2e, h, opt, *res);
+      for (std::size_t k = 0; k < kNames.size(); ++k) {
+        // (p - m) / 2h, with p and m already divided by 2h each.
+        double worst = 0.0;
+        for (std::size_t i = 0; i < p.t[k].size(); ++i)
+          worst = std::max(worst, std::abs((p.t[k][i] - m.t[k][i]) * (0.5 / h)));
+        EXPECT_LT(worst, kDifferenceTol * scale) << kNames[k] << " third derivative";
+      }
+    }
+  }
 }
 
 // --- RdmDigestAdjointTests -----------------------------------------------------
