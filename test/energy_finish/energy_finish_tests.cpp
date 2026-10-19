@@ -41,6 +41,21 @@
 //                          Richardson table in Delta, and the degree -1
 //                          homogeneity in (H, Delta), Q H + R Delta = -E
 //   NormToEnergyDeltaDeathTest  four vectors of different lengths abort
+//   NormToEnergyHessianTests  the finish's 3x3 second derivative in the d form
+//                          (#150, docs/hessian-theory.md Sec. 2): the hand
+//                          case, agreement with Sec. 2.1's T forms at N != 0,
+//                          Sec. 2.3's two exact zeros (the Hessian annihilates
+//                          the ray (N, H)), Sec. 2.1-2.2's structural relations
+//                          (E_ND = N E_NH + Q, E_DD = N^2 E_HH, the rank-one
+//                          (H, Delta) block), N = 0 exactly giving zero where
+//                          the T form gives NaN, and a Richardson table
+//                          against a central difference of (P, Q, R)
+//   NormToEnergyMultiplierTangentTests  Pdot / Qdot / Rdot (Sec. 2.4): the
+//                          3x3 applied to the direction, still along the ray
+//                          (Rdot = R there), a Richardson table along a line,
+//                          and the class form per perturber with the guard
+//   NormToEnergyMultiplierTangentDeathTest  six vectors of different lengths
+//                          abort
 //
 // THE TANGENT'S ONLY CALCULUS IS HERE. The class contractions are linear in
 // the RDMs, so their tangents are the same einsum chains with the tangent
@@ -650,6 +665,241 @@ TEST(NormToEnergyTangentDeathTest, MismatchedLengthsAbort) {
                "normToEnergyTangent: norm/h/diff/normDot/hDot lengths differ");
   EXPECT_DEATH((void)normToEnergyTangent({1.0}, {1.0}, {1.0}, {}, {1.0}),
                "normToEnergyTangent: norm/h/diff/normDot/hDot lengths differ");
+}
+
+// --- NormToEnergyHessianTests ----------------------------------------------------
+//
+// The finish's 3x3 second derivative in (N, H, Delta), docs/hessian-theory.md
+// Sec. 2 (#150). On the hand case, from Sec. 2.1's T forms worked on paper:
+//
+//   k = 0 (T = -1/3):  E_NN = -16/27, E_NH = 8/27, E_ND = 7/27,
+//                      E_HH = -4/27,  E_HD = -2/27, E_DD = -1/27
+//   k = 1 (T = -1/2):  E_NN = -9/32,  E_NH = 3/16, E_ND = 5/8,
+//                      E_HH = -1/8,   E_HD = -1/4,  E_DD = -1/2
+
+// Sec. 2.1's T forms, transcribed independently of the d form the module
+// implements, so the two are compared rather than one re-derived. These are
+// the forms with the removable 1/N singularities: NaN at N == 0 exactly.
+FinishHessian hessianInTheTForm(double n, double h, double delta) {
+  const double t = -1.0 / (delta + h / n);
+  const double u = 1.0 + delta * t;
+  return {.nn = 2.0 * t / n * u * u,
+          .nh = 2.0 * t * t / n * u,
+          .nDelta = t * t * (3.0 + 2.0 * delta * t),
+          .dd = 2.0 * t * t * t / n,
+          .hh = 2.0 * t * t * t / n,
+          .hDelta = 2.0 * t * t * t,
+          .deltaDelta = 2.0 * n * t * t * t};
+}
+
+// The finish's gradient (P, Q, R) at one perturber -- the first derivatives
+// the Hessian is checked against by difference.
+std::array<double, 3> finishGradient(double n, double h, double delta) {
+  const auto [p, q] = normToEnergyDerivative(n, h, delta);
+  return {p, q, normToEnergyDeltaDerivative(n, h, delta)};
+}
+
+std::array<double, 9> asMatrix(const FinishHessian& e) {
+  return {e.nn, e.nh,     e.nDelta, e.nh,       e.hh, e.hDelta,
+          e.nDelta, e.hDelta, e.deltaDelta};
+}
+
+// The spread every identity below runs over: negative norms, a negative
+// Delta, H = 0, and a small norm (the T form's 1/N is large there).
+template <class F>
+void forEachPerturber(F&& f) {
+  for (const double n : {0.5, 2.0, 13.0, -0.75, 1e-6})
+    for (const double h : {1.0, 3.0, -2.5, 0.0})
+      for (const double d : {1.0, 0.5, 7.0, -0.25}) {
+        if (std::fabs(n * d + h) < 1e-6) continue;  // the finish's pole
+        SCOPED_TRACE(std::format("N={} H={} Delta={}", n, h, d));
+        f(n, h, d);
+      }
+}
+
+TEST(NormToEnergyHessianTests, MatchesTheHandCase) {
+  const std::array<std::array<double, 6>, 2> want = {{
+      {-16.0 / 27.0, 8.0 / 27.0, 7.0 / 27.0, -4.0 / 27.0, -2.0 / 27.0, -1.0 / 27.0},
+      {-9.0 / 32.0, 3.0 / 16.0, 5.0 / 8.0, -1.0 / 8.0, -1.0 / 4.0, -1.0 / 2.0},
+  }};
+  for (std::size_t k = 0; k < 2; ++k) {
+    SCOPED_TRACE(std::format("perturber {}", k));
+    const FinishHessian e = normToEnergyHessian(kHandNorm[k], kHandH[k], kHandDiff[k]);
+    EXPECT_DOUBLE_EQ(e.nn, want[k][0]);
+    EXPECT_DOUBLE_EQ(e.nh, want[k][1]);
+    EXPECT_DOUBLE_EQ(e.nDelta, want[k][2]);
+    EXPECT_DOUBLE_EQ(e.hh, want[k][3]);
+    EXPECT_DOUBLE_EQ(e.hDelta, want[k][4]);
+    EXPECT_DOUBLE_EQ(e.deltaDelta, want[k][5]);
+    EXPECT_DOUBLE_EQ(e.dd, want[k][3]);
+  }
+}
+
+TEST(NormToEnergyHessianTests, AgreesWithTheTFormAwayFromNZero) {
+  // The two forms are the same function at every N != 0, small N included.
+  forEachPerturber([](double n, double h, double d) {
+    const auto got = asMatrix(normToEnergyHessian(n, h, d));
+    const auto ref = asMatrix(hessianInTheTForm(n, h, d));
+    for (std::size_t i = 0; i < 9; ++i)
+      EXPECT_NEAR(got[i], ref[i], 1e-12 * std::max(1.0, std::fabs(ref[i]))) << "entry " << i;
+  });
+}
+
+TEST(NormToEnergyHessianTests, TheRayIsAnnihilatedExactly) {
+  // Sec. 2.3, Eq. 40's second-order partner: E is degree-1 homogeneous in
+  // (N, H), so its Hessian annihilates the ray (N, H):
+  //   N E_NN + H E_NH == 0,   N E_NH + H E_HH == 0.
+  // Both are T (Delta + H/N) = -1 in disguise -- exact zeros, so the bound is
+  // round-off relative to the terms that cancel.
+  forEachPerturber([](double n, double h, double d) {
+    const FinishHessian e = normToEnergyHessian(n, h, d);
+    EXPECT_NEAR(n * e.nn + h * e.nh, 0.0,
+                1e-14 * std::max(1.0, std::fabs(n * e.nn) + std::fabs(h * e.nh)));
+    EXPECT_NEAR(n * e.nh + h * e.hh, 0.0,
+                1e-14 * std::max(1.0, std::fabs(n * e.nh) + std::fabs(h * e.hh)));
+  });
+}
+
+TEST(NormToEnergyHessianTests, SatisfiesTheStructuralRelations) {
+  // Sec. 2.1-2.2: E_ND == N E_NH + Q (Q = T^2 = E_H, Park Eq. 37),
+  // E_DD == N^2 E_HH, and the (H, Delta) block is E_dd (1, N) (x) (1, N),
+  // so rank one: E_HD == N E_HH and det == 0.
+  forEachPerturber([](double n, double h, double d) {
+    const FinishHessian e = normToEnergyHessian(n, h, d);
+    const double q = normToEnergyDerivative(n, h, d).second;
+    const auto tol = [](double x) { return 1e-13 * std::max(1.0, std::fabs(x)); };
+    EXPECT_NEAR(e.nDelta, n * e.nh + q, tol(e.nDelta));
+    EXPECT_NEAR(e.deltaDelta, n * n * e.hh, tol(e.deltaDelta));
+    EXPECT_NEAR(e.hDelta, n * e.hh, tol(e.hDelta));
+    EXPECT_EQ(e.hh, e.dd);
+    EXPECT_NEAR(e.hh * e.deltaDelta - e.hDelta * e.hDelta, 0.0,
+                tol(e.hh * e.deltaDelta) + tol(e.hDelta * e.hDelta));
+  });
+}
+
+TEST(NormToEnergyHessianTests, NZeroIsZeroNotNaN) {
+  // N == 0 exactly is the case normToEnergy's NUMERICAL_ZERO guard exists
+  // for; there the T form evaluates 0/0. The module returns zeros (the empty
+  // perturber space's energy is identically zero), as normToEnergyDerivative
+  // does, and so at the guard's boundary.
+  EXPECT_TRUE(std::isnan(hessianInTheTForm(0.0, 5.0, 1.0).hh));
+  for (const double n : {0.0, -0.0, NUMERICAL_ZERO, -NUMERICAL_ZERO}) {
+    SCOPED_TRACE(std::format("N={}", n));
+    for (const double v : asMatrix(normToEnergyHessian(n, 5.0, 1.0))) EXPECT_EQ(v, 0.0);
+    EXPECT_EQ(normToEnergyHessian(n, 5.0, 1.0).dd, 0.0);
+  }
+  // Just above the guard it is finite, and E_HH = -2 N^2/d^3 is O(N^2): the
+  // removable singularity is removed, not merely survived.
+  const FinishHessian e = normToEnergyHessian(2.0 * NUMERICAL_ZERO, 5.0, 1.0);
+  for (const double v : asMatrix(e)) EXPECT_TRUE(std::isfinite(v));
+  EXPECT_LT(std::fabs(e.hh), 1e-27);
+  EXPECT_NEAR(e.nn, -2.0 / 5.0, 1e-12);  // -2/d + O(N), d -> H
+}
+
+TEST(NormToEnergyHessianTests, IsTheGradientsCentralDifference) {
+  // Column j of the 3x3 against a central difference of (P, Q, R) in input j;
+  // the summed error falls fourfold per halving.
+  for (std::size_t k = 0; k < 2; ++k) {
+    const double n = kHandNorm[k], h = kHandH[k], d = kHandDiff[k];
+    const auto hess = asMatrix(normToEnergyHessian(n, h, d));
+    for (std::size_t j = 0; j < 3; ++j) {
+      SCOPED_TRACE(std::format("perturber {} input {}", k, j));
+      double prev = 0.0;
+      for (const double step : {0.0625, 0.03125, 0.015625, 0.0078125}) {
+        std::array<double, 3> plus{n, h, d}, minus{n, h, d};
+        plus[j] += step;
+        minus[j] -= step;
+        const auto gp = finishGradient(plus[0], plus[1], plus[2]);
+        const auto gm = finishGradient(minus[0], minus[1], minus[2]);
+        double err = 0.0;
+        for (std::size_t i = 0; i < 3; ++i)
+          err += std::fabs((gp[i] - gm[i]) / (2.0 * step) - hess[i * 3 + j]);
+        if (prev > 0.0) EXPECT_NEAR(prev / err, 4.0, 0.5) << "Richardson ratio at " << step;
+        prev = err;
+      }
+      EXPECT_LT(prev, 1e-3);
+    }
+  }
+}
+
+// --- NormToEnergyMultiplierTangentTests ------------------------------------------
+
+TEST(NormToEnergyMultiplierTangentTests, IsTheHessianAppliedToTheDirection) {
+  const FinishHessian e = normToEnergyHessian(kHandNorm[0], kHandH[0], kHandDiff[0]);
+  const MultiplierTangent t = applyFinishHessian(e, 0.25, -1.5, 0.75);
+  EXPECT_DOUBLE_EQ(t.p, e.nn * 0.25 + e.nh * -1.5 + e.nDelta * 0.75);
+  EXPECT_DOUBLE_EQ(t.q, e.nh * 0.25 + e.hh * -1.5 + e.hDelta * 0.75);
+  EXPECT_DOUBLE_EQ(t.r, e.nDelta * 0.25 + e.hDelta * -1.5 + e.deltaDelta * 0.75);
+}
+
+TEST(NormToEnergyMultiplierTangentTests, AlongTheRayPAndQAreStillAndRIsItself) {
+  // Sec. 2.3 again, as the multipliers see it: P and Q are degree 0 in (N, H)
+  // and R = N T^2 is degree 1, so along (Ndot, Hdot, Deltadot) = (N, H, 0)
+  // Pdot = Qdot = 0 and Rdot = R.
+  forEachPerturber([](double n, double h, double d) {
+    const MultiplierTangent t = applyFinishHessian(normToEnergyHessian(n, h, d), n, h, 0.0);
+    const auto g = finishGradient(n, h, d);
+    EXPECT_NEAR(t.p, 0.0, 1e-13 * std::max(1.0, std::fabs(g[0])));
+    EXPECT_NEAR(t.q, 0.0, 1e-13 * std::max(1.0, std::fabs(g[1])));
+    EXPECT_NEAR(t.r, g[2], 1e-13 * std::max(1.0, std::fabs(g[2])));
+  });
+}
+
+TEST(NormToEnergyMultiplierTangentTests, MatchesACentralDifferenceAlongALine) {
+  // P, Q, R differenced along one line in (N, H, Delta) per perturber.
+  const std::vector<double> normDot = {0.25, -1.5}, hDot = {-0.5, 0.75}, diffDot = {0.3, -0.2};
+  const ClassMultiplierTangents t = normToEnergyMultiplierTangent(kHandNorm, kHandH, kHandDiff,
+                                                                  normDot, hDot, diffDot);
+  for (std::size_t k = 0; k < 2; ++k) {
+    SCOPED_TRACE(std::format("perturber {}", k));
+    const std::array<double, 3> want{t.p[k], t.q[k], t.r[k]};
+    double prev = 0.0;
+    for (const double step : {0.0625, 0.03125, 0.015625, 0.0078125}) {
+      const auto at = [&](double s) {
+        return finishGradient(kHandNorm[k] + s * normDot[k], kHandH[k] + s * hDot[k],
+                              kHandDiff[k] + s * diffDot[k]);
+      };
+      const auto gp = at(step), gm = at(-step);
+      double err = 0.0;
+      for (std::size_t i = 0; i < 3; ++i)
+        err += std::fabs((gp[i] - gm[i]) / (2.0 * step) - want[i]);
+      if (prev > 0.0) EXPECT_NEAR(prev / err, 4.0, 0.5) << "Richardson ratio at " << step;
+      prev = err;
+    }
+    EXPECT_LT(prev, 1e-3);
+  }
+}
+
+TEST(NormToEnergyMultiplierTangentTests, TheClassFormIsPerPerturberAndGuarded) {
+  // A guarded perturber (N = 0, with an H that would blow up H/N) has zero
+  // tangents, and every other one is applyFinishHessian's.
+  const std::vector<double> norm = {0.5, 0.0, 2.0}, h = {1.0, 5.0, 3.0}, diff = {1.0, 1.0, 0.5};
+  const std::vector<double> normDot = {0.25, 1.0, -1.5}, hDot = {-0.5, 2.0, 0.75},
+                            diffDot = {0.3, 4.0, -0.2};
+  const ClassMultiplierTangents t =
+      normToEnergyMultiplierTangent(norm, h, diff, normDot, hDot, diffDot);
+  ASSERT_EQ(t.p.size(), 3u);
+  ASSERT_EQ(t.q.size(), 3u);
+  ASSERT_EQ(t.r.size(), 3u);
+  for (std::size_t k = 0; k < 3; ++k) {
+    const MultiplierTangent w =
+        applyFinishHessian(normToEnergyHessian(norm[k], h[k], diff[k]), normDot[k], hDot[k],
+                           diffDot[k]);
+    EXPECT_EQ(t.p[k], w.p);
+    EXPECT_EQ(t.q[k], w.q);
+    EXPECT_EQ(t.r[k], w.r);
+  }
+  EXPECT_EQ(t.p[1], 0.0);
+  EXPECT_EQ(t.q[1], 0.0);
+  EXPECT_EQ(t.r[1], 0.0);
+  const ClassMultiplierTangents empty = normToEnergyMultiplierTangent({}, {}, {}, {}, {}, {});
+  EXPECT_TRUE(empty.p.empty() && empty.q.empty() && empty.r.empty());
+}
+
+TEST(NormToEnergyMultiplierTangentDeathTest, MismatchedLengthsAbort) {
+  EXPECT_DEATH((void)normToEnergyMultiplierTangent({1.0, 2.0}, {1.0, 1.0}, {1.0, 1.0},
+                                                   {1.0, 1.0}, {1.0, 1.0}, {1.0}),
+               "normToEnergyMultiplierTangent: norm/h/diff/normDot/hDot/diffDot lengths differ");
 }
 
 // --- PcCoefficientsTests -------------------------------------------------------

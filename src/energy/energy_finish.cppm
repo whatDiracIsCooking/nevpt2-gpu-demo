@@ -2,7 +2,10 @@
 // walk every class runs (forBatches), the strongly-contracted finish
 // (normToEnergy, PySCF's _norm_to_energy) and ITS DERIVATIVE
 // (normToEnergyDerivative, normToEnergyTangent -- the only calculus the
-// forward tangent of an SC class energy needs), the partially-contracted
+// forward tangent of an SC class energy needs) and its SECOND derivative
+// (normToEnergyHessian, the 3x3 in the d form, and the multiplier tangents
+// applyFinishHessian / normToEnergyMultiplierTangent -- #150,
+// docs/hessian-theory.md Sec. 2), the partially-contracted
 // finish (pcRankCut, finishSingle, checkDenominator) and the PC TANGENT's per-tuple
 // arithmetic (pcCoefficients, pcQuadForm, tangentSingle), with the PC result
 // types they all fill. No device, no BLAS, no solver: nevpt2.energy
@@ -163,6 +166,116 @@ double normToEnergyDeltaTangent(const std::vector<double>& norm, const std::vect
   for (std::size_t i = 0; i < k; ++i)
     enerT += normToEnergyDeltaDerivative(norm[i], h[i], diff[i]) * diffDot[i];
   return enerT;
+}
+
+// --- SC: the finish's SECOND derivative (#150) ---------------------------------
+//
+// The 3x3 Hessian of the per-perturber finish E = -N^2 / d, d = N Delta + H,
+// in its three inputs (N, H, Delta) -- docs/hessian-theory.md, Sec. 2. Like
+// P, Q, R above it is reference-independent and is the only new calculus a
+// second derivative of the SC energy needs (everything downstream is these
+// numbers contracted back against integrals and densities).
+//
+// WRITTEN IN THE d FORM, NOT IN THE AMPLITUDE T, for two reasons (Sec. 2.1-2.2):
+//
+//   - E reads H and Delta only through d, so the (H, Delta) block is rank one,
+//     E_dd (1, N) (x) (1, N) with E_dd = -2 N^2 / d^3: four independent
+//     entries (E_NN, E_NH, E_NDelta, E_dd), and E_HDelta / E_DeltaDelta are
+//     N and N^2 times E_HH BY CONSTRUCTION here.
+//   - the T forms (E_NN = (2T/N)(1 + Delta T)^2, E_HH = 2T^3/N, ...) carry
+//     removable 1/N singularities that none of P, Q, R has; in d all six are
+//     1/N-free:
+//
+//       E_NN      = -2/d + 4 N Delta/d^2 - 2 N^2 Delta^2/d^3
+//       E_NH      =  2 N/d^2 - 2 N^2 Delta/d^3
+//       E_NDelta  =  3 N^2/d^2 - 2 N^3 Delta/d^3
+//       E_HH      = -2 N^2/d^3,  E_HDelta = N E_HH,  E_DeltaDelta = N^2 E_HH
+//
+// A norm at or below NUMERICAL_ZERO is normToEnergy's empty perturber space,
+// whose energy is identically zero, so all nine entries are zero there --
+// exactly as normToEnergyDerivative returns {0, 0} -- and N = 0 is never a
+// NaN. d = 0 (the finish's own pole) is not guarded, as it is not for P, Q.
+struct FinishHessian {
+  double nn = 0.0;          // E_NN
+  double nh = 0.0;          // E_NH
+  double nDelta = 0.0;      // E_NDelta
+  double dd = 0.0;          // E_dd: the rank-one (H, Delta) block's coefficient
+  double hh = 0.0;          // E_HH       = dd
+  double hDelta = 0.0;      // E_HDelta   = N dd
+  double deltaDelta = 0.0;  // E_DeltaDelta = N^2 dd
+};
+
+FinishHessian normToEnergyHessian(double norm, double h, double diff) {
+  if (!(std::fabs(norm) > NUMERICAL_ZERO)) return {};
+  const double d = norm * diff + h;
+  const double a = norm / d;      // N / d
+  const double b = a * diff;      // N Delta / d
+  FinishHessian e;
+  // Each line is Sec. 2.1's d form term by term, with a = N/d, b = N Delta/d.
+  e.nn = (-2.0 + 4.0 * b - 2.0 * b * b) / d;
+  e.nh = (2.0 * a - 2.0 * a * b) / d;
+  e.nDelta = 3.0 * a * a - 2.0 * a * a * b;
+  e.dd = -2.0 * a * a / d;
+  e.hh = e.dd;
+  e.hDelta = norm * e.dd;
+  e.deltaDelta = norm * norm * e.dd;
+  return e;
+}
+
+// One perturber's multiplier tangents: the derivatives of P, Q, R (Park
+// Eqs. 36-38) along a direction whose first-order scalar tangents are
+// (Ndot, Hdot, Deltadot) -- the 3x3 applied to them (Sec. 2.4). The same
+// expression serves forward-over-forward (Eddot(u, v) = (Ndot_v, Hdot_v,
+// Deltadot_v) . these, plus the first-order terms) and reverse-over-forward
+// (the pseudodensity walk with P, Q, R replaced by their tangents).
+struct MultiplierTangent {
+  double p = 0.0;  // Pdot = E_NN Ndot + E_NH Hdot + E_NDelta Deltadot
+  double q = 0.0;  // Qdot = E_NH Ndot + E_HH Hdot + E_HDelta Deltadot
+  double r = 0.0;  // Rdot = E_NDelta Ndot + E_HDelta Hdot + E_DeltaDelta Deltadot
+};
+
+MultiplierTangent applyFinishHessian(const FinishHessian& e, double normDot, double hDot,
+                                     double diffDot) {
+  return {e.nn * normDot + e.nh * hDot + e.nDelta * diffDot,
+          e.nh * normDot + e.hh * hDot + e.hDelta * diffDot,
+          e.nDelta * normDot + e.hDelta * hDot + e.deltaDelta * diffDot};
+}
+
+// One class's multiplier tangents, perturber by perturber, in its own order:
+// P, Q, R's derivatives along (normDot, hDot, diffDot). `diffDot` is the
+// class's Delta construction read at the orbital energies' tangent (as for
+// normToEnergyDeltaTangent; all zeros for frozen orbital energies). Six
+// vectors of one class, same length and order, or it aborts. A guarded
+// perturber's three tangents are zero.
+struct ClassMultiplierTangents {
+  std::vector<double> p, q, r;
+};
+
+ClassMultiplierTangents normToEnergyMultiplierTangent(
+    const std::vector<double>& norm, const std::vector<double>& h,
+    const std::vector<double>& diff, const std::vector<double>& normDot,
+    const std::vector<double>& hDot, const std::vector<double>& diffDot,
+    std::source_location loc = std::source_location::current()) {
+  const std::size_t k = norm.size();
+  if (h.size() != k || diff.size() != k || normDot.size() != k || hDot.size() != k ||
+      diffDot.size() != k)
+    check(false,
+          std::format("normToEnergyMultiplierTangent: norm/h/diff/normDot/hDot/diffDot lengths "
+                      "differ ({}, {}, {}, {}, {}, {})",
+                      k, h.size(), diff.size(), normDot.size(), hDot.size(), diffDot.size()),
+          loc);
+  ClassMultiplierTangents out;
+  out.p.resize(k);
+  out.q.resize(k);
+  out.r.resize(k);
+  for (std::size_t i = 0; i < k; ++i) {
+    const MultiplierTangent t = applyFinishHessian(normToEnergyHessian(norm[i], h[i], diff[i]),
+                                                   normDot[i], hDot[i], diffDot[i]);
+    out.p[i] = t.p;
+    out.q[i] = t.q;
+    out.r[i] = t.r;
+  }
+  return out;
 }
 
 // The orbital energies' tangent along one CI direction, host-resident: what
