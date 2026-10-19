@@ -622,6 +622,45 @@ DeviceTensor scDigestAdjointDevice(const RdmBuildOptions& opt, const Tensor& ci,
                                    const DeviceTensor& dm3, const DeviceTensor& f3ac,
                                    const DeviceTensor& f3ca, const DeviceResources& res);
 
+// --- the digests' transpose onto the THREE-index tensor (#168) ---------------
+//
+// On a density-fitted case h2e is itself sum_L B_aa B_aa (docs/gradient-
+// theory.md, Sec. 3.8), so the transpose's hbar can be carried one step
+// further back, onto B, and the digests' term of <kappa, Y> read off B alone
+// -- no one-general-index four-index array (g_xa_aa, which h2e_dot's general
+// part reads) is needed for it. In nevpt2.energy's layout h2e[p,q,r,s] =
+// (p r | q s) = sum_L B[L,p,r] B[L,q,s], so with
+//
+//   Bdot[L,t,u] = sum_x ( kappa_xt B[L,x,u] + kappa_xu B[L,t,x] )
+//                                        (Sec. 3.1's rule on each B factor)
+//   h2e_dot[p,q,r,s] = sum_L ( Bdot[L,p,r] B[L,q,s] + B[L,p,r] Bdot[L,q,s] )
+//
+// the pairing <hbar, h2e_dot> is <Bbar, Bdot> with
+//
+//   Bbar[L,t,u] = sum_{v,w} ( hbar[t,v,u,w] + hbar[v,t,w,u] ) B_aa[L,v,w]
+//
+// and, Bdot's two promotions folded onto the one strip B[L, x, a] (x over the
+// whole MO range, a active -- B is symmetric in its MO pair),
+//
+//   <hbar, h2e_dot(kappa)> = sum_{x, t in act} kappa[x, t] D[x, t],
+//   D[x, t] = sum_{L, u} B[L,x,u] ( Bbar[L,t,u] + Bbar[L,u,t] ).
+//
+// `D` is (n_mo, n_act), with t indexing the active space (column t is MO
+// ncore + t). It reads hbar (n_act^4: the transpose's own output, the 4-RDM
+// still never formed) and the golden's three blocks with an active index --
+// B_ca, B_aa, B_va -- and nothing of the sidecar's: the digests' term never
+// reaches B_cc, B_vv or B_cv. Returned on the host; the einsums run on
+// res.stream(). Blocks whose extents disagree with one another or with hbar
+// are the caller's input: an IO Error, before any upload.
+Result<Tensor> dfDigestSourceDevice(const DeviceTensor& hbar, const Tensor& bAA,
+                                    const Tensor& bCA, const Tensor& bVA,
+                                    const DeviceResources& res);
+
+// sum_{x, t} kappa[x, ncore + t] d[x, t]: the digests' term of <kappa, Y>
+// along `kappa` ((n_mo, n_mo)) off dfDigestSourceDevice's `d`. On the host;
+// exactly zero when kappa has no column in the active space.
+double dfDigestPairing(const Tensor& d, const Tensor& kappa, int64_t ncore);
+
 // Prints the per-class table -- the amplitude energy against `energies`'
 // (nevpt2.energy's own answer for the same state) and against the golden
 // `ref`, and both identity residuals -- then the gate line the

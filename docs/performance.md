@@ -664,9 +664,10 @@ direction's `h2e_dot`, one `n^4` dot product. The ctest walls it moved are in
 [`gradients.md`](gradients.md), §6.2) contracts the one-general-index
 inventory on the device out of the whole `B[L,p,q]` — one contraction over
 the auxiliary index per array — and then runs the integral-direct path's
-checks on it, less the digests' own term (#168). RTX 3080, CUDA, Release (the
-`default` preset), 584 MiB of the card held by other processes
-(`nvidia-smi`), one run per row, wall clock of the whole binary:
+checks on it. #165 measured it less the digests' own term; #168's
+re-measurement, with that term in, follows the first table. RTX 3080, CUDA,
+Release (the `default` preset), 584 MiB of the card held by other processes
+(`nvidia-smi`), one run per row, wall clock of the whole binary — #165's:
 
 | case | `--tiles` | wall | `Y`'s inactive blocks probed | pool used, whole run |
 |---|---:|---:|---:|---:|
@@ -690,6 +691,37 @@ CAS(8,8) run is faster than its twin by what it does not run, the digests'
 forward term and transpose. The inventory's own contractions are not timed
 separately (they are enqueued and overlap the rest; at these sizes they are
 not visible in the totals above).
+
+**With the digests' own term (#168).** The same binary, every row in one
+sequential run under the card lock (2026-10-19, RTX 3080, `default` preset,
+582 MiB held by other processes, one run per row):
+
+| case | `--tiles` | wall | the transpose (`hbar`) | onto `B` (`D`) | the forward term, 4 directions | pool used, whole run |
+|---|---:|---:|---:|---:|---:|---:|
+| `--kappa-full`, N2 CAS(4,4) DF | 1 | 1.21 s | 0.01 s | 0.000 s | 0.01 s | 2.6 MB |
+| `--kappa-full`, N2 CAS(4,4) DF | 3 | 1.14 s | 0.01 s | 0.000 s | 0.01 s | 2.6 MB |
+| `--kappa-full`, N2 CAS(8,8) DF | 1 | 17.17 s | 0.16 s | 0.001 s | 0.64 s | 176.5 MB |
+| `--kappa-full`, N2 CAS(8,8) DF | 3 | 17.22 s | 0.16 s | 0.001 s | 0.64 s | 71.2 MB |
+| `--kappa-full`, N2 CAS(4,4) integral-direct | 3 | 1.12 s | 0.01 s | — | 0.01 s | 2.3 MB |
+| `--kappa-full`, N2 CAS(8,8) integral-direct | 3 | 17.28 s | 0.16 s | — | 0.65 s | 71.2 MB |
+| `--dump-source-terms`, N2 CAS(4,4) DF | 1 | 1.41 s | | | | 2.6 MB |
+| `--dump-source-terms`, N2 CAS(4,4) DF | 3 | 1.40 s | | | | 2.6 MB |
+| `--dump-source-terms`, N2 CAS(4,4) integral-direct | 3 | 1.42 s | | | | 2.3 MB |
+| `--dump-source-terms`, N2 CAS(8,8) DF | 3 | 24.03 s | | | | 71.3 MB |
+
+**Still no tile floor.** Every fitted run passes at one tile. The digests'
+term adds the plain RDM build's working set once per direction (the forward
+term) and once for the transpose, both at `--tiles` and freed between calls,
+and the transpose carried onto `B` adds an `naux · n_mo · n_act` strip and
+an `naux · n_act^2` `Bbar`, too small to register. So the fitted
+`--kappa-full` now costs what its integral-direct twin does, to within the
+run-to-run spread: the CAS(8,8) wall that was 13.4 s without the term is
+17.2 s with it, the integral-direct run's 17.3 s, the difference being the
+forward term's four RDM builds, the transpose and check 6's finite-difference
+sweep of RDM builds. The transpose costs on the fitted path exactly what it
+does on the integral-direct one (it is the same call on the fitted `h2e`);
+its cost at larger active spaces is "The digests' transpose" above, and no
+fitted gradient sidecar exists at those sizes.
 
 ### `--tiles` on the CI source term (`--gradient-source`)
 

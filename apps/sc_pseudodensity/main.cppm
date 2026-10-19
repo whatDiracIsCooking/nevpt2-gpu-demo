@@ -38,9 +38,10 @@
 // B blocks, so the identities and --kappa-act read it as they read any
 // golden, and --kappa-full knows the case by its sidecar's NEVPT2F1 magic,
 // contracts the general-range inventory out of the whole B tensor and gates
-// the frozen-digest half (the digests' own term is #168). --dump-source-terms
-// and --source-oracle refuse a fitted sidecar until then: they carry the
-// exact Y. docs/gradients.md, Sec. 6.2, has the decision.
+// both of Y's terms, the digests' own included (#168). --dump-source-terms
+// writes the fitted Y and y; --source-oracle (no fitted oracle exists) and
+// --pc --dump-source-terms refuse a fitted sidecar. docs/gradients.md,
+// Sec. 6.2, has the decisions.
 //
 // WITH --dump-source-terms PATH IT WRITES THEM INSTEAD: the whole Y_xy (out of
 // the same sidecar), the CI source term y_I and Edot(kappa) along seeded
@@ -230,20 +231,35 @@ int main(int argc, char** argv) {
     return nevpt2::loadGradGold(gradgoldPath);
   };
 
-  // --dump-source-terms and --source-oracle hand on (or compare) the EXACT Y,
-  // the digests' own term in it. On a density-fitted case only Y's
-  // frozen-digest term is in tree (#165; --kappa-full checks it) and the
-  // digests' term is #168's, so a fitted sidecar is refused here as
-  // Unsupported -- half a dump is refused rather than written, the rule
-  // nevpt2_demo's y_I already follows -- never written with a term missing.
-  const auto refuseFitted = [](const nevpt2::GradGoldFile& gg,
-                               std::string_view flag) -> nevpt2::Status {
+  // A density-fitted case (#165, #168) carries both of Y's terms, so the SC
+  // dump writes it (docs/gradients.md, Sec. 6.2). Two things stay refused as
+  // Unsupported:
+  //   --pc on a fitted case: PC's orbital source term over the fitted
+  //     inventory has no gate of its own in tree (the SC --kappa-full checks
+  //     do not reach PC's rotation tangent), and a dump is never written
+  //     ungated;
+  //   --source-oracle on a fitted case: there is no oracle to compare with.
+  //     reference_data/sc_source_oracle.py writes PySCF's / block2's exact
+  //     source terms of the CONVENTIONAL calculation only, so no fitted
+  //     .srcgold exists; the fitted Y's independent check is the nuclear
+  //     gradient built from the dump against the fitted grad_num (#166, #167).
+  const auto refuseFitted = [&](const nevpt2::GradGoldFile& gg,
+                                std::string_view flag) -> nevpt2::Status {
     if (!gg.densityFitted()) return {};
-    return nevpt2::err_unsupported(std::format(
-        "{} on a density-fitted case: it writes or compares the exact orbital source term Y, "
-        "and on the density-fitted path only Y's frozen-digest term is in tree (#165, "
-        "--kappa-full); the f3ac/f3ca digests' own term is #168",
-        flag));
+    if (flag == "--source-oracle")
+      return nevpt2::err_unsupported(
+          "--source-oracle on a density-fitted case: there is no fitted oracle to compare "
+          "against -- reference_data/sc_source_oracle.py writes the conventional "
+          "calculation's exact source terms only; the fitted Y is checked by --kappa-full and "
+          "by the nuclear gradient built from --dump-source-terms (docs/gradients.md, Sec. "
+          "6.2)");
+    if (opt.pc)
+      return nevpt2::err_unsupported(std::format(
+          "--pc {} on a density-fitted case: PC's orbital source term over the fitted "
+          "inventory has no gate in tree (docs/gradients.md, Sec. 6.2); without --pc the SC "
+          "dump runs",
+          flag));
+    return {};
   };
 
   // --dump-source-terms: Y_xy and y_I, written (:source_dump). The terms

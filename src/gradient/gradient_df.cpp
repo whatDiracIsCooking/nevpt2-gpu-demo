@@ -2,7 +2,9 @@
 // inventory, built on the device from the whole three-index tensor -- see
 // gradient.cppm for why every one-general-index array is one contraction over
 // the auxiliary index, and docs/gradient-theory.md, Sec. 3.8 for which blocks
-// of B that reads.
+// of B that reads. And dfDigestSourceDevice / dfDigestPairing (#168): the
+// digests' transpose carried from h2e back onto the three-index tensor (see
+// gradient.cppm, "the digests' transpose onto the THREE-index tensor").
 module nevpt2.gradient;
 
 import std;
@@ -123,6 +125,65 @@ Result<GeneralIntegralsDevice> dfGeneralIntegralsDevice(
   // read them still queued: the free is stream-ordered (wwrFreeAsync on
   // res.stream()), behind them.
   return g;
+}
+
+Result<Tensor> dfDigestSourceDevice(const DeviceTensor& hbar, const Tensor& bAA,
+                                    const Tensor& bCA, const Tensor& bVA,
+                                    const DeviceResources& res) {
+  for (const auto& [name, b] : {std::pair<const char*, const Tensor*>{"B_aa", &bAA},
+                                {"B_ca", &bCA},
+                                {"B_va", &bVA}})
+    if (b->rank() != 3)
+      return err_io(std::format(
+          "density-fitted digest term: {} must be rank 3 [naux, p, q], it is rank {}", name,
+          b->rank()));
+  const int64_t naux = bAA.dim(0), na = bAA.dim(1), nc = bCA.dim(1), nv = bVA.dim(1);
+  if (bAA.dim(2) != na || bCA.dim(0) != naux || bCA.dim(2) != na || bVA.dim(0) != naux ||
+      bVA.dim(2) != na)
+    return err_io(std::format(
+        "density-fitted digest term: B_aa, B_ca and B_va do not describe one fitted "
+        "calculation (naux {} / {} / {}, active extent {} / {} / {})",
+        naux, bCA.dim(0), bVA.dim(0), na, bCA.dim(2), bVA.dim(2)));
+  if (hbar.dims != std::vector<int64_t>{na, na, na, na})
+    return err_io(std::format(
+        "density-fitted digest term: hbar is not (n_act)^4 for the golden's {} active orbitals",
+        na));
+  const int64_t nmo = nc + na + nv;
+
+  // The active strip B[L, x, a], x over the whole MO range: the three blocks
+  // with an active index stacked along x in core / active / virtual order,
+  // the MO order the rest of the tree uses.
+  Tensor strip({naux, nmo, na});
+  const auto put = [&](const Tensor& blk, int64_t rowLo) {
+    for (int64_t l = 0; l < naux; ++l)
+      for (int64_t p = 0; p < blk.dim(1); ++p)
+        for (int64_t t = 0; t < na; ++t) strip(l, rowLo + p, t) = blk(l, p, t);
+  };
+  put(bCA, 0);
+  put(bAA, nc);
+  put(bVA, nc + na);
+  const DeviceTensor dStrip = uploadTensor(strip, res);
+  const DeviceTensor dBaa = sliceAxis(dStrip, 1, nc, nc + na);
+
+  // Bbar[L,t,u] = sum_{v,w} (hbar[t,v,u,w] + hbar[v,t,w,u]) B_aa[L,v,w].
+  const DeviceTensor bbar = deviceEinsumNew("tvuw,Lvw->Ltu", {&hbar, &dBaa}, 1.0, res);
+  deviceEinsumAccum("vtwu,Lvw->Ltu", {&hbar, &dBaa}, bbar, 1.0, res.stream());
+  // D[x,t] = sum_{L,u} B[L,x,u] (Bbar[L,t,u] + Bbar[L,u,t]).
+  const DeviceTensor d = deviceEinsumNew("Lxu,Ltu->xt", {&dStrip, &bbar}, 1.0, res);
+  deviceEinsumAccum("Lxu,Lut->xt", {&dStrip, &bbar}, d, 1.0, res.stream());
+  // downloadTensor synchronizes the stream itself, behind every einsum above;
+  // dStrip and bbar are freed (stream-ordered) as they go out of scope.
+  return downloadTensor(d, res.stream());
+}
+
+double dfDigestPairing(const Tensor& d, const Tensor& kappa, int64_t ncore) {
+  check(kappa.rank() == 2 && d.rank() == 2 && kappa.dim(0) == d.dim(0) &&
+            kappa.dim(1) == d.dim(0) && ncore + d.dim(1) <= kappa.dim(1),
+        "dfDigestPairing: kappa must be (n_mo, n_mo) over the rows of d");
+  double s = 0.0;
+  for (int64_t x = 0; x < d.dim(0); ++x)
+    for (int64_t t = 0; t < d.dim(1); ++t) s += kappa(x, ncore + t) * d(x, t);
+  return s;
 }
 
 }  // namespace nevpt2

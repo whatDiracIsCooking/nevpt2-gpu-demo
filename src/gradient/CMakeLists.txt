@@ -79,7 +79,9 @@ add_cxx_module_library(
 # case's general-range inventory, contracted on the device from the whole
 # three-index tensor (the golden's four B blocks plus the NEVPT2F1 sidecar's
 # B_cc / B_vv) into the same GeneralIntegralsDevice the sidecar fills for a
-# conventional case. Einsums only, so still no device library here.
+# conventional case -- and (#168) dfDigestSourceDevice, the digests'
+# transpose carried from h2e back onto the three-index tensor. Einsums only,
+# so still no device library here.
 add_cxx_module_library(
   NAME nevpt2.gradient
   PRIMARY_INTERFACE gradient.cppm

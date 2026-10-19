@@ -695,7 +695,7 @@ if(NEVPT2_BUILD_TESTING)
   unset(_dir_oracle)
   unset(_dir_side)
 
-  # --- the density-fitted orbital source term (#165) ---------------------------
+  # --- the density-fitted orbital source term (#165, #168) ---------------------
   #
   # nevpt2_sc_pseudodensity on a `*_df` golden, beside its NEVPT2F1 sidecar
   # (golden/n2_ccpvdz_cas44_df.gradgold, #164). No --df flag: the golden
@@ -703,18 +703,24 @@ if(NEVPT2_BUILD_TESTING)
   # read it unchanged, and --kappa-full knows the case by the sidecar's magic,
   # contracts the one-general-index inventory out of the whole B[L,p,q] (the
   # golden's four blocks and the sidecar's B_cc / B_vv) and runs the same
-  # checks on the FROZEN-DIGEST half -- the duality (integral halves, then
-  # with the orbital energies' response; 1e-7), the promotion table and the
-  # sidecar's carried tied arrays against the built inventory (1e-10), the
-  # active block against --kappa-act's entry point, the two intra-space finite
-  # differences and Eqs. 56-57 -- and its PASS line names the half. The
-  # digests' own term on the fitted path is #168 (docs/gradients.md, Sec. 6.2).
-  # --dump-source-terms refuses a fitted sidecar until then, since it writes
-  # the exact Y; the last entry holds that refusal (its regex is the error).
+  # checks with BOTH of Y's terms (#168) -- the integral halves' duality, the
+  # frozen-digest one and the FULL one with the digests' transpose against
+  # the rebuilt digests' term (1e-7), the promotion table and the sidecar's
+  # carried tied arrays against the built inventory (1e-10), the active block
+  # against --kappa-act's entry point, the two intra-space finite differences
+  # with the digests' term exactly zero on both, Eqs. 56-57, and the digests'
+  # term against its own finite difference, forward and reverse -- plus the
+  # transpose carried onto the three-index B (dfDigestSourceDevice) against
+  # the four-index pairing (1e-7). Its PASS line names the fitted case.
+  # --dump-source-terms writes the fitted Y and y with both terms and Edot's
+  # two along the seeded directions, read back bit for bit (#166's input).
+  # Two refusals stay, each an entry whose regex is the error: --pc on a
+  # fitted case (no PC gate over the fitted inventory), and --source-oracle
+  # (no fitted oracle exists; docs/gradients.md, Sec. 6.2).
   #
   # The identity and --kappa-act entries are `small`, as their integral-direct
-  # CAS(4,4) twins are; --kappa-full is not, for the twins' reason (its
-  # sweeps and probes are each a full pass).
+  # CAS(4,4) twins are; --kappa-full and the dump are not, for the twins'
+  # reason (their sweeps and probes are each a full pass).
   set(_df_y_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_df.nevpt2gold")
   set(_df_y_side "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_df.gradgold")
   if(NOT EXISTS "${_df_y_side}")
@@ -744,17 +750,34 @@ if(NEVPT2_BUILD_TESTING)
     if(TEST nevpt2_sc_pseudodensity_kappa_full_${_case})
       set_tests_properties(nevpt2_sc_pseudodensity_kappa_full_${_case} PROPERTIES
         PASS_REGULAR_EXPRESSION
-          "PASS: the full orbital source term's adjoint and tangent agree on the frozen-digest half \\(density-fitted")
+          "PASS: the full orbital source term's adjoint and tangent agree to [^ ]+ on every direction \\(density-fitted: both Y terms")
     endif()
     unset(_df_kf_gold)
   endforeach()
-  _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_dump_cas44_df_refused
+  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/gradsrc")
+  _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_dump_cas44_df
                         "${_df_y_gold}" --tiles 3
-                        --dump-source-terms "${CMAKE_CURRENT_BINARY_DIR}/gradsrc/refused_df.gradsrc")
-  if(TEST nevpt2_sc_pseudodensity_dump_cas44_df_refused)
-    set_tests_properties(nevpt2_sc_pseudodensity_dump_cas44_df_refused PROPERTIES
+                        --dump-source-terms "${CMAKE_CURRENT_BINARY_DIR}/gradsrc/n2_ccpvdz_cas44_df.gradsrc")
+  if(TEST nevpt2_sc_pseudodensity_dump_cas44_df)
+    set_tests_properties(nevpt2_sc_pseudodensity_dump_cas44_df PROPERTIES
       PASS_REGULAR_EXPRESSION
-        "--dump-source-terms on a density-fitted case: it writes or compares the exact orbital source term Y")
+        "PASS: the GPU's source terms Y_xy and y_I were assembled, written to .* \\(density-fitted: both Y terms")
+  endif()
+  _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_dump_pc_cas44_df_refused
+                        "${_df_y_gold}" --tiles 3 --pc
+                        --dump-source-terms "${CMAKE_CURRENT_BINARY_DIR}/gradsrc/refused_df_pc.gradsrc")
+  if(TEST nevpt2_sc_pseudodensity_dump_pc_cas44_df_refused)
+    set_tests_properties(nevpt2_sc_pseudodensity_dump_pc_cas44_df_refused PROPERTIES
+      PASS_REGULAR_EXPRESSION
+        "--pc --dump-source-terms on a density-fitted case: PC's orbital source term over the fitted inventory has no gate in tree")
+  endif()
+  _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_oracle_cas44_df_refused
+                        "${_df_y_gold}" --tiles 3
+                        --source-oracle "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_dir.srcgold")
+  if(TEST nevpt2_sc_pseudodensity_oracle_cas44_df_refused)
+    set_tests_properties(nevpt2_sc_pseudodensity_oracle_cas44_df_refused PROPERTIES
+      PASS_REGULAR_EXPRESSION
+        "--source-oracle on a density-fitted case: there is no fitted oracle to compare against")
   endif()
   unset(_df_y_gold)
   unset(_df_y_side)
