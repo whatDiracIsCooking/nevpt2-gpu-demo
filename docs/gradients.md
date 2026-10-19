@@ -814,9 +814,10 @@ its own, and each prints one `PASS:` line a ctest entry matches
 | invocation | what runs |
 |---|---|
 | `nevpt2_demo --rdm-tangent`, `nevpt2_df_demo --rdm-tangent` | the tangent RDM build beside the plain one, checked against twice it |
-| `nevpt2_demo --sc-tangent` | the SC total's tangent: the norms' affine increment, Euler, and the one-time finite difference |
+| `nevpt2_demo --sc-tangent`, `nevpt2_df_demo --sc-tangent` | the SC total's tangent: the norms' affine increment, Euler, and the one-time finite difference |
 | `nevpt2_demo --gradient-source --pc` | PC's `y_I` (§5.6) against `pcTangentsDevice`, the same three checks and the walk's PC total against block2's (#74) |
 | `nevpt2_demo --gradient-source` | `y_I = dE/dc_I` in reverse mode, gated on the duality against the forward tangent, plus the Jacobian where `ndet` allows. With `--gradgold PATH` both modes carry the orbital energies' response (§5.5) and the sidecar is first checked against the golden (its `h^eff` and `W` must rebuild `e_core` / `e_virt`); without it they hold the orbital energies fixed. The PASS line names which |
+| `nevpt2_df_demo --gradient-source` | the same duality and Jacobian over the density-fitted slabs (#162), always at **frozen** orbital energies: the demo reads no sidecar, and the PASS line says `frozen-orbital-energy mode` |
 | `nevpt2_sc_pseudodensity` | the Eqs. 40–47 identities for all eight classes |
 | `nevpt2_sc_pseudodensity --kappa-act` | the active–active orbital source term: adjoint against tangent, with a finite difference beside them |
 | `nevpt2_sc_pseudodensity --kappa-full` | the same over the whole `kappa` space, out of the `*.gradgold` sidecar (`--gradgold PATH` overrides the derived path): the duality, the sidecar's promotion table against the arrays it reads, the active block against `--kappa-act`'s own entry point, two intra-space finite differences, and Eqs. 56–57; and `Edot(kappa)` in its two terms — the frozen-digest tangent and the digests' own (§6) — with the **full** duality against `<kappa, Y>` carrying the digests' transpose (#89), the digests' term held to its own finite difference along an active direction (forward and reverse) and to an exact zero along the two intra-space ones |
@@ -825,11 +826,16 @@ its own, and each prints one `PASS:` line a ctest entry matches
 | `nevpt2_sc_pseudodensity --pc --dump-source-terms PATH` / `--pc --source-oracle PATH` | the same two jobs for PC-NEVPT2's `Y` and `y` (§5.6, §6.1, #74): the dump marked `pc`, its four checks plus a fifth — the PC integral halves' duality on the six directions — and the oracle against block2's `golden/n2_ccpvdz_cas44_pc.srcgold`. Both require the golden's PC fields and first hold the PC energy to them |
 | `nevpt2_pc_tangent` | the PC tangent: Euler, and a Richardson-verified central difference. `--fd-steps` and `--fd-start-pow` set the sweep |
 
-`--sc-tangent` and `--gradient-source` are the integral-direct demo's alone
-(the density-fitted demo has no second copy of the integral blocks to
-differentiate against), they are two different checks of the same derivative
-and so refuse each other; `--gradient-source` has a `--pc` path (#74),
-`--sc-tangent` none.
+`--sc-tangent` and `--gradient-source` run on both demos (#162): `y_I` and
+`Edot(u)` differentiate the CI vector at **fixed** integrals, so nothing in
+them differentiates an integral and the density-fitted demo needs no second
+copy of the blocks -- only the slab entry points every class already walks.
+(The ORBITAL source term is the one that needs that copy; §3.8 of
+[`gradient-theory.md`](gradient-theory.md) is its inventory, and
+`nevpt2_sc_pseudodensity` stays integral-direct.) They are two different
+checks of the same derivative and so refuse each other; `--gradient-source`
+has a `--pc` path (#74) on the integral-direct demo only, `--sc-tangent`
+none.
 
 **A flag a binary does not act on is refused, never ignored.** The gradient
 binaries used to parse `--rdm-tangent` and do nothing with it; now one table

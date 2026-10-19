@@ -18,7 +18,8 @@
 //                        missing value, finalize() applied, and every flag
 //                        combination a registered ctest entry passes accepted
 //   CliDemoFlagTests     nevpt2_demo's --sc-tangent / --gradient-source
-//   CliDfDemoFlagTests   nevpt2_df_demo's --batch / --check-blocks
+//   CliDfDemoFlagTests   nevpt2_df_demo's --batch / --check-blocks, and its
+//                        --sc-tangent / --gradient-source (#162)
 //   CliScPseudodensityFlagTests  --kappa-act / --kappa-full / --gradgold /
 //                                --dump-source-terms / --source-oracle
 //   CliPcTangentFlagTests        --fd-steps / --fd-start-pow
@@ -394,8 +395,8 @@ constexpr std::array kExpectedMatrix{
     MatrixRow{"--fused-digest", "DFS"},     MatrixRow{"--cublas", "DFS"},
     MatrixRow{"--mantissa-bits", "DFS"},    MatrixRow{"--ozaki", "DFS"},
     MatrixRow{"--ozaki-pairs", "DFS"},      MatrixRow{"--ozaki-check", "DFS"},
-    MatrixRow{"--pool-threshold", "DFSP"},  MatrixRow{"--sc-tangent", "D"},
-    MatrixRow{"--gradient-source", "D"},    MatrixRow{"--batch", "F"},
+    MatrixRow{"--pool-threshold", "DFSP"},  MatrixRow{"--sc-tangent", "DF"},
+    MatrixRow{"--gradient-source", "DF"},   MatrixRow{"--batch", "F"},
     MatrixRow{"--check-blocks", "F"},       MatrixRow{"--kappa-act", "S"},
     MatrixRow{"--kappa-full", "S"},         MatrixRow{"--gradgold", "DS"},
     MatrixRow{"--dump-source-terms", "S"},  MatrixRow{"--source-oracle", "S"},
@@ -622,6 +623,8 @@ TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
       {Binary::DfDemo, {"--tiles", "3", "--blas-digest"}},
       {Binary::DfDemo, {"--tiles", "3", "--digest-emitted"}},
       {Binary::DfDemo, {"--tiles", "3", "--profile"}},
+      {Binary::DfDemo, {"--tiles", "3", "--sc-tangent"}},
+      {Binary::DfDemo, {"--tiles", "3", "--gradient-source"}},
       {Binary::ScPseudodensity, {"--tiles", "3"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--kappa-act"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--kappa-full"}},
@@ -752,6 +755,96 @@ TEST(CliDfDemoFlagTests, BatchIsAWholeNonNegativeInteger) {
   const Result<Options> bad = parse(Binary::DfDemo, {"--batch", "eight"});
   ASSERT_FALSE(bad.has_value());
   EXPECT_EQ(bad.error().message, "--batch takes an integer, not \"eight\"");
+}
+
+// #162: the CI derivative's two checks run over the DF slabs too, under the
+// integral-direct demo's shared rules, plus the density-fitted demo's own:
+// no --pc on --gradient-source, no --check-blocks beside either, and no
+// --gradgold (it reads no sidecar: the matrix refuses it, below).
+TEST(CliDfDemoFlagTests, EachCheckSetsItsField) {
+  const Result<Options> sc = parse(Binary::DfDemo, {"--sc-tangent", "--batch", "5"});
+  ASSERT_TRUE(sc.has_value()) << sc.error().message;
+  EXPECT_TRUE(sc->scTangent);
+  EXPECT_FALSE(sc->gradientSource);
+  EXPECT_EQ(sc->batch, 5);
+  const Result<Options> gs = parse(Binary::DfDemo, {"--gradient-source", "--blas-digest"});
+  ASSERT_TRUE(gs.has_value()) << gs.error().message;
+  EXPECT_TRUE(gs->gradientSource);
+  EXPECT_FALSE(gs->scTangent);
+}
+
+TEST(CliDfDemoFlagTests, TheTwoChecksRefuseEachOther) {
+  const Result<Options> r = parse(Binary::DfDemo, {"--sc-tangent", "--gradient-source"});
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+  EXPECT_EQ(r.error().message,
+            "--sc-tangent and --gradient-source are two different checks of the same "
+            "derivative; run one at a time");
+}
+
+TEST(CliDfDemoFlagTests, EachCheckRefusesTheDigestsWithNoTangentPath) {
+  for (const std::string_view which : {"--sc-tangent", "--gradient-source"}) {
+    for (const std::vector<std::string_view>& digest :
+         {std::vector<std::string_view>{"--ozaki"},
+          std::vector<std::string_view>{"--blas-digest", "--fused-digest"}}) {
+      std::vector<std::string_view> args{which};
+      args.insert(args.end(), digest.begin(), digest.end());
+      const Result<Options> r = parse(Binary::DfDemo, args);
+      ASSERT_FALSE(r.has_value()) << which;
+      EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+      EXPECT_EQ(r.error().message,
+                std::format("{} runs the tangent RDM build, which is the emitted digest or "
+                            "--blas-digest; not --cublas, --ozaki or --fused-digest",
+                            which));
+    }
+  }
+  if (kHaveCublasEmul) {
+    const Result<Options> r = parse(Binary::DfDemo, {"--gradient-source", "--cublas"});
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+  }
+}
+
+TEST(CliDfDemoFlagTests, NeitherCheckHasAPcPath) {
+  const Result<Options> sc = parse(Binary::DfDemo, {"--sc-tangent", "--pc"});
+  ASSERT_FALSE(sc.has_value());
+  EXPECT_EQ(sc.error().kind, ErrorKind::InvalidConfig);
+  EXPECT_EQ(sc.error().message,
+            "--sc-tangent differentiates the strongly-contracted energy; it has no --pc path "
+            "(the PC tangent's finite difference is nevpt2_pc_tangent)");
+  const Result<Options> gs = parse(Binary::DfDemo, {"--gradient-source", "--pc"});
+  ASSERT_FALSE(gs.has_value());
+  EXPECT_EQ(gs.error().kind, ErrorKind::Unsupported);
+  EXPECT_EQ(gs.error().message,
+            "--gradient-source --pc is the integral-direct demo's alone: the PC CI source term "
+            "has no density-fitted slab path (nevpt2_demo --gradient-source --pc)");
+}
+
+TEST(CliDfDemoFlagTests, EachCheckRefusesProfileAndCheckBlocks) {
+  for (const std::string_view which : {"--sc-tangent", "--gradient-source"}) {
+    const Result<Options> p = parse(Binary::DfDemo, {which, "--profile"});
+    ASSERT_FALSE(p.has_value());
+    EXPECT_EQ(p.error().kind, ErrorKind::Unsupported);
+    EXPECT_EQ(p.error().message,
+              std::format("{} prints no profile tables; --profile times the energy run", which));
+    const Result<Options> b = parse(Binary::DfDemo, {which, "--check-blocks"});
+    ASSERT_FALSE(b.has_value());
+    EXPECT_EQ(b.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(b.error().message,
+              std::format("--check-blocks is the energy run's diagnostic; {} replaces that run",
+                          which));
+  }
+}
+
+TEST(CliDfDemoFlagTests, NoSidecarAndRdmTangentRunsBeside) {
+  const Result<Options> g =
+      parse(Binary::DfDemo, {"--gradient-source", "--gradgold", "x.gradgold"});
+  ASSERT_FALSE(g.has_value());
+  EXPECT_EQ(g.error().kind, ErrorKind::Unsupported);
+  for (const std::string_view which : {"--sc-tangent", "--gradient-source"}) {
+    const Result<Options> r = parse(Binary::DfDemo, {which, "--rdm-tangent"});
+    EXPECT_TRUE(r.has_value()) << which << ": " << r.error().message;
+  }
 }
 
 // --- CliScPseudodensityFlagTests ----------------------------------------------

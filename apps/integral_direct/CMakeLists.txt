@@ -2,11 +2,10 @@
 # device code of its own (the kernels are device libraries the components link).
 # main.cppm is a module unit (export module nevpt2.app.integral_direct), so it
 # goes in a CXX_MODULES file set for the dependency scan, not in plain sources.
-# tangent_check.cppm and gradient_source_check.cppm are main.cppm's interface
-# partitions (--sc-tangent and --gradient-source).
+# --sc-tangent and --gradient-source are nevpt2.ci_checks (src/gradient/),
+# shared with the density-fitted demo.
 add_executable(nevpt2_demo)
-target_sources(nevpt2_demo PRIVATE FILE_SET CXX_MODULES
-                           FILES main.cppm tangent_check.cppm gradient_source_check.cppm)
+target_sources(nevpt2_demo PRIVATE FILE_SET CXX_MODULES FILES main.cppm)
 set_target_properties(nevpt2_demo PROPERTIES CXX_MODULE_STD ON)
 target_compile_features(nevpt2_demo PRIVATE cxx_std_23)
 target_compile_options(nevpt2_demo PRIVATE -Wall)
@@ -21,11 +20,8 @@ target_link_libraries(nevpt2_demo PRIVATE
   nevpt2::profile
   nevpt2::cli
   nevpt2::rdm_build
-  # --sc-tangent's and --gradient-source's host dm1/dm2 rebuild and its
-  # tangent along a CI direction: the only reason this demo links the host RDM
-  # module.
-  nevpt2::rdm_host_dm
-  # --gradient-source: the CI source term y_I (scCiSourceDevice), which brings
-  # nevpt2::sigma_vector and its device library with it.
-  nevpt2::gradient
+  # --sc-tangent and --gradient-source: the CI derivative's checks, which
+  # bring nevpt2::gradient (the CI source term y_I, scCiSourceDevice, and
+  # nevpt2::sigma_vector with it) and the host dm1/dm2 rebuild.
+  nevpt2::ci_checks
 )

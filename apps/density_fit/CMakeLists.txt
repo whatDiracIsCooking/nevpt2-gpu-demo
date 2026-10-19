@@ -16,4 +16,7 @@ target_link_libraries(nevpt2_df_demo PRIVATE
   nevpt2::profile
   nevpt2::cli
   nevpt2::rdm_build
+  # --sc-tangent and --gradient-source (#162): the integral-direct demo's
+  # checks of the CI derivative, run over this demo's DfIntegralSource.
+  nevpt2::ci_checks
 )

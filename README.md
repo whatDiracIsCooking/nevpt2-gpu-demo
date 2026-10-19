@@ -257,8 +257,8 @@ binary's:
 | `--consume-emitted` | use the emitted kernel for the consume step instead of the GEMM |
 | `--rdm-tangent` | also run the tangent RDM build — the derivative of dm3/f3ac/f3ca with respect to the CI vector — and check it against twice the plain build. It holds about twice the per-tile intermediates, so it needs more tiles than the plain build; not usable with `--cublas`, `--ozaki` or `--fused-digest` |
 | `--pool-threshold BYTES\|max` | the memory pool's release threshold (default `max`) |
-| `--sc-tangent` | **integral-direct demo only**: instead of the golden comparison, differentiate the SC total with respect to the CI vector and check that tangent against the class norms' exact affine increment, Euler's identity and a central finite difference of the energy itself. Same digest restriction as `--rdm-tangent`, no `--pc` path, and no `--profile` (it prints no profile tables) |
-| `--gradient-source` | **integral-direct demo only**: instead of the golden comparison, assemble the SC-NEVPT2 CI source term `y_I = dE/dc_I` (Park Eq. 48) in reverse mode and check it against the forward tangent by duality — `<u, y> = Edot(u)`, exactly, for several seeded directions and for the state itself, plus the full Jacobian column by column where the determinant space is small enough. With `--pc`, the same for PC-NEVPT2's `y_I`: the PC solve's adjoint against its tangent (#74). Same digest restriction as `--rdm-tangent`, and no `--profile`; not with `--sc-tangent` |
+| `--sc-tangent` | **both demos**: instead of the golden comparison, differentiate the SC total with respect to the CI vector and check that tangent against the class norms' exact affine increment, Euler's identity and a central finite difference of the energy itself. Same digest restriction as `--rdm-tangent`, no `--pc` path, and no `--profile` (it prints no profile tables) |
+| `--gradient-source` | **both demos**: instead of the golden comparison, assemble the SC-NEVPT2 CI source term `y_I = dE/dc_I` (Park Eq. 48) in reverse mode and check it against the forward tangent by duality — `<u, y> = Edot(u)`, exactly, for several seeded directions and for the state itself, plus the full Jacobian column by column where the determinant space is small enough. With `--pc` (integral-direct demo only), the same for PC-NEVPT2's `y_I`: the PC solve's adjoint against its tangent (#74). On the DF demo the orbital energies are held fixed and the PASS line says so. Same digest restriction as `--rdm-tangent`, and no `--profile`; not with `--sc-tangent`, nor (DF demo) with `--check-blocks` |
 | `--batch N` | **DF demo only**: slab length along each integral block's batch index (default 8; `0` = one slab per block; >= 0). A memory lever |
 | `--check-blocks` | **DF demo only**: also compare every DF-built integral block against the file's four-index arrays |
 
@@ -279,7 +279,7 @@ ignores it. `test/cli/` holds this matrix against the table:
 | `--pc` | ✓ | ✓ | ✓ (`--dump-source-terms`, `--source-oracle`) | refused |
 | `--profile` | ✓ | ✓ | refused | refused |
 | `--rdm-tangent` | ✓ | ✓ | refused | refused |
-| `--sc-tangent`, `--gradient-source` | ✓ | refused | refused | refused |
+| `--sc-tangent`, `--gradient-source` | ✓ | ✓ | refused | refused |
 | `--batch`, `--check-blocks` | refused | ✓ | refused | refused |
 | `--kappa-act`, `--kappa-full` | refused | refused | ✓ | refused |
 | `--gradgold` | ✓ | refused | ✓ | refused |
@@ -305,11 +305,13 @@ digest has no path for,
 `--source-oracle` with any of the three,
 `--gradgold` without `--kappa-full`, `--dump-source-terms` or
 `--source-oracle`, or in
-`nevpt2_demo` without `--gradient-source`, `--pc` in
+`nevpt2_demo` without `--gradient-source`, `--check-blocks` with
+`--sc-tangent` or `--gradient-source`, `--pc` in
 `nevpt2_sc_pseudodensity` without `--dump-source-terms` or `--source-oracle`,
 `--sc-tangent` with `--pc`), and
 `--sc-tangent` / `--gradient-source` with `--profile` is refused as
-*unsupported*, since neither prints the tables.
+*unsupported*, since neither prints the tables, as is `nevpt2_df_demo
+--gradient-source --pc` (the PC source term has no density-fitted slab path).
 
 ### The gradient checks
 
@@ -323,8 +325,9 @@ against the other. They read the same reference files, and each prints its own
 | invocation | extra flags | what it checks |
 |---|---|---|
 | `nevpt2_demo --rdm-tangent` (also `nevpt2_df_demo`) | — | the tangent RDM build beside the plain one, against twice it |
-| `nevpt2_demo --sc-tangent` | — | the SC total's derivative with respect to the CI vector |
+| `nevpt2_demo --sc-tangent` (also `nevpt2_df_demo`) | — | the SC total's derivative with respect to the CI vector |
 | `nevpt2_demo --gradient-source` | `[--gradgold PATH]`, `[--pc]` | the CI source term `y_I = dE/dc_I`, against that tangent by duality; with the `*.gradgold` sidecar, both carry the orbital energies' response to the active density, without it both hold them fixed. With `--pc`, PC-NEVPT2's `y_I` (the PC solve's adjoint) against the PC tangent (#74) |
+| `nevpt2_df_demo --gradient-source` | — | the SC CI source term against the tangent by the same duality, over the density-fitted slabs, with the orbital energies held fixed (#162) |
 | `nevpt2_sc_pseudodensity` | `--kappa-act`, or `--kappa-full [--gradgold PATH]` | the SC pseudodensity identities; with `--kappa-act`, the active–active orbital source term instead; with `--kappa-full`, the whole orbital source term out of the `*.gradgold` sidecar |
 | `nevpt2_sc_pseudodensity --source-oracle PATH` | `[--gradgold PATH]` | the GPU's own `Y_xy` and `y_I` against PySCF's exact ones, committed as a `golden/*.srcgold`, block by block: every block must stay within the measured tolerance (the known-gap list is empty since #89) ([`docs/testing.md`](docs/testing.md), "The SC source terms against PySCF's, on a card"). With `--pc`, PC-NEVPT2's against block2's, `golden/n2_ccpvdz_cas44_pc.srcgold` (#74; docs/testing.md, "The PC source terms' oracle"); the oracle's scheme must be the run's. A directional oracle (`golden/*_dir.srcgold`, #105) is compared along its seeded directions per block instead (docs/testing.md, "The directional source-term oracle") |
 | `nevpt2_sc_pseudodensity --dump-source-terms PATH` | `[--gradgold PATH]`, `[--pc]` | writes the GPU's own `Y_xy` and `y_I` to a `.gradsrc` (a NumPy `.npz`) for `reference_data/nevpt2_grad.py --source dump` / `both`, and reads it back; what a nuclear gradient built from it comes out at is [`docs/testing.md`](docs/testing.md), "The GPU as the source-term provider". With `--pc`, PC-NEVPT2's, marked as such, with the PC adjoint held to the PC forward tangent along seeded rotations (#74; [`docs/pc-nevpt2.md`](docs/pc-nevpt2.md), "The source terms by reverse mode") |
@@ -335,9 +338,10 @@ Everything that builds a *tangent* — the first three rows and
 `--cublas`, `--ozaki` and `--fused-digest` are refused there, since a tangent
 of an approximate digest is not the derivative of what the energy stage
 computed. `nevpt2_sc_pseudodensity` builds no tangent RDMs and takes any
-digest. `--sc-tangent` and `--gradient-source` are the integral-direct demo's
-alone and refuse each other; `--gradient-source` has a `--pc` path (#74),
-`--sc-tangent` none (the PC tangent's own check is `nevpt2_pc_tangent`).
+digest. `--sc-tangent` and `--gradient-source` run on both demos and refuse
+each other; `--gradient-source` has a `--pc` path (#74) on the integral-direct
+demo only, `--sc-tangent` none (the PC tangent's own check is
+`nevpt2_pc_tangent`).
 
 ## One tree, two backends
 

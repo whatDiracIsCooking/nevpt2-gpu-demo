@@ -370,8 +370,8 @@ if(NEVPT2_BUILD_TESTING)
 
   # --- PC-NEVPT2's CI source term: --gradient-source --pc (#74) -------------------
   #
-  # The same three checks for PC-NEVPT2's y_I (apps/integral_direct/
-  # gradient_source_check.cppm, checkPcCiSource): nevpt2.gradient's
+  # The same three checks for PC-NEVPT2's y_I (src/gradient/
+  # ci_checks_source.cpp, checkPcCiSource): nevpt2.gradient's
   # pcCiSourceDevice -- the PC solve's adjoint, swept through SC's own block
   # adjoints and the same sigma assembly -- against nevpt2.energy's
   # pcTangentsDevice, the solve's tangent, along four seeded directions and
@@ -758,6 +758,43 @@ if(NEVPT2_BUILD_TESTING)
   add_df_pc_golden_test(nevpt2_df_ccpvtz_cas1010_pc "${_gold_tz1010_df}"
                         --tiles 3 --batch 5)
 
+  # --- --gradient-source / --sc-tangent, density-fitted (#162) --------------------
+  #
+  # The integral-direct demo's two checks of the energy's CI-vector derivative
+  # (nevpt2.ci_checks, src/gradient/ci_checks_*.cpp), run by nevpt2_df_demo
+  # over its DfIntegralSource: y_I = dE/dc_I against the forward tangent by
+  # the duality <u, y> = Edot(u) -- four seeded directions, the state itself
+  # and, at CAS(4,4), the full Jacobian -- and the SC tangent against Euler,
+  # the norms' exact affine increment and its one-time finite difference. Both
+  # differentiate the CI vector at FIXED integrals, so the B tensors are never
+  # differentiated; the default --batch 8 leaves a ragged last slab (19
+  # virtuals = 8 + 8 + 3 at CAS(4,4), 17 = 8 + 8 + 1 at CAS(8,8)), so the
+  # gradient walk crosses owning, freed-per-slab DF slabs, which no
+  # integral-direct entry does. FROZEN orbital energies: this demo reads no
+  # gradient sidecar, and the --gradient-source regex requires the PASS line
+  # to say so. Same tolerances, same --tiles as the integral-direct twins
+  # below; the same `small` split (CAS(8,8)'s --sc-tangent is not).
+  set(_nevpt2_df_ci_src_pass
+      "PASS: the CI source term and the forward tangent agree .*, the orbital energies held fixed \\(frozen-orbital-energy mode")
+  foreach(_case cas44 cas88)
+    set(_df_ci_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}_df.nevpt2gold")
+    add_df_golden_test(nevpt2_df_gradient_source_${_case} "${_df_ci_gold}"
+                       --tiles 3 --gradient-source)
+    if(TEST nevpt2_df_gradient_source_${_case})
+      set_tests_properties(nevpt2_df_gradient_source_${_case} PROPERTIES
+        PASS_REGULAR_EXPRESSION "${_nevpt2_df_ci_src_pass}" LABELS "gpu;small")
+    endif()
+    add_df_golden_test(nevpt2_df_${_case}_sc_tangent "${_df_ci_gold}" --tiles 3 --sc-tangent)
+    if(TEST nevpt2_df_${_case}_sc_tangent)
+      set_tests_properties(nevpt2_df_${_case}_sc_tangent PROPERTIES
+        PASS_REGULAR_EXPRESSION "PASS: the SC tangent matches Euler")
+      if(_case STREQUAL "cas44")
+        set_tests_properties(nevpt2_df_${_case}_sc_tangent PROPERTIES LABELS "gpu;small")
+      endif()
+    endif()
+    unset(_df_ci_gold)
+  endforeach()
+
   # --- --consume-emitted -------------------------------------------------------
   #
   # The f3 consume step runs through wwr.blas by default; the
@@ -912,7 +949,7 @@ if(NEVPT2_BUILD_TESTING)
   #
   # The SC class energies' forward tangent with respect to the RDMs
   # (nevpt2.energy's :sc_tangent partition, energiesTangentDevice), checked
-  # three ways by apps/integral_direct/tangent_check.cppm: the class norms'
+  # three ways by src/gradient/ci_checks_tangent.cpp: the class norms'
   # exact affine increment (every class), Euler's identity for the three
   # classes whose blocks are purely linear in the RDMs, and a central finite
   # difference of energiesDevice along a seeded CI direction, Richardson

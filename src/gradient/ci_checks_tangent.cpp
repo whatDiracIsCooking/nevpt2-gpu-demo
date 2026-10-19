@@ -1,11 +1,8 @@
-// nevpt2.app.integral_direct:tangent_check -- --sc-tangent: the forward
-// tangent of the SC-NEVPT2 total with respect to the CI vector, checked two
-// ways.
-// An interface partition that exports nothing: main.cppm is the primary
-// interface, which may import only interface partitions and must re-export
-// them ([module.unit]), so it does `export import :tangent_check;` -- and
-// since no declaration here is `export`ed, every one keeps module linkage,
-// reachable from main.cppm and from no importer.
+// nevpt2.ci_checks, --sc-tangent: the forward tangent of the SC-NEVPT2 total
+// with respect to the CI vector, checked against the class norms' exact affine
+// increment, Euler's identity and a central finite difference. Both demos run
+// it -- nevpt2_demo over FullBlockSource, nevpt2_df_demo over its
+// DfIntegralSource slabs (#162); ci_checks.cppm has the interface.
 //
 // WHAT IS BEING DIFFERENTIATED. Along a direction u in the space of CI
 // amplitudes, the state c + t u gives RDMs
@@ -78,14 +75,12 @@ module;
 
 #include <cstdio>  // stdout: a macro, which `import std` does not carry
 
-export module nevpt2.app.integral_direct:tangent_check;
+module nevpt2.ci_checks;
 
 import std;
-import nevpt2.energy;  // energiesDevice / energiesTangentDevice and their inputs
-import nevpt2.golden;
-import nevpt2.gradient_plan;  // longestFourfoldRun: the step-ladder rule
-import nevpt2.rdm_build;
 import nevpt2.rdm_host_dm;
+
+namespace nevpt2 {
 
 // The step sweep: h = 2^-k, halving, from 2^-6 (a 1.6% displacement, coarse
 // enough that truncation dominates) down to 2^-19 (past the round-off floor
@@ -163,14 +158,16 @@ nevpt2::Tensor tangentStep(const nevpt2::Tensor& ci, double h, const nevpt2::Ten
 // reference for one. Every device tensor it allocates is freed (on res's
 // stream) when it returns.
 double scTotalAt(const nevpt2::HostDm12Builder& builder, const nevpt2::Tensor& ci,
-                 const nevpt2::RdmBuildOptions& rdmOpt, const nevpt2::Tensor& h2e,
-                 const nevpt2::NevptIntegralsDevice& ints, const nevpt2::DeviceResources& res) {
+                 const nevpt2::RdmBuildOptions& rdmOpt, const CiCheckIntegrals& ints,
+                 const nevpt2::DeviceResources& res) {
   const nevpt2::HostDm12 dm = builder.dm12(ci);
   const nevpt2::DeviceTensor dDm1 = nevpt2::uploadTensor(dm.dm1, res);
   const nevpt2::DeviceTensor dDm2 = nevpt2::uploadTensor(dm.dm2, res);
   const nevpt2::RdmBuildResult rdm = nevpt2::buildRdmsDevice(
-      rdmOpt, ci, builder.norb(), builder.nelecA(), builder.nelecB(), h2e, res);
-  return nevpt2::energiesDevice(ints, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, res).total;
+      rdmOpt, ci, builder.norb(), builder.nelecA(), builder.nelecB(), ints.h2e, res);
+  return nevpt2::energiesDevice(ints.active, ints.source, ints.batch, dDm1, dDm2, rdm.dm3,
+                                rdm.f3ac, rdm.f3ca, res)
+      .total;
 }
 
 // a + b, same shape, as a fresh device tensor: a no-permutation transpose
@@ -200,14 +197,16 @@ double tangentMaxDiff(const nevpt2::Tensor& a, const nevpt2::Tensor& b) {
 // is a number.
 nevpt2::Result<bool> checkScTangent(const nevpt2::GoldenFile& g,
                                     const nevpt2::RdmBuildOptions& rdmOpt,
-                                    const nevpt2::NevptIntegralsDevice& ints,
+                                    const CiCheckIntegrals& ints,
                                     const nevpt2::RdmBuildResult& baseRdm, std::uint64_t seed,
                                     const nevpt2::DeviceResources& res) {
   nevpt2::Result<nevpt2::HostDm12Builder> builder =
       nevpt2::HostDm12Builder::create(g.ncas, g.nelecA, g.nelecB);
   if (!builder) return std::unexpected(builder.error());
   const nevpt2::Tensor& ci = g.get("ci");
-  const nevpt2::Tensor& h2e = g.get("h2e");
+  // The active block the RDM builds contract: the golden's own, or the
+  // density-fitted demo's rebuild from B_aa -- whichever built baseRdm.
+  const nevpt2::Tensor& h2e = ints.h2e;
   const std::int64_t norb = g.ncas;
 
   std::printf("\n--sc-tangent: the SC total's tangent with respect to the CI vector\n");
@@ -222,7 +221,7 @@ nevpt2::Result<bool> checkScTangent(const nevpt2::GoldenFile& g,
 
   const nevpt2::DeviceTensor dDm1 = nevpt2::uploadTensor(base.dm1, res);
   const nevpt2::DeviceTensor dDm2 = nevpt2::uploadTensor(base.dm2, res);
-  // dm3/f3ac/f3ca at the base point are the build main() already ran on this
+  // dm3/f3ac/f3ca at the base point are the build the caller already ran on this
   // very CI vector with these very options; only the displaced points below
   // need builds of their own.
   const nevpt2::RdmBuildResult& rdm = baseRdm;
@@ -237,10 +236,10 @@ nevpt2::Result<bool> checkScTangent(const nevpt2::GoldenFile& g,
     const nevpt2::RdmBuildResult rdmDot =
         nevpt2::buildRdmTangentsDevice(rdmOpt, ci, ci, norb, g.nelecA, g.nelecB, h2e, res);
     const nevpt2::EnergyTangentResult t = nevpt2::energiesTangentDevice(
-        ints, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1Dot, dDm2Dot, rdmDot.dm3,
-        rdmDot.f3ac, rdmDot.f3ca, /*epsDot=*/nullptr, res);
-    const nevpt2::EnergyResult e =
-        nevpt2::energiesDevice(ints, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, res);
+        ints.active, ints.source, ints.batch, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1Dot,
+        dDm2Dot, rdmDot.dm3, rdmDot.f3ac, rdmDot.f3ca, /*epsDot=*/nullptr, res);
+    const nevpt2::EnergyResult e = nevpt2::energiesDevice(
+        ints.active, ints.source, ints.batch, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, res);
 
     // The tangent path recomputes the class energies on its way to the
     // derivative; they must be energiesDevice's own.
@@ -283,8 +282,8 @@ nevpt2::Result<bool> checkScTangent(const nevpt2::GoldenFile& g,
   const nevpt2::RdmBuildResult rdmDot =
       nevpt2::buildRdmTangentsDevice(rdmOpt, ci, u, norb, g.nelecA, g.nelecB, h2e, res);
   const nevpt2::EnergyTangentResult t = nevpt2::energiesTangentDevice(
-      ints, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1Dot, dDm2Dot, rdmDot.dm3, rdmDot.f3ac,
-      rdmDot.f3ca, /*epsDot=*/nullptr, res);
+      ints.active, ints.source, ints.batch, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1Dot,
+      dDm2Dot, rdmDot.dm3, rdmDot.f3ac, rdmDot.f3ca, /*epsDot=*/nullptr, res);
 
   std::printf("\n  Edot(u) = %.12f  (seed 0x%llx, |u| = 1, <c|u> = 0)\n", t.totalDot,
               static_cast<unsigned long long>(seed));
@@ -303,7 +302,8 @@ nevpt2::Result<bool> checkScTangent(const nevpt2::GoldenFile& g,
     const nevpt2::DeviceTensor f3acPlus = tangentSum(rdm.f3ac, rdmDot.f3ac, res);
     const nevpt2::DeviceTensor f3caPlus = tangentSum(rdm.f3ca, rdmDot.f3ca, res);
     const nevpt2::EnergyResult shifted = nevpt2::energiesDevice(
-        ints, dm1Plus, dm2Plus, dm3Plus, f3acPlus, f3caPlus, res);
+        ints.active, ints.source, ints.batch, dm1Plus, dm2Plus, dm3Plus, f3acPlus, f3caPlus,
+        res);
 
     std::printf("\n  the class norms are affine in the RDMs: norm_k(dm + X) - norm_k(dm) = "
                 "Ndot_k(X), exactly\n");
@@ -326,8 +326,8 @@ nevpt2::Result<bool> checkScTangent(const nevpt2::GoldenFile& g,
     const int k = kFirstStepExp + static_cast<int>(i);
     const double h = std::ldexp(1.0, -k);
     step[i] = h;
-    const double plus = scTotalAt(*builder, tangentStep(ci, h, u), rdmOpt, h2e, ints, res);
-    const double minus = scTotalAt(*builder, tangentStep(ci, -h, u), rdmOpt, h2e, ints, res);
+    const double plus = scTotalAt(*builder, tangentStep(ci, h, u), rdmOpt, ints, res);
+    const double minus = scTotalAt(*builder, tangentStep(ci, -h, u), rdmOpt, ints, res);
     const double d = (plus - minus) / (2.0 * h);
     err[i] = std::fabs(d - t.totalDot);
     const double rel = err[i] / std::max(1e-30, std::fabs(t.totalDot));
@@ -365,3 +365,5 @@ nevpt2::Result<bool> checkScTangent(const nevpt2::GoldenFile& g,
               ok ? "PASS" : "FAIL", kTangentExactTol, kTangentFdTol);
   return ok;
 }
+
+}  // namespace nevpt2

@@ -1,10 +1,8 @@
-// nevpt2.app.integral_direct:gradient_source_check -- --gradient-source: the
-// SC-NEVPT2 CI SOURCE TERM y_I = dE/dc_I (Park Eq. 48), checked against the
-// forward tangent by DUALITY. An interface partition of main.cppm that
-// exports nothing -- [module.unit] requires a primary interface to re-export
-// its interface partitions, so main.cppm does `export import
-// :gradient_source_check;`; nothing outside this binary sees it. The same
-// shape as :tangent_check beside it.
+// nevpt2.ci_checks, --gradient-source: the SC-NEVPT2 CI SOURCE TERM
+// y_I = dE/dc_I (Park Eq. 48), checked against the forward tangent by
+// DUALITY -- and, integral-direct only, PC-NEVPT2's (#74). Both demos run the
+// SC check -- nevpt2_demo over FullBlockSource, nevpt2_df_demo over its
+// DfIntegralSource slabs (#162); ci_checks.cppm has the interface.
 //
 // WHAT IS BEING CHECKED, and why it is exact. Forward and reverse mode are
 // the same derivative computed two ways:
@@ -36,14 +34,14 @@
 // no truncation error, nothing but floating-point reassociation. That is why
 // this is a PERMANENT 1e-7 gate and not a finite-difference plateau: the
 // difference quotient was the one-time cross-check that licensed the tangent
-// itself (:tangent_check, and docs/testing.md, "The SC tangent's
+// itself (ci_checks_tangent.cpp, and docs/testing.md, "The SC tangent's
 // finite-difference cross-check"), and this check inherits its authority
 // without inheriting its noise.
 //
 // THREE THINGS IT RUNS.
 //
 //   1. SEVERAL SEEDED DIRECTIONS. Random u, projected against the state and
-//      normalized -- the same construction :tangent_check uses. A single
+//      normalized -- the same construction checkScTangent uses. A single
 //      direction can hide an error that happens to be orthogonal to it; four
 //      independent ones at three active-space sizes do not.
 //   2. THE EULER DIRECTION, u = the state itself. Free (the tangent build
@@ -79,14 +77,12 @@ module;
 // read or does not fit the golden is the caller's input.
 #include "error_handling/error_macros.h"
 
-export module nevpt2.app.integral_direct:gradient_source_check;
+module nevpt2.ci_checks;
 
 import std;
-import nevpt2.energy;    // energiesTangentDevice: the forward side
-import nevpt2.golden;
-import nevpt2.gradient;  // scCiSourceDevice: the reverse side
-import nevpt2.rdm_build;
 import nevpt2.rdm_host_dm;
+
+namespace nevpt2 {
 
 // The gate. Both sides are the same algebra, so the only difference is
 // floating-point reassociation (the sigma kernels walk the reverse link
@@ -110,8 +106,8 @@ constexpr std::int64_t kJacobianMaxDet = 256;
 constexpr std::array<std::uint64_t, 4> kCiSourceSeeds = {0x5eed'0035u, 0x5eed'1035u,
                                                          0x5eed'2035u, 0x5eed'3035u};
 
-// x scaled so <x|x> = 1 (:tangent_check's tangentNormalized, which is in the
-// other partition and not visible here).
+// x scaled so <x|x> = 1 (ci_checks_tangent.cpp's tangentNormalized, which
+// has module linkage there and no declaration here).
 nevpt2::Tensor ciSourceNormalized(nevpt2::Tensor x) {
   double norm2 = 0.0;
   for (std::int64_t i = 0; i < x.size(); ++i) norm2 += x.flat(i) * x.flat(i);
@@ -121,7 +117,7 @@ nevpt2::Tensor ciSourceNormalized(nevpt2::Tensor x) {
 }
 
 // A seeded random direction, projected against `ci` and normalized -- the
-// same construction :tangent_check and test/rdm_host_dm/ use. The projection
+// same construction checkScTangent and test/rdm_host_dm/ use. The projection
 // is not needed for the identity (which holds for any direction at all); it
 // keeps the direction a rotation of the state, which is the physically
 // meaningful one, and leaves the state's own direction to the Euler case.
@@ -159,7 +155,7 @@ double ciSourceDot(const nevpt2::Tensor& x, const nevpt2::Tensor& y) {
 // the same host dm1 tangent the RDM side reads.
 double ciSourceTangentAlong(const nevpt2::HostDm12Builder& builder, const nevpt2::Tensor& ci,
                             const nevpt2::Tensor& u, const nevpt2::RdmBuildOptions& rdmOpt,
-                            const nevpt2::Tensor& h2e, const nevpt2::NevptIntegralsDevice& ints,
+                            const CiCheckIntegrals& ints,
                             const nevpt2::DeviceTensor& dDm1, const nevpt2::DeviceTensor& dDm2,
                             const nevpt2::RdmBuildResult& rdm,
                             const nevpt2::OrbitalEnergyResponse* eps,
@@ -168,11 +164,12 @@ double ciSourceTangentAlong(const nevpt2::HostDm12Builder& builder, const nevpt2
   const nevpt2::DeviceTensor dDm1Dot = nevpt2::uploadTensor(dot.dm1, res);
   const nevpt2::DeviceTensor dDm2Dot = nevpt2::uploadTensor(dot.dm2, res);
   const nevpt2::RdmBuildResult rdmDot = nevpt2::buildRdmTangentsDevice(
-      rdmOpt, ci, u, builder.norb(), builder.nelecA(), builder.nelecB(), h2e, res);
+      rdmOpt, ci, u, builder.norb(), builder.nelecA(), builder.nelecB(), ints.h2e, res);
   const std::optional<nevpt2::OrbitalEnergyDot> epsDot =
       eps ? std::optional(nevpt2::orbitalEnergyDot(*eps, dot.dm1)) : std::nullopt;
-  return nevpt2::energiesTangentDevice(ints, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1Dot,
-                                       dDm2Dot, rdmDot.dm3, rdmDot.f3ac, rdmDot.f3ca,
+  return nevpt2::energiesTangentDevice(ints.active, ints.source, ints.batch, dDm1, dDm2,
+                                       rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1Dot, dDm2Dot,
+                                       rdmDot.dm3, rdmDot.f3ac, rdmDot.f3ca,
                                        epsDot ? &*epsDot : nullptr, res)
       .totalDot;
 }
@@ -227,26 +224,26 @@ nevpt2::Result<nevpt2::OrbitalEnergyResponse> loadOrbitalEnergyResponse(
 // Otherwise both sides carry their response, read from that sidecar.
 nevpt2::Result<bool> checkCiSource(const nevpt2::GoldenFile& g,
                                    const nevpt2::RdmBuildOptions& rdmOpt,
-                                   const nevpt2::NevptIntegralsDevice& ints,
+                                   const CiCheckIntegrals& ints,
                                    const nevpt2::RdmBuildResult& baseRdm,
                                    const nevpt2::EnergyResult& energies,
                                    const std::string& gradgoldPath,
+                                   std::string_view fixedReason,
                                    const nevpt2::DeviceResources& res) {
   nevpt2::Result<nevpt2::HostDm12Builder> builder =
       nevpt2::HostDm12Builder::create(g.ncas, g.nelecA, g.nelecB);
   if (!builder) return std::unexpected(builder.error());
   const nevpt2::Tensor& ci = g.get("ci");
-  const nevpt2::Tensor& h2e = g.get("h2e");
 
   std::printf("\n--gradient-source: y_I = dE/dc_I (Park Eq. 48) against the forward tangent\n");
   std::optional<nevpt2::OrbitalEnergyResponse> epsResponse;
   if (!gradgoldPath.empty())
     epsResponse = NEVPT2_TRY(loadOrbitalEnergyResponse(g, gradgoldPath));
   const nevpt2::OrbitalEnergyResponse* eps = epsResponse ? &*epsResponse : nullptr;
-  const char* const functional =
-      eps ? "the orbital energies moving with the active density"
-          : "the orbital energies held fixed (no --gradgold)";
-  std::printf("  functional: %s\n", functional);
+  const std::string functional =
+      eps ? std::string("the orbital energies moving with the active density")
+          : std::format("the orbital energies held fixed ({})", fixedReason);
+  std::printf("  functional: %s\n", functional.c_str());
 
   // The host rebuild IS the dm1/dm2 both sides read, so the whole check is
   // internally consistent at one state; the unit tier is what holds that
@@ -254,7 +251,7 @@ nevpt2::Result<bool> checkCiSource(const nevpt2::GoldenFile& g,
   const nevpt2::HostDm12 base = builder->dm12(ci);
   const nevpt2::DeviceTensor dDm1 = nevpt2::uploadTensor(base.dm1, res);
   const nevpt2::DeviceTensor dDm2 = nevpt2::uploadTensor(base.dm2, res);
-  // dm3/f3ac/f3ca at the base point are main()'s own build on this very CI
+  // dm3/f3ac/f3ca at the base point are the caller's own build on this very CI
   // vector with these very options.
   const nevpt2::RdmBuildResult& rdm = baseRdm;
 
@@ -263,9 +260,9 @@ nevpt2::Result<bool> checkCiSource(const nevpt2::GoldenFile& g,
   nevpt2::SigmaVectorOptions sigmaOpt;
   sigmaOpt.nTiles = rdmOpt.nTiles;
   const auto t0 = std::chrono::steady_clock::now();
-  const nevpt2::ScCiSourceResult src =
-      nevpt2::scCiSourceDevice(ints, ci, g.nelecA, g.nelecB, dDm1, dDm2, rdm.dm3, rdm.f3ac,
-                               rdm.f3ca, sigmaOpt, eps, res);
+  const nevpt2::ScCiSourceResult src = nevpt2::scCiSourceDevice(
+      ints.active, ints.source, ints.batch, ci, g.nelecA, g.nelecB, dDm1, dDm2, rdm.dm3,
+      rdm.f3ac, rdm.f3ca, sigmaOpt, eps, res);
   const double ySeconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   double yNorm = 0.0;
@@ -302,7 +299,7 @@ nevpt2::Result<bool> checkCiSource(const nevpt2::GoldenFile& g,
   double worst = 0.0;
   const auto compare = [&](const std::string& what, const nevpt2::Tensor& u) {
     const double dotY = ciSourceDot(u, src.y);
-    const double edot = ciSourceTangentAlong(*builder, ci, u, rdmOpt, h2e, ints, dDm1, dDm2,
+    const double edot = ciSourceTangentAlong(*builder, ci, u, rdmOpt, ints, dDm1, dDm2,
                                              rdm, eps, res);
     const double d = std::fabs(dotY - edot);
     worst = std::max(worst, d);
@@ -327,7 +324,7 @@ nevpt2::Result<bool> checkCiSource(const nevpt2::GoldenFile& g,
     for (std::int64_t I = 0; I < ndet; ++I) {
       const nevpt2::Tensor e = ciSourceUnit(src.y.dims(), I);
       const double edot =
-          ciSourceTangentAlong(*builder, ci, e, rdmOpt, h2e, ints, dDm1, dDm2, rdm, eps, res);
+          ciSourceTangentAlong(*builder, ci, e, rdmOpt, ints, dDm1, dDm2, rdm, eps, res);
       const double d = std::fabs(src.y.flat(I) - edot);
       yMax = std::max(yMax, std::fabs(src.y.flat(I)));
       if (d > jWorst) {
@@ -348,7 +345,7 @@ nevpt2::Result<bool> checkCiSource(const nevpt2::GoldenFile& g,
 
   std::printf("\n%s: the CI source term and the forward tangent agree to %.0e "
               "(worst |<u,y> - Edot(u)| = %.3e), %s\n",
-              ok ? "PASS" : "FAIL", kCiSourceTol, worst, functional);
+              ok ? "PASS" : "FAIL", kCiSourceTol, worst, functional.c_str());
   return ok;
 }
 
@@ -512,3 +509,5 @@ nevpt2::Result<bool> checkPcCiSource(const nevpt2::GoldenFile& g,
               ok ? "PASS" : "FAIL", kCiSourceTol, worst, functional);
   return ok;
 }
+
+}  // namespace nevpt2

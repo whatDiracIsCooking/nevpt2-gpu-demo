@@ -40,6 +40,12 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   the tangent RDM build beside their own (#38, #39).
 //   the --cublas / --ozaki family and --fused-digest: every binary but
 //                   nevpt2_pc_tangent (kNotPcTangent, above).
+//   --sc-tangent, --gradient-source
+//                   the demos (#162): both differentiate the CI vector at
+//                   fixed integrals, so the density-fitted demo runs them over
+//                   its slabs. It holds the orbital energies fixed (it reads
+//                   no sidecar) and has no --pc path for --gradient-source
+//                   (the PC source term has no slab entry point).
 //   each binary's own flags: that binary alone. --dump-source-terms is
 //                   nevpt2_sc_pseudodensity's because Y_xy needs the gradient
 //                   sidecar's full-MO-range arrays; nevpt2_demo computes y_I
@@ -69,8 +75,8 @@ constexpr std::array kFlagTable{
     FlagSpec{"--ozaki-pairs", "P", kNotPcTangent},
     FlagSpec{"--ozaki-check", "", kNotPcTangent},
     FlagSpec{"--pool-threshold", "BYTES|max", kEvery},
-    FlagSpec{"--sc-tangent", "", kDemo},
-    FlagSpec{"--gradient-source", "", kDemo},
+    FlagSpec{"--sc-tangent", "", kDemos},
+    FlagSpec{"--gradient-source", "", kDemos},
     FlagSpec{"--batch", "N", kDfDemo},
     FlagSpec{"--check-blocks", "", kDfDemo},
     FlagSpec{"--kappa-act", "", kScPd},
@@ -149,47 +155,71 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
   return {};
 }
 
+// The checks the two demos share on --sc-tangent / --gradient-source: one at
+// a time, the tangent RDM build's digests only, no --pc for the SC tangent,
+// no --profile. Each demo's own rules (the sidecar, --pc on the source term,
+// --check-blocks) are its case below.
+Status checkDifferentiationFlags(const Options& opt) {
+  const CommonOptions& c = opt.common;
+  if (opt.scTangent && opt.gradientSource)
+    return err_config(
+        "--sc-tangent and --gradient-source are two different checks of the same "
+        "derivative; run one at a time");
+  if (!(opt.scTangent || opt.gradientSource)) return {};
+  const std::string_view which = opt.scTangent ? "--sc-tangent" : "--gradient-source";
+  // Both differentiation checks run the tangent RDM build, which is the
+  // emitted or the native-fp64 BLAS digest only -- the rule finalize()
+  // applies to --rdm-tangent.
+  if (c.rdm.cublas || c.rdm.ozaki || c.rdm.fusedDigest)
+    return err_config(std::format(
+        "{} runs the tangent RDM build, which is the emitted digest or --blas-digest; "
+        "not --cublas, --ozaki or --fused-digest",
+        which));
+  // --gradient-source --pc is the PC CI source term's duality (#74, the
+  // integral-direct demo's alone); --sc-tangent is the SC tangent's finite
+  // difference and nothing else.
+  if (c.pc && opt.scTangent)
+    return err_config(
+        "--sc-tangent differentiates the strongly-contracted energy; it has no --pc path "
+        "(the PC tangent's finite difference is nevpt2_pc_tangent)");
+  // Each check prints its own report and returns before the profile tables
+  // are printed, so --profile would be parsed and ignored.
+  if (c.profile)
+    return err_unsupported(
+        std::format("{} prints no profile tables; --profile times the energy run", which));
+  return {};
+}
+
 // The checks on `b`'s own flags, after finalize(). Only `b`'s fields can be
 // set by now: another binary's flag was refused while parsing.
 Status checkOwnFlags(const Binary b, const Options& opt) {
   const CommonOptions& c = opt.common;
   switch (b) {
-    case Binary::Demo: {
-      if (opt.scTangent && opt.gradientSource)
-        return err_config(
-            "--sc-tangent and --gradient-source are two different checks of the same "
-            "derivative; run one at a time");
+    case Binary::Demo:
       // The sidecar's one reader here is the CI source term's orbital-energy
-      // response (#87).
+      // response (#87). (With both checks set, --gradient-source is, so the
+      // one-at-a-time refusal below is what reports it.)
       if (!opt.gradgoldPath.empty() && !opt.gradientSource)
         return err_config(
             "--gradgold is the sidecar --gradient-source reads the orbital energies' "
             "response from; it does nothing on its own");
-      if (!(opt.scTangent || opt.gradientSource)) return {};
-      const std::string_view which = opt.scTangent ? "--sc-tangent" : "--gradient-source";
-      // Both differentiation checks run the tangent RDM build, which is the
-      // emitted or the native-fp64 BLAS digest only -- the rule finalize()
-      // applies to --rdm-tangent.
-      if (c.rdm.cublas || c.rdm.ozaki || c.rdm.fusedDigest)
-        return err_config(std::format(
-            "{} runs the tangent RDM build, which is the emitted digest or --blas-digest; "
-            "not --cublas, --ozaki or --fused-digest",
-            which));
-      // --gradient-source --pc is the PC CI source term's duality (#74);
-      // --sc-tangent is the SC tangent's finite difference and nothing else.
-      if (c.pc && opt.scTangent)
-        return err_config(
-            "--sc-tangent differentiates the strongly-contracted energy; it has no --pc path "
-            "(the PC tangent's finite difference is nevpt2_pc_tangent)");
-      // Each check prints its own report and returns before the profile tables
-      // are printed, so --profile would be parsed and ignored.
-      if (c.profile)
-        return err_unsupported(std::format(
-            "{} prints no profile tables; --profile times the energy run", which));
-      return {};
-    }
+      return checkDifferentiationFlags(opt);
     case Binary::DfDemo:
       if (opt.batch < 0) return err_config("--batch must be >= 0");
+      if (const Status st = checkDifferentiationFlags(opt); !st) return st;
+      // #162: the PC CI source term (pcCiSourceDevice) and the PC tangent it
+      // is held against have no slab entry point, so they are the
+      // integral-direct demo's alone.
+      if (c.pc && opt.gradientSource)
+        return err_unsupported(
+            "--gradient-source --pc is the integral-direct demo's alone: the PC CI source term "
+            "has no density-fitted slab path (nevpt2_demo --gradient-source --pc)");
+      // --check-blocks is the energy run's diagnostic, and its verdict joins
+      // that run's PASS line, which neither check prints.
+      if (opt.checkBlocks && (opt.scTangent || opt.gradientSource))
+        return err_config(std::format(
+            "--check-blocks is the energy run's diagnostic; {} replaces that run",
+            opt.scTangent ? "--sc-tangent" : "--gradient-source"));
       return {};
     case Binary::ScPseudodensity:
       if (opt.kappaAct && opt.kappaFull)
