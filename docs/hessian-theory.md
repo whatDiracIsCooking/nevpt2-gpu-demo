@@ -363,7 +363,18 @@ time*, so the slab walk must carry **three** tangent sets — `u`, `v` and the
 second-order one — rather than being run twice. The per-slab working set grows
 accordingly, which means the tangent build's tile floors do not carry over and
 must be re-measured ([`performance.md`](performance.md), "Tile floors", is
-where that number would live).
+where that number lives).
+
+In the tree (#153) this is `nevpt2.energy`'s `energiesHessianDevice` (the
+`:sc_hessian` partition: the tangent's class walks carrying the four RDM
+sets, through block builders shared with `:sc_tangent`), fed by
+`nevpt2.rdm_build`'s `buildRdmHessianTangentsDevice` (one sweep over
+`(c, u, v)`, §4.4) and finished by `nevpt2.energy_finish`'s
+`normToEnergyHessianSandwich`, at fixed orbital energies only. Its gate is
+`nevpt2_demo --sc-hessian`: §4.3's Euler, the norms' exact second-order
+increment and §9's one finite difference of `Edot`
+([`testing.md`](testing.md), "The SC Hessian's finite-difference
+cross-check").
 
 ### 4.2 `H_cc u` as a vector: reverse-over-forward
 

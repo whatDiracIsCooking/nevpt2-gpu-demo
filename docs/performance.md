@@ -504,6 +504,9 @@ fails with a clean out-of-memory **during the RDM build**, at the
 | CAS(10,10), `--rdm-tangent` | RTX 3080 / RX 9060 XT | **2** (1 tile: out of memory) / **1** | `--tiles 3` |
 | CAS(10,12), `--rdm-tangent` | RTX 3080 / RX 9060 XT | **25** (24 and 23: out of memory) / **13** (12 and 11: out of memory) | `--tiles 40` |
 | CAS(12,12), `--rdm-tangent` | RTX 3080 / RX 9060 XT | **34** (33 and 32: out of memory) / **18** (17 and 16: out of memory) | `--tiles 40` |
+| CAS(10,10), `--sc-hessian` (#153) | RTX 3080 | **2** (1 tile: out of memory) | `--tiles 3` |
+| CAS(10,12), `--sc-hessian` (#153) | RTX 3080 | **35** (34: out of memory) | `--tiles 60` |
+| CAS(12,12), `--sc-hessian` (#153) | RTX 3080 | **48** (47: out of memory) | `--tiles 60` |
 | CAS(10,10), the digests' transpose (#89) | RTX 3080 / RX 9060 XT | **1** / **1** | `--tiles 3` |
 | CAS(12,12), the digests' transpose (#89) | RTX 3080 / RX 9060 XT | **16** (15: out of memory) / **11 (10, 9 and 8: out of memory)** | `--tiles 40` |
 
@@ -555,7 +558,8 @@ twice the plain ones: on the RTX 3080 2 against 1 at CAS(10,10), 25 against
 same clean out-of-memory, at one of the two `L2` allocations in
 `buildRdmTangentsDevice` rather than in `buildRdmsDevice` (on the RX 9060 XT
 the second, `dL2u`, `hipErrorOutOfMemory`, after the plain build has
-passed). Its per-tile
+passed; since #153 those allocations are `buildRdmCrossTermsDevice`'s, the
+sweep the tangent build runs, so an abort now names that function). Its per-tile
 working set (printed as `per-tile transition blocks (R x2, L2 x2, W)`), with
 the pool's used high-water after that build beside it, RTX 3080:
 
@@ -574,6 +578,42 @@ and RX 9060 XT, at its floors:
 | CAS(10,10) `--tiles 1` (its floor) | 9835.3 MB | 9890.3 MB |
 | CAS(10,12) `--tiles 13` (its floor) | 15426.3 MB | 15597.6 MB |
 | CAS(12,12) `--tiles 18` (its floor) | 15164.1 MB | 15339.3 MB |
+
+**The `--sc-hessian` floors are the three-argument build's own** (#153).
+`buildRdmHessianTangentsDevice` holds one `L2` and one `R` block per *vector*
+— `c`, `u`, `v` — so its per-tile working set is `3 n^4 + 4 n^2` doubles per
+determinant against the tangent's `2 n^4 + 3 n^2`: about 1.5x, not the 3x of
+building its three RDM sets one tangent build at a time
+([`hessian-theory.md`](hessian-theory.md), §4.4). Measured 2026-10-19 on the
+RTX 3080 (CUDA, `default` preset, emitted digest, BLAS consume) through
+`nevpt2_demo --golden <case> --tiles T --sc-hessian`, under the card lock,
+with 590 MiB of the card held by other processes before every probe (676 MiB
+before the CAS(12,12) 47-tile one) — less than the 1.3–1.6 GB the
+`--rdm-tangent` rows were measured with, so the two sets of floors are not
+directly comparable. Each probe was stopped once the first three-argument
+build had finished (`GPU RDM three-argument tangent build done`): it is the
+run's largest per-tile allocation, every other build `--sc-hessian` runs is
+a plain or a tangent build whose floor is lower, and its finite-difference
+sweep at these sizes is 28 more plain and tangent builds. So the rows say
+the three-argument build fits, not that a whole `--sc-hessian` run was timed
+at them. Below the floor the failure is a clean out-of-memory at the `L2`
+allocation in `buildRdmCrossTermsDevice`, after the plain build has passed.
+The per-tile working set (`per-tile transition blocks (R x3, L2 x3, W)`) and
+the pool's used high-water after that build:
+
+| case | per-tile | pool used |
+|---|---:|---:|
+| CAS(4,4) / CAS(8,8) `--tiles 3` (the ctest entries) | 0.1 MB / 156.4 MB | 0.7 MB / 183.2 MB |
+| CAS(10,10) `--tiles 2` (its floor) | 7364.4 MB | 7466.5 MB |
+| CAS(10,12) `--tiles 35` (its floor) | 8584.7 MB | 8899.0 MB |
+| CAS(10,12) `--tiles 38` | 7906.9 MB | 8221.2 MB |
+| CAS(12,12) `--tiles 48` (its floor) | 8520.0 MB | 8839.9 MB |
+| CAS(12,12) `--tiles 51` | 8019.0 MB | 8338.9 MB |
+
+At CAS(8,8) `--tiles 3` the tangent build's line beside it reads 104.5 MB,
+the ratio §4.4 predicts. `--tiles 40` is **below** the CAS(12,12) floor here,
+so the integral-direct CAS(12,12) recommendation for `--sc-hessian` is 60, not
+the 40 the plain and tangent builds run at; no RX 9060 XT row was measured.
 
 **The digests' transpose (#89) has the plain build's per-tile working set.**
 `buildDigestAdjointDevice` (`nevpt2.rdm_build`'s `:adjoint` partition) holds

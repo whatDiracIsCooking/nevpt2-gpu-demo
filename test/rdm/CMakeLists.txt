@@ -61,7 +61,9 @@ add_gtest_suite_tests(
 # normalized path -- and, at two arbitrary vectors (u, v), against a central
 # difference of the tangent build itself: the RDMs' second derivative
 # (RdmSecondDerivativeTests, docs/hessian-theory.md section 3), whose third
-# derivative vanishes. Logic, not energies: no golden file is read and the h2e is
+# derivative vanishes; and the three-argument sweep the second derivative of
+# the energy builds its RDM sets with (RdmHessianTangentsTests, #153), each
+# set against the tangent build at its own pair. Logic, not energies: no golden file is read and the h2e is
 # seeded random.
 #
 # Its own binary, like rdm_dm3_tests: it imports nevpt2.rdm_build, which links
@@ -79,5 +81,5 @@ add_gtest_executable(
 add_gtest_suite_tests(
   TARGET rdm_tangent_tests
   SUITES RdmTangentDifferenceTests RdmTangentRichardsonTests RdmTangentEulerTests
-    RdmTangentPathTests RdmSecondDerivativeTests RdmDigestAdjointTests
+    RdmTangentPathTests RdmSecondDerivativeTests RdmHessianTangentsTests RdmDigestAdjointTests
   REQUIRES_GPU)

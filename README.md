@@ -259,6 +259,7 @@ binary's:
 | `--pool-threshold BYTES\|max` | the memory pool's release threshold (default `max`) |
 | `--sc-tangent` | **both demos**: instead of the golden comparison, differentiate the SC total with respect to the CI vector and check that tangent against the class norms' exact affine increment, Euler's identity and a central finite difference of the energy itself. Same digest restriction as `--rdm-tangent`, no `--pc` path, and no `--profile` (it prints no profile tables) |
 | `--gradient-source` | **both demos**: instead of the golden comparison, assemble the SC-NEVPT2 CI source term `y_I = dE/dc_I` (Park Eq. 48) in reverse mode and check it against the forward tangent by duality — `<u, y> = Edot(u)`, exactly, for several seeded directions and for the state itself, plus the full Jacobian column by column where the determinant space is small enough. With `--pc` (integral-direct demo only), the same for PC-NEVPT2's `y_I`: the PC solve's adjoint against its tangent (#74). On the DF demo the orbital energies are held fixed and the PASS line says so. Same digest restriction as `--rdm-tangent`, and no `--profile`; not with `--sc-tangent`, nor (DF demo) with `--check-blocks` |
+| `--sc-hessian` | **integral-direct demo only** (#153): instead of the golden comparison, take the SC total's *second* directional derivative `Eddot(u, v)` with respect to the CI vector, at the golden's fixed orbital energies, and check it against Euler's identity at second order (`Eddot(c, u) = Edot(u)` on the three homogeneous classes), the class norms' exact second-order increment and one central finite difference of `Edot`. Its three-argument tangent RDM build needs more tiles than `--rdm-tangent`'s. Same digest restriction as `--rdm-tangent`, no `--pc` path, no `--profile`, and not with `--sc-tangent` or `--gradient-source` |
 | `--batch N` | **DF demo only**: slab length along each integral block's batch index (default 8; `0` = one slab per block; >= 0). A memory lever |
 | `--check-blocks` | **DF demo only**: also compare every DF-built integral block against the file's four-index arrays |
 
@@ -280,6 +281,7 @@ ignores it. `test/cli/` holds this matrix against the table:
 | `--profile` | ✓ | ✓ | refused | refused |
 | `--rdm-tangent` | ✓ | ✓ | refused | refused |
 | `--sc-tangent`, `--gradient-source` | ✓ | ✓ | refused | refused |
+| `--sc-hessian` | ✓ | refused | refused | refused |
 | `--batch`, `--check-blocks` | refused | ✓ | refused | refused |
 | `--kappa-act`, `--kappa-full` | refused | refused | ✓ | refused |
 | `--gradgold` | ✓ | refused | ✓ | refused |
@@ -320,9 +322,10 @@ digest has no path for,
 `nevpt2_demo` without `--gradient-source`, `--check-blocks` with
 `--sc-tangent` or `--gradient-source`, `--pc` in
 `nevpt2_sc_pseudodensity` without `--dump-source-terms` or `--source-oracle`,
-`--sc-tangent` with `--pc`), and
-`--sc-tangent` / `--gradient-source` with `--profile` is refused as
-*unsupported*, since neither prints the tables, as is `nevpt2_df_demo
+`--sc-tangent` or `--sc-hessian` with `--pc`, `--sc-hessian` with
+`--sc-tangent` or `--gradient-source`), and
+`--sc-tangent` / `--gradient-source` / `--sc-hessian` with `--profile` is
+refused as *unsupported*, since none prints the tables, as is `nevpt2_df_demo
 --gradient-source --pc` (the PC source term has no density-fitted slab path).
 
 ### The gradient checks
@@ -338,6 +341,7 @@ against the other. They read the same reference files, and each prints its own
 |---|---|---|
 | `nevpt2_demo --rdm-tangent` (also `nevpt2_df_demo`) | — | the tangent RDM build beside the plain one, against twice it |
 | `nevpt2_demo --sc-tangent` (also `nevpt2_df_demo`) | — | the SC total's derivative with respect to the CI vector |
+| `nevpt2_demo --sc-hessian` | — | the SC total's second directional derivative `Eddot(u, v)`, with the orbital energies held fixed (#153) |
 | `nevpt2_demo --gradient-source` | `[--gradgold PATH]`, `[--pc]` | the CI source term `y_I = dE/dc_I`, against that tangent by duality; with the `*.gradgold` sidecar, both carry the orbital energies' response to the active density, without it both hold them fixed. With `--pc`, PC-NEVPT2's `y_I` (the PC solve's adjoint) against the PC tangent (#74) |
 | `nevpt2_df_demo --gradient-source` | — | the SC CI source term against the tangent by the same duality, over the density-fitted slabs, with the orbital energies held fixed (#162) |
 | `nevpt2_sc_pseudodensity` | `--kappa-act`, or `--kappa-full [--gradgold PATH]` | the SC pseudodensity identities; with `--kappa-act`, the active–active orbital source term instead; with `--kappa-full`, the whole orbital source term out of the `*.gradgold` sidecar — on a `*_df` golden, out of the whole three-index `B`, with both of its terms (#165, #168) |
@@ -345,7 +349,7 @@ against the other. They read the same reference files, and each prints its own
 | `nevpt2_sc_pseudodensity --dump-source-terms PATH` | `[--gradgold PATH]`, `[--pc]` | writes the GPU's own `Y_xy` and `y_I` to a `.gradsrc` (a NumPy `.npz`) for `reference_data/nevpt2_grad.py --source dump` / `both`, and reads it back; what a nuclear gradient built from it comes out at is [`docs/testing.md`](docs/testing.md), "The GPU as the source-term provider". With `--pc`, PC-NEVPT2's, marked as such, with the PC adjoint held to the PC forward tangent along seeded rotations (#74; [`docs/pc-nevpt2.md`](docs/pc-nevpt2.md), "The source terms by reverse mode") |
 | `nevpt2_pc_tangent` | `--fd-steps N` (3..8, default 4), `--fd-start-pow N` (1..30, default 12: the first step is `2^-N`) | PC's derivative with respect to the CI vector, against a Richardson-verified finite difference |
 
-Everything that builds a *tangent* — the first three rows and
+Everything that builds a *tangent* — the first four rows and
 `nevpt2_pc_tangent` — runs the emitted or the native-fp64 BLAS digest;
 `--cublas`, `--ozaki` and `--fused-digest` are refused there, since a tangent
 of an approximate digest is not the derivative of what the energy stage

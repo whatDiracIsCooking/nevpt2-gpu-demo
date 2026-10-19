@@ -553,7 +553,9 @@ stage's own finite difference, and a one-time one** — the golden tier has
 three in all, and they are the three conventions no identity can pin
 (`docs/gradients.md`, §2): this one, the `--kappa-act` entries' third number
 (the device kappa action against the exponential map, below) and the PC
-tangent's (a derivative of a solve, which has no identity at all). It
+tangent's (a derivative of a solve, which has no identity at all). One order
+up, `--sc-hessian` adds the Hessian's single one, a difference of `Edot`
+itself ("The SC Hessian's finite-difference cross-check", below). It
 validates `energiesTangentDevice` (`nevpt2.energy`'s `:sc_tangent`
 partition) so that
 every later check of the reverse-mode assembly can be an exact dot-product
@@ -615,6 +617,70 @@ every one of them.
 The host half — the scalar finish's derivative, which is the only thing the
 tangent differentiates by hand — is `test/energy_finish/`, card-free
 (`NormToEnergyDerivativeTests`, `NormToEnergyTangentTests`).
+
+## The SC Hessian's finite-difference cross-check
+
+`nevpt2_cas44_sc_hessian` and `nevpt2_cas88_sc_hessian` (`gpu`; the CAS(4,4)
+one `small`) run `nevpt2_demo --golden <case> --tiles 3 --sc-hessian` and
+match `PASS: the SC Hessian matches Euler` (#153). They check
+`energiesHessianDevice` (`nevpt2.energy`'s `:sc_hessian` partition), the SC
+total's second directional derivative `Eddot(u, v)` at the golden's **fixed**
+orbital energies, over the RDM sets of `buildRdmHessianTangentsDevice`
+([`hessian-theory.md`](hessian-theory.md), §4.1, §4.4).
+`src/gradient/ci_checks_tangent.cpp` ("--sc-hessian") has the derivation.
+`u` is `--sc-tangent`'s direction (seed `0x5eed0032`) and `v` a second one
+(`0x5eed0153`), each `|.| = 1` and orthogonal to the state. The PASS line says
+which functional ran (the orbital energies held fixed), as §9.1 asks.
+
+**The exact checks.** Euler at second order — a class homogeneous of degree 2
+has `H c = grad E`, so `Eddot_k(c, u) == Edot_k(u)` for Sr, Srsi and Srs —
+holds the new 3×3 and the second-order chains against the *already-gated*
+`energiesTangentDevice`, run on its own tangent build. The five affine
+classes have no such identity (Sijr, Sij, Sir and, at CAS(8,8), Si miss it
+by 2e-4–3e-2, printed for the record; CAS(4,4)'s Si is zero by symmetry);
+their second-order blocks are held by
+the norms' increment at the second-order RDM set, `norm_k(dm + X'') -
+norm_k(dm) == N''_k`, exact because the norms are affine in the RDMs. Sijrs
+reads no RDM, and its every second derivative is exactly zero. The Hessian
+walk's own value and first derivatives come along against `energiesDevice`
+and `energiesTangentDevice`. RTX 3080 (CUDA, `default` preset):
+
+| exact check | CAS(4,4) | CAS(8,8) |
+|---|---|---|
+| the walk's base total vs `energiesDevice`' | 1.1e-15 | 1.5e-15 |
+| the walk's `Edot(u)` / `Edot(v)` vs `energiesTangentDevice`'s | 4.6e-15 / 1.2e-14 | 1.5e-17 / 2.6e-16 |
+| the second-order norm increment, worst of the eight classes | 1.8e-15 | 2.4e-15 |
+| Euler, worst of Sr / Srsi / Srs | 4.2e-15 | 3.1e-17 |
+
+All under the same 1e-10 as `--sc-tangent`'s exact checks.
+
+**The finite difference: Edot, not E.** The milestone's one new difference
+([`hessian-theory.md`](hessian-theory.md), §9): `energiesTangentDevice`'s
+`Edot(u)` at `c ± h v`, each point a fresh host dm1/dm2 rebuild and a fresh
+plain and tangent RDM build, differenced against `Eddot(u, v)`. `Edot` is a
+ratio of polynomials in the CI vector, so the error is `O(h^2)`, with the
+same `h = 2^-k` ladder (k = 6…19) and the same gate as the tangent's: at
+least four consecutive halvings with a ratio in [3.2, 4.8], and a best
+relative error under 1e-6. Measured on the RTX 3080:
+
+| case | `Eddot(u, v)` | fourfold halvings | plateau `|err|` | plateau relative | at `h` |
+|---|---|---|---|---|---|
+| CAS(4,4) | 2.7746e-2 | 7 (k = 12…18) | 3.2e-10 | 1.2e-8 | 2^-18 |
+| CAS(8,8) | 3.9897e-3 | 10 (k = 7…16) | 4.2e-11 | 1.1e-8 | 2^-19 |
+
+At CAS(8,8) the plateau is reached at k = 17 already (6.7e-11) and is flat to
+k = 19. The CAS(4,4) sweep shows the empty-perturber row the tangent's
+does, at the same step: k = 9 gives -1.36e4 where the derivative is 0.0277 —
+the same cancelling `Delta N + H` of a perturber empty at the base point
+("The SC tangent's finite-difference cross-check", above), now inside `Edot`'s
+finish; the Richardson run is taken from k = 12 on. The gate leaves a factor
+of ~100 over the measured plateau.
+
+The host half — Eddot's one new expression, the 3×3 between two first-order
+tangents — is `test/energy_finish/`'s `NormToEnergyHessianSandwichTests`
+(card-free), and the three-argument build's three sets are each the tangent
+build at their pair to 1e-12 in `test/rdm/rdm_tangent_tests.cpp`'s
+`RdmHessianTangentsTests`.
 
 ## The active-rotation source term
 
@@ -3785,6 +3851,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_cas44_pc`, `nevpt2_cas88_pc`, `nevpt2_df_cas44_pc`, `nevpt2_df_cas88_pc` | `--pc`: the solver handle's eigensolves, the `d x d` BLAS GEMMs and the PC slab einsums, on both demos |
 | `nevpt2_cas88_rdm_tangent` | `--rdm-tangent`: the tangent RDM build beside the plain one, checked against twice it (the derivative itself is checked against a finite difference in the unit tier, `test/rdm/rdm_tangent_tests.cpp`) |
 | `nevpt2_cas44_sc_tangent` | `--sc-tangent`: the SC class energies' tangent with respect to the RDMs, against the norms' exact affine increment, Euler's identity and a finite difference ("The SC tangent's finite-difference cross-check", below). `nevpt2_cas88_sc_tangent` runs the same at CAS(8,8) and is **not** `small` |
+| `nevpt2_cas44_sc_hessian` | `--sc-hessian`: the three-argument tangent RDM build (three `L2`/`R` blocks per tile) and the SC energy's second derivative over four RDM sets, against Euler at second order, the norms' second-order increment and a finite difference of `Edot` ("The SC Hessian's finite-difference cross-check", below). `nevpt2_cas88_sc_hessian` runs the same at CAS(8,8) and is **not** `small` |
 | `nevpt2_sc_pseudodensity_cas44`, `nevpt2_sc_pseudodensity_cas88` | the SC gradient's pseudodensity assembly and its identities ("The SC pseudodensity identities", above) |
 | `nevpt2_pc_tangent_cas44`, `nevpt2_pc_tangent_cas88` | the PC tangent: a second solve per class, the tangent slab einsums and the `(m, m)` blocks' GEMMs, plus ten RDM builds and PC stages per entry ("The PC tangent against a finite difference", above) |
 | `nevpt2_cas44_casscf`, `nevpt2_cas44_casscf_pc`, `nevpt2_df_cas44_casscf`, `nevpt2_df_cas44_casscf_pc` | the same four paths on **CASSCF orbitals** — a `NEVPT2G2` golden whose `reference_kind` is CASSCF ("The CASSCF-orbital entries", above). Same CAS(4,4) shape, so the same cost |

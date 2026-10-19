@@ -1,25 +1,33 @@
 // nevpt2.rdm_build:tangent -- the tangent of the dm3/f3ac/f3ca build with
-// respect to the CI vector (buildRdmTangentsDevice) and the --rdm-tangent
-// self-check both demos run (checkRdmTangentsDevice). Both are declared in the
-// module interface, which has the derivation; this partition is where they are
-// defined, so rdm_build.cpp's plain build stays untouched by them.
+// respect to the CI vector (buildRdmTangentsDevice), its three-argument form
+// for the second derivative (buildRdmHessianTangentsDevice, #153) and the
+// --rdm-tangent self-check both demos run (checkRdmTangentsDevice). All three
+// are declared in the module interface, which has the derivation; this
+// partition is where they are defined, so rdm_build.cpp's plain build stays
+// untouched by them.
 // An internal partition: nothing here is exported, and no importer of
-// nevpt2.rdm_build sees it -- it is reached only because the two functions it
+// nevpt2.rdm_build sees it -- it is reached only because the functions it
 // defines are the module's own.
 //
-// IT IS THE SAME PIPELINE, run with one copy of the CI vector replaced by the
-// direction: per tile, produce twice (once from `ci`, once from `dir`), every
-// digest twice over the swapped operands, and the fdm2/wedge step once at the
-// end on the tangent accumulators -- that step is linear in what it reads, so
-// it maps tangents to tangents unchanged. No kernel here is new: every launch
-// below is one buildRdmsDevice already makes, through the same bridges.
+// IT IS THE SAME PIPELINE, run on CROSS TERMS. Every output is a bilinear
+// form B(x, y) in two copies of the CI vector, and what both entry points
+// want is a set of symmetrised cross terms B(x_a, x_b) + B(x_b, x_a) over a
+// few vectors x_0, x_1, ...: the tangent is the one pair (c, u); the Hessian's
+// three RDM sets are (c, u), (c, v) and (u, v). So per tile, `produce` runs
+// ONCE PER VECTOR (not once per pair: the three pairs share three vectors),
+// every digest runs twice per pair over the swapped operands, and the
+// fdm2/wedge step runs once per pair at the end on that pair's accumulators
+// -- that step is linear in what it reads, so it maps cross terms to cross
+// terms unchanged. No kernel here is new: every launch below is one
+// buildRdmsDevice already makes, through the same bridges.
 //
-// What it costs. Two L2 blocks and two R blocks per tile instead of one each
-// (the two cross terms need both directions' produce output at once), against
-// one W: the per-tile working set is 2 n^4 + 3 n^2 doubles per determinant
-// against the plain build's n^4 + 2 n^2, so a little over twice as much, and
-// the plain build's measured tile floors do not carry over
-// (docs/performance.md, "Tile floors").
+// What it costs. One L2 and one R block per VECTOR per tile, against one W:
+// the per-tile working set is (V n^4 + (V + 1) n^2) doubles per determinant
+// for V vectors -- 2 n^4 + 3 n^2 for the tangent against the plain build's
+// n^4 + 2 n^2, and 3 n^4 + 4 n^2 for the Hessian's three
+// (docs/hessian-theory.md, Sec. 4.4). So neither carries the plain build's
+// measured tile floors, nor the Hessian the tangent's (docs/performance.md,
+// "Tile floors").
 module;
 
 #include <cstdio>  // stdout/stderr: macros, which `import std` does not carry
@@ -54,10 +62,32 @@ extern "C++" {
 
 namespace nevpt2 {
 
-RdmBuildResult buildRdmTangentsDevice(const RdmBuildOptions& opt, const Tensor& ci,
-                                      const Tensor& dir, int64_t norb, int64_t nelecA,
-                                      int64_t nelecB, const Tensor& h2e,
-                                      const DeviceResources& res) {
+// One cross term: the indices of its two vectors in the build's vector list.
+struct RdmCrossPair {
+  std::size_t a = 0;
+  std::size_t b = 0;
+};
+
+// What a cross-term build prints, so each entry point keeps its own lines.
+struct RdmCrossLabels {
+  const char* building;  // what "building ... on the GPU" names
+  const char* blocks;    // the per-tile line's parenthesis
+  const char* done;      // the "GPU RDM ... done" line's subject
+  const char* poolWhen;  // printPoolHighWater's "after ..."
+};
+
+// --profile labels for produce, one per vector (at most three vectors).
+constexpr std::array<const char*, 3> kProduceLabel = {"produce_c_dot", "produce_u_dot",
+                                                      "produce_v_dot"};
+
+// The symmetrised cross terms B(x_a, x_b) + B(x_b, x_a) of every output, one
+// RdmBuildResult per pair in `pairs`' order, from ONE tile sweep over the
+// vectors `vecs` (each one amplitude per determinant). See the header for the
+// pipeline and its working set.
+std::vector<RdmBuildResult> buildRdmCrossTermsDevice(
+    const RdmBuildOptions& opt, std::span<const Tensor* const> vecs,
+    std::span<const RdmCrossPair> pairs, int64_t norb, int64_t nelecA, int64_t nelecB,
+    const Tensor& h2e, const RdmCrossLabels& labels, const DeviceResources& res) {
   const wwrStream_t stream = res.stream();
   // --profile: the spans land in the plain build's table, each labelled
   // `*_dot` so the two builds' phases stay apart in it.
@@ -65,20 +95,26 @@ RdmBuildResult buildRdmTangentsDevice(const RdmBuildOptions& opt, const Tensor& 
 
   check(opt.nTiles >= 1, "RdmBuildOptions::nTiles >= 1 (each demo's main refuses --tiles < 1)");
   // Only the two exact digests have a tangent path here: the approximate ones
-  // (--cublas, --ozaki) and the fused GEMM are refused with --rdm-tangent at
-  // flag parsing, so reaching this is our bug, not a user's.
+  // (--cublas, --ozaki) and the fused GEMM are refused with --rdm-tangent,
+  // --sc-tangent, --sc-hessian and --gradient-source at flag parsing, so
+  // reaching this is our bug, not a user's.
   check(!opt.cublas && !opt.ozaki && !opt.fusedDigest,
         "the tangent RDM build runs the emitted or the native-fp64 BLAS digest "
         "(cli::finalize refuses --cublas / --ozaki / --fused-digest with --rdm-tangent)");
+  check(!vecs.empty() && vecs.size() <= kProduceLabel.size() && !pairs.empty(),
+        "a cross-term RDM build takes one to three vectors and at least one pair");
+  for (const RdmCrossPair& p : pairs)
+    check(p.a < vecs.size() && p.b < vecs.size(), "a cross pair names a vector it was handed");
 
   const int64_t na = link_tables::num_strings(norb, nelecA);
   const int64_t nb = link_tables::num_strings(norb, nelecB);
   const int64_t ndet = na * nb;
-  // Both vectors live on the same determinant axis: the caller derives them
+  // Every vector lives on the same determinant axis: the caller derives them
   // from the very (norb, nelec) it passes here, so a mismatch is a broken
   // invariant, not bad input.
-  check(ci.size() == ndet && dir.size() == ndet,
-        "the tangent RDM build's ci and dir each hold one amplitude per determinant");
+  for (const Tensor* x : vecs)
+    check(x->size() == ndet, "the tangent RDM build's vectors each hold one amplitude per "
+                             "determinant");
 
   const int64_t n2 = norb * norb;
   const int64_t n4 = n2 * n2;
@@ -101,13 +137,12 @@ RdmBuildResult buildRdmTangentsDevice(const RdmBuildOptions& opt, const Tensor& 
   const std::size_t n2KCount = narrowTo<std::size_t>(n2 * nK);
   const std::size_t n4KCount = narrowTo<std::size_t>(n4 * nK);
   const std::shared_ptr<const DeviceResources> owner = res.shared_from_this();
-  std::print(
-      "\nbuilding dm3_dot/f3ac_dot/f3ca_dot on the GPU (tiles={}, tile width={}, "
-      "digest={}, consume={})...\n",
-      tiles.size(), nK, gemmDigest ? "blas" : "emitted", opt.consumeGemm ? "blas" : "emitted");
+  std::print("\nbuilding {} on the GPU (tiles={}, tile width={}, digest={}, consume={})...\n",
+             labels.building, tiles.size(), nK, gemmDigest ? "blas" : "emitted",
+             opt.consumeGemm ? "blas" : "emitted");
 
   // --- host inputs: the same link tables and chemists'-order eri the plain
-  // build uses, plus the direction beside the CI vector ---
+  // build uses, plus the vectors ---
   const auto fa = link_tables::gen_linkstr_index(norb, nelecA);
   const auto fb = link_tables::gen_linkstr_index(norb, nelecB);
   const auto ra = link_tables::reverse_link(fa, na, nla);
@@ -117,8 +152,9 @@ RdmBuildResult buildRdmTangentsDevice(const RdmBuildOptions& opt, const Tensor& 
   const auto t0 = std::chrono::steady_clock::now();
 
   // Freed when the build returns, on `stream`, like every buffer here.
-  DeviceBuffer<double> dCi = upload(ci.data(), res);
-  DeviceBuffer<double> dDir = upload(dir.data(), res);
+  std::vector<DeviceBuffer<double>> dVec;
+  dVec.reserve(vecs.size());
+  for (const Tensor* x : vecs) dVec.push_back(upload(x->data(), res));
   DeviceBuffer<double> dEri = upload(eriF3.data(), res);
   DeviceBuffer<int> dFa = upload(fa, res);
   DeviceBuffer<int> dFb = upload(fb, res);
@@ -133,11 +169,18 @@ RdmBuildResult buildRdmTangentsDevice(const RdmBuildOptions& opt, const Tensor& 
       opt.consumeGemm ? upload(permuteEriConsume(eriF3.data(), norb), res)
                       : DeviceBuffer<double>(0, owner);
 
-  // The tangent accumulators: zeroed by their allocation, summed over tiles on
-  // the device, and moved into the result.
-  DeviceBuffer<double> dDm3Final(n6Count, owner);
-  std::array<DeviceBuffer<double>, 2> dFaccFinal = {DeviceBuffer<double>(n6Count, owner),
-                                                    DeviceBuffer<double>(n6Count, owner)};
+  // One pair's accumulators: zeroed by their allocation, summed over tiles on
+  // the device, and moved into that pair's result. facc[0] is order 0 (ca).
+  struct PairAcc {
+    DeviceBuffer<double> dm3;
+    std::array<DeviceBuffer<double>, 2> facc;
+  };
+  std::vector<PairAcc> acc;
+  acc.reserve(pairs.size());
+  for (std::size_t p = 0; p < pairs.size(); ++p)
+    acc.push_back(PairAcc{DeviceBuffer<double>(n6Count, owner),
+                          {DeviceBuffer<double>(n6Count, owner),
+                           DeviceBuffer<double>(n6Count, owner)}});
 
   // --profile labels, indexed by order (0 = ca, 1 = ac), all suffixed `_dot`:
   // the spans share the plain build's table.
@@ -153,136 +196,189 @@ RdmBuildResult buildRdmTangentsDevice(const RdmBuildOptions& opt, const Tensor& 
   // closing brace, behind the last tile's kernels -- before the fdm2/wedge
   // step below allocates, for the reason the plain build's sweep gives.
   {
-    // TWO copies of produce's output, one per direction: the cross terms
-    // L2(c).R(u) and L2(u).R(c) both need the other direction's block, so
-    // neither can be overwritten by the other's produce. W is single: each
-    // order's two consumes run one after the other, the digest of the first
-    // reading W before the second overwrites it (beta=0).
-    DeviceBuffer<double> dRc(n2KCount, owner);
-    DeviceBuffer<double> dRu(n2KCount, owner);
-    DeviceBuffer<double> dL2c(n4KCount, owner);
-    DeviceBuffer<double> dL2u(n4KCount, owner);
+    // ONE copy of produce's output PER VECTOR: a cross term L2(x_a).R(x_b)
+    // needs both vectors' blocks at once, and with three vectors every block
+    // is read by two pairs, so none can be overwritten by another's produce.
+    // W is single: each consume is followed at once by the digest that reads
+    // it, before the next consume overwrites it (beta=0).
+    std::vector<DeviceBuffer<double>> dR;
+    std::vector<DeviceBuffer<double>> dL2;
+    dR.reserve(vecs.size());
+    dL2.reserve(vecs.size());
+    // Built here and moved in, not emplaced, so an out-of-memory abort names
+    // this line (the constructor's source_location) rather than <vector>'s.
+    for (std::size_t i = 0; i < vecs.size(); ++i) {
+      dR.push_back(DeviceBuffer<double>(n2KCount, owner));
+      dL2.push_back(DeviceBuffer<double>(n4KCount, owner));
+    }
     DeviceBuffer<double> dW(n2KCount, owner);
-    // The emitted dm3 digest's per-tile output (it overwrites, so both cross
-    // terms reuse it and each is accumulated in turn); the BLAS digest
-    // accumulates into dDm3Final directly and allocates none.
+    // The emitted dm3 digest's per-tile output (it overwrites, so every cross
+    // term reuses it and each is accumulated in turn); the BLAS digest
+    // accumulates into the pair's dm3 directly and allocates none.
     DeviceBuffer<double> dDm3Tile(gemmDigest ? 0 : n6Count, owner);
-    // The BLAS digest's f3 temp: both cross terms are summed into it
+    // The BLAS digest's f3 temp: a pair's two terms are summed into it
     // (beta = 0 then 1) and scattered once.
     DeviceBuffer<double> dF3C(gemmDigest ? n6Count : 0, owner);
     {
       // Counted, not measured: the per-tile working set the tile count sizes.
-      const int64_t doubles = (2 * n4 + 3 * n2) * nK;
-      std::printf("per-tile transition blocks (R x2, L2 x2, W): %.1f MB\n",
+      const int64_t nv = static_cast<int64_t>(vecs.size());
+      const int64_t doubles = (nv * n4 + (nv + 1) * n2) * nK;
+      std::printf("per-tile transition blocks (%s): %.1f MB\n", labels.blocks,
                   static_cast<double>(doubles) * 8.0 / (1024.0 * 1024.0));
     }
 
     for (auto [k0, width] : tiles) {
-      profile::time("produce_c_dot", stream, [&] {
-        gpuCheck(device::rdmProduce(stream, dCi.data(), dFa.data(), dFb.data(), dRa.data(),
-                                    dRb.data(), dRc.data(), dL2c.data(), norbK, naK, nbK, nlaK,
-                                    nlbK, k0, width));
-      });
-      profile::time("produce_u_dot", stream, [&] {
-        gpuCheck(device::rdmProduce(stream, dDir.data(), dFa.data(), dFb.data(), dRa.data(),
-                                    dRb.data(), dRu.data(), dL2u.data(), norbK, naK, nbK, nlaK,
-                                    nlbK, k0, width));
-      });
+      for (std::size_t i = 0; i < vecs.size(); ++i) {
+        profile::time(kProduceLabel[i], stream, [&] {
+          gpuCheck(device::rdmProduce(stream, dVec[i].data(), dFa.data(), dFb.data(),
+                                      dRa.data(), dRb.data(), dR[i].data(), dL2[i].data(), norbK,
+                                      naK, nbK, nlaK, nlbK, k0, width));
+        });
+      }
 
-      // dm3_dot[pqrs,tu] += sum_K [ L2(c)[pqrs,K] R(u)[tu,K]
-      //                           + L2(u)[pqrs,K] R(c)[tu,K] ].
-      // `term` indexes the two: 0 is L2(c) against R(u), 1 the other way.
-      for (int term = 0; term < 2; ++term) {
-        const double* const l2 = term == 0 ? dL2c.data() : dL2u.data();
-        const double* const r = term == 0 ? dRu.data() : dRc.data();
-        if (gemmDigest) {
-          profile::time("digest_dm3_dot [blas]", stream, [&] {
-            digestGemmNative(plainBlas, l2, r, dDm3Final.data(), n4, n2, width, /*beta=*/1.0);
-          });
-        } else {
-          profile::time("digest_dm3_dot", stream, [&] {
-            gpuCheck(device::rdmDigestDm3(stream, r, l2, dDm3Tile.data(), norbK, width));
-          });
-          profile::time("accumulate_dm3_dot", stream,
-                        [&] { accumulateInto(dDm3Final.data(), dDm3Tile.data(), n6, stream); });
+      // dm3_ab[pqrs,tu] += sum_K [ L2(x_a)[pqrs,K] R(x_b)[tu,K]
+      //                          + L2(x_b)[pqrs,K] R(x_a)[tu,K] ].
+      // `term` indexes the two: 0 is L2(x_a) against R(x_b), 1 the other way.
+      for (std::size_t p = 0; p < pairs.size(); ++p) {
+        const auto [a, b] = pairs[p];
+        for (int term = 0; term < 2; ++term) {
+          const double* const l2 = term == 0 ? dL2[a].data() : dL2[b].data();
+          const double* const r = term == 0 ? dR[b].data() : dR[a].data();
+          if (gemmDigest) {
+            profile::time("digest_dm3_dot [blas]", stream, [&] {
+              digestGemmNative(plainBlas, l2, r, acc[p].dm3.data(), n4, n2, width,
+                               /*beta=*/1.0);
+            });
+          } else {
+            profile::time("digest_dm3_dot", stream, [&] {
+              gpuCheck(device::rdmDigestDm3(stream, r, l2, dDm3Tile.data(), norbK, width));
+            });
+            profile::time("accumulate_dm3_dot", stream, [&] {
+              accumulateInto(acc[p].dm3.data(), dDm3Tile.data(), n6, stream);
+            });
+          }
         }
       }
 
       for (int o = 0; o < 2; ++o) {
-        for (int term = 0; term < 2; ++term) {
-          // W is the OTHER direction's consume: the digest pairs L2(c) with
-          // W(u) and L2(u) with W(c).
-          const double* const l2Digest = term == 0 ? dL2c.data() : dL2u.data();
-          const double* const l2Consume = term == 0 ? dL2u.data() : dL2c.data();
-          if (opt.consumeGemm) {
-            profile::time(kConsumeBlasLabel[o], stream, [&] {
-              consumeGemm(plainBlas, dEriConsume.data(), l2Consume, dW.data(), o, norb, width);
-            });
-          } else {
-            profile::time(kConsumeLabel[o], stream, [&] {
-              gpuCheck(device::rdmConsume(stream, o, dEri.data(), l2Consume, dW.data(), norbK,
-                                          width));
-            });
+        for (std::size_t p = 0; p < pairs.size(); ++p) {
+          const auto [a, b] = pairs[p];
+          for (int term = 0; term < 2; ++term) {
+            // W is the OTHER vector's consume: the digest pairs L2(x_a) with
+            // W(x_b) and L2(x_b) with W(x_a).
+            const double* const l2Digest = term == 0 ? dL2[a].data() : dL2[b].data();
+            const double* const l2Consume = term == 0 ? dL2[b].data() : dL2[a].data();
+            if (opt.consumeGemm) {
+              profile::time(kConsumeBlasLabel[o], stream, [&] {
+                consumeGemm(plainBlas, dEriConsume.data(), l2Consume, dW.data(), o, norb,
+                            width);
+              });
+            } else {
+              profile::time(kConsumeLabel[o], stream, [&] {
+                gpuCheck(device::rdmConsume(stream, o, dEri.data(), l2Consume, dW.data(), norbK,
+                                            width));
+              });
+            }
+            if (gemmDigest) {
+              // Both terms into the f3 temp (beta=0 then 1), scattered once
+              // below: the scatter accumulates, so folding each term
+              // separately would be the same answer at twice the scatter.
+              profile::time(kGemmF3Label[o], stream, [&] {
+                digestGemmNative(plainBlas, l2Digest, dW.data(), dF3C.data(), n4, n2, width,
+                                 /*beta=*/term == 0 ? 0.0 : 1.0);
+              });
+            } else {
+              // Reads L2 directly and adds into the accumulator itself, like
+              // the plain build's emitted f3 digest.
+              profile::time(kDigestF3Label[o], stream, [&] {
+                gpuCheck(device::f3DigestAccumulate(stream, o, dW.data(), l2Digest,
+                                                    acc[p].facc[o].data(), norbK, width));
+              });
+            }
           }
           if (gemmDigest) {
-            // Both terms into the f3 temp (beta=0 then 1), scattered once
-            // below: the scatter accumulates, so folding each term separately
-            // would be the same answer at twice the scatter.
-            profile::time(kGemmF3Label[o], stream, [&] {
-              digestGemmNative(plainBlas, l2Digest, dW.data(), dF3C.data(), n4, n2, width,
-                               /*beta=*/term == 0 ? 0.0 : 1.0);
-            });
-          } else {
-            // Reads L2 directly and adds into the accumulator itself, like the
-            // plain build's emitted f3 digest.
-            profile::time(kDigestF3Label[o], stream, [&] {
-              gpuCheck(device::f3DigestAccumulate(stream, o, dW.data(), l2Digest,
-                                                  dFaccFinal[o].data(), norbK, width));
+            profile::time(kScatterLabel[o], stream, [&] {
+              if (o == 0) {
+                gpuCheck(device::f3ScatterCa(stream, dF3C.data(), acc[p].facc[0].data(), norbK));
+              } else {
+                accumulateInto(acc[p].facc[1].data(), dF3C.data(), n6, stream);
+              }
             });
           }
-        }
-        if (gemmDigest) {
-          profile::time(kScatterLabel[o], stream, [&] {
-            if (o == 0) {
-              gpuCheck(device::f3ScatterCa(stream, dF3C.data(), dFaccFinal[0].data(), norbK));
-            } else {
-              accumulateInto(dFaccFinal[1].data(), dF3C.data(), n6, stream);
-            }
-          });
         }
       }
     }
-  }  // dRc, dRu, dL2c, dL2u, dW, dDm3Tile, dF3C freed here, behind the last tile
+  }  // dR, dL2, dW, dDm3Tile, dF3C freed here, behind the last tile
 
-  // fdm2 + wedge, once, on the fully-summed tangent partials. Both steps are
+  // fdm2 + wedge, once per pair, on its fully-summed partials. Both steps are
   // LINEAR in what they read (fdm2 contracts dm3 with the integrals; the wedge
-  // copies and adds), so running them on the tangents is the tangent of
+  // copies and adds), so running them on a cross term is the cross term of
   // running them on the plain build -- which is why the tangent needs no
-  // derivative of its own here.
+  // derivative of its own here. One fdm2 scratch serves every pair: each
+  // wedge reads it before the next fdm2 overwrites it, in stream order.
   DeviceBuffer<double> dFdm2(n4Count, owner);
-  for (int o = 0; o < 2; ++o) {
-    profile::time(kFdm2Label[o], stream, [&] {
-      gpuCheck(device::rdmFdm2(stream, o, dEri.data(), dDm3Final.data(), dFdm2.data(), norbK));
-    });
-    profile::time(kWedgeLabel[o], stream, [&] {
-      gpuCheck(device::rdmWedge(stream, o, dFdm2.data(), dFaccFinal[o].data(), norbK));
-    });
+  for (PairAcc& pa : acc) {
+    for (int o = 0; o < 2; ++o) {
+      profile::time(kFdm2Label[o], stream, [&] {
+        gpuCheck(device::rdmFdm2(stream, o, dEri.data(), pa.dm3.data(), dFdm2.data(), norbK));
+      });
+      profile::time(kWedgeLabel[o], stream, [&] {
+        gpuCheck(device::rdmWedge(stream, o, dFdm2.data(), pa.facc[o].data(), norbK));
+      });
+    }
   }
   // Nothing above blocks the host, so this sync is what makes `seconds` GPU
   // completion rather than host dispatch -- the plain build's reason, and its
   // one stream, so syncing it waits for all of the work.
   gpuCheck(wwrStreamSynchronize(stream));
   const auto t1 = std::chrono::steady_clock::now();
+  const double seconds = std::chrono::duration<double>(t1 - t0).count();
 
   const std::vector<int64_t> n6Shape(6, norb);
-  RdmBuildResult r;
-  r.dm3 = DeviceTensor(std::move(dDm3Final), n6Shape);
-  r.f3ca = DeviceTensor(std::move(dFaccFinal[0]), n6Shape);  // order 0 == "ca"
-  r.f3ac = DeviceTensor(std::move(dFaccFinal[1]), n6Shape);  // order 1 == "ac"
-  r.seconds = std::chrono::duration<double>(t1 - t0).count();
-  std::printf("GPU RDM tangent build (dm3_dot/f3ac_dot/f3ca_dot) done in %.2fs\n", r.seconds);
-  printPoolHighWater("after the RDM tangent build", res);
-  return r;
+  std::vector<RdmBuildResult> out;
+  out.reserve(acc.size());
+  for (PairAcc& pa : acc) {
+    RdmBuildResult r;
+    r.dm3 = DeviceTensor(std::move(pa.dm3), n6Shape);
+    r.f3ca = DeviceTensor(std::move(pa.facc[0]), n6Shape);  // order 0 == "ca"
+    r.f3ac = DeviceTensor(std::move(pa.facc[1]), n6Shape);  // order 1 == "ac"
+    r.seconds = seconds;
+    out.push_back(std::move(r));
+  }
+  std::printf("GPU RDM %s done in %.2fs\n", labels.done, seconds);
+  printPoolHighWater(labels.poolWhen, res);
+  return out;
+}
+
+RdmBuildResult buildRdmTangentsDevice(const RdmBuildOptions& opt, const Tensor& ci,
+                                      const Tensor& dir, int64_t norb, int64_t nelecA,
+                                      int64_t nelecB, const Tensor& h2e,
+                                      const DeviceResources& res) {
+  const std::array<const Tensor*, 2> vecs = {&ci, &dir};
+  const std::array<RdmCrossPair, 1> pairs = {RdmCrossPair{0, 1}};
+  const RdmCrossLabels labels{"dm3_dot/f3ac_dot/f3ca_dot", "R x2, L2 x2, W",
+                              "tangent build (dm3_dot/f3ac_dot/f3ca_dot)",
+                              "after the RDM tangent build"};
+  std::vector<RdmBuildResult> r =
+      buildRdmCrossTermsDevice(opt, vecs, pairs, norb, nelecA, nelecB, h2e, labels, res);
+  return std::move(r.front());
+}
+
+RdmHessianTangents buildRdmHessianTangentsDevice(const RdmBuildOptions& opt, const Tensor& ci,
+                                                 const Tensor& u, const Tensor& v, int64_t norb,
+                                                 int64_t nelecA, int64_t nelecB,
+                                                 const Tensor& h2e,
+                                                 const DeviceResources& res) {
+  const std::array<const Tensor*, 3> vecs = {&ci, &u, &v};
+  // (c, u), (c, v), (u, v): the RdmHessianTangents fields, in order.
+  const std::array<RdmCrossPair, 3> pairs = {RdmCrossPair{0, 1}, RdmCrossPair{0, 2},
+                                             RdmCrossPair{1, 2}};
+  const RdmCrossLabels labels{"the three-argument tangents (c,u), (c,v), (u,v)",
+                              "R x3, L2 x3, W", "three-argument tangent build",
+                              "after the three-argument RDM tangent build"};
+  std::vector<RdmBuildResult> r =
+      buildRdmCrossTermsDevice(opt, vecs, pairs, norb, nelecA, nelecB, h2e, labels, res);
+  return RdmHessianTangents{std::move(r[0]), std::move(r[1]), std::move(r[2])};
 }
 
 Status checkRdmTangentsDevice(const RdmBuildOptions& opt, const RdmBuildResult& built,

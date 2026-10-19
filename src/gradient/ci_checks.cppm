@@ -6,6 +6,10 @@
 //                    Euler's identity on the three homogeneous classes, and a
 //                    one-time central finite difference of the energy
 //                    (ci_checks_tangent.cpp has the derivation);
+//   checkScHessian   --sc-hessian (nevpt2_demo): the SC energy's second
+//                    directional derivative Eddot(u, v) against Euler, the
+//                    norms' exact second-order increment and one finite
+//                    difference of Edot (ci_checks_tangent.cpp, #153);
 //   checkCiSource    --gradient-source: nevpt2.gradient's CI source term
 //                    y_I = dE/dc_I (Park Eq. 48) against that tangent by the
 //                    forward-reverse duality <u, y> == Edot(u), exact, plus
@@ -68,6 +72,20 @@ struct CiCheckIntegrals {
 Result<bool> checkScTangent(const GoldenFile& g, const RdmBuildOptions& rdmOpt,
                             const CiCheckIntegrals& ints, const RdmBuildResult& baseRdm,
                             std::uint64_t seed, const DeviceResources& res);
+
+// --sc-hessian on the golden state `g` (#153): energiesHessianDevice's
+// Eddot(u, v) along two seeded directions `seedU` / `seedV`, at the golden's
+// fixed orbital energies, against Euler's identity Eddot(c, u) == Edot(u) on
+// the three homogeneous classes, the class norms' exact increment at the
+// second-order RDMs (every class), and one Richardson-verified central
+// difference of Edot(u) along v. Prints the tables and the gate line
+// "PASS: the SC Hessian matches Euler ..." / "FAIL: ...". `baseRdm` as for
+// checkScTangent. Returns whether every criterion held; an active space the
+// host RDM builder refuses is a configuration Error.
+Result<bool> checkScHessian(const GoldenFile& g, const RdmBuildOptions& rdmOpt,
+                            const CiCheckIntegrals& ints, const RdmBuildResult& baseRdm,
+                            std::uint64_t seedU, std::uint64_t seedV,
+                            const DeviceResources& res);
 
 // --gradient-source on `g`: y_I against Edot(u) along four seeded directions
 // and the state itself, plus the full Jacobian where ndet allows, all to 1e-7;

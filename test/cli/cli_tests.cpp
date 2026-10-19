@@ -17,7 +17,8 @@
 //   CliParseArgsTests    parseArgs' shared behaviour: an unknown argument, a
 //                        missing value, finalize() applied, and every flag
 //                        combination a registered ctest entry passes accepted
-//   CliDemoFlagTests     nevpt2_demo's --sc-tangent / --gradient-source
+//   CliDemoFlagTests     nevpt2_demo's --sc-tangent / --gradient-source /
+//                        --sc-hessian
 //   CliDfDemoFlagTests   nevpt2_df_demo's --batch / --check-blocks, and its
 //                        --sc-tangent / --gradient-source (#162)
 //   CliScPseudodensityFlagTests  --kappa-act / --kappa-full / --gradgold /
@@ -396,11 +397,12 @@ constexpr std::array kExpectedMatrix{
     MatrixRow{"--mantissa-bits", "DFS"},    MatrixRow{"--ozaki", "DFS"},
     MatrixRow{"--ozaki-pairs", "DFS"},      MatrixRow{"--ozaki-check", "DFS"},
     MatrixRow{"--pool-threshold", "DFSP"},  MatrixRow{"--sc-tangent", "DF"},
-    MatrixRow{"--gradient-source", "DF"},   MatrixRow{"--batch", "F"},
-    MatrixRow{"--check-blocks", "F"},       MatrixRow{"--kappa-act", "S"},
-    MatrixRow{"--kappa-full", "S"},         MatrixRow{"--gradgold", "DS"},
-    MatrixRow{"--dump-source-terms", "S"},  MatrixRow{"--source-oracle", "S"},
-    MatrixRow{"--fd-steps", "P"},           MatrixRow{"--fd-start-pow", "P"},
+    MatrixRow{"--gradient-source", "DF"},   MatrixRow{"--sc-hessian", "D"},
+    MatrixRow{"--batch", "F"},              MatrixRow{"--check-blocks", "F"},
+    MatrixRow{"--kappa-act", "S"},          MatrixRow{"--kappa-full", "S"},
+    MatrixRow{"--gradgold", "DS"},          MatrixRow{"--dump-source-terms", "S"},
+    MatrixRow{"--source-oracle", "S"},      MatrixRow{"--fd-steps", "P"},
+    MatrixRow{"--fd-start-pow", "P"},
 };
 
 char letterOf(const Binary b) {
@@ -610,6 +612,7 @@ TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
       {Binary::Demo, {"--tiles", "3", "--rdm-tangent"}},
       {Binary::Demo, {"--tiles", "3", "--sc-tangent"}},
       {Binary::Demo, {"--tiles", "3", "--gradient-source"}},
+      {Binary::Demo, {"--tiles", "3", "--sc-hessian"}},
       {Binary::Demo, {"--tiles", "3", "--gradient-source", "--gradgold", "x.gradgold"}},
       {Binary::DfDemo, {"--tiles", "3", "--check-blocks"}},
       {Binary::DfDemo, {"--tiles", "3", "--batch", "5", "--check-blocks"}},
@@ -729,6 +732,52 @@ TEST(CliDemoFlagTests, EachCheckRefusesProfileItWouldNotPrint) {
     EXPECT_EQ(r.error().message,
               std::format("{} prints no profile tables; --profile times the energy run", which));
   }
+}
+
+// --sc-hessian (#153), nevpt2_demo alone: one check at a time, the tangent
+// RDM build's digests, SC only, no --profile, no --gradgold.
+TEST(CliDemoFlagTests, ScHessianSetsItsFieldAndRefusesTheOtherChecks) {
+  const Result<Options> h = parse(Binary::Demo, {"--sc-hessian", "--blas-digest"});
+  ASSERT_TRUE(h.has_value()) << h.error().message;
+  EXPECT_TRUE(h->scHessian);
+  EXPECT_FALSE(h->scTangent);
+  EXPECT_FALSE(h->gradientSource);
+  for (const std::string_view other : {"--sc-tangent", "--gradient-source"}) {
+    const Result<Options> r = parse(Binary::Demo, {"--sc-hessian", other});
+    ASSERT_FALSE(r.has_value()) << other;
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(r.error().message,
+              std::format("--sc-hessian and {} are two different checks of the energy's CI "
+                          "derivatives; run one at a time",
+                          other));
+  }
+}
+
+TEST(CliDemoFlagTests, ScHessianRefusesWhatTheTangentRefuses) {
+  for (const std::vector<std::string_view>& digest :
+       {std::vector<std::string_view>{"--ozaki"},
+        std::vector<std::string_view>{"--blas-digest", "--fused-digest"}}) {
+    std::vector<std::string_view> args{"--sc-hessian"};
+    args.insert(args.end(), digest.begin(), digest.end());
+    const Result<Options> r = parse(Binary::Demo, args);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(r.error().message,
+              "--sc-hessian runs the tangent RDM build, which is the emitted digest or "
+              "--blas-digest; not --cublas, --ozaki or --fused-digest");
+  }
+  const Result<Options> pc = parse(Binary::Demo, {"--sc-hessian", "--pc"});
+  ASSERT_FALSE(pc.has_value());
+  EXPECT_EQ(pc.error().kind, ErrorKind::InvalidConfig);
+  EXPECT_EQ(pc.error().message,
+            "--sc-hessian differentiates the strongly-contracted energy twice; it has no --pc "
+            "path");
+  const Result<Options> prof = parse(Binary::Demo, {"--sc-hessian", "--profile"});
+  ASSERT_FALSE(prof.has_value());
+  EXPECT_EQ(prof.error().kind, ErrorKind::Unsupported);
+  const Result<Options> gg = parse(Binary::Demo, {"--sc-hessian", "--gradgold", "x.gradgold"});
+  ASSERT_FALSE(gg.has_value());
+  EXPECT_EQ(gg.error().kind, ErrorKind::InvalidConfig);
 }
 
 TEST(CliDemoFlagTests, RdmTangentRunsBesideEitherCheck) {

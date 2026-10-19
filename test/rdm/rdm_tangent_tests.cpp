@@ -23,6 +23,10 @@
 //                              at (c, u), symmetric in (u, v), the same at any
 //                              base state -- and the third derivative, a mixed
 //                              difference of the tangent, vanishes exactly
+//   RdmHessianTangentsTests    buildRdmHessianTangentsDevice (#153), the
+//                              three-argument sweep over (c, u, v): each of
+//                              its three sets is the tangent build at its own
+//                              pair, at every digest / consume / tile count
 //   RdmDigestAdjointTests      buildDigestAdjointDevice (the :adjoint
 //                              partition, #89) is the TRANSPOSE of the f3
 //                              path's h2e dependence: <hbar, h2e_dot> against
@@ -494,6 +498,47 @@ TEST(RdmSecondDerivativeTests, ThirdDerivativeVanishesExactly) {
         for (std::size_t i = 0; i < p.t[k].size(); ++i)
           worst = std::max(worst, std::abs((p.t[k][i] - m.t[k][i]) * (0.5 / h)));
         EXPECT_LT(worst, kDifferenceTol * scale) << kNames[k] << " third derivative";
+      }
+    }
+  }
+}
+
+// --- RdmHessianTangentsTests ---------------------------------------------------
+//
+// buildRdmHessianTangentsDevice (#153): one tile sweep over (c, u, v) giving
+// the cross terms at (c, u), (c, v) and (u, v). Each must be the tangent build
+// at its own pair -- the same kernels on the same operands, so two builds of
+// one form (kSameFormTol) -- at every digest / consume / tile count the
+// tangent build itself is checked across.
+
+TEST(RdmHessianTangentsTests, EachSetIsTheTangentBuildAtItsPair) {
+  const DeviceResources* res = resourcesOrFail();
+  ASSERT_NE(res, nullptr);
+  for (const CasCase& c : cases()) {
+    SCOPED_TRACE(caseName(c));
+    const Tensor ci = randomCi(c);
+    const Tensor h2e = randomH2e(c);
+    const Tensor u = direction(ci, c.seed ^ 0xd1'5ec7u);
+    const Tensor v = direction(ci, c.seed ^ 0x5ec0'0d02u);
+    for (const auto& [tiles, blas, emitted] :
+         {std::tuple{c.nTiles, false, false}, std::tuple{int64_t{1}, false, false},
+          std::tuple{int64_t{5}, true, false}, std::tuple{c.nTiles, true, true}}) {
+      SCOPED_TRACE(std::format("tiles={} blasDigest={} consumeEmitted={}", tiles, blas, emitted));
+      const RdmBuildOptions opt = options(tiles, blas, emitted);
+      const RdmHessianTangents t3 =
+          buildRdmHessianTangentsDevice(opt, ci, u, v, c.norb, c.nelecA, c.nelecB, h2e, *res);
+      const std::array<Built, 3> got = {download(t3.cu, *res), download(t3.cv, *res),
+                                        download(t3.uv, *res)};
+      const std::array<Built, 3> want = {tangentBuild(c, ci, u, h2e, opt, *res),
+                                         tangentBuild(c, ci, v, h2e, opt, *res),
+                                         tangentBuild(c, u, v, h2e, opt, *res)};
+      constexpr std::array<const char*, 3> kPair = {"(c,u)", "(c,v)", "(u,v)"};
+      for (std::size_t p = 0; p < 3; ++p) {
+        const double scale = std::max(1.0, maxAbs(want[p]));
+        EXPECT_GT(maxAbs(want[p]), 1e-3) << kPair[p] << ": a vacuous comparison";
+        for (std::size_t k = 0; k < kNames.size(); ++k)
+          EXPECT_LT(maxDiff(got[p].t[k], want[p].t[k]), kSameFormTol * scale)
+              << kPair[p] << " " << kNames[k];
       }
     }
   }
