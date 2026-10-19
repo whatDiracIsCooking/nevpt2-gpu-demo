@@ -58,7 +58,10 @@ add_gtest_suite_tests(
 # finite difference of buildRdmsDevice itself, on a seeded random state and a
 # seeded random direction at CAS(4,4) and CAS(8,8) -- along the straight line
 # (exact, the forms are quadratic) and Richardson-verified along the
-# normalized path. Logic, not energies: no golden file is read and the h2e is
+# normalized path -- and, at two arbitrary vectors (u, v), against a central
+# difference of the tangent build itself: the RDMs' second derivative
+# (RdmSecondDerivativeTests, docs/hessian-theory.md section 3), whose third
+# derivative vanishes. Logic, not energies: no golden file is read and the h2e is
 # seeded random.
 #
 # Its own binary, like rdm_dm3_tests: it imports nevpt2.rdm_build, which links
@@ -76,5 +79,5 @@ add_gtest_executable(
 add_gtest_suite_tests(
   TARGET rdm_tangent_tests
   SUITES RdmTangentDifferenceTests RdmTangentRichardsonTests RdmTangentEulerTests
-    RdmTangentPathTests RdmDigestAdjointTests
+    RdmTangentPathTests RdmSecondDerivativeTests RdmDigestAdjointTests
   REQUIRES_GPU)
