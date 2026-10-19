@@ -1749,9 +1749,9 @@ state's `.gradsrc` on the card. `nevpt2_grad.py --source both` reads it, and
 the CASSCF branch takes it since this change ("The GPU as the source-term
 provider" below has the mechanism). The dump is in the golden's basis. On
 this branch the state is held in that basis too, with no §2.6 rotation, so
-the dump is read unrotated. A PC dump on a CASSCF reference stays refused,
-because none has been through a gradient. The two providers' terms and
-gradients:
+the dump is read unrotated. A PC dump on a CASSCF reference is taken the
+same way since #163 ("PC on a CASSCF reference: acrolein" below, "GPU-sourced").
+The two providers' terms and gradients:
 
 | | LiF CAS(4,6) | N2 CAS(4,4) |
 |---|---|---|
@@ -1965,6 +1965,115 @@ with `/tmp/acrolein_states` and `/tmp/acrolein_pc_states.npz` from the two
 commands in [`reference-data.md`](reference-data.md), "The numerical
 gradient of a CASSCF reference" and "The GPU's PC energies on the kept
 states". The `--atom` spec is the state's own, in that sweep's `states.json`.
+
+#### GPU-sourced
+
+**From the GPU's PC source terms, the same gradient agrees with the same
+numerical one to 6.1e-8 Eh/bohr in the worst in-plane component (RMS
+2.3e-8), at the 1e-6 gate: PASS. It differs from the block2-sourced
+gradient on the same sweep by at most 3.8e-9.** This is #163. The analytic
+side is `nevpt2_grad.py --reference casscf --pc --source both`. It reads the
+GPU's PC dump (`nevpt2_sc_pseudodensity --pc --dump-source-terms` on
+`golden/acrolein_def2svp_cas65_casscf.nevpt2gold`). It then solves block2's
+`Y` and `y` through the same `kappa` sweep, Jacobian and coupled solve, so
+the two gradients can differ only through the source terms. The PC dump on
+a CASSCF reference was held to block2's committed oracle block by block
+first, by #160 on N2 CAS(4,4) ([`pc-nevpt2.md`](pc-nevpt2.md), "On a
+CASSCF reference"), and acrolein's directional PC tier is green ("On CASSCF
+orbitals: acrolein" below). The numerical side is the section's own
+procedure, re-run from scratch for this change. The sweep and the PC
+energies were regenerated on the RTX 3080 (`pc_on_states.py` with the CUDA
+`nevpt2_demo`), and every `grad_num_pc` component, residual and
+translational sum came out as in the table above, to the digits shown.
+
+**The gate is the section's, unchanged:** 1e-6 per component against
+`grad_num_pc`, and the fourteen residual-independent checks. **The verdict
+is the same partial one #126 recorded:** the gradient PASSes, 12 of 14
+checks hold, and `nevpt2_grad.py` exits 1 on the same two ladders.
+
+| | GPU-sourced | block2-sourced |
+|---|---:|---:|
+| max \|g − `grad_num_pc`\| (16 in-plane) | 6.09e-8 (C2 y) | 5.99e-8 (C2 y) |
+| RMS over the 16 | 2.29e-8 | 2.27e-8 |
+| out-of-plane, max \|g\| | 1.4e-11 | 1.4e-11 |
+| sum over atoms, max per column | 3.8e-10 | 3.8e-10 |
+| residual-independent checks | 12 of 14 | 12 of 14 |
+
+Between the two providers, on the one sweep: max \|GPU-sourced −
+block2-sourced\| is 3.8e-9 over all 24 components (RMS 1.4e-9 in-plane).
+The GPU's `Y` alone, solved with block2's `y`, moves it by 3.4e-9, and the
+GPU's `y` alone by 4.4e-10. The source terms themselves differ by at most
+3.3e-8 in `A` (core–virt) and 4.4e-8 in `P y`. That is the size of
+block2's side, a central difference ([`pc-nevpt2.md`](pc-nevpt2.md),
+"block2's exact source terms, on a card"). The block2-sourced gradient of this
+`--source both` run is **bit-identical** to a separate `--source pyscf` run
+on the same tree. That second run reproduces #126's record: 5.99e-8, PASS,
+12 of 14.
+
+**The two failing ladders fail on the same piece, bit for bit, from either
+provider.** Both differentiate block2's `E_corr(PC)` along seed 70's CI
+direction, which does not depend on where `Y` and `y` came from. The
+`y`-linearity ladder (that piece alone) is identical in the two runs: its
+central differences, its two halvings and its round-off floor at `2^-15`.
+The mechanism is the paragraph "Two of the run's fourteen
+residual-independent checks fail" above. CI stationarity's whole-Lagrangian
+ladder moves with the multipliers, but it falls back to pieces in both
+runs. Its `E_corr` piece is that same ladder, so its verdict is identical.
+GPU sourcing therefore can neither cause nor cure either failure. What a
+provider changes is the reference each ladder is compared with, and the
+multipliers:
+
+| check | GPU-sourced \|Richardson − ref\| | block2-sourced |
+|---|---:|---:|
+| `y` linearity, seed 70 (2 halvings, **FAIL** both) | 3.1e-10 | 4.9e-10 |
+| CI stationarity, seed 70 (by pieces, `E_corr` 2 halvings, **FAIL** both) | `E_corr` piece as block2's | as GPU's |
+| `y` linearity, seed 2026 | 4.6e-10 | 1.1e-8 |
+| CI stationarity, seed 2026 | 4.5e-10 | 1.1e-8 |
+| orbital stationarity, seeds 70 / 2026 | 1.3e-8 / 9.9e-9 | 2.7e-8 / 4.3e-9 |
+| nuclear ladder, seeds 70 / 2026 | 8.7e-10 / 2.3e-9 | 1.7e-9 / 2.6e-10 |
+| Hessian-vector, three seeds | ≤ 6.9e-9 (identical) | ≤ 6.9e-9 |
+| PC guard | 168 of 168, gap 2.4e5 | 168 of 168, gap 2.4e5 |
+
+On the CI-direction ladders the GPU's adjoint `y` sits closer to block2's
+own finite-difference ladder than block2's `y` does: 4.6e-10 against
+1.1e-8 on seed 2026. block2's `y` is itself a central difference, with that
+truncation. Nothing was loosened: the rule, `CI_LADDER_PC`, `CI_STEP_PC`
+and the 1e-6 are unchanged.
+
+**N2 CAS(4,4) CASSCF PC, `--source dump`** (no numerical gradient, so the
+checks are its gate, as in the cost probe above): 14 of 14 hold, and the
+gradient is 3.4e-9 from a block2-sourced run of the same state.
+
+**Walls** (the RTX 3080 box, `--workers 12` in the `kappa` sweep):
+
+| run | wall |
+|---|---:|
+| `nevpt2_sc_pseudodensity --pc --dump-source-terms`, acrolein CASSCF, `--tiles 3` | 178 s |
+| `nevpt2_numgrad.py --reference casscf`, the 96-state componentwise sweep | 891 s |
+| `pc_on_states.py --workers 10`, 97 states (GPU 69.6 s) | 79.7 s |
+| `nevpt2_grad.py --reference casscf --pc --source both` | 6236 s (budget 36000 s) |
+| the same, `--source pyscf` (block2) alone | 3906 s |
+| N2 CAS(4,4), `--source dump`, `--workers 2` | 67.2 s |
+
+For part of the time the two acrolein gradient runs shared the CPU with the
+golden regeneration gate, pytest, and the build and ctest tiers. Their
+walls are therefore upper bounds.
+
+```bash
+./build/src/nevpt2_sc_pseudodensity \
+    --golden golden/acrolein_def2svp_cas65_casscf.nevpt2gold --tiles 3 --pc \
+    --dump-source-terms /tmp/acrolein_casscf_pc.gradsrc
+uv run python reference_data/nevpt2_grad.py --case acrolein_def2svp_cas65 \
+    --reference casscf --pc --source both --workers 12 \
+    --source-path /tmp/acrolein_casscf_pc.gradsrc \
+    --grad-num /tmp/acrolein_casscf_pc.numgrad.npz
+```
+
+The dump needs `golden/acrolein_def2svp_cas65_casscf.gradgold`, which is
+gitignored. Regenerate it with the `--mo-from … --gradgold` command in
+[`reference-data.md`](reference-data.md), "Regenerating the golden file".
+It came out at its recorded sha256, and the golden beside it
+byte-identical.
 
 ### Why there is no ctest entry for it
 

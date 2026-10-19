@@ -18,6 +18,7 @@ a test that compared against ``HVP_TOL`` would move with it.
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 
 import nevpt2_grad as ng
@@ -107,14 +108,61 @@ def test_dense_operator_is_symmetric_and_positive(grads):
 
 @pytest.mark.parametrize("extra", [
     ["--energy-ordered"],
-    ["--pc", "--source", "dump", "--source-path", "x.gradsrc"],
-    ["--pc", "--source", "both", "--source-path", "x.gradsrc"],
+    ["--source", "dump", "--source-path", "x.gradsrc", "--edot-check"],
 ])
 def test_casscf_refuses_what_it_is_not_validated_for(monkeypatch, extra):
     monkeypatch.setattr(sys, "argv", ["nevpt2_grad.py", "--case", "n2_ccpvdz_cas44",
                                       "--reference", "casscf", *extra])
-    with pytest.raises(SystemExit, match="--reference casscf"):
+    with pytest.raises(SystemExit, match="--reference casscf: .* refused"):
         ng.main()
+
+
+class _PastTheGate(Exception):
+    """Raised by a stubbed ``build_state``: the run got past every refusal."""
+
+
+@pytest.mark.parametrize("source", ["dump", "both"])
+def test_casscf_takes_a_pc_dump(monkeypatch, source):
+    """#163: ``--reference casscf --pc --source dump/both`` is no longer
+    refused -- the PC dump on a CASSCF reference has been through a gradient
+    (docs/testing.md, "PC on a CASSCF reference: acrolein"). The run is
+    stopped at ``build_state``, the first expensive step, so reaching it is
+    the claim: no refusal fired before it."""
+    def stop(*_a, **_k):
+        raise _PastTheGate
+    monkeypatch.setattr(ng, "build_state", stop)
+    monkeypatch.setattr(sys, "argv", ["nevpt2_grad.py", "--case", "n2_ccpvdz_cas44",
+                                      "--reference", "casscf", "--pc", "--source", source,
+                                      "--source-path", "x.gradsrc"])
+    with pytest.raises(_PastTheGate):
+        ng.main()
+
+
+def test_casscf_takes_a_pc_dump_in_its_own_basis(grads, tmp_path):
+    """#163: a PC ``.gradsrc`` (``pc`` = 1) on a CASSCF state is read as
+    written, like the SC one, and its ``e_corr`` is held to the PC total;
+    the scheme check still refuses it for an SC run."""
+    st = grads.st
+    rng = np.random.default_rng(163)
+    y_mat = rng.standard_normal((st.nmo, st.nmo))
+    y_ci = rng.standard_normal(st.ci.shape)
+    e_pc = st.e_corr + 1e-3  # a stand-in PC total, distinct from SC's
+    st_pc = dataclasses.replace(st, e_corr_pc=e_pc)
+    path = tmp_path / "pc.gradsrc"
+    with path.open("wb") as fh:
+        np.savez(fh, kappa_source=y_mat, ci_source=y_ci, ci=st.ci, e_corr=e_pc, pc=1,
+                 ncore=st.ncore, nact=st.nact, nvirt=st.nvirt)
+    src = ng.load_source_terms(path, st_pc, pc=True)
+    assert src.from_dump
+    assert np.array_equal(src.kappa, y_mat - y_mat.T)
+    assert np.array_equal(src.ci, y_ci)
+    with pytest.raises(SystemExit, match="PC-NEVPT2 source terms"):
+        ng.load_source_terms(path, st_pc, pc=False)
+    sc_total = tmp_path / "sc_total.gradsrc"
+    with sc_total.open("wb") as fh:
+        np.savez(fh, kappa_source=y_mat, ci_source=y_ci, ci=st.ci, e_corr=st.e_corr, pc=1)
+    with pytest.raises(SystemExit, match="PC total"):
+        ng.load_source_terms(sc_total, st_pc, pc=True)
 
 
 def test_casscf_takes_an_sc_dump_in_its_own_basis(grads, tmp_path):
