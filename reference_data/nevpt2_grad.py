@@ -367,10 +367,11 @@ Its numerical gradient is ``nevpt2_numgrad.py --reference casscf --npz
 PATH`` (every displaced state re-optimised), read with ``--grad-num PATH``;
 without one, the gate is the residual-independent checks. The measured
 numbers and the wall-clock budget per case are in docs/reference-data.md,
-"The analytic gradient". ``--source dump`` / ``both`` (#125, SC only) read the
-GPU's ``.gradsrc`` unrotated: the dump is in the golden's basis, and so is
+"The analytic gradient". ``--source dump`` / ``both`` (SC #125, PC #163) read
+the GPU's ``.gradsrc`` unrotated: the dump is in the golden's basis, and so is
 this branch's state. The SC verdict, both providers, is docs/testing.md, "SC
-on a CASSCF reference: LiF, and the N2 degeneracy probe".
+on a CASSCF reference: LiF, and the N2 degeneracy probe"; the PC one is
+docs/testing.md, "PC on a CASSCF reference: acrolein".
 
 **``--pc`` on this branch** (#126) is the CASCI branch's ``--pc`` fed into the
 coupled solve, and nothing more: the source terms ``Y`` and ``y`` are
@@ -430,6 +431,14 @@ Usage::
     # PC on the CASSCF branch (#126), against the GPU-differenced grad_num_pc:
     uv run python reference_data/nevpt2_grad.py --case acrolein_def2svp_cas65 \
         --reference casscf --pc --grad-num /tmp/acrolein_casscf_pc.numgrad.npz
+    # ... and from the GPU's PC dump (#163), beside block2's on the same sweep:
+    ./build/src/nevpt2_sc_pseudodensity \
+        --golden golden/acrolein_def2svp_cas65_casscf.nevpt2gold --tiles 3 --pc \
+        --dump-source-terms /tmp/acrolein_casscf_pc.gradsrc
+    uv run python reference_data/nevpt2_grad.py --case acrolein_def2svp_cas65 \
+        --reference casscf --pc --source both \
+        --source-path /tmp/acrolein_casscf_pc.gradsrc \
+        --grad-num /tmp/acrolein_casscf_pc.numgrad.npz
 
 ``--out`` writes the gradient and every residual as an ``.npz``; nothing is
 written by default, and **no committed file is ever touched** (the
@@ -3814,21 +3823,21 @@ def run(args) -> dict:
         # What the CASSCF branch is validated for, and nothing else: SC-NEVPT2
         # and its --casci-only smoke test (#122) and PC-NEVPT2 (#126) with the
         # offline source terms -- PySCF's SC ones, block2's PC ones -- and
-        # SC-NEVPT2 with the GPU's dumped ones too (#125: --source dump/both;
-        # the dump is in the golden's basis, which on this branch is the
-        # state's own, act_rot = 1). A PC dump on CASSCF orbitals has not
-        # been through a gradient here, so it stays refused.
+        # with the GPU's dumped ones too: SC (#125) and PC (#163; the PC dump
+        # held to block2's oracle block by block on this branch by #160).
+        # The dump is in the golden's basis, which on this branch is the
+        # state's own, act_rot = 1. --edot-check and --energy-ordered have
+        # not been through it.
         refused = [flag for flag, on in (
-            ("--source dump/both with --pc", args.source != "pyscf" and args.pc),
             ("--edot-check", args.edot_check),
             ("--energy-ordered", args.energy_ordered)) if on]
         if refused:
             raise SystemExit(
                 f"--reference casscf: {', '.join(refused)} refused. The CASSCF branch "
                 "differentiates SC- or PC-NEVPT2 (or, --casci-only, the CASSCF energy) "
-                "with the offline source terms (PySCF's SC, block2's PC), and SC-NEVPT2 "
-                "with the GPU's dumped SC ones (#125); no GPU PC source term has been "
-                "through a gradient on it, and its active space is the sidecar's"
+                "with the offline source terms (PySCF's SC, block2's PC) or the GPU's "
+                "dumped ones (SC #125, PC #163); --edot-check has not been through "
+                "it, and --energy-ordered's active space is not the sidecar's"
             )
         if args.mo_from is None:
             default = REPO / "golden" / f"{args.case}_casscf.mogold"
@@ -4539,9 +4548,9 @@ def main() -> None:
                          "converged CASSCF orbitals of --mo-from: CASSCF stationarity "
                          "as the constraint, one coupled CP-CASSCF solve, sections 1.4 "
                          "and 2.7). SC, or PC with --pc, with the offline source "
-                         "terms (PySCF's SC, block2's PC), or SC with the GPU's "
-                         "dumped ones (--source dump/both, #125); --grad-num "
-                         "optional")
+                         "terms (PySCF's SC, block2's PC), or with the GPU's "
+                         "dumped ones (--source dump/both: SC #125, PC #163); "
+                         "--grad-num optional")
     ap.add_argument("--mo-from", type=Path, default=None,
                     help="with --reference casscf: the .mogold sidecar of CASSCF "
                          "orbitals (generate_golden.py --casscf --mo-out), read and "
