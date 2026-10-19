@@ -121,6 +121,32 @@ RdmBuildResult buildRdmTangentsDevice(const RdmBuildOptions& opt, const Tensor& 
                                       int64_t nelecB, const Tensor& h2e,
                                       const DeviceResources& res);
 
+// The THREE RDM sets a second derivative of the energy along (u, v) needs
+// (docs/hessian-theory.md, Sec. 3 and 4.4), each the tangent build's output
+// at one pair of vectors: `cu` = buildRdmTangentsDevice(ci, u), the first
+// derivative along u; `cv` the same along v; and `uv` =
+// buildRdmTangentsDevice(u, v), the RDMs' exact second derivative
+// d^2(dm)/dc^2 [u, v] (their third derivative is zero).
+struct RdmHessianTangents {
+  RdmBuildResult cu;
+  RdmBuildResult cv;
+  RdmBuildResult uv;
+};
+
+// All three from ONE tile sweep: produce runs once per distinct VECTOR -- ci,
+// u, v -- not once per pair, so the per-tile working set is
+// 3 n^4 + 4 n^2 doubles per determinant (printed as `per-tile transition
+// blocks (R x3, L2 x3, W)`), about 1.5x the tangent build's rather than 3x,
+// and its tile floors are its own (docs/performance.md, "Tile floors"). Each
+// set equals the tangent build at its pair to round-off (the same kernels,
+// summed in the same order; test/rdm/rdm_tangent_tests.cpp's
+// RdmHessianTangentsTests). Same digests, stream, pool and --profile table
+// as buildRdmTangentsDevice; `u` and `v` have `ci`'s shape.
+RdmHessianTangents buildRdmHessianTangentsDevice(const RdmBuildOptions& opt, const Tensor& ci,
+                                                 const Tensor& u, const Tensor& v, int64_t norb,
+                                                 int64_t nelecA, int64_t nelecB,
+                                                 const Tensor& h2e, const DeviceResources& res);
+
 // The TRANSPOSE of the build's f3 path with respect to the integrals (#89):
 // given G_ac = dE/d(f3ac) and G_ca = dE/d(f3ca) at the state `ci` (whose
 // plain build left `dm3`), the physicist-ordered (n_act,)^4 tensor

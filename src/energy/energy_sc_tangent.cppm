@@ -104,14 +104,94 @@ DeviceTensor make_a25_dot(const DeviceTensor& h1e, const DeviceTensor& h2e,
 // --- the shared plumbing ------------------------------------------------------
 
 // One set of RDMs, as every class below reads them: the plain ones, or the
-// tangent ones in their place. References to tensors the caller owns.
-struct ScRdms {
-  const DeviceTensor& dm1;
-  const DeviceTensor& dm2;
-  const DeviceTensor& dm3;
-  const DeviceTensor& f3ac;
-  const DeviceTensor& f3ca;
+// tangent ones in their place -- nevpt2.energy's exported RdmTensors, which
+// energiesHessianDevice takes four of. References to tensors the caller owns.
+using ScRdms = RdmTensors;
+
+// --- the class blocks, at an RDM set or at a tangent one ----------------------
+//
+// Every class's metric and Dyall blocks, built once before its slab walk. At
+// the plain RDMs (`BlockOrder::Value`) they are the make_* builders as
+// energy_<class> calls them. At ANY tangent RDM set (`BlockOrder::Tangent`)
+// -- a first derivative's, or the second derivative's (:sc_hessian) -- every
+// builder is linear in the RDMs, so it is the same make_* on the tangent
+// RDMs, except the three tangent-only builders above for the blocks that
+// carry an RDM-free term. Shared by :sc_tangent and :sc_hessian, so the two
+// cannot drift apart.
+enum class BlockOrder { Value, Tangent };
+
+struct SrBlocks {
+  DeviceTensor a16, a17, a19;
 };
+// No RDM-free term: the same three builders at either order.
+SrBlocks srBlocks(const ActiveIntegralsDevice& ai, const ScRdms& r, int64_t norb,
+                  const DeviceResources& dr) {
+  return {make_a16(ai.h1e, ai.h2e, r.dm3, r.f3ac, r.f3ca, norb, dr),
+          make_a17(ai.h1e, ai.h2e, r.dm2, r.dm3, dr), make_a19(ai.h1e, ai.h2e, r.dm1, r.dm2, dr)};
+}
+
+struct SiBlocks {
+  DeviceTensor a22, a23, a25, dm3_h, dm2_h, dm1_h;
+};
+// a25 is the one builder whose chain the tangent cannot reuse as it stands
+// (its 2 h1e^T term reads no RDM); dm1_h's constant 2 delta is the other.
+SiBlocks siBlocks(const ActiveIntegralsDevice& ai, const ScRdms& r, int64_t norb,
+                  BlockOrder order, const DeviceResources& dr) {
+  const bool dot = order == BlockOrder::Tangent;
+  DeviceTensor dm1_h;
+  if (dot) {
+    dm1_h = make_hdm1_dot(r.dm1, dr);
+  } else {
+    const DeviceTensor delta = deviceEye(norb, dr);
+    dm1_h = deviceEinsumNew("ij->ij", {&delta}, 2.0, dr);
+    deviceTransposeAccum(r.dm1, {1, 0}, dm1_h, -1.0, dr.stream());
+  }
+  return {make_a22(ai.h1e, ai.h2e, r.dm2, r.dm3, r.f3ac, r.f3ca, norb, dr),
+          make_a23(ai.h1e, ai.h2e, r.dm1, r.dm2, r.dm3, dr),
+          dot ? make_a25_dot(ai.h1e, ai.h2e, r.dm1, r.dm2, dr)
+              : make_a25(ai.h1e, ai.h2e, r.dm1, r.dm2, dr),
+          make_dm3_h(r.dm2, r.dm3, dr),
+          make_dm2_h(r.dm1, r.dm2, dr),
+          std::move(dm1_h)};
+}
+
+struct SijrBlocks {
+  DeviceTensor hdm1, a3;
+};
+// make_a3 is linear in (hdm1, dm1, dm2), so the tangent hdm1 carries it.
+SijrBlocks sijrBlocks(const ActiveIntegralsDevice& ai, const ScRdms& r, BlockOrder order,
+                      const DeviceResources& dr) {
+  DeviceTensor hdm1 =
+      order == BlockOrder::Tangent ? make_hdm1_dot(r.dm1, dr) : make_hdm1(r.dm1, dr);
+  DeviceTensor a3 = make_a3(ai.h1e, ai.h2e, r.dm1, r.dm2, hdm1, dr);
+  return {std::move(hdm1), std::move(a3)};
+}
+
+struct SijBlocks {
+  DeviceTensor hdm1, hdm2, hdm3, a9;
+};
+// make_hdm3 and make_a9 are linear in the hole RDMs they take, so the tangent
+// hdm1/hdm2 carry the two builders that needed a tangent of their own.
+SijBlocks sijBlocks(const ActiveIntegralsDevice& ai, const ScRdms& r, BlockOrder order,
+                    const DeviceResources& dr) {
+  const bool dot = order == BlockOrder::Tangent;
+  DeviceTensor hdm1 = dot ? make_hdm1_dot(r.dm1, dr) : make_hdm1(r.dm1, dr);
+  DeviceTensor hdm2 = dot ? make_hdm2_dot(r.dm1, r.dm2, dr) : make_hdm2(r.dm1, r.dm2, dr);
+  DeviceTensor hdm3 = make_hdm3(r.dm1, r.dm2, r.dm3, hdm1, hdm2, dr);
+  DeviceTensor a9 = make_a9(ai.h1e, ai.h2e, hdm1, hdm2, hdm3, dr);
+  return {std::move(hdm1), std::move(hdm2), std::move(hdm3), std::move(a9)};
+}
+
+struct SirBlocks {
+  DeviceTensor a12, a13;
+};
+// No RDM-free block (Sir's one RDM-free term is in its norm chain, which
+// sirNormSlab's `withOneElectronTerm` drops): the same two at either order.
+SirBlocks sirBlocks(const ActiveIntegralsDevice& ai, const ScRdms& r,
+                    const DeviceResources& dr) {
+  return {make_a12(ai.h1e, ai.h2e, r.dm1, r.dm2, r.dm3, dr),
+          make_a13(ai.h1e, ai.h2e, r.dm1, r.dm2, r.dm3, dr)};
+}
 
 // One class's value and tangent: normToEnergy's pair, and the derivative of
 // each along the direction.
@@ -195,16 +275,9 @@ const std::vector<double>* ptrOf(const std::optional<std::vector<double>>& v) {
 ScTangentSums tangent_Sr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                          const Tensor& hostEVirt, const ScRdms& r, const ScRdms& d,
                          const OrbitalEnergyDot* eps, int64_t norb, const DeviceResources& dr) {
-  const DeviceTensor& h1e = ai.h1e;
-  const DeviceTensor& h2e = ai.h2e;
-
-  DeviceTensor a16 = make_a16(h1e, h2e, r.dm3, r.f3ac, r.f3ca, norb, dr);
-  DeviceTensor a17 = make_a17(h1e, h2e, r.dm2, r.dm3, dr);
-  DeviceTensor a19 = make_a19(h1e, h2e, r.dm1, r.dm2, dr);
   // The same three builders on the tangent RDMs: each is linear in them.
-  DeviceTensor a16Dot = make_a16(h1e, h2e, d.dm3, d.f3ac, d.f3ca, norb, dr);
-  DeviceTensor a17Dot = make_a17(h1e, h2e, d.dm2, d.dm3, dr);
-  DeviceTensor a19Dot = make_a19(h1e, h2e, d.dm1, d.dm2, dr);
+  const SrBlocks base = srBlocks(ai, r, norb, dr);
+  const SrBlocks dot = srBlocks(ai, d, norb, dr);
 
   ScTangentSums acc;
   forBatches(src.extent(ExtBlock::Sr), batch, [&](int64_t b0, int64_t b1) {
@@ -212,9 +285,9 @@ ScTangentSums tangent_Sr(const ActiveIntegralsDevice& ai, IntegralSource& src, i
     const DeviceTensor& h2e_v = slab;
     DeviceTensor h1e_v = sliceAxis(ai.h1e_v_Sr, 0, b0, b1);
 
-    DeviceTensor ener = srHSlab(h2e_v, h1e_v, a16, a17, a19, dr);
+    DeviceTensor ener = srHSlab(h2e_v, h1e_v, base.a16, base.a17, base.a19, dr);
     DeviceTensor norm = srNormSlab(h2e_v, h1e_v, r.dm1, r.dm2, r.dm3, dr);
-    DeviceTensor enerDot = srHSlab(h2e_v, h1e_v, a16Dot, a17Dot, a19Dot, dr);
+    DeviceTensor enerDot = srHSlab(h2e_v, h1e_v, dot.a16, dot.a17, dot.a19, dr);
     DeviceTensor normDot = srNormSlab(h2e_v, h1e_v, d.dm1, d.dm2, d.dm3, dr);
 
     const auto diffDot =
@@ -228,27 +301,9 @@ ScTangentSums tangent_Sr(const ActiveIntegralsDevice& ai, IntegralSource& src, i
 ScTangentSums tangent_Si(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                          const Tensor& hostECore, const ScRdms& r, const ScRdms& d,
                          const OrbitalEnergyDot* eps, int64_t norb, const DeviceResources& dr) {
-  const wwrStream_t s = dr.stream();
-  const DeviceTensor& h1e = ai.h1e;
-  const DeviceTensor& h2e = ai.h2e;
-
-  DeviceTensor a22 = make_a22(h1e, h2e, r.dm2, r.dm3, r.f3ac, r.f3ca, norb, dr);
-  DeviceTensor a23 = make_a23(h1e, h2e, r.dm1, r.dm2, r.dm3, dr);
-  DeviceTensor a25 = make_a25(h1e, h2e, r.dm1, r.dm2, dr);
-  DeviceTensor delta = deviceEye(norb, dr);
-  DeviceTensor dm3_h = make_dm3_h(r.dm2, r.dm3, dr);
-  DeviceTensor dm2_h = make_dm2_h(r.dm1, r.dm2, dr);
-  DeviceTensor dm1_h = deviceEinsumNew("ij->ij", {&delta}, 2.0, dr);
-  deviceTransposeAccum(r.dm1, {1, 0}, dm1_h, -1.0, s);
-
-  // a25 is the one builder whose chain the tangent cannot reuse as it stands
-  // (its 2 h1e^T term reads no RDM); dm1_h's constant 2 delta is the other.
-  DeviceTensor a22Dot = make_a22(h1e, h2e, d.dm2, d.dm3, d.f3ac, d.f3ca, norb, dr);
-  DeviceTensor a23Dot = make_a23(h1e, h2e, d.dm1, d.dm2, d.dm3, dr);
-  DeviceTensor a25Dot = make_a25_dot(h1e, h2e, d.dm1, d.dm2, dr);
-  DeviceTensor dm3_hDot = make_dm3_h(d.dm2, d.dm3, dr);
-  DeviceTensor dm2_hDot = make_dm2_h(d.dm1, d.dm2, dr);
-  DeviceTensor dm1_hDot = make_hdm1_dot(d.dm1, dr);
+  // siBlocks says which two blocks the tangent cannot build as they stand.
+  const SiBlocks base = siBlocks(ai, r, norb, BlockOrder::Value, dr);
+  const SiBlocks dot = siBlocks(ai, d, norb, BlockOrder::Tangent, dr);
 
   ScTangentSums acc;
   forBatches(src.extent(ExtBlock::Si), batch, [&](int64_t b0, int64_t b1) {
@@ -256,10 +311,10 @@ ScTangentSums tangent_Si(const ActiveIntegralsDevice& ai, IntegralSource& src, i
     const DeviceTensor& h2e_v = slab;
     DeviceTensor h1e_v = sliceAxis(ai.h1e_v_Si, 1, b0, b1);
 
-    DeviceTensor ener = siHSlab(h2e_v, h1e_v, a22, a23, a25, dr);
-    DeviceTensor norm = siNormSlab(h2e_v, h1e_v, dm1_h, dm2_h, dm3_h, dr);
-    DeviceTensor enerDot = siHSlab(h2e_v, h1e_v, a22Dot, a23Dot, a25Dot, dr);
-    DeviceTensor normDot = siNormSlab(h2e_v, h1e_v, dm1_hDot, dm2_hDot, dm3_hDot, dr);
+    DeviceTensor ener = siHSlab(h2e_v, h1e_v, base.a22, base.a23, base.a25, dr);
+    DeviceTensor norm = siNormSlab(h2e_v, h1e_v, base.dm1_h, base.dm2_h, base.dm3_h, dr);
+    DeviceTensor enerDot = siHSlab(h2e_v, h1e_v, dot.a22, dot.a23, dot.a25, dr);
+    DeviceTensor normDot = siNormSlab(h2e_v, h1e_v, dot.dm1_h, dot.dm2_h, dot.dm3_h, dr);
 
     const auto diffDot =
         diffDotOf(eps, [&](const Tensor& ec, const Tensor&) { return siDiff(ec, b0, b1); });
@@ -308,23 +363,18 @@ ScTangentSums tangent_Sijr(const ActiveIntegralsDevice& ai, IntegralSource& src,
                            const ScRdms& d, const OrbitalEnergyDot* eps,
                            const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
-  const DeviceTensor& h1e = ai.h1e;
-  const DeviceTensor& h2e = ai.h2e;
-  DeviceTensor hdm1 = make_hdm1(r.dm1, dr);
-  DeviceTensor a3 = make_a3(h1e, h2e, r.dm1, r.dm2, hdm1, dr);
-  // make_a3 is linear in (hdm1, dm1, dm2), so the tangent hdm1 carries it.
-  DeviceTensor hdm1Dot = make_hdm1_dot(d.dm1, dr);
-  DeviceTensor a3Dot = make_a3(h1e, h2e, d.dm1, d.dm2, hdm1Dot, dr);
+  const SijrBlocks base = sijrBlocks(ai, r, BlockOrder::Value, dr);
+  const SijrBlocks dot = sijrBlocks(ai, d, BlockOrder::Tangent, dr);
 
   ScTangentSums acc;
   forBatches(src.extent(ExtBlock::Sijr), batch, [&](int64_t b0, int64_t b1) {
     DeviceTensor slab = src.slab(ExtBlock::Sijr, b0, b1, dr);  // (nr, a, c, c)
     const DeviceTensor& h2e_v = slab;
 
-    DeviceTensor normT = sijrSlab(h2e_v, hdm1, dr);
-    DeviceTensor hT = sijrSlab(h2e_v, a3, dr);
-    DeviceTensor normTDot = sijrSlab(h2e_v, hdm1Dot, dr);
-    DeviceTensor hTDot = sijrSlab(h2e_v, a3Dot, dr);
+    DeviceTensor normT = sijrSlab(h2e_v, base.hdm1, dr);
+    DeviceTensor hT = sijrSlab(h2e_v, base.a3, dr);
+    DeviceTensor normTDot = sijrSlab(h2e_v, dot.hdm1, dr);
+    DeviceTensor hTDot = sijrSlab(h2e_v, dot.a3, dr);
 
     const Tensor hostNormT = downloadTensor(normT, s);
     const Tensor hostHT = downloadTensor(hT, s);
@@ -411,29 +461,18 @@ ScTangentSums tangent_Srs(const ActiveIntegralsDevice& ai, IntegralSource& src, 
 ScTangentSums tangent_Sij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                           const Tensor& hostECore, const ScRdms& r, const ScRdms& d,
                           const OrbitalEnergyDot* eps, const DeviceResources& dr) {
-  const DeviceTensor& h1e = ai.h1e;
-  const DeviceTensor& h2e = ai.h2e;
   if (hostECore.size() == 0) return {};
-  DeviceTensor hdm1 = make_hdm1(r.dm1, dr);
-  DeviceTensor hdm2 = make_hdm2(r.dm1, r.dm2, dr);
-  DeviceTensor hdm3 = make_hdm3(r.dm1, r.dm2, r.dm3, hdm1, hdm2, dr);
-  DeviceTensor a9 = make_a9(h1e, h2e, hdm1, hdm2, hdm3, dr);
-  // make_hdm3 and make_a9 are linear in the hole RDMs they take, so the
-  // tangent hdm1/hdm2 carry the two builders that needed a tangent of their
-  // own.
-  DeviceTensor hdm1Dot = make_hdm1_dot(d.dm1, dr);
-  DeviceTensor hdm2Dot = make_hdm2_dot(d.dm1, d.dm2, dr);
-  DeviceTensor hdm3Dot = make_hdm3(d.dm1, d.dm2, d.dm3, hdm1Dot, hdm2Dot, dr);
-  DeviceTensor a9Dot = make_a9(h1e, h2e, hdm1Dot, hdm2Dot, hdm3Dot, dr);
+  const SijBlocks base = sijBlocks(ai, r, BlockOrder::Value, dr);
+  const SijBlocks dot = sijBlocks(ai, d, BlockOrder::Tangent, dr);
 
   ScTangentSums acc;
   forBatches(src.extent(ExtBlock::Sij), batch, [&](int64_t b0, int64_t b1) {
     DeviceTensor slab = src.slab(ExtBlock::Sij, b0, b1, dr);  // (a, a, ni, c)
     const DeviceTensor& h2e_v = slab;
-    DeviceTensor norm = sijSlab(h2e_v, hdm2, dr);
-    DeviceTensor h = sijSlab(h2e_v, a9, dr);
-    DeviceTensor normDot = sijSlab(h2e_v, hdm2Dot, dr);
-    DeviceTensor hDot = sijSlab(h2e_v, a9Dot, dr);
+    DeviceTensor norm = sijSlab(h2e_v, base.hdm2, dr);
+    DeviceTensor h = sijSlab(h2e_v, base.a9, dr);
+    DeviceTensor normDot = sijSlab(h2e_v, dot.hdm2, dr);
+    DeviceTensor hDot = sijSlab(h2e_v, dot.a9, dr);
 
     const auto diffDot =
         diffDotOf(eps, [&](const Tensor& ec, const Tensor&) { return sijDiff(ec, b0, b1); });
@@ -447,13 +486,8 @@ ScTangentSums tangent_Sir(const ActiveIntegralsDevice& ai, IntegralSource& src, 
                           const Tensor& hostECore, const Tensor& hostEVirt, const ScRdms& r,
                           const ScRdms& d, const OrbitalEnergyDot* eps,
                           const DeviceResources& dr) {
-  const DeviceTensor& h1e = ai.h1e;
-  const DeviceTensor& h2e = ai.h2e;
-
-  DeviceTensor a12 = make_a12(h1e, h2e, r.dm1, r.dm2, r.dm3, dr);
-  DeviceTensor a13 = make_a13(h1e, h2e, r.dm1, r.dm2, r.dm3, dr);
-  DeviceTensor a12Dot = make_a12(h1e, h2e, d.dm1, d.dm2, d.dm3, dr);
-  DeviceTensor a13Dot = make_a13(h1e, h2e, d.dm1, d.dm2, d.dm3, dr);
+  const SirBlocks base = sirBlocks(ai, r, dr);
+  const SirBlocks dot = sirBlocks(ai, d, dr);
 
   ScTangentSums acc;
   forBatches(src.extent(ExtBlock::Sir1), batch, [&](int64_t b0, int64_t b1) {
@@ -465,11 +499,11 @@ ScTangentSums tangent_Sir(const ActiveIntegralsDevice& ai, IntegralSource& src, 
 
     DeviceTensor norm = sirNormSlab(h2e_v1, h2e_v2, h1e_v, r.dm1, r.dm2,
                                     /*withOneElectronTerm=*/true, dr);
-    DeviceTensor h = sirHSlab(h2e_v1, h2e_v2, a12, a13, dr);
+    DeviceTensor h = sirHSlab(h2e_v1, h2e_v2, base.a12, base.a13, dr);
     // The one-electron term reads no RDM: constant, so out of the tangent.
     DeviceTensor normDot = sirNormSlab(h2e_v1, h2e_v2, h1e_v, d.dm1, d.dm2,
                                        /*withOneElectronTerm=*/false, dr);
-    DeviceTensor hDot = sirHSlab(h2e_v1, h2e_v2, a12Dot, a13Dot, dr);
+    DeviceTensor hDot = sirHSlab(h2e_v1, h2e_v2, dot.a12, dot.a13, dr);
 
     const auto diffDot = diffDotOf(eps, [&](const Tensor& ec, const Tensor& ev) {
       return sirDiff(ec, ev, b0, b1);

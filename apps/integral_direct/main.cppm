@@ -60,6 +60,9 @@ int main(int argc, char** argv) {
   // --sc-tangent's one direction, fixed so the check is reproducible run to
   // run (the several directions of the dot-product test are later work).
   constexpr std::uint64_t kTangentSeed = 0x5eed'0032u;
+  // --sc-hessian's second direction v; its u is kTangentSeed's, so its Euler
+  // check differentiates the very Edot(u) --sc-tangent gates.
+  constexpr std::uint64_t kHessianSeedV = 0x5eed'0153u;
   const std::vector<std::string_view> args(argv + 1, argv + argc);
 
   // Every flag, the common ones and this demo's own, and every check that
@@ -83,10 +86,20 @@ int main(int argc, char** argv) {
   // the same two over its slabs (#162); parseArgs has already refused them
   // together, with an approximate digest, --sc-tangent with --pc, and either
   // with --profile.
+  //
+  // --sc-hessian (#153): the SC total's SECOND directional derivative
+  // Eddot(u, v), at the golden's fixed orbital energies, against Euler at
+  // second order, the norms' exact second-order increment and one finite
+  // difference of Edot (nevpt2.ci_checks' checkScHessian). Refused, like
+  // --sc-tangent, with --pc, --profile, an approximate digest and the other
+  // two checks.
   const bool scTangentArg = parsedOpts.scTangent;
   const bool gradientSourceArg = parsedOpts.gradientSource;
-  const bool differentiates = scTangentArg || gradientSourceArg;
-  const char* const whichFlag = scTangentArg ? "--sc-tangent" : "--gradient-source";
+  const bool scHessianArg = parsedOpts.scHessian;
+  const bool differentiates = scTangentArg || gradientSourceArg || scHessianArg;
+  const char* const whichFlag = scTangentArg   ? "--sc-tangent"
+                                : scHessianArg ? "--sc-hessian"
+                                               : "--gradient-source";
 
   // A missing, unreadable or malformed golden file -- or one without an
   // array this demo reads -- is the user's input: reported once, here, with a
@@ -232,6 +245,23 @@ int main(int argc, char** argv) {
   if (scTangentArg) {
     const nevpt2::Result<bool> ok =
         nevpt2::checkScTangent(g, opt.rdm, checkInts, rdm, kTangentSeed, *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
+
+  // --sc-hessian: Eddot(u, v) (nevpt2.energy's energiesHessianDevice over
+  // nevpt2.rdm_build's three-argument tangent build), checked by
+  // nevpt2.ci_checks' checkScHessian; like --sc-tangent, its own PASS line is
+  // the gate and the golden comparison below does not run. The three-argument
+  // build holds three L2 blocks per tile, so its tile floors are its own
+  // (docs/performance.md, "Tile floors").
+  if (scHessianArg) {
+    const nevpt2::Result<bool> ok = nevpt2::checkScHessian(g, opt.rdm, checkInts, rdm,
+                                                           kTangentSeed, kHessianSeedV, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

@@ -56,6 +56,12 @@
 //                          and the class form per perturber with the guard
 //   NormToEnergyMultiplierTangentDeathTest  six vectors of different lengths
 //                          abort
+//   NormToEnergyHessianSandwichTests  Eddot's second sum over a class (#153):
+//                          symmetric in (u, v), the central difference of
+//                          normToEnergyTangent's base point at fixed Delta,
+//                          and the guard
+//   NormToEnergyHessianSandwichDeathTest  nine vectors of different lengths
+//                          abort
 //
 // THE TANGENT'S ONLY CALCULUS IS HERE. The class contractions are linear in
 // the RDMs, so their tangents are the same einsum chains with the tangent
@@ -900,6 +906,71 @@ TEST(NormToEnergyMultiplierTangentDeathTest, MismatchedLengthsAbort) {
   EXPECT_DEATH((void)normToEnergyMultiplierTangent({1.0, 2.0}, {1.0, 1.0}, {1.0, 1.0},
                                                    {1.0, 1.0}, {1.0, 1.0}, {1.0}),
                "normToEnergyMultiplierTangent: norm/h/diff/normDot/hDot/diffDot lengths differ");
+}
+
+// --- NormToEnergyHessianSandwichTests --------------------------------------------
+//
+// Eddot's second sum over one class (#153, docs/hessian-theory.md Sec. 4.1):
+// the 3x3 between two directions' first-order tangents.
+
+TEST(NormToEnergyHessianSandwichTests, IsSymmetricInTheTwoDirections) {
+  const std::vector<double> nu = {0.25, -1.5}, hu = {-0.5, 0.75}, du = {0.3, -0.2};
+  const std::vector<double> nv = {1.0, 0.5}, hv = {0.125, -2.0}, dv = {-0.4, 0.1};
+  const double uv = normToEnergyHessianSandwich(kHandNorm, kHandH, kHandDiff, nu, hu, du, nv,
+                                                hv, dv);
+  const double vu = normToEnergyHessianSandwich(kHandNorm, kHandH, kHandDiff, nv, hv, dv, nu,
+                                                hu, du);
+  EXPECT_NEAR(uv, vu, 1e-14);
+  EXPECT_GT(std::fabs(uv), 1e-3) << "a vacuous comparison";
+}
+
+TEST(NormToEnergyHessianSandwichTests, IsTheTangentsCentralDifferenceAtFixedDelta) {
+  // With Delta frozen, d/ds of normToEnergyTangent(N + s Nv, H + s Hv; Nu, Hu)
+  // is exactly the sandwich at zero Deltadot: the tangent is linear in its
+  // direction, so only the base point moves. The central difference's error
+  // falls fourfold per halving.
+  const std::vector<double> nu = {0.25, -1.5}, hu = {-0.5, 0.75};
+  const std::vector<double> nv = {1.0, 0.5}, hv = {0.125, -2.0};
+  const std::vector<double> zeros = {0.0, 0.0};
+  const double want = normToEnergyHessianSandwich(kHandNorm, kHandH, kHandDiff, nu, hu, zeros,
+                                                  nv, hv, zeros);
+  const auto at = [&](double s) {
+    std::vector<double> n = kHandNorm, h = kHandH;
+    for (std::size_t k = 0; k < n.size(); ++k) {
+      n[k] += s * nv[k];
+      h[k] += s * hv[k];
+    }
+    return normToEnergyTangent(n, h, kHandDiff, nu, hu).second;
+  };
+  double prev = 0.0;
+  for (const double step : {0.0625, 0.03125, 0.015625, 0.0078125}) {
+    const double err = std::fabs((at(step) - at(-step)) / (2.0 * step) - want);
+    if (prev > 0.0) EXPECT_NEAR(prev / err, 4.0, 0.5) << "Richardson ratio at " << step;
+    prev = err;
+  }
+  EXPECT_LT(prev, 1e-3);
+}
+
+TEST(NormToEnergyHessianSandwichTests, AGuardedPerturberContributesNothing) {
+  // N = 0 is normToEnergy's empty perturber space: the sandwich over it alone
+  // is zero, and adding it to a class changes nothing.
+  const double alone =
+      normToEnergyHessianSandwich({0.0}, {5.0}, {1.0}, {1.0}, {2.0}, {4.0}, {3.0}, {-1.0}, {0.5});
+  EXPECT_EQ(alone, 0.0);
+  const double without = normToEnergyHessianSandwich({0.5}, {1.0}, {1.0}, {0.25}, {-0.5}, {0.3},
+                                                     {1.0}, {0.125}, {-0.4});
+  const double with = normToEnergyHessianSandwich({0.5, 0.0}, {1.0, 5.0}, {1.0, 1.0},
+                                                  {0.25, 1.0}, {-0.5, 2.0}, {0.3, 4.0},
+                                                  {1.0, 3.0}, {0.125, -1.0}, {-0.4, 0.5});
+  EXPECT_EQ(with, without);
+  EXPECT_EQ(normToEnergyHessianSandwich({}, {}, {}, {}, {}, {}, {}, {}, {}), 0.0);
+}
+
+TEST(NormToEnergyHessianSandwichDeathTest, MismatchedLengthsAbort) {
+  EXPECT_DEATH((void)normToEnergyHessianSandwich({1.0, 2.0}, {1.0, 1.0}, {1.0, 1.0}, {1.0, 1.0},
+                                                 {1.0, 1.0}, {1.0, 1.0}, {1.0, 1.0}, {1.0},
+                                                 {1.0, 1.0}),
+               "normToEnergyHessianSandwich: the nine vectors' lengths differ");
 }
 
 // --- PcCoefficientsTests -------------------------------------------------------

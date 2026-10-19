@@ -34,14 +34,17 @@ add_cxx_module_library(
 # needs no kernel and no subscript of its own. energy_pc_tangent.cppm is
 # nevpt2.energy:pc_tangent, the per-class work behind pcTangentsDevice -- the
 # PC class energies' derivative with respect to the CI vector, which
-# differentiates the SOLVE and not the eigendecomposition. No importer sees
-# either. (The metric / Dyall-Hamiltonian intermediates ARE exported, from
+# differentiates the SOLVE and not the eigendecomposition.
+# energy_sc_hessian.cppm is nevpt2.energy:sc_hessian, the SC classes' second
+# directional derivative Eddot(u, v) (energiesHessianDevice, #153): the
+# tangent's walks carrying four RDM sets, through :sc_tangent's shared block
+# builders. No importer sees any of the three. (The metric / Dyall-Hamiltonian intermediates ARE exported, from
 # energy.cppm: nevpt2.gradient differentiates the same class einsums.)
 add_cxx_module_library(
   NAME nevpt2.energy
   PRIMARY_INTERFACE energy.cppm
   PARTITIONS energy_shared.cppm energy_sc_finish.cppm energy_sc_classes.cppm
-             energy_sc_tangent.cppm
+             energy_sc_tangent.cppm energy_sc_hessian.cppm
              energy_pc_solve.cppm energy_pc_classes.cppm energy_pc_tangent.cppm
   IMPLEMENTATION energy.cpp energy_pc.cpp
   LINK_PUBLIC nevpt2::einsum nevpt2::energy_finish

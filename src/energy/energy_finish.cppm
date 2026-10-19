@@ -278,6 +278,42 @@ ClassMultiplierTangents normToEnergyMultiplierTangent(
   return out;
 }
 
+// The second sum of docs/hessian-theory.md Sec. 4.1, over one class's
+// perturbers: sum_k (Ndot_v, Hdot_v, Deltadot_v)_k . Hess f_k .
+// (Ndot_u, Hdot_u, Deltadot_u)_k -- the finish's 3x3 sandwiched between two
+// directions' first-order per-perturber tangents. With
+// normToEnergyTangent(norm, h, diff, N''[u,v], H''[u,v]).second (the first
+// sum, at frozen orbital energies) it is the class's Eddot(u, v). Symmetric
+// in u <-> v, as the 3x3 is. `diffDot*` all zeros hold the orbital energies
+// fixed. Nine vectors of one class, same length and order, or it aborts; a
+// guarded perturber contributes zero.
+double normToEnergyHessianSandwich(const std::vector<double>& norm, const std::vector<double>& h,
+                                   const std::vector<double>& diff,
+                                   const std::vector<double>& normDotU,
+                                   const std::vector<double>& hDotU,
+                                   const std::vector<double>& diffDotU,
+                                   const std::vector<double>& normDotV,
+                                   const std::vector<double>& hDotV,
+                                   const std::vector<double>& diffDotV,
+                                   std::source_location loc = std::source_location::current()) {
+  const std::size_t k = norm.size();
+  for (const std::vector<double>* x :
+       {&h, &diff, &normDotU, &hDotU, &diffDotU, &normDotV, &hDotV, &diffDotV})
+    if (x->size() != k)
+      check(false,
+            std::format("normToEnergyHessianSandwich: the nine vectors' lengths differ ({} "
+                        "against {})",
+                        x->size(), k),
+            loc);
+  double sum = 0.0;
+  for (std::size_t i = 0; i < k; ++i) {
+    const MultiplierTangent t = applyFinishHessian(normToEnergyHessian(norm[i], h[i], diff[i]),
+                                                   normDotU[i], hDotU[i], diffDotU[i]);
+    sum += t.p * normDotV[i] + t.q * hDotV[i] + t.r * diffDotV[i];
+  }
+  return sum;
+}
+
 // The orbital energies' tangent along one CI direction, host-resident: what
 // energiesTangentDevice reads Deltadot from, in the golden's e_core / e_virt
 // order. nevpt2.gradient_plan's orbitalEnergyDot builds it from the active

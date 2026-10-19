@@ -2,7 +2,9 @@
 // with respect to the CI vector, checked against the class norms' exact affine
 // increment, Euler's identity and a central finite difference. Both demos run
 // it -- nevpt2_demo over FullBlockSource, nevpt2_df_demo over its
-// DfIntegralSource slabs (#162); ci_checks.cppm has the interface.
+// DfIntegralSource slabs (#162); ci_checks.cppm has the interface. And
+// --sc-hessian (#153, nevpt2_demo): the same three kinds of check one order
+// up, for the second directional derivative -- at the end of this file.
 //
 // WHAT IS BEING DIFFERENTIATED. Along a direction u in the space of CI
 // amplitudes, the state c + t u gives RDMs
@@ -362,6 +364,276 @@ nevpt2::Result<bool> checkScTangent(const nevpt2::GoldenFile& g,
 
   std::printf("\n%s: the SC tangent matches Euler and the exact norm increment to %.0e, and "
               "the finite difference to %.0e relative\n",
+              ok ? "PASS" : "FAIL", kTangentExactTol, kTangentFdTol);
+  return ok;
+}
+
+// =============================================================================
+// --sc-hessian (#153): the SECOND directional derivative, Eddot(u, v).
+//
+// WHAT IS BEING DIFFERENTIATED: the same functional as --sc-tangent's above
+// (plain bilinear RDMs, the golden's e_core / e_virt held fixed), twice.
+// nevpt2.energy's energiesHessianDevice reads four RDM sets -- the plain one,
+// the tangents along u and along v, and the second-order set at (u, v), all
+// three tangent sets from ONE three-argument build
+// (nevpt2.rdm_build's buildRdmHessianTangentsDevice; dm1/dm2's from the host
+// rebuild's dm12Dot, whose (u, v) form is the second derivative for the same
+// reason, docs/hessian-theory.md Sec. 3).
+//
+// CHECK H1, EXACT, THREE CLASSES: EULER AT SECOND ORDER. A class homogeneous
+// of degree 2 in the CI vector has a gradient homogeneous of degree 1, so its
+// Hessian maps the state to the gradient, H c = grad E, and
+//
+//   Eddot_k(c, u) == Edot_k(u)
+//
+// for Sr, Srsi and Srs (CHECK 1b's three) -- the new 3x3 and the second-order
+// chains held against the ALREADY-GATED Edot(u) of energiesTangentDevice,
+// along a direction no seeded pair reaches (Sec. 4.3). The reference is that
+// function on its own tangent build, not the Hessian walk's u-tangent. Like
+// 1b, an identity at FIXED orbital energies only: the generalized Fock is
+// affine in dm1, so a responding Delta breaks the homogeneity.
+//
+// CHECK H2, EXACT, EVERY CLASS: THE NORM'S SECOND-ORDER INCREMENT. The norms
+// are affine in the RDMs (CHECK 1a), so at the second-order RDM set X'' the
+// increment norm_k(dm + X'') - norm_k(dm) IS the second-order chain's
+// N''_k -- the only exact hold on the five affine classes' second-order
+// blocks, which have no homogeneity to exploit (Sec. 4.3). Sijrs reads no RDM,
+// so its every second derivative is exactly zero.
+//
+// CHECK H3, THE ONE FINITE DIFFERENCE: Edot(u) itself -- energiesTangentDevice
+// on a fresh plain build and a fresh tangent build at every displaced state
+// c +- h v -- differenced along v against Eddot(u, v). The milestone's single
+// new difference (docs/hessian-theory.md, Sec. 9): it licenses Eddot as
+// Edot's derivative at all, after which the exact gates downstream (#156's
+// duality) hold the vector form to it. Same ladder, plateau and Richardson
+// rules as CHECK 2, for the same reasons (Edot is again a ratio of
+// polynomials in the CI vector, with the same empty-perturber hazard).
+//
+// Also free, and checked: the Hessian walk's own base total and Edot(u) /
+// Edot(v) against energiesDevice and energiesTangentDevice.
+// docs/testing.md, "The SC Hessian's finite-difference cross-check", records
+// the measured plateau.
+
+// Edot(u) at the CI vector `ci`, the whole way from the vector: dm1/dm2 and
+// their tangent rebuilt on the host, dm3/f3ac/f3ca and their tangent built on
+// the device, then energiesTangentDevice. No Hessian code is involved, which
+// is what makes it a reference for one. Every device tensor it allocates is
+// freed (on res's stream) when it returns.
+double scTangentAt(const nevpt2::HostDm12Builder& builder, const nevpt2::Tensor& ci,
+                   const nevpt2::Tensor& u, const nevpt2::RdmBuildOptions& rdmOpt,
+                   const CiCheckIntegrals& ints, const nevpt2::DeviceResources& res) {
+  const nevpt2::HostDm12 dm = builder.dm12(ci);
+  const nevpt2::HostDm12 dot = builder.dm12Dot(ci, u);
+  const nevpt2::DeviceTensor dDm1 = nevpt2::uploadTensor(dm.dm1, res);
+  const nevpt2::DeviceTensor dDm2 = nevpt2::uploadTensor(dm.dm2, res);
+  const nevpt2::DeviceTensor dDm1Dot = nevpt2::uploadTensor(dot.dm1, res);
+  const nevpt2::DeviceTensor dDm2Dot = nevpt2::uploadTensor(dot.dm2, res);
+  const nevpt2::RdmBuildResult rdm = nevpt2::buildRdmsDevice(
+      rdmOpt, ci, builder.norb(), builder.nelecA(), builder.nelecB(), ints.h2e, res);
+  const nevpt2::RdmBuildResult rdmDot = nevpt2::buildRdmTangentsDevice(
+      rdmOpt, ci, u, builder.norb(), builder.nelecA(), builder.nelecB(), ints.h2e, res);
+  return nevpt2::energiesTangentDevice(ints.active, ints.source, ints.batch, dDm1, dDm2,
+                                       rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1Dot, dDm2Dot,
+                                       rdmDot.dm3, rdmDot.f3ac, rdmDot.f3ca,
+                                       /*epsDot=*/nullptr, res)
+      .totalDot;
+}
+
+nevpt2::Result<bool> checkScHessian(const nevpt2::GoldenFile& g,
+                                    const nevpt2::RdmBuildOptions& rdmOpt,
+                                    const CiCheckIntegrals& ints,
+                                    const nevpt2::RdmBuildResult& baseRdm, std::uint64_t seedU,
+                                    std::uint64_t seedV, const nevpt2::DeviceResources& res) {
+  nevpt2::Result<nevpt2::HostDm12Builder> builder =
+      nevpt2::HostDm12Builder::create(g.ncas, g.nelecA, g.nelecB);
+  if (!builder) return std::unexpected(builder.error());
+  const nevpt2::Tensor& ci = g.get("ci");
+  const nevpt2::Tensor& h2e = ints.h2e;
+  const std::int64_t norb = g.ncas;
+
+  std::printf("\n--sc-hessian: the SC total's second derivative with respect to the CI vector\n");
+  // Which functional, said where the Euler gate is stated (docs/hessian-theory.md,
+  // Sec. 9.1): the identity holds only with the orbital energies fixed.
+  std::printf("  functional: the orbital energies held fixed (the golden's e_core / e_virt; "
+              "Euler holds only there)\n");
+
+  const nevpt2::HostDm12 base = builder->dm12(ci);
+  std::printf("  host dm1/dm2 rebuild vs the golden: max|delta| = %.2e / %.2e\n",
+              tangentMaxDiff(base.dm1, g.get("dm1")), tangentMaxDiff(base.dm2, g.get("dm2")));
+  const nevpt2::DeviceTensor dDm1 = nevpt2::uploadTensor(base.dm1, res);
+  const nevpt2::DeviceTensor dDm2 = nevpt2::uploadTensor(base.dm2, res);
+  const nevpt2::RdmBuildResult& rdm = baseRdm;
+  const nevpt2::RdmTensors baseSet{dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca};
+
+  const nevpt2::Tensor u = tangentDirection(ci, seedU);
+  const nevpt2::Tensor v = tangentDirection(ci, seedV);
+  bool ok = true;
+  double eddot = 0.0;  // Eddot(u, v), the finite difference's target
+
+  // --- Eddot(u, v), and check H2 at the second-order RDMs ---------------------
+  // Scoped, so every RDM set of the three-argument build is freed before the
+  // difference below allocates its own builds.
+  {
+    const nevpt2::HostDm12 dotU = builder->dm12Dot(ci, u);
+    const nevpt2::HostDm12 dotV = builder->dm12Dot(ci, v);
+    const nevpt2::HostDm12 ddot = builder->dm12Dot(u, v);
+    const nevpt2::DeviceTensor dDm1U = nevpt2::uploadTensor(dotU.dm1, res);
+    const nevpt2::DeviceTensor dDm2U = nevpt2::uploadTensor(dotU.dm2, res);
+    const nevpt2::DeviceTensor dDm1V = nevpt2::uploadTensor(dotV.dm1, res);
+    const nevpt2::DeviceTensor dDm2V = nevpt2::uploadTensor(dotV.dm2, res);
+    const nevpt2::DeviceTensor dDm1UV = nevpt2::uploadTensor(ddot.dm1, res);
+    const nevpt2::DeviceTensor dDm2UV = nevpt2::uploadTensor(ddot.dm2, res);
+    const nevpt2::RdmHessianTangents t3 =
+        nevpt2::buildRdmHessianTangentsDevice(rdmOpt, ci, u, v, norb, g.nelecA, g.nelecB, h2e,
+                                              res);
+    const nevpt2::RdmTensors setU{dDm1U, dDm2U, t3.cu.dm3, t3.cu.f3ac, t3.cu.f3ca};
+    const nevpt2::RdmTensors setV{dDm1V, dDm2V, t3.cv.dm3, t3.cv.f3ac, t3.cv.f3ca};
+    const nevpt2::RdmTensors setUV{dDm1UV, dDm2UV, t3.uv.dm3, t3.uv.f3ac, t3.uv.f3ca};
+    const nevpt2::EnergyHessianResult hr = nevpt2::energiesHessianDevice(
+        ints.active, ints.source, ints.batch, baseSet, setU, setV, setUV, res);
+    eddot = hr.totalDDot;
+
+    // Free: the walk's base total and its two first-order tangents are
+    // energiesDevice's and energiesTangentDevice's own.
+    const nevpt2::EnergyResult e = nevpt2::energiesDevice(
+        ints.active, ints.source, ints.batch, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, res);
+    const nevpt2::EnergyTangentResult tu = nevpt2::energiesTangentDevice(
+        ints.active, ints.source, ints.batch, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1U,
+        dDm2U, t3.cu.dm3, t3.cu.f3ac, t3.cu.f3ca, /*epsDot=*/nullptr, res);
+    const nevpt2::EnergyTangentResult tv = nevpt2::energiesTangentDevice(
+        ints.active, ints.source, ints.batch, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1V,
+        dDm2V, t3.cv.dm3, t3.cv.f3ac, t3.cv.f3ca, /*epsDot=*/nullptr, res);
+    const double dBase = std::fabs(hr.total - e.total);
+    const double dU = std::fabs(hr.totalDotU - tu.totalDot);
+    const double dV = std::fabs(hr.totalDotV - tv.totalDot);
+    ok = ok && dBase < kTangentExactTol && dU < kTangentExactTol && dV < kTangentExactTol;
+    std::printf("\n  the Hessian walk's own value and first derivatives against energiesDevice "
+                "/ energiesTangentDevice:\n"
+                "    E %.12f (|delta| %.2e)   Edot(u) %.12f (|delta| %.2e)   Edot(v) %.12f "
+                "(|delta| %.2e)\n",
+                hr.total, dBase, hr.totalDotU, dU, hr.totalDotV, dV);
+
+    std::printf("\n  Eddot(u, v) = %.12f  (seeds 0x%llx / 0x%llx, |u| = |v| = 1, <c|u> = "
+                "<c|v> = 0)\n",
+                hr.totalDDot, static_cast<unsigned long long>(seedU),
+                static_cast<unsigned long long>(seedV));
+
+    // Check H2: the displaced RDMs dm + X'', X'' the second-order set. Only
+    // the NORMS of the run below are read.
+    const nevpt2::DeviceTensor dm1Plus = tangentSum(dDm1, dDm1UV, res);
+    const nevpt2::DeviceTensor dm2Plus = tangentSum(dDm2, dDm2UV, res);
+    const nevpt2::DeviceTensor dm3Plus = tangentSum(rdm.dm3, t3.uv.dm3, res);
+    const nevpt2::DeviceTensor f3acPlus = tangentSum(rdm.f3ac, t3.uv.f3ac, res);
+    const nevpt2::DeviceTensor f3caPlus = tangentSum(rdm.f3ca, t3.uv.f3ca, res);
+    const nevpt2::EnergyResult shifted = nevpt2::energiesDevice(
+        ints.active, ints.source, ints.batch, dm1Plus, dm2Plus, dm3Plus, f3acPlus, f3caPlus,
+        res);
+    std::printf("\n  per class, and the norms' second-order increment: norm_k(dm + X'') - "
+                "norm_k(dm) = N''_k, exactly\n");
+    std::printf("  %-7s %16s %16s %16s %16s %16s %10s\n", "class", "Edot(u)", "Edot(v)",
+                "Eddot(u,v)", "increment", "N''", "|delta|");
+    for (int c = 0; c < 8; ++c) {
+      const double increment = shifted.norms[c] - hr.norms[c];
+      const double d = std::fabs(increment - hr.normDDots[c]);
+      ok = ok && d < kTangentExactTol;
+      // Sijrs (index 2) reads no RDM: every second derivative exactly zero.
+      if (c == 2) ok = ok && hr.energyDDots[c] == 0.0 && hr.normDDots[c] == 0.0;
+      std::printf("  %-7s %16.10f %16.10f %16.10f %16.10f %16.10f %10.2e\n",
+                  nevpt2::CLASSES[c].c_str(), hr.energyDotsU[c], hr.energyDotsV[c],
+                  hr.energyDDots[c], increment, hr.normDDots[c], d);
+    }
+    std::printf("  norm increment (every class) and Sijrs exactly zero: %s\n",
+                ok ? "ok" : "FAILED");
+  }
+
+  // --- check H1: Euler, Eddot(c, u) == Edot(u) ---------------------------------
+  {
+    const nevpt2::HostDm12 dotC = builder->dm12Dot(ci, ci);
+    const nevpt2::HostDm12 dotU = builder->dm12Dot(ci, u);
+    const nevpt2::DeviceTensor dDm1C = nevpt2::uploadTensor(dotC.dm1, res);
+    const nevpt2::DeviceTensor dDm2C = nevpt2::uploadTensor(dotC.dm2, res);
+    const nevpt2::DeviceTensor dDm1U = nevpt2::uploadTensor(dotU.dm1, res);
+    const nevpt2::DeviceTensor dDm2U = nevpt2::uploadTensor(dotU.dm2, res);
+    // (c, c), (c, u) and -- the second-order set at (c, u) -- (c, u) again:
+    // the three-argument build at (ci, ci, u).
+    const nevpt2::RdmHessianTangents t3 =
+        nevpt2::buildRdmHessianTangentsDevice(rdmOpt, ci, ci, u, norb, g.nelecA, g.nelecB,
+                                              h2e, res);
+    const nevpt2::RdmTensors setC{dDm1C, dDm2C, t3.cu.dm3, t3.cu.f3ac, t3.cu.f3ca};
+    const nevpt2::RdmTensors setU{dDm1U, dDm2U, t3.cv.dm3, t3.cv.f3ac, t3.cv.f3ca};
+    const nevpt2::RdmTensors setCU{dDm1U, dDm2U, t3.uv.dm3, t3.uv.f3ac, t3.uv.f3ca};
+    const nevpt2::EnergyHessianResult hr = nevpt2::energiesHessianDevice(
+        ints.active, ints.source, ints.batch, baseSet, setC, setU, setCU, res);
+    // The reference: the already-gated tangent, on its own tangent build.
+    const nevpt2::RdmBuildResult rdmDot =
+        nevpt2::buildRdmTangentsDevice(rdmOpt, ci, u, norb, g.nelecA, g.nelecB, h2e, res);
+    const nevpt2::EnergyTangentResult t = nevpt2::energiesTangentDevice(
+        ints.active, ints.source, ints.batch, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1U,
+        dDm2U, rdmDot.dm3, rdmDot.f3ac, rdmDot.f3ca, /*epsDot=*/nullptr, res);
+
+    std::printf("\n  Euler at second order: Eddot_k(c, u) = Edot_k(u), for the three classes "
+                "whose\n  metric and Dyall blocks are purely linear in the RDMs\n");
+    std::printf("  %-7s %6s %16s %16s %10s\n", "class", "linear", "Eddot(c,u)", "Edot(u)",
+                "|delta|");
+    bool euler = true;
+    for (int c = 0; c < 8; ++c) {
+      // Sr, Srsi, Srs (0, 4, 5): CHECK 1b's three; Sijrs (2) exactly zero.
+      const bool linear = c == 0 || c == 4 || c == 5;
+      const bool sijrs = c == 2;
+      const double d = std::fabs(hr.energyDDots[c] - t.energyDots[c]);
+      if (linear) euler = euler && d < kTangentExactTol;
+      if (sijrs) euler = euler && hr.energyDDots[c] == 0.0 && t.energyDots[c] == 0.0;
+      std::printf("  %-7s %6s %16.10f %16.10f %10.2e\n", nevpt2::CLASSES[c].c_str(),
+                  linear ? "yes" : (sijrs ? "none" : "affine"), hr.energyDDots[c],
+                  t.energyDots[c], d);
+    }
+    ok = ok && euler;
+    std::printf("  Euler identity (the three linear classes, and Sijrs exactly zero): %s\n",
+                euler ? "ok" : "FAILED");
+  }
+
+  // --- check H3: the one finite difference, of Edot(u) along v -----------------
+  std::printf("\n  central differences of Edot(u) along c + h v (energiesTangentDevice on "
+              "fresh builds):\n");
+  std::printf("  %5s %14s %20s %12s %12s %8s\n", "k", "h = 2^-k", "(Edot(+h)-Edot(-h))/2h",
+              "|err|", "rel err", "ratio");
+  std::array<double, kStepCount> step{};
+  std::array<double, kStepCount> err{};
+  for (std::size_t i = 0; i < kStepCount; ++i) {
+    const int k = kFirstStepExp + static_cast<int>(i);
+    const double h = std::ldexp(1.0, -k);
+    step[i] = h;
+    const double plus = scTangentAt(*builder, tangentStep(ci, h, v), u, rdmOpt, ints, res);
+    const double minus = scTangentAt(*builder, tangentStep(ci, -h, v), u, rdmOpt, ints, res);
+    const double d = (plus - minus) / (2.0 * h);
+    err[i] = std::fabs(d - eddot);
+    const double rel = err[i] / std::max(1e-30, std::fabs(eddot));
+    if (i == 0) {
+      std::printf("  %5d %14.3e %20.12f %12.3e %12.3e %8s\n", k, h, d, err[i], rel, "-");
+    } else {
+      std::printf("  %5d %14.3e %20.12f %12.3e %12.3e %8.2f\n", k, h, d, err[i], rel,
+                  err[i] > 0.0 ? err[i - 1] / err[i] : 0.0);
+    }
+  }
+  std::size_t bestAt = 0;
+  for (std::size_t i = 1; i < kStepCount; ++i)
+    if (err[i] < err[bestAt]) bestAt = i;
+  const double bestRel = err[bestAt] / std::max(1e-30, std::fabs(eddot));
+  ok = ok && bestRel < kTangentFdTol;
+  std::printf("\n  plateau: |err| = %.3e (relative %.3e) at h = %.3e (2^-%d); round-off takes "
+              "over below it\n",
+              err[bestAt], bestRel, step[bestAt], kFirstStepExp + static_cast<int>(bestAt));
+  const nevpt2::FourfoldRun run = nevpt2::longestFourfoldRun(err);
+  const bool richardson = run.length >= kRichardsonRun;
+  ok = ok && richardson;
+  std::printf("  Richardson: %d consecutive halvings cut the error fourfold (ratio in [%.1f, "
+              "%.1f]), ending at h = %.3e -- %s, %d needed\n",
+              run.length, nevpt2::kFourfoldLow, nevpt2::kFourfoldHigh, step[run.end],
+              richardson ? "ok" : "NOT ENOUGH", kRichardsonRun);
+
+  std::printf("\n%s: the SC Hessian matches Euler and the exact norm increment to %.0e, and "
+              "the finite difference of Edot to %.0e relative (the orbital energies held "
+              "fixed)\n",
               ok ? "PASS" : "FAIL", kTangentExactTol, kTangentFdTol);
   return ok;
 }

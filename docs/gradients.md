@@ -118,6 +118,7 @@ convention is pinned once, by differencing the unmodified energy stage:
 | `nevpt2_demo --sc-tangent` | that `energiesTangentDevice` is the derivative of `energiesDevice` at all. Run once, to license every later dot-product identity against the tangent |
 | `nevpt2_sc_pseudodensity --kappa-act`'s third number | the device kappa action against `nevpt2.kappa_rotation`'s exponential map. The adjoint and the tangent *share* that convention, so they cannot check it |
 | `nevpt2_pc_tangent` | the PC tangent, which differentiates a **solve** and has no algebraic identity short of differentiating the eigendecomposition — exactly what that code avoids (§4.3) |
+| `nevpt2_demo --sc-hessian` | one order up (#153): that `energiesHessianDevice`'s `Eddot(u, v)` is the derivative of `Edot(u)` at all — a difference of `energiesTangentDevice` itself ([`hessian-theory.md`](hessian-theory.md), §9) |
 
 Each is a Richardson table, judged on its *shape* — a run of halvings whose
 error falls fourfold — rather than on any single step, because the RDM
@@ -152,9 +153,10 @@ Dependency order; `src/gradient/`'s components are in
 | module | computes | checked by |
 |---|---|---|
 | `nevpt2.rdm_host_dm` (`src/rdm/`) | `dm1`/`dm2` from a CI vector, and their tangents. Host only — no kernel, no BLAS | `test/rdm_host_dm/`: each committed golden's own arrays rebuilt, and the tangents against a curved-path difference |
-| `nevpt2.rdm_build`'s `:tangent` partition | `buildRdmTangentsDevice`: the tangent of the `dm3`/`f3ac`/`f3ca` build | `--rdm-tangent` against twice the plain build; `test/rdm/rdm_tangent_tests.cpp` against a finite difference |
+| `nevpt2.rdm_build`'s `:tangent` partition | `buildRdmTangentsDevice`: the tangent of the `dm3`/`f3ac`/`f3ca` build; and `buildRdmHessianTangentsDevice`, its three RDM sets at `(c, u)`, `(c, v)`, `(u, v)` from one sweep (#153) | `--rdm-tangent` against twice the plain build; `test/rdm/rdm_tangent_tests.cpp` against a finite difference, and the three-argument sets against the tangent at each pair |
 | `nevpt2.sigma_vector` (`src/rdm/`) | the 3-body and integral-contracted 4-body sigma vectors, forward and dagger | `test/sigma_vector/`, against an exact host contraction, with negative controls |
 | `nevpt2.energy`'s `:sc_tangent` partition | `energiesTangentDevice`: the eight SC class energies' tangent in the RDMs | `--sc-tangent`: two exact checks and one finite difference |
+| `nevpt2.energy`'s `:sc_hessian` partition | `energiesHessianDevice`: their second directional derivative `Eddot(u, v)`, frozen orbital energies (#153) | `--sc-hessian`: two exact checks and one finite difference of `Edot` |
 | `nevpt2.energy`'s `:pc_tangent` partition | `pcTangentsDevice`: the PC classes' tangent — the *solve* differentiated | `nevpt2_pc_tangent`: Euler, and a Richardson-verified difference |
 | `nevpt2.sc_amplitudes` (`src/gradient/`) | the amplitude `T`, the multipliers `P`/`Q`/`R`, the pseudocanonical multipliers `z^c` (Park Eqs. 56–57) and `derivativeSubscripts`. Host only | `test/gradient/`, card-free |
 | `nevpt2.kappa_rotation` (`src/gradient/`) | the orbital-rotation parameterisation: antisymmetric `kappa`, `exp(kappa)`, an array's active axes transformed. Host only | `test/gradient/`, card-free |
@@ -956,6 +958,7 @@ its own, and each prints one `PASS:` line a ctest entry matches
 |---|---|
 | `nevpt2_demo --rdm-tangent`, `nevpt2_df_demo --rdm-tangent` | the tangent RDM build beside the plain one, checked against twice it |
 | `nevpt2_demo --sc-tangent`, `nevpt2_df_demo --sc-tangent` | the SC total's tangent: the norms' affine increment, Euler, and the one-time finite difference |
+| `nevpt2_demo --sc-hessian` | the SC total's second directional derivative `Eddot(u, v)` at fixed orbital energies (#153): Euler at second order, the norms' second-order increment, and one finite difference of `Edot` |
 | `nevpt2_demo --gradient-source --pc` | PC's `y_I` (§5.6) against `pcTangentsDevice`, the same three checks and the walk's PC total against block2's (#74) |
 | `nevpt2_demo --gradient-source` | `y_I = dE/dc_I` in reverse mode, gated on the duality against the forward tangent, plus the Jacobian where `ndet` allows. With `--gradgold PATH` both modes carry the orbital energies' response (§5.5) and the sidecar is first checked against the golden (its `h^eff` and `W` must rebuild `e_core` / `e_virt`); without it they hold the orbital energies fixed. The PASS line names which |
 | `nevpt2_df_demo --gradient-source` | the same duality and Jacobian over the density-fitted slabs (#162), always at **frozen** orbital energies: the demo reads no sidecar, and the PASS line says `frozen-orbital-energy mode` |

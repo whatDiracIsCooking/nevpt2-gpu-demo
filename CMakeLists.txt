@@ -1076,6 +1076,33 @@ if(NEVPT2_BUILD_TESTING)
       PASS_REGULAR_EXPRESSION "${_nevpt2_sc_tangent_pass}" LABELS "gpu;small")
   endif()
 
+  # --- --sc-hessian (#153) --------------------------------------------------------
+  #
+  # The SC energy's SECOND directional derivative Eddot(u, v) (nevpt2.energy's
+  # :sc_hessian partition, energiesHessianDevice, over nevpt2.rdm_build's
+  # three-argument tangent build), checked by src/gradient/ci_checks_tangent.cpp's
+  # checkScHessian at the golden's fixed orbital energies: Euler at second
+  # order, Eddot(c, u) == Edot(u), on the three homogeneous classes; the norms'
+  # exact increment at the second-order RDMs (every class); and ONE
+  # Richardson-verified central difference of Edot along v -- the Hessian's one
+  # finite difference (docs/hessian-theory.md, Sec. 9; docs/testing.md, "The SC
+  # Hessian's finite-difference cross-check"). Its own PASS line, as
+  # --sc-tangent's. Each sweep point is a plain AND a tangent build, so the
+  # same `small` split as --sc-tangent: CAS(4,4) under the sanitizer tier,
+  # CAS(8,8) not. --tiles 3 is far above the three-argument build's floor at
+  # both sizes (docs/performance.md, "Tile floors").
+  set(_nevpt2_sc_hessian_pass "PASS: the SC Hessian matches Euler")
+  add_golden_test(nevpt2_cas44_sc_hessian "${_gold_44}" --tiles 3 --sc-hessian)
+  add_golden_test(nevpt2_cas88_sc_hessian "${_gold_88}" --tiles 3 --sc-hessian)
+  if(TEST nevpt2_cas44_sc_hessian)
+    set_tests_properties(nevpt2_cas44_sc_hessian PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_pass}" LABELS "gpu;small")
+  endif()
+  if(TEST nevpt2_cas88_sc_hessian)
+    set_tests_properties(nevpt2_cas88_sc_hessian PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_pass}" LABELS "gpu")
+  endif()
+
   # --- *_pc, small ----------------------------------------------------
   #
   # --pc at CAS(4,4)/CAS(8,8), both demos, labelled `small` so the sanitizer

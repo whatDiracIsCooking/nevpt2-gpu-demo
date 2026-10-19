@@ -289,6 +289,70 @@ EnergyTangentResult energiesTangentDevice(const NevptIntegralsDevice& ints,
                                           const OrbitalEnergyDot* epsDot,
                                           const DeviceResources& res);
 
+// --- the second directional derivative (energy_sc_hessian.cppm, #153) -------
+//
+// Eddot(u, v), the SC class energies' second derivative with respect to the
+// CI vector along two directions, at the golden's FIXED orbital energies --
+// docs/hessian-theory.md, Sec. 4.1's two terms, per perturber k:
+//
+//   Eddot_k = P_k N''_k + Q_k H''_k                        (first sum)
+//           + (Ndot_k[v], Hdot_k[v], 0) . Hess f_k . (Ndot_k[u], Hdot_k[u], 0)
+//
+// N''/H'' are the same chains as N/H at the second-order RDMs
+// d^2(dm)/dc^2 [u, v] (nevpt2.rdm_build's RdmHessianTangents::uv, and
+// nevpt2.rdm_host_dm's dm12Dot(u, v) for dm1/dm2), built with the tangent
+// builders: every make_* is linear in the RDMs, and the RDM-free terms have
+// N'' = H'' = 0 as they have Ndot = Hdot = 0. The 3x3 is nevpt2.energy_finish's
+// normToEnergyHessian; the two first-order tangents are energiesTangentDevice's
+// own, formed here side by side because the second sum needs both at once.
+// NO NEW CONTRACTION AND NO NEW KERNEL: four RDM sets through one slab walk.
+//
+// THE ORBITAL ENERGIES ARE HELD FIXED (Deltadot = Delta'' = 0): the
+// functional --sc-tangent licenses, and the one in which the Euler identity
+// Eddot(c, u) == Edot(u) holds for the three homogeneous classes
+// (docs/hessian-theory.md, Sec. 4.3). Their response is later work.
+
+// One RDM set, as the energy's class walks read it: the plain RDMs, a
+// first-order tangent set, or the second-order one. References to tensors the
+// caller owns, which must outlive the call they are passed to.
+struct RdmTensors {
+  const DeviceTensor& dm1;
+  const DeviceTensor& dm2;
+  const DeviceTensor& dm3;
+  const DeviceTensor& f3ac;
+  const DeviceTensor& f3ca;
+};
+
+struct EnergyHessianResult {
+  std::array<double, 8> norms{};        // as EnergyResult
+  std::array<double, 8> energies{};     // as EnergyResult
+  std::array<double, 8> normDotsU{};    // Ndot along u, per class
+  std::array<double, 8> energyDotsU{};  // Edot(u), per class
+  std::array<double, 8> normDotsV{};    // Ndot along v
+  std::array<double, 8> energyDotsV{};  // Edot(v)
+  std::array<double, 8> normDDots{};    // sum_k N''_k[u, v]: the class norm's second derivative
+  std::array<double, 8> energyDDots{};  // Eddot(u, v), per class
+  double total = 0.0;                   // sum of `energies`
+  double totalDotU = 0.0;               // Edot(u)
+  double totalDotV = 0.0;               // Edot(v)
+  double totalDDot = 0.0;               // Eddot(u, v)
+};
+
+// Everything energiesTangentDevice does along u AND along v, plus the second
+// derivative, from ONE slab walk carrying the three tangent sets: `rdm` the
+// plain RDMs, `dotU` / `dotV` the first-order tangents along u / v, `ddot`
+// the second-order set at (u, v). One stream (res.stream()), every
+// intermediate from res's pool and freed when its class returns (four block
+// sets live per class, against the tangent's two), every read-back a
+// downloadTensor, so all work is complete when this returns. `batch` bounds
+// every slab as in energiesDevice. Sijrs reads no RDM, so at fixed orbital
+// energies its every derivative is exactly zero.
+EnergyHessianResult energiesHessianDevice(const ActiveIntegralsDevice& active,
+                                          IntegralSource& source, int64_t batch,
+                                          const RdmTensors& rdm, const RdmTensors& dotU,
+                                          const RdmTensors& dotV, const RdmTensors& ddot,
+                                          const DeviceResources& res);
+
 // --- the class metrics and Dyall Hamiltonians -------------------------------
 //
 // The RDM-only intermediates every class energy is built from: each class

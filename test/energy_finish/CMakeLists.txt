@@ -28,13 +28,13 @@ add_gtest_suite_tests(
          NormToEnergyDerivativeTests NormToEnergyTangentTests NormToEnergyDeltaTests
          PcCoefficientsTests PcQuadFormTests TangentSingleTests PcAdjointTests
          PcRotationTangentTests PcDeltaTangentTests NormToEnergyHessianTests
-         NormToEnergyMultiplierTangentTests)
+         NormToEnergyMultiplierTangentTests NormToEnergyHessianSandwichTests)
 
 # The abort tier: normToEnergyTangent's five vectors (and the Delta and
-# multiplier tangents' four and six) must be one class's, so differing lengths
+# multiplier tangents' four and six, the Hessian sandwich's nine) must be one class's, so differing lengths
 # are check(). EXPECT_DEATH forks per assertion, hence its own `death` label.
 add_gtest_suite_tests(
   TARGET energy_finish_tests
   SUITES NormToEnergyTangentDeathTest NormToEnergyDeltaDeathTest
-         NormToEnergyMultiplierTangentDeathTest
+         NormToEnergyMultiplierTangentDeathTest NormToEnergyHessianSandwichDeathTest
   DEATH)

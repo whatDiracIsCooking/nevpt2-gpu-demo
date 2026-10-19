@@ -162,6 +162,9 @@ struct Options {
   // --gradgold PATH beside --gradient-source (the field below).
   bool scTangent = false;
   bool gradientSource = false;
+  // nevpt2_demo alone: --sc-hessian, the SC energy's second directional
+  // derivative Eddot(u, v) (#153); one at a time with the two above, SC only.
+  bool scHessian = false;
   // nevpt2_df_demo: --batch N (>= 0), --check-blocks.
   std::int64_t batch = kDefaultBatch;
   bool checkBlocks = false;
