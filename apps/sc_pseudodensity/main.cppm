@@ -33,6 +33,15 @@
 // the duality (#88); the partition :kappa_full_check is where that lives, and
 // it prints its own PASS line too.
 //
+// A DENSITY-FITTED golden (`generate_golden.py --df`) runs here too (#165),
+// with no flag of its own: it carries its fitted four-index blocks beside the
+// B blocks, so the identities and --kappa-act read it as they read any
+// golden, and --kappa-full knows the case by its sidecar's NEVPT2F1 magic,
+// contracts the general-range inventory out of the whole B tensor and gates
+// the frozen-digest half (the digests' own term is #168). --dump-source-terms
+// and --source-oracle refuse a fitted sidecar until then: they carry the
+// exact Y. docs/gradients.md, Sec. 6.2, has the decision.
+//
 // WITH --dump-source-terms PATH IT WRITES THEM INSTEAD: the whole Y_xy (out of
 // the same sidecar), the CI source term y_I and Edot(kappa) along seeded
 // directions in its two terms, as a `.gradsrc` that
@@ -221,6 +230,22 @@ int main(int argc, char** argv) {
     return nevpt2::loadGradGold(gradgoldPath);
   };
 
+  // --dump-source-terms and --source-oracle hand on (or compare) the EXACT Y,
+  // the digests' own term in it. On a density-fitted case only Y's
+  // frozen-digest term is in tree (#165; --kappa-full checks it) and the
+  // digests' term is #168's, so a fitted sidecar is refused here as
+  // Unsupported -- half a dump is refused rather than written, the rule
+  // nevpt2_demo's y_I already follows -- never written with a term missing.
+  const auto refuseFitted = [](const nevpt2::GradGoldFile& gg,
+                               std::string_view flag) -> nevpt2::Status {
+    if (!gg.densityFitted()) return {};
+    return nevpt2::err_unsupported(std::format(
+        "{} on a density-fitted case: it writes or compares the exact orbital source term Y, "
+        "and on the density-fitted path only Y's frozen-digest term is in tree (#165, "
+        "--kappa-full); the f3ac/f3ca digests' own term is #168",
+        flag));
+  };
+
   // --dump-source-terms: Y_xy and y_I, written (:source_dump). The terms
   // themselves are derivatives at fixed orbitals and CI vector, with no
   // reference-kind dependence, so this is the SOURCE-TERM gate; the
@@ -237,6 +262,10 @@ int main(int argc, char** argv) {
       return 1;
     }
     const nevpt2::GradGoldFile gg = *std::move(sidecar);
+    if (const nevpt2::Status st = refuseFitted(gg, "--dump-source-terms"); !st) {
+      nevpt2::report(st.error());
+      return 1;
+    }
     const nevpt2::Result<bool> ok =
         dumpSourceTerms(g, gg, opt.pc, energyTotal, dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac,
                         rdm.f3ca, opt.rdm, dumpPath, *res);
@@ -261,6 +290,10 @@ int main(int argc, char** argv) {
       return 1;
     }
     const nevpt2::GradGoldFile gg = *std::move(sidecar);
+    if (const nevpt2::Status st = refuseFitted(gg, "--source-oracle"); !st) {
+      nevpt2::report(st.error());
+      return 1;
+    }
     const nevpt2::Result<bool> ok =
         checkSourceOracle(g, gg, oraclePath, opt.pc, energyTotal, dInts, dDm1, dDm2, rdm.dm3,
                           rdm.f3ac, rdm.f3ca, opt.rdm, *res);

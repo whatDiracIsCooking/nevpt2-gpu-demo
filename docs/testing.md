@@ -1033,6 +1033,65 @@ derivative, and (`PcTangentLadderTests`) that the difference is gated on a
 run and that a displaced state with no conditioning record fails — the two
 rows added for "Residual-independent checks of the gradient path" below.
 
+## The density-fitted orbital source term (frozen-digest half)
+
+#165 runs "The full orbital source term" above on the **density-fitted**
+pair: `nevpt2_sc_pseudodensity_kappa_full_cas44_df` and `_cas88_df` (`gpu`)
+run `nevpt2_sc_pseudodensity --golden golden/n2_ccpvdz_<case>_df.nevpt2gold
+--tiles 3 --kappa-full` beside the committed NEVPT2F1 sidecar, and match
+`PASS: the full orbital source term's adjoint and tangent agree on the
+frozen-digest half (density-fitted`. The inventory is contracted on the
+device out of the whole `B[L,p,q]` instead of read ([`gradients.md`](gradients.md),
+§6.2), and the checks are the five of the section above with the digests'
+own term left out — that is #168's — so the duality gated is the
+frozen-digest one, as `--kappa-full`'s was between #88 and #89. Check 1 gains
+one row, the built inventory against the four tied arrays the sidecar
+carries ready-made.
+
+Beside them, three `small` entries on `n2_ccpvdz_cas44_df`: the identities
+(`nevpt2_sc_pseudodensity_cas44_df`) and `--kappa-act`
+(`nevpt2_sc_pseudodensity_kappa_cas44_df`), which read a fitted golden's
+four-index blocks exactly as any other, and
+`nevpt2_sc_pseudodensity_dump_cas44_df_refused`, whose regex is the
+*unsupported* error `--dump-source-terms` prints on a fitted sidecar (the dump
+writes the exact `Y`; until #168 the fitted path has only half of it).
+
+Measured on an RTX 3080 (CUDA, Release, `--tiles 3`), one run each:
+
+| | CAS(4,4) DF | CAS(8,8) DF |
+|---|---|---|
+| **1** the promotion table against the arrays it reads, worst of four families | 2.1e-14 | 5.2e-14 |
+| the built inventory against the sidecar's four carried tied arrays | 3.2e-16 | 7.0e-16 |
+| **2** `<kappa, Y>`'s integral half vs the tangent's, worst of four seeded FULL directions | **4.2e-17** | **4.5e-16** |
+| the frozen-digest duality, `<kappa, Y>` vs `Edot` with the orbital energies moving | **4.2e-17** | **4.5e-16** |
+| `<kappa, Y>`, direction 0 | 2.569305008166e-03 | 1.508999826491e-02 |
+| of which the orbital energies' response | −6.726e-04 | −7.111e-04 |
+| **3** the active block vs `--kappa-act`'s own entry point (vs what that entry point reproduces from itself) | 4.3e-30 (1.9e-28) | 5.6e-17 (5.2e-16) |
+| **4a** core-internal finite difference: plateau, fourfold halvings | 2.9e-12, 8 | 6.3e-13, 7 |
+| **4b** virtual-internal: plateau, fourfold halvings | 3.5e-13, 6 | 8.6e-12, 5 |
+| the same two directions' `eps` term, zero by (O2) | ≤7.9e-17 | ≤1.6e-17 |
+| the probed matrix's pairing vs the direct one, inactive-restricted | 3.0e-18 | 2.8e-18 |
+| **5** Eqs. 56-57: pairs divided / left zero as degenerate | 175 / 6 | 133 / 6 |
+| max \|z^c\|, at the smallest gap divided by | 5.92e-03, 3.309e-03 Eh | 3.52e-03, 3.305e-03 Eh |
+
+The gate is again nine-plus decades inside 1e-7, the same orders as the
+integral-direct twins in the section above; the finite-difference plateaus
+and halving counts are of the same shape. N2's exactly degenerate virtual
+pairs are left zero on the fitted state as on the exact one (six each), and
+nothing was refused. What the entries cost is
+[`performance.md`](performance.md), "The density-fitted orbital source term".
+
+**Sanitizers** (CUDA, RTX 3080, each preset's Debug build). The two `small`
+entries ran in the tier, clean under `asan`, `ubsan`, memcheck (with the leak
+check) and initcheck: `nevpt2_sc_pseudodensity_cas44_df` 0.48 / 0.36 / 0.62 /
+0.57 s and `nevpt2_sc_pseudodensity_kappa_cas44_df` 0.89 / 0.68 / 1.42 / 1.17 s
+in that order. The two `--kappa-full` entries and the refusal are not in the
+tier (the integral-direct `--kappa-full` entries' reason) and were run by
+name, clean under the same four (memcheck: 0 errors, 0 bytes leaked):
+`_kappa_full_cas44_df` 3.83 / 3.25 / 10.59 / 7.38 s, `_kappa_full_cas88_df`
+15.73 / 15.35 / 344.99 / 115.50 s, `_dump_cas44_df_refused` 0.48 / 0.34 / 0.57 /
+0.57 s. Not run under racecheck or synccheck, and nothing here on HIP.
+
 ## The CI source term's forward-reverse duality
 
 `nevpt2_gradient_source_cas44`, `_cas88` and `_cas1010` (all `gpu`; the first

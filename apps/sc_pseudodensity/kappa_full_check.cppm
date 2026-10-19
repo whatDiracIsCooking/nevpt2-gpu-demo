@@ -92,6 +92,23 @@
 //      PySCF by the offline provider gate above. Beside it, the same term in
 //      reverse mode (#89) along the same direction, held to the forward one
 //      at 1e-7 -- exact arithmetic, as the full duality is.
+//
+// ON A DENSITY-FITTED CASE (#165), the sidecar beside the `*_df` golden is the
+// NEVPT2F1 flavour, and its magic is what selects this path -- there is no
+// --df flag, so the two cannot disagree (docs/gradients.md, Sec. 6.2, has the
+// decision and its reason). The one-general-index inventory is then
+// contracted on the device out of the whole three-index tensor
+// (dfGeneralIntegralsDevice) rather than read, and everything above runs on
+// it unchanged, the energy stage reading the golden's fitted four-index
+// blocks as nevpt2_demo does. Check 1 gains one row: the built inventory
+// against the four tied arrays the sidecar carries ready-made. What does NOT
+// run is the digests' own term -- check 2's full duality and check 6 --
+// which on the fitted path is #168's: the gate is the FROZEN-DIGEST duality
+// (integral halves, then with the orbital energies' response), and the PASS
+// line says so, as this binary's did between #88 and #89. Checks 4 and 5 are
+// unaffected: an intra-space rotation moves no active integral, so neither
+// the finite differences nor the inactive blocks Eqs. 56-57 divide carry a
+// digests' term at all.
 module;
 
 #include <cstdio>  // stdout: a macro, which `import std` does not carry
@@ -222,6 +239,48 @@ nevpt2::GeneralIntegralsDevice uploadGeneral(const nevpt2::GradGoldFile& gg,
   d.g_xa_vv = up("g_xa_vv");
   d.g_xc_vv = up("g_xc_vv");
   return d;
+}
+
+// The density-fitted case (#165): the arrays a NEVPT2F1 sidecar and its
+// `*_df` golden must carry for the inventory to be BUILT rather than read --
+// the six blocks of B and the three full-range matrices -- plus the four tied
+// orbital-energy arrays the sidecar carries ready-made, which check 1 holds
+// the built ones to.
+nevpt2::Status requireDfGradientArrays(const nevpt2::GoldenFile& g,
+                                       const nevpt2::GradGoldFile& gg) {
+  NEVPT2_TRY(g.require({"B_aa", "B_ca", "B_va", "B_cv"}));
+  return gg.require(
+      {"h", "heff", "f", "B_cc", "B_vv", "g_xa_cc", "g_xc_ca", "g_xa_vv", "g_xv_va"});
+}
+
+// The general-range inventory for either flavour of sidecar: uploaded as it
+// is from a conventional one, contracted on the device out of the whole
+// three-index tensor for a density-fitted one (dfGeneralIntegralsDevice).
+// The pair is checked to be one calculation's first (checkAgainst refuses a
+// fitted sidecar beside an exact golden, and the reverse).
+nevpt2::Result<nevpt2::GeneralIntegralsDevice> generalIntegrals(
+    const nevpt2::GoldenFile& g, const nevpt2::GradGoldFile& gg,
+    const nevpt2::DeviceResources& res) {
+  NEVPT2_TRY(gg.checkAgainst(g));
+  if (!gg.densityFitted()) {
+    NEVPT2_TRY(requireGradientArrays(gg));
+    return uploadGeneral(gg, res);
+  }
+  NEVPT2_TRY(requireDfGradientArrays(g, gg));
+  return nevpt2::dfGeneralIntegralsDevice(g.get("B_aa"), g.get("B_ca"), g.get("B_va"),
+                                          g.get("B_cv"), gg.get("B_cc"), gg.get("B_vv"),
+                                          gg.get("h"), gg.get("heff"), gg.get("f"), res);
+}
+
+// ||a - b|| / ||b|| on the host, for two tensors of one shape.
+double hostRelativeResidual(const nevpt2::Tensor& a, const nevpt2::Tensor& b) {
+  double num = 0.0, den = 0.0;
+  for (std::int64_t i = 0; i < b.size(); ++i) {
+    const double d = a.flat(i) - b.flat(i);
+    num += d * d;
+    den += b.flat(i) * b.flat(i);
+  }
+  return std::sqrt(num / std::max(den, 1e-300));
 }
 
 // A full (n_mo, n_mo) kappa with `k` written into one diagonal block --
@@ -448,16 +507,26 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
   // The sidecar is found beside the golden by name, so the first thing to
   // settle is that the two describe the same state -- and then that it
   // carries every array the source term reads.
-  NEVPT2_TRY(gg.checkAgainst(g));
-  NEVPT2_TRY(requireGradientArrays(gg));
+  //
+  // A density-fitted sidecar (#165) is the same check on the frozen-digest
+  // half: the inventory is contracted out of the whole B tensor instead of
+  // read, and the digests' own term -- the full duality and check 6 -- is
+  // #168's, so it is not run here, and the PASS line says which half held.
+  const bool fitted = gg.densityFitted();
+  const nevpt2::GeneralIntegralsDevice gen = NEVPT2_TRY(generalIntegrals(g, gg, res));
   const std::int64_t nc = gg.ncore, na = gg.nact, nv = gg.nvirt, nmo = gg.nmo;
-  std::printf("\n--kappa-full: the full orbital source term Y_xy (Park Eqs. 26, 28)\n");
+  std::printf("\n--kappa-full: the full orbital source term Y_xy (Park Eqs. 26, 28)%s\n",
+              fitted ? ", density-fitted" : "");
   std::printf("  sidecar partition: n_mo = %lld = %lld core + %lld active + %lld virtual "
               "(n_ao = %lld, n_elec(RHF) = %lld)\n",
               static_cast<long long>(nmo), static_cast<long long>(nc),
               static_cast<long long>(na), static_cast<long long>(nv),
               static_cast<long long>(gg.nao), static_cast<long long>(gg.nelecRhf));
-  const nevpt2::GeneralIntegralsDevice gen = uploadGeneral(gg, res);
+  if (fitted)
+    std::printf("  density-fitted sidecar (naux = %lld): the one-general-index inventory "
+                "contracted on the device\n  from the whole B[L,p,q] -- the golden's B_aa, "
+                "B_ca, B_va, B_cv and the sidecar's B_cc, B_vv\n",
+                static_cast<long long>(gg.naux));
 
   // --- 1. the sidecar against itself and the golden -------------------------
   const nevpt2::ScGeneralCheck self =
@@ -480,6 +549,32 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
               "%.2e\n",
               self.eps);
   std::printf("  worst %.2e (< %.0e: %s)\n", worstSelf, kSelfCheckTol, ok ? "ok" : "FAILED");
+  if (fitted) {
+    // The four tied orbital-energy arrays the sidecar carries were written by
+    // the generator as sum_L B B from the same tensor; the inventory built
+    // here must reproduce them -- which pins the B assembly's B_cc / B_vv
+    // placement on rows the restriction identities above cannot reach (no
+    // stored block is a restriction of g_xa_cc or g_xa_vv).
+    double worstTied = 0.0;
+    std::string worstTiedName;
+    for (const auto& [name, built] :
+         {std::pair<const char*, const nevpt2::DeviceTensor*>{"g_xa_cc", &gen.g_xa_cc},
+          {"g_xc_ca", &gen.g_xc_ca},
+          {"g_xa_vv", &gen.g_xa_vv},
+          {"g_xv_va", &gen.g_xv_va}}) {
+      const double r = hostRelativeResidual(nevpt2::downloadTensor(*built, res.stream()),
+                                            gg.get(name));
+      if (r >= worstTied) {
+        worstTied = r;
+        worstTiedName = name;
+      }
+    }
+    const bool tiedOk = worstTied < kSelfCheckTol;
+    ok = ok && tiedOk;
+    std::printf("    the built inventory against the sidecar's four carried tied arrays:  "
+                "%.2e  (%s; < %.0e: %s)\n",
+                worstTied, worstTiedName.c_str(), kSelfCheckTol, tiedOk ? "ok" : "FAILED");
+  }
 
   // --- 2. the duality on four seeded full directions ------------------------
   std::vector<nevpt2::Tensor> kappas;
@@ -494,21 +589,43 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
     reqs.push_back(nevpt2::ScRotationRequest{std::move(k), /*tangent=*/true});
   }
   // The digests' transpose (#89): hbar = dE/d(h2e) through f3ac/f3ca, once,
-  // and with it every pairing below is the EXACT <kappa, Y> at fixed CI.
-  const auto tAdj = std::chrono::steady_clock::now();
-  const nevpt2::DeviceTensor hbar = nevpt2::scDigestAdjointDevice(
-      rdmOpt, g.get("ci"), g.nelecA, g.nelecB, ints, dm1, dm2, dm3, f3ac, f3ca, res);
-  std::printf("  the digests' transpose hbar = dE/dh2e through f3ac/f3ca: %.2fs\n",
-              std::chrono::duration<double>(std::chrono::steady_clock::now() - tAdj).count());
+  // and with it every pairing below is the EXACT <kappa, Y> at fixed CI. On a
+  // density-fitted case that term is #168's, so there is no hbar and every
+  // pairing is the frozen-digest functional's (`digest` stays 0).
+  nevpt2::DeviceTensor hbar;
+  if (!fitted) {
+    const auto tAdj = std::chrono::steady_clock::now();
+    hbar = nevpt2::scDigestAdjointDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB, ints, dm1,
+                                         dm2, dm3, f3ac, f3ca, res);
+    std::printf("  the digests' transpose hbar = dE/dh2e through f3ac/f3ca: %.2fs\n",
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - tAdj).count());
+  }
+  const nevpt2::DeviceTensor* hbarPtr = fitted ? nullptr : &hbar;
   const auto t0 = std::chrono::steady_clock::now();
   const nevpt2::ScFullRotationResult rot = NEVPT2_TRY(
-      nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, reqs, res));
+      nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, hbarPtr, reqs, res));
   std::printf("  assembly + %zu full directions: %.2fs\n", kFullDirections,
               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
   const bool dual = nevpt2::printScFullRotationTable(rot, kFullRotTol);
   ok = ok && dual;
   std::printf("  adjoint vs tangent (integral halves), every direction within %.0e: %s\n",
               kFullRotTol, dual ? "ok" : "FAILED");
+  if (fitted) {
+    // The frozen-digest duality in full: <kappa, Y> (integral half plus the
+    // orbital energies' response) against the frozen-digest tangent. The
+    // table above holds the integral halves; `eps` is one contraction shared
+    // by both modes, so this adds it to each and holds the sums.
+    double worst = 0.0;
+    for (const nevpt2::ScFullRotationPairing& d : rot.dirs)
+      worst = std::max(worst, std::fabs(d.adjoint - d.tangent));
+    const bool frozenDual = worst < kFullRotTol;
+    ok = ok && frozenDual;
+    std::printf("  FROZEN-DIGEST duality, <kappa, Y> vs Edot with the orbital energies moving "
+                "and the f3ac/f3ca digests held: worst |delta| = %.2e (< %.0e: %s)\n",
+                worst, kFullRotTol, frozenDual ? "ok" : "FAILED");
+    std::printf("  the digests' own term on the density-fitted path -- forward, the transpose, "
+                "and the full duality -- is #168's: not run here\n");
+  }
 
   // The digests' own term along the same four directions, forward (#88) and
   // reverse (#89), and with them the FULL duality: <kappa, Y> -- integral
@@ -517,20 +634,21 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
   // arithmetic again, gated at the same 1e-7. The forward term's independent
   // gate is PySCF's exact directional derivative, offline (--dump-source-terms,
   // then nevpt2_grad.py --edot-check); check 6 below is its on-card one.
-  const auto tDig = std::chrono::steady_clock::now();
-  const std::vector<nevpt2::ScDigestTangent> digest =
-      NEVPT2_TRY(nevpt2::scDigestRotationTangentDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB,
-                                                       ints, gen, dm1, dm2, dm3, f3ac, f3ca,
-                                                       reqs, res));
-  const bool fullDual = nevpt2::printScDigestTangentTable(rot, digest, kFullRotTol);
-  ok = ok && fullDual;
-  std::printf("  the digests' term along %zu full directions: %.2fs (forward gated offline "
-              "against PySCF's exact Edot,\n  and on the card by check 6)\n",
-              kFullDirections,
-              std::chrono::duration<double>(std::chrono::steady_clock::now() - tDig).count());
-  std::printf("  FULL duality, <kappa, Y> (with the digests' transpose) vs exact Edot, every "
-              "direction within %.0e: %s\n",
-              kFullRotTol, fullDual ? "ok" : "FAILED");
+  if (!fitted) {
+    const auto tDig = std::chrono::steady_clock::now();
+    const std::vector<nevpt2::ScDigestTangent> digest = NEVPT2_TRY(
+        nevpt2::scDigestRotationTangentDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB, ints, gen,
+                                              dm1, dm2, dm3, f3ac, f3ca, reqs, res));
+    const bool fullDual = nevpt2::printScDigestTangentTable(rot, digest, kFullRotTol);
+    ok = ok && fullDual;
+    std::printf("  the digests' term along %zu full directions: %.2fs (forward gated offline "
+                "against PySCF's exact Edot,\n  and on the card by check 6)\n",
+                kFullDirections,
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - tDig).count());
+    std::printf("  FULL duality, <kappa, Y> (with the digests' transpose) vs exact Edot, every "
+                "direction within %.0e: %s\n",
+                kFullRotTol, fullDual ? "ok" : "FAILED");
+  }
 
   double worstE = 0.0;
   for (int c = 0; c < 8; ++c)
@@ -617,29 +735,33 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
     const std::vector<nevpt2::ScRotationRequest> one{nevpt2::ScRotationRequest{
         embedBlock(block, core ? 0 : nc + na, nmo), /*tangent=*/true}};
     const nevpt2::ScFullRotationResult r = NEVPT2_TRY(
-        nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, one, res));
+        nevpt2::scFullRotationDevice(ints, gen, dm1, dm2, dm3, f3ac, f3ca, hbarPtr, one, res));
     const bool epsZero = std::fabs(r.dirs[0].eps) < kEpsZeroTol;
     const bool dualHere = std::fabs(r.dirs[0].integral - r.dirs[0].tangentIntegral) <
                           kFullRotTol;
-    // No active index moves, so h2e_dot is an exactly-zero tensor and so is
-    // every digest built from it: the digests' term is 0.0, not small (#88).
-    const std::vector<nevpt2::ScDigestTangent> dig0 =
-        NEVPT2_TRY(nevpt2::scDigestRotationTangentDevice(rdmOpt, g.get("ci"), g.nelecA,
-                                                         g.nelecB, ints, gen, dm1, dm2, dm3,
-                                                         f3ac, f3ca, one, res));
-    // And in reverse mode (#89): hbar paired with that zero tensor.
-    const bool digestZero =
-        dig0[0].total == 0.0 && dig0[0].h2eDotMax == 0.0 && r.dirs[0].digest == 0.0;
-    ok = ok && epsZero && dualHere && digestZero;
+    ok = ok && epsZero && dualHere;
     std::printf("\n  %s-internal direction: <kappa, Y> = %.14e, adjoint vs tangent %.2e\n",
                 name, r.dirs[0].adjoint,
                 std::fabs(r.dirs[0].integral - r.dirs[0].tangentIntegral));
     std::printf("  its orbital-energy response is zero by (O2): eps = %.2e (< %.0e: %s)\n",
                 r.dirs[0].eps, kEpsZeroTol, epsZero ? "ok" : "FAILED");
-    std::printf("  it moves no active integral: max |h2e_dot| = %.1e, the digests' term = %.1e "
-                "forward, %.1e reverse (exactly 0: %s)\n",
-                dig0[0].h2eDotMax, dig0[0].total, r.dirs[0].digest,
-                digestZero ? "ok" : "FAILED");
+    if (!fitted) {
+      // No active index moves, so h2e_dot is an exactly-zero tensor and so
+      // is every digest built from it: the digests' term is 0.0, not small
+      // (#88). (On a density-fitted case that term is #168's.)
+      const std::vector<nevpt2::ScDigestTangent> dig0 =
+          NEVPT2_TRY(nevpt2::scDigestRotationTangentDevice(rdmOpt, g.get("ci"), g.nelecA,
+                                                           g.nelecB, ints, gen, dm1, dm2, dm3,
+                                                           f3ac, f3ca, one, res));
+      // And in reverse mode (#89): hbar paired with that zero tensor.
+      const bool digestZero =
+          dig0[0].total == 0.0 && dig0[0].h2eDotMax == 0.0 && r.dirs[0].digest == 0.0;
+      ok = ok && digestZero;
+      std::printf("  it moves no active integral: max |h2e_dot| = %.1e, the digests' term = "
+                  "%.1e forward, %.1e reverse (exactly 0: %s)\n",
+                  dig0[0].h2eDotMax, dig0[0].total, r.dirs[0].digest,
+                  digestZero ? "ok" : "FAILED");
+    }
     const double scale = std::max(std::fabs(r.dirs[0].tangent), std::fabs(energies.total));
     ok = finiteDifferenceSweep(name, g, gg, core, block, r.dirs[0].tangent, scale, dm1, dm2,
                                dm3, f3ac, f3ca, res) &&
@@ -654,7 +776,7 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
     for (std::int64_t q = p + 1; q < nmo; ++q) pairs.emplace_back(p, q);
   const auto tY = std::chrono::steady_clock::now();
   const nevpt2::Tensor y = NEVPT2_TRY(nevpt2::scFullRotationMatrix(
-      ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, pairs, kYChunk, res));
+      ints, gen, dm1, dm2, dm3, f3ac, f3ca, hbarPtr, pairs, kYChunk, res));
   double yMax = 0.0;
   for (const auto& [p, q] : pairs) yMax = std::max(yMax, std::fabs(y(p, q)));
   std::printf("\n  Y's inactive blocks: %zu basis directions in chunks of %lld, %.2fs, "
@@ -676,7 +798,7 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
   const std::vector<nevpt2::ScRotationRequest> inactiveReq{
       nevpt2::ScRotationRequest{kInactive, /*tangent=*/false}};
   const nevpt2::ScFullRotationResult rInactive = NEVPT2_TRY(nevpt2::scFullRotationDevice(
-      ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, inactiveReq, res));
+      ints, gen, dm1, dm2, dm3, f3ac, f3ca, hbarPtr, inactiveReq, res));
   double fromMatrix = 0.0;
   for (std::int64_t p = 0; p < nmo; ++p)
     for (std::int64_t q = 0; q < nmo; ++q) fromMatrix += kInactive(p, q) * y(p, q);
@@ -696,6 +818,20 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
               pc.smallestGap);
 
   // --- 6. the digests' term against its own finite difference (#88) -------
+  if (fitted) {
+    // The density-fitted case stops at the frozen-digest half (#165); the
+    // digests' term, this check included, is #168's.
+    std::printf("\n%s: the full orbital source term's adjoint and tangent agree on the "
+                "frozen-digest half (density-fitted; the f3ac/f3ca digests' own term is "
+                "#168's) to %.0e on every direction -- integral halves, and with the orbital "
+                "energies' response -- the inventory built from B[L,p,q] holds the promotion "
+                "table and the sidecar's carried tied arrays to %.0e, the active block is "
+                "unchanged to the kernels' own reproducibility (itself inside its recorded "
+                "envelope), the two intra-space finite differences converge, and Park Eqs. "
+                "56-57 are determined\n",
+                ok ? "PASS" : "FAIL", kFullRotTol, kSelfCheckTol);
+    return ok;
+  }
   const std::vector<nevpt2::ScRotationRequest> actEmbedded{
       nevpt2::ScRotationRequest{embedBlock(kAct, nc, nmo), /*tangent=*/false}};
   const std::vector<nevpt2::ScDigestTangent> digAct =
@@ -715,7 +851,7 @@ nevpt2::Result<bool> checkKappaFull(const nevpt2::GoldenFile& g, const nevpt2::G
   // The same term in reverse mode (#89), along the same direction: the
   // transpose's pairing against the rebuilt digests' tangent, exact arithmetic.
   const nevpt2::ScFullRotationResult revAct = NEVPT2_TRY(nevpt2::scFullRotationDevice(
-      ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar, actEmbedded, res));
+      ints, gen, dm1, dm2, dm3, f3ac, f3ca, hbarPtr, actEmbedded, res));
   const double revGap = std::fabs(revAct.dirs[0].digest - digAct[0].total);
   const bool revOk = revGap < kFullRotTol;
   ok = ok && revOk;

@@ -74,13 +74,19 @@ add_cxx_module_library(
 # rotation is buildRdmsDevice run at the dotted active integrals, so
 # scDigestRotationTangentDevice takes its RdmBuildOptions and calls it. That
 # brings the RDM kernels' device libraries in as well; no kernel is new.
+#
+# gradient_df.cpp (#165) is dfGeneralIntegralsDevice: the density-fitted
+# case's general-range inventory, contracted on the device from the whole
+# three-index tensor (the golden's four B blocks plus the NEVPT2F1 sidecar's
+# B_cc / B_vv) into the same GeneralIntegralsDevice the sidecar fills for a
+# conventional case. Einsums only, so still no device library here.
 add_cxx_module_library(
   NAME nevpt2.gradient
   PRIMARY_INTERFACE gradient.cppm
   PARTITIONS gradient_general.cppm gradient_rotation.cppm gradient_terms.cppm
              gradient_sc_classes.cppm gradient_rdm_adjoint.cppm gradient_ci_source.cppm
              gradient_pc_classes.cppm
-  IMPLEMENTATION gradient.cpp
+  IMPLEMENTATION gradient.cpp gradient_df.cpp
   LINK_PUBLIC nevpt2::energy nevpt2::sc_amplitudes nevpt2::gradient_plan
               nevpt2::sigma_vector nevpt2::rdm_build
 )
