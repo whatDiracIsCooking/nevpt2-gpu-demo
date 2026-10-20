@@ -30,10 +30,11 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 
 // What implements what, and why a binary that does not refuses it:
 //   --pc            the demos, and nevpt2_sc_pseudodensity for its two
-//                   source-term jobs alone (--dump-source-terms and
-//                   --source-oracle write / compare PC-NEVPT2's with it, #74;
-//                   the identities and --kappa-act / --kappa-full are SC's,
-//                   so it is a config error there). nevpt2_pc_tangent is PC
+//                   source-term jobs (--dump-source-terms and --source-oracle
+//                   write / compare PC-NEVPT2's with it, #74) and for
+//                   --sc-hessian-kk-int (PC's orbital curvature, #200); the
+//                   identities and --kappa-act / --kappa-full are SC's, so it
+//                   is a config error there. nevpt2_pc_tangent is PC
 //                   throughout, so the switch would change nothing there.
 //   --profile       the demos only: nothing else prints a profile table.
 //   --rdm-tangent   the demos only: the gradient binaries run no Euler check of
@@ -375,10 +376,6 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
             "--sc-hessian-kk-int checks the orbital Hessian's integral curvature; --kappa-act, "
             "--kappa-full, --sc-hessian-kc, --dump-source-terms and --source-oracle are jobs of "
             "their own -- run one at a time");
-      if (c.pc && opt.scHessianKkInt)
-        return err_config(
-            "--sc-hessian-kk-int differentiates the strongly-contracted energy twice; PC's "
-            "orbital Hessian has no path");
       // --sc-hessian-kk (#158) likewise: one job per run, SC only.
       if (opt.scHessianKk && (opt.kappaAct || opt.kappaFull || opt.scHessianKc ||
                               opt.scHessianKkInt || !opt.dumpSourceTermsPath.empty() ||
@@ -391,12 +388,14 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
         return err_config(
             "--sc-hessian-kk differentiates the strongly-contracted energy twice; PC's orbital "
             "Hessian has no path");
-      // --pc picks PC-NEVPT2's source terms (#74): only the two jobs that
-      // assemble them take it.
-      if (c.pc && opt.dumpSourceTermsPath.empty() && opt.sourceOraclePath.empty())
+      // --pc picks PC-NEVPT2's source terms (#74) and PC's orbital curvature
+      // (#200): only the three jobs that assemble them take it.
+      if (c.pc && opt.dumpSourceTermsPath.empty() && opt.sourceOraclePath.empty() &&
+          !opt.scHessianKkInt)
         return err_config(
-            "--pc makes --dump-source-terms and --source-oracle PC-NEVPT2's; the identities, "
-            "--kappa-act and --kappa-full are the SC energy's and have no --pc path");
+            "--pc makes --dump-source-terms, --source-oracle and --sc-hessian-kk-int "
+            "PC-NEVPT2's; the identities, --kappa-act and --kappa-full are the SC energy's and "
+            "have no --pc path");
       if (!opt.gradgoldPath.empty() && !opt.kappaFull && !opt.scHessianKc &&
           !opt.scHessianKkInt && !opt.scHessianKk && opt.dumpSourceTermsPath.empty() &&
           opt.sourceOraclePath.empty())

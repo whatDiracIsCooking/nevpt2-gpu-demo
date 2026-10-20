@@ -715,7 +715,8 @@ if(NEVPT2_BUILD_TESTING)
   # --dump-source-terms writes the fitted Y and y with both terms and Edot's
   # two along the seeded directions, read back bit for bit (#166's input).
   # Two refusals stay, each an entry whose regex is the error: --pc on a
-  # fitted case (no PC gate over the fitted inventory), and --source-oracle
+  # fitted case (no PC dump over the fitted inventory; its source term is gated
+  # only inside --pc --sc-hessian-kk-int, #200), and --source-oracle
   # (no fitted oracle exists; docs/gradients.md, Sec. 6.2).
   #
   # The identity and --kappa-act entries are `small`, as their integral-direct
@@ -769,7 +770,7 @@ if(NEVPT2_BUILD_TESTING)
   if(TEST nevpt2_sc_pseudodensity_dump_pc_cas44_df_refused)
     set_tests_properties(nevpt2_sc_pseudodensity_dump_pc_cas44_df_refused PROPERTIES
       PASS_REGULAR_EXPRESSION
-        "--pc --dump-source-terms on a density-fitted case: PC's orbital source term over the fitted inventory has no gate in tree")
+        "--pc --dump-source-terms on a density-fitted case: the PC dump over the fitted inventory is not built")
   endif()
   _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_oracle_cas44_df_refused
                         "${_df_y_gold}" --tiles 3
@@ -861,6 +862,52 @@ if(NEVPT2_BUILD_TESTING)
     set_tests_properties(nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk_int PROPERTIES
       PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_kk_pass} .*\\(density-fitted: K2 by the three-index jets, both routes agree\\)")
   endif()
+
+  # --- PC's orbital curvature, --pc --sc-hessian-kk-int (#200) -------------------
+  #
+  # The same binary and checks with --pc (apps/sc_pseudodensity/
+  # hessian_kk_check.cppm; docs/hessian-theory.md, Sec. 6.7): PC-NEVPT2's
+  # <Ehat'_pc, I''[u, v]> = K1 + K2 (pcOrbitalCurvatureDevice) -- #154's input
+  # generators against PC's integral adjoint (#74's dE/dslab, dE/dK, R_t and
+  # the digests' hbar_pc). First, check 0 gates PC's first-order orbital source
+  # term itself on seeded full kappas, the integral half's duality and the full
+  # one with the digests' forward term (1e-7) -- on a fitted case the only gate
+  # of it in tree, which the curvature there rests on. Then every SC check:
+  # duality per term, the swap, K1's matrix path at an antisymmetric kappa,
+  # the traced pairs' zero (h1e_v_Sr's alone -- PC reads no v2tr), the
+  # intra-space zeros, the Richardson-verified ladders of the fixed-adjoint
+  # pairing along exp(s u + t v) (the term paired in the ladder's own walk),
+  # the product parameterisation, the routes on a fitted case and the
+  # refusals. The state is held to block2's PC total first. CAS(4,4), both
+  # flavours, is `small`; CAS(8,8) runs too, both flavours, outside it, for
+  # the same reason as SC's (docs/testing.md, "PC's orbital curvature").
+  set(_nevpt2_pc_hessian_kk_pass
+      "PASS: the PC orbital Hessian's integral curvature <Ehat', I''> = K1 \\+ K2 agrees .*\\(PC's first-order source term gated first, both dualities\\)")
+  foreach(_case cas44 cas88 cas44_df cas88_df)
+    set(_pkk_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.nevpt2gold")
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.gradgold")
+      message(FATAL_ERROR "nevpt2: committed gradient sidecar missing for n2_ccpvdz_${_case}")
+    endif()
+    _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_${_case}_pc_hessian_kk_int
+                          "${_pkk_gold}" --tiles 3 --pc --sc-hessian-kk-int)
+    if(TEST nevpt2_sc_pseudodensity_${_case}_pc_hessian_kk_int)
+      set_tests_properties(nevpt2_sc_pseudodensity_${_case}_pc_hessian_kk_int PROPERTIES
+        PASS_REGULAR_EXPRESSION "${_nevpt2_pc_hessian_kk_pass}")
+    endif()
+    unset(_pkk_gold)
+  endforeach()
+  foreach(_case cas44 cas44_df)
+    if(TEST nevpt2_sc_pseudodensity_${_case}_pc_hessian_kk_int)
+      set_tests_properties(nevpt2_sc_pseudodensity_${_case}_pc_hessian_kk_int PROPERTIES
+        LABELS "gpu;small")
+    endif()
+  endforeach()
+  foreach(_case cas44_df cas88_df)
+    if(TEST nevpt2_sc_pseudodensity_${_case}_pc_hessian_kk_int)
+      set_tests_properties(nevpt2_sc_pseudodensity_${_case}_pc_hessian_kk_int PROPERTIES
+        PASS_REGULAR_EXPRESSION "${_nevpt2_pc_hessian_kk_pass}.* \\(density-fitted: K2 by the three-index jets, both routes agree\\)")
+    endif()
+  endforeach()
 
   # --- the orbital block's sandwich and Eddot_kk, --sc-hessian-kk (#158, #190) ----
   #

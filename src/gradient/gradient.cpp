@@ -1110,63 +1110,222 @@ bool isActiveActive(const Tensor& k, int64_t actLo, int64_t actHi) {
   return true;
 }
 
-Result<std::vector<ScOrbitalCurvatureResult>> scOrbitalCurvatureDevice(
-    const ScOrbitalCurvatureSetup& s, const std::vector<ScOrbitalCurvatureRequest>& pairs,
-    const DeviceResources& res) {
-  NEVPT2_TRY(checkGeneralShapes(s.ints, s.gen));
-  if (s.digestAdjoint != nullptr && s.digestAdjoint->dims != s.ints.h2e.dims)
-    return err_config("scOrbitalCurvatureDevice: the digests' adjoint is not shaped like h2e");
+// PC's one walk over dotted input sets (#200; docs/hessian-theory.md, Sec.
+// 6.7): pairDottedSets' pairing with PC's integral adjoint Ehat'_pc --
+// :pc_classes' dE/dslab against every slab's dot, dE/dK against the class's
+// own K builder at the set's h1e / h2e (pcClassMatrices), R_t against the
+// set's orbital energies -- and, with `hbar` (pcDigestAdjointDevice), the
+// digests' <hbar, h2e increment>. PC reads no v2tr (its Sir pairs Sir2's own
+// dotted block), so a set's v2tr field is never read here. A class the
+// solve refuses leaves `ok` false and `dirs` empty.
+Result<PcFullRotationResult> pairDottedSetsPc(const NevptIntegralsDevice& ints,
+                                              const RdmTensors& rdm, const DeviceTensor* hbar,
+                                              const std::vector<const ScDotted*>& sets,
+                                              const std::vector<bool>& tangent,
+                                              const DeviceResources& res) {
+  FullBlockSource src(ints);
+  const ActiveIntegralsDevice ai = activeViewOf(ints);
+  const ScRotation rot = makeDottedRotation(sets, tangent, res);
+  PcFullRotationResult out;
+  out.walk = NEVPT2_TRY(assemblePcClasses(ai, src, /*batch=*/0, rdm.dm1, rdm.dm2, rdm.dm3,
+                                          rdm.f3ac, rdm.f3ca, rot, /*adj=*/nullptr,
+                                          /*epsAdjoint=*/false, res));
+  out.ok = out.walk.allDone();
+  if (!out.ok) return out;
+  out.dirs.assign(sets.size(), ScFullRotationPairing{});
+  for (std::size_t d = 0; d < sets.size(); ++d) {
+    ScFullRotationPairing& p = out.dirs[d];
+    for (const PcClassGradient& c : out.walk.classes) {
+      p.ext += c.rotExt[d];
+      p.act += c.rotAct[d];
+      p.eps += c.rotEps[d];
+      p.tangentIntegral += c.rotTangent[d];
+    }
+    p.integral = p.ext + p.act;
+    if (hbar != nullptr) {
+      p.digest = dotTensors(*hbar, sets[d]->d.h2e, res);
+      p.hasDigest = true;
+    }
+    p.adjoint = p.integral + p.eps + p.digest;
+    p.tangent = p.tangentIntegral + p.eps;
+    p.hasTangent = tangent[d];
+  }
+  return out;
+}
+
+// The PC energy's response to one h2e increment through the digests alone:
+// the RDM build at `h2eDotDevice` (f3ac / f3ca are linear in h2e at a fixed
+// CI vector) and pcTangentsDevice with every other RDM tangent zero --
+// digestTangentAt's construction for PC. A class the solve refuses is a
+// Numerical Error naming it.
+Result<double> pcDigestTangentAt(const RdmBuildOptions& opt, const Tensor& ci,
+                                 const int64_t nelecA, const int64_t nelecB,
+                                 const NevptIntegralsDevice& ints,
+                                 const DeviceTensor& h2eDotDevice, const RdmTensors& rdm,
+                                 const DeviceTensor& dm1Zero, const DeviceTensor& dm2Zero,
+                                 const DeviceTensor& dm3Zero, const DeviceResources& res) {
+  const int64_t norb = rdm.dm1.dims[0];
+  // downloadTensor synchronizes: the einsums that wrote the increment are done.
+  const Tensor h2eDot = downloadTensor(h2eDotDevice, res.stream());
+  const RdmBuildResult dot = buildRdmsDevice(opt, ci, norb, nelecA, nelecB, h2eDot, res);
+  const PcTangentResult t = NEVPT2_TRY(pcTangentsDevice(
+      ints, rdm.dm1, rdm.dm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dm1Zero, dm2Zero, dm3Zero, dot.f3ac,
+      dot.f3ca, /*epsDot=*/nullptr, res));
+  double total = 0.0;
+  for (std::size_t c = 0; c < 8; ++c) {
+    if (t.classes[c].result.status != PcStatus::Done)
+      return err_numerical(std::format(
+          "the PC digests' tangent at a second-order h2e increment: {} refused by the solve ({})",
+          CLASSES[c], t.classes[c].result.why));
+    total += t.classes[c].edot;
+  }
+  return total;
+}
+
+// One walk over dotted sets in either variant, as the pairings' list: SC's
+// pairDottedSets, or PC's, whose refused class is a Numerical Error naming it
+// (a pairing with a class missing is not the term).
+Result<std::vector<ScFullRotationPairing>> pairDottedSetsAny(
+    const bool pc, const NevptIntegralsDevice& ints, const RdmTensors& rdm,
+    const DeviceTensor* hbar, const std::vector<const ScDotted*>& sets,
+    const std::vector<bool>& tangent, const DeviceResources& res) {
+  if (!pc) return pairDottedSets(ints, rdm, hbar, sets, tangent, res).dirs;
+  PcFullRotationResult w = NEVPT2_TRY(pairDottedSetsPc(ints, rdm, hbar, sets, tangent, res));
+  if (!w.ok)
+    return err_numerical(std::format(
+        "the PC orbital curvature has no value: {} refused by the solve the energy runs "
+        "(docs/pc-nevpt2.md, \"The singular-metric convention\")",
+        w.walk.refusals()));
+  return std::move(w.dirs);
+}
+
+// One pair's settled plan: which route serves each term, and which member is
+// active-active.
+struct CurvaturePlan {
+  ScCurvatureRoute k1, k2;
+  bool uAct, vAct;
+};
+
+// Shape, antisymmetry and the routes of pair `q`, or the caller's Error --
+// Unsupported for a route the data cannot serve or a conventional pair with
+// neither member active-active (the header's refusals), before any device work.
+Result<CurvaturePlan> planCurvaturePair(const ScOrbitalCurvatureSetup& s,
+                                        const ScOrbitalCurvatureRequest& r, const std::size_t q) {
   const int64_t nmo = s.gen.nmo();
   const int64_t actLo = s.gen.ncore, actHi = s.gen.ncore + s.gen.nact;
   const bool fitted = s.gen.densityFitted();
+  NEVPT2_TRY(checkCurvatureDirection(r.u, nmo, q, "u"));
+  NEVPT2_TRY(checkCurvatureDirection(r.v, nmo, q, "v"));
+  CurvaturePlan p{ScCurvatureRoute::Sidecar, ScCurvatureRoute::Sidecar,
+                  isActiveActive(r.u, actLo, actHi), isActiveActive(r.v, actLo, actHi)};
+  if (r.k1 == ScCurvatureRoute::ThreeIndex) {
+    if (!fitted)
+      return err_unsupported(std::format(
+          "pair {}: K1's three-index route reads the whole B[L, p, q], which only a "
+          "density-fitted case carries",
+          q));
+    p.k1 = ScCurvatureRoute::ThreeIndex;
+  }
+  const bool oneActive = p.uAct || p.vAct;
+  const ScCurvatureRoute want =
+      r.k2 != ScCurvatureRoute::Auto
+          ? r.k2
+          : (fitted ? ScCurvatureRoute::ThreeIndex : ScCurvatureRoute::Sidecar);
+  if (want == ScCurvatureRoute::ThreeIndex && !fitted)
+    return err_unsupported(std::format(
+        "pair {}: K2's three-index route reads the whole B[L, p, q], which only a "
+        "density-fitted case carries",
+        q));
+  if (want == ScCurvatureRoute::Sidecar && !oneActive)
+    return err_unsupported(std::format(
+        "pair {}: the orbital Hessian's cross-slot curvature K2 reads two-general-index "
+        "integrals -- for a pair with neither direction active-active, the whole MO-integral "
+        "tensor, which the conventional gradient sidecar does not carry "
+        "(docs/hessian-theory.md, Sec. 5.4). Refused rather than answered without K2 "
+        "(Sec. 9.1); the full-tensor K2 is #180",
+        q));
+  p.k2 = want;
+  return p;
+}
+
+// W = (u v + v u) / 2: symmetric, the parameterisation's own second order.
+Tensor symmetricProduct(const Tensor& u, const Tensor& v) {
+  const Tensor uv = matmulHost(u, v);
+  const Tensor vu = matmulHost(v, u);
+  Tensor w(uv.dims());
+  for (int64_t i = 0; i < w.size(); ++i) w.flatRef(i) = 0.5 * (uv.flat(i) + vu.flat(i));
+  return w;
+}
+
+// K1's and K2's dotted input sets for one planned pair, by the plan's routes.
+Result<std::pair<ScDotted, ScDotted>> curvatureSets(const ScOrbitalCurvatureSetup& s,
+                                                    const ScOrbitalCurvatureRequest& r,
+                                                    const CurvaturePlan& p, const Tensor& w,
+                                                    const DeviceResources& res) {
+  ScDotted k1Set = p.k1 == ScCurvatureRoute::ThreeIndex
+                       ? dfDottedFirst(s.ints, s.gen, s.rdm.dm1, w, res)
+                       : NEVPT2_TRY(dottedAtMatrix(s.ints, s.gen, s.rdm.dm1, w, res));
+  // The composition's outer direction is the active-active one; z^x is
+  // symmetric in (u, v), so either way round is the same term.
+  ScDotted k2Set = p.k2 == ScCurvatureRoute::ThreeIndex
+                       ? dfDottedCross(s.ints, s.gen, s.rdm.dm1, r.u, r.v, res)
+                       : NEVPT2_TRY(composedCross(s.ints, s.gen, s.rdm.dm1, p.uAct ? r.u : r.v,
+                                                  p.uAct ? r.v : r.u, res));
+  return std::pair<ScDotted, ScDotted>{std::move(k1Set), std::move(k2Set)};
+}
+
+Result<NevptIntegralsDevice> orbitalSecondInputsDevice(const ScOrbitalCurvatureSetup& s,
+                                                       const ScOrbitalCurvatureRequest& r,
+                                                       const DeviceResources& res) {
+  NEVPT2_TRY(checkGeneralShapes(s.ints, s.gen));
+  const CurvaturePlan p = NEVPT2_TRY(planCurvaturePair(s, r, 0));
+  const auto [k1, k2] = NEVPT2_TRY(curvatureSets(s, r, p, symmetricProduct(r.u, r.v), res));
+  NevptIntegralsDevice out;
+  const auto sum = [&](DeviceTensor NevptIntegralsDevice::* member) {
+    out.*member = DeviceTensor::zeros((k1.d.*member).dims, res);
+    addScaledInto(k1.d.*member, out.*member, 1.0, res.stream());
+    addScaledInto(k2.d.*member, out.*member, 1.0, res.stream());
+  };
+  for (const ScDottedField& f : kDottedFields) sum(f.member);
+  sum(&NevptIntegralsDevice::e_core);
+  sum(&NevptIntegralsDevice::e_virt);
+  return out;
+}
+
+Result<NevptIntegralsDevice> orbitalMatrixInputsDevice(const ScOrbitalCurvatureSetup& s,
+                                                       const Tensor& m,
+                                                       const DeviceResources& res) {
+  NEVPT2_TRY(checkGeneralShapes(s.ints, s.gen));
+  const int64_t nmo = s.gen.nmo();
+  if (m.rank() != 2 || m.dim(0) != nmo || m.dim(1) != nmo)
+    return err_config(std::format("orbitalMatrixInputsDevice: M is not a {} x {} matrix", nmo, nmo));
+  ScDotted set = NEVPT2_TRY(dottedAtMatrix(s.ints, s.gen, s.rdm.dm1, m, res));
+  return std::move(set.d);
+}
+
+// scOrbitalCurvatureDevice and pcOrbitalCurvatureDevice: one body, the
+// variant choosing the walk that pairs the dotted sets and the digests'
+// forward term. The input generators (:curvature) and every refusal are the
+// two variants' alike (docs/hessian-theory.md, Sec. 6.7).
+Result<std::vector<ScOrbitalCurvatureResult>> orbitalCurvature(
+    const bool pc, const ScOrbitalCurvatureSetup& s,
+    const std::vector<ScOrbitalCurvatureRequest>& pairs, const DeviceResources& res) {
+  const char* const who = pc ? "pcOrbitalCurvatureDevice" : "scOrbitalCurvatureDevice";
+  NEVPT2_TRY(checkGeneralShapes(s.ints, s.gen));
+  if (s.digestAdjoint != nullptr && s.digestAdjoint->dims != s.ints.h2e.dims)
+    return err_config(std::format("{}: the digests' adjoint is not shaped like h2e", who));
 
   // Every pair is settled -- shape, antisymmetry, which route serves each
   // term -- before any device work, so a refusal is never a partial answer.
-  struct Plan {
-    ScCurvatureRoute k1, k2;
-    bool uAct, vAct;
-  };
-  std::vector<Plan> plans;
+  std::vector<CurvaturePlan> plans;
   bool anyTangent = false;
   for (std::size_t q = 0; q < pairs.size(); ++q) {
-    const ScOrbitalCurvatureRequest& r = pairs[q];
-    NEVPT2_TRY(checkCurvatureDirection(r.u, nmo, q, "u"));
-    NEVPT2_TRY(checkCurvatureDirection(r.v, nmo, q, "v"));
-    Plan p{ScCurvatureRoute::Sidecar, ScCurvatureRoute::Sidecar, isActiveActive(r.u, actLo, actHi),
-           isActiveActive(r.v, actLo, actHi)};
-    if (r.k1 == ScCurvatureRoute::ThreeIndex) {
-      if (!fitted)
-        return err_unsupported(std::format(
-            "pair {}: K1's three-index route reads the whole B[L, p, q], which only a "
-            "density-fitted case carries",
-            q));
-      p.k1 = ScCurvatureRoute::ThreeIndex;
-    }
-    const bool oneActive = p.uAct || p.vAct;
-    const ScCurvatureRoute want =
-        r.k2 != ScCurvatureRoute::Auto
-            ? r.k2
-            : (fitted ? ScCurvatureRoute::ThreeIndex : ScCurvatureRoute::Sidecar);
-    if (want == ScCurvatureRoute::ThreeIndex && !fitted)
-      return err_unsupported(std::format(
-          "pair {}: K2's three-index route reads the whole B[L, p, q], which only a "
-          "density-fitted case carries",
-          q));
-    if (want == ScCurvatureRoute::Sidecar && !oneActive)
-      return err_unsupported(std::format(
-          "pair {}: the orbital Hessian's cross-slot curvature K2 reads two-general-index "
-          "integrals -- for a pair with neither direction active-active, the whole MO-integral "
-          "tensor, which the conventional gradient sidecar does not carry "
-          "(docs/hessian-theory.md, Sec. 5.4). Refused rather than answered without K2 "
-          "(Sec. 9.1); the full-tensor K2 is #180",
-          q));
-    p.k2 = want;
-    anyTangent = anyTangent || r.tangent;
-    plans.push_back(p);
+    plans.push_back(NEVPT2_TRY(planCurvaturePair(s, pairs[q], q)));
+    anyTangent = anyTangent || pairs[q].tangent;
   }
   if (anyTangent && s.ci != nullptr)
     check(!s.opt.cublas && !s.opt.ozaki && !s.opt.fusedDigest,
-          "scOrbitalCurvatureDevice: the digests' forward term runs the emitted or the native-fp64 "
+          "the orbital curvature's digests' forward term runs the emitted or the native-fp64 "
           "BLAS digest (cli refuses --cublas / --ozaki / --fused-digest with --sc-hessian-kk-int "
           "and --sc-hessian-kk)");
 
@@ -1182,23 +1341,10 @@ Result<std::vector<ScOrbitalCurvatureResult>> scOrbitalCurvatureDevice(
   out.reserve(pairs.size());
   for (std::size_t q = 0; q < pairs.size(); ++q) {
     const ScOrbitalCurvatureRequest& r = pairs[q];
-    const Plan& p = plans[q];
-    // W = (u v + v u) / 2: symmetric, the parameterisation's own second order.
-    const Tensor uv = matmulHost(r.u, r.v);
+    const CurvaturePlan& p = plans[q];
+    const Tensor w = symmetricProduct(r.u, r.v);
     const Tensor vu = matmulHost(r.v, r.u);
-    Tensor w({nmo, nmo});
-    for (int64_t i = 0; i < w.size(); ++i) w.flatRef(i) = 0.5 * (uv.flat(i) + vu.flat(i));
-
-    const ScDotted k1Set = p.k1 == ScCurvatureRoute::ThreeIndex
-                               ? dfDottedFirst(s.ints, s.gen, s.rdm.dm1, w, res)
-                               : NEVPT2_TRY(dottedAtMatrix(s.ints, s.gen, s.rdm.dm1, w, res));
-    // The composition's outer direction is the active-active one; z^x is
-    // symmetric in (u, v), so either way round is the same term.
-    const ScDotted k2Set =
-        p.k2 == ScCurvatureRoute::ThreeIndex
-            ? dfDottedCross(s.ints, s.gen, s.rdm.dm1, r.u, r.v, res)
-            : NEVPT2_TRY(composedCross(s.ints, s.gen, s.rdm.dm1, p.uAct ? r.u : r.v,
-                                       p.uAct ? r.v : r.u, res));
+    const auto [k1Set, k2Set] = NEVPT2_TRY(curvatureSets(s, r, p, w, res));
     std::vector<const ScDotted*> sets{&k1Set, &k2Set};
     std::vector<bool> tangent{r.tangent, r.tangent};
     // Both active-active: the traced pairs' shares, K1's at W and K2's at v u
@@ -1212,13 +1358,14 @@ Result<std::vector<ScOrbitalCurvatureResult>> scOrbitalCurvatureDevice(
       tangent.push_back(false);
       tangent.push_back(false);
     }
-    const ScFullRotationResult walk = pairDottedSets(s.ints, s.rdm, s.digestAdjoint, sets, tangent, res);
+    const std::vector<ScFullRotationPairing> walk =
+        NEVPT2_TRY(pairDottedSetsAny(pc, s.ints, s.rdm, s.digestAdjoint, sets, tangent, res));
 
     ScOrbitalCurvatureResult o;
     o.k1Route = p.k1;
     o.k2Route = p.k2;
     for (int t = 0; t < 2; ++t) {
-      const ScFullRotationPairing& w2 = walk.dirs[static_cast<std::size_t>(t)];
+      const ScFullRotationPairing& w2 = walk[static_cast<std::size_t>(t)];
       const ScDotted& set = *sets[static_cast<std::size_t>(t)];
       ScCurvatureTerm& term = t == 0 ? o.k1 : o.k2;
       term.ext = w2.ext;
@@ -1234,18 +1381,62 @@ Result<std::vector<ScOrbitalCurvatureResult>> scOrbitalCurvatureDevice(
       term.h2eMax = maxAbsDevice(set.d.h2e, res);
       if (r.tangent && s.ci != nullptr)
         term.digestForward =
-            digestTangentAt(s.opt, *s.ci, s.nelecA, s.nelecB, s.ints, set.d.h2e, s.rdm.dm1,
-                            s.rdm.dm2, s.rdm.dm3, s.rdm.f3ac, s.rdm.f3ca, *dm1Zero, *dm2Zero,
-                            *dm3Zero, std::nullopt, res)
-                .total;
+            pc ? NEVPT2_TRY(pcDigestTangentAt(s.opt, *s.ci, s.nelecA, s.nelecB, s.ints, set.d.h2e,
+                                              s.rdm, *dm1Zero, *dm2Zero, *dm3Zero, res))
+               : digestTangentAt(s.opt, *s.ci, s.nelecA, s.nelecB, s.ints, set.d.h2e, s.rdm.dm1,
+                                 s.rdm.dm2, s.rdm.dm3, s.rdm.f3ac, s.rdm.f3ca, *dm1Zero,
+                                 *dm2Zero, *dm3Zero, std::nullopt, res)
+                     .total;
       term.tangent = term.tangentIntegral + term.eps + term.digestForward;
     }
     if (p.uAct && p.vAct) {
       o.hasTraced = true;
-      o.k1Traced = walk.dirs[2].adjoint;
-      o.k2Traced = -walk.dirs[3].adjoint;
+      o.k1Traced = walk[2].adjoint;
+      o.k2Traced = -walk[3].adjoint;
     }
     out.push_back(o);
+  }
+  return out;
+}
+
+Result<std::vector<ScOrbitalCurvatureResult>> scOrbitalCurvatureDevice(
+    const ScOrbitalCurvatureSetup& s, const std::vector<ScOrbitalCurvatureRequest>& pairs,
+    const DeviceResources& res) {
+  return orbitalCurvature(/*pc=*/false, s, pairs, res);
+}
+
+Result<std::vector<ScOrbitalCurvatureResult>> pcOrbitalCurvatureDevice(
+    const ScOrbitalCurvatureSetup& s, const std::vector<ScOrbitalCurvatureRequest>& pairs,
+    const DeviceResources& res) {
+  return orbitalCurvature(/*pc=*/true, s, pairs, res);
+}
+
+// The matrix path's dotted sets, one per direction (K1's machinery at each
+// direction's matrix), and their tangent flags: scMatrixRotationDevice's and
+// pcMatrixRotationDevice's shared front half.
+struct MatrixSets {
+  std::vector<ScDotted> owned;
+  std::vector<bool> tangent;
+  std::vector<const ScDotted*> ptrs() const {
+    std::vector<const ScDotted*> out;
+    for (const ScDotted& d : owned) out.push_back(&d);
+    return out;
+  }
+};
+
+Result<MatrixSets> matrixSets(const char* who, const NevptIntegralsDevice& ints,
+                              const GeneralIntegralsDevice& gen, const RdmTensors& rdm,
+                              const DeviceTensor* digestAdjoint,
+                              const std::vector<ScRotationRequest>& dirs,
+                              const DeviceResources& res) {
+  NEVPT2_TRY(checkGeneralShapes(ints, gen));
+  if (digestAdjoint != nullptr && digestAdjoint->dims != ints.h2e.dims)
+    return err_config(std::format("{}: the digests' adjoint is not shaped like h2e", who));
+  MatrixSets out;
+  out.owned.reserve(dirs.size());
+  for (const ScRotationRequest& d : dirs) {
+    out.owned.push_back(NEVPT2_TRY(dottedAtMatrix(ints, gen, rdm.dm1, d.kappa, res)));
+    out.tangent.push_back(d.tangent);
   }
   return out;
 }
@@ -1256,27 +1447,31 @@ Result<ScFullRotationResult> scMatrixRotationDevice(const NevptIntegralsDevice& 
                                                     const DeviceTensor* digestAdjoint,
                                                     const std::vector<ScRotationRequest>& dirs,
                                                     const DeviceResources& res) {
-  NEVPT2_TRY(checkGeneralShapes(ints, gen));
-  if (digestAdjoint != nullptr && digestAdjoint->dims != ints.h2e.dims)
-    return err_config("scMatrixRotationDevice: the digests' adjoint is not shaped like h2e");
-  std::vector<ScDotted> owned;
-  owned.reserve(dirs.size());
-  std::vector<bool> tangent;
-  for (const ScRotationRequest& d : dirs) {
-    owned.push_back(NEVPT2_TRY(dottedAtMatrix(ints, gen, rdm.dm1, d.kappa, res)));
-    tangent.push_back(d.tangent);
-  }
-  std::vector<const ScDotted*> sets;
-  for (const ScDotted& d : owned) sets.push_back(&d);
-  return pairDottedSets(ints, rdm, digestAdjoint, sets, tangent, res);
+  const MatrixSets m = NEVPT2_TRY(
+      matrixSets("scMatrixRotationDevice", ints, gen, rdm, digestAdjoint, dirs, res));
+  return pairDottedSets(ints, rdm, digestAdjoint, m.ptrs(), m.tangent, res);
 }
 
-Result<ScFullRotationResult> scDottedPairingDevice(
-    const NevptIntegralsDevice& ints, const RdmTensors& rdm, const DeviceTensor* digestAdjoint,
-    const std::vector<const NevptIntegralsDevice*>& dotted, const bool tangent,
-    const DeviceResources& res) {
+Result<PcFullRotationResult> pcMatrixRotationDevice(const NevptIntegralsDevice& ints,
+                                                    const GeneralIntegralsDevice& gen,
+                                                    const RdmTensors& rdm,
+                                                    const DeviceTensor* digestAdjoint,
+                                                    const std::vector<ScRotationRequest>& dirs,
+                                                    const DeviceResources& res) {
+  const MatrixSets m = NEVPT2_TRY(
+      matrixSets("pcMatrixRotationDevice", ints, gen, rdm, digestAdjoint, dirs, res));
+  return pairDottedSetsPc(ints, rdm, digestAdjoint, m.ptrs(), m.tangent, res);
+}
+
+// Caller-supplied increments as dotted sets, each field checked against the
+// integrals' own shape: scDottedPairingDevice's and pcDottedPairingDevice's
+// shared front half. The sets VIEW the increments, which outlive the walk.
+Result<std::vector<ScDotted>> incrementSets(const char* who, const NevptIntegralsDevice& ints,
+                                            const DeviceTensor* digestAdjoint,
+                                            const std::vector<const NevptIntegralsDevice*>& dotted,
+                                            const DeviceResources& res) {
   if (digestAdjoint != nullptr && digestAdjoint->dims != ints.h2e.dims)
-    return err_config("scDottedPairingDevice: the digests' adjoint is not shaped like h2e");
+    return err_config(std::format("{}: the digests' adjoint is not shaped like h2e", who));
   const auto fields = [](const NevptIntegralsDevice& n) {
     return std::array<std::pair<const char*, const DeviceTensor*>, 16>{{
         {"h1e", &n.h1e},           {"h2e", &n.h2e},
@@ -1297,8 +1492,7 @@ Result<ScFullRotationResult> scDottedPairingDevice(
     for (std::size_t f = 0; f < want.size(); ++f)
       if (got[f].second->dims != want[f].second->dims)
         return err_config(std::format(
-            "scDottedPairingDevice: increment {}'s {} is not shaped like the integrals' own", k,
-            want[f].first));
+            "{}: increment {}'s {} is not shaped like the integrals' own", who, k, want[f].first));
     ScDotted d;
     d.d.h1e = dotted[k]->h1e.view();
     d.d.h2e = dotted[k]->h2e.view();
@@ -1319,10 +1513,31 @@ Result<ScFullRotationResult> scDottedPairingDevice(
     d.v2tr = traceV2tr(d.d.h2e_v2_Sir, res);
     owned.push_back(std::move(d));
   }
+  return owned;
+}
+
+Result<ScFullRotationResult> scDottedPairingDevice(
+    const NevptIntegralsDevice& ints, const RdmTensors& rdm, const DeviceTensor* digestAdjoint,
+    const std::vector<const NevptIntegralsDevice*>& dotted, const bool tangent,
+    const DeviceResources& res) {
+  const std::vector<ScDotted> owned =
+      NEVPT2_TRY(incrementSets("scDottedPairingDevice", ints, digestAdjoint, dotted, res));
   std::vector<const ScDotted*> sets;
   for (const ScDotted& d : owned) sets.push_back(&d);
   return pairDottedSets(ints, rdm, digestAdjoint, sets, std::vector<bool>(sets.size(), tangent),
                         res);
+}
+
+Result<PcFullRotationResult> pcDottedPairingDevice(
+    const NevptIntegralsDevice& ints, const RdmTensors& rdm, const DeviceTensor* digestAdjoint,
+    const std::vector<const NevptIntegralsDevice*>& dotted, const bool tangent,
+    const DeviceResources& res) {
+  const std::vector<ScDotted> owned =
+      NEVPT2_TRY(incrementSets("pcDottedPairingDevice", ints, digestAdjoint, dotted, res));
+  std::vector<const ScDotted*> sets;
+  for (const ScDotted& d : owned) sets.push_back(&d);
+  return pairDottedSetsPc(ints, rdm, digestAdjoint, sets,
+                          std::vector<bool>(sets.size(), tangent), res);
 }
 
 Result<double> scRestoredTracePairingDevice(const NevptIntegralsDevice& ints,
@@ -1337,6 +1552,20 @@ Result<double> scRestoredTracePairingDevice(const NevptIntegralsDevice& ints,
   const ScFullRotationResult r =
       pairDottedSets(ints, rdm, /*hbar=*/nullptr, {&traced}, {false}, res);
   return r.dirs[0].adjoint;
+}
+
+Result<double> pcRestoredTracePairingDevice(const NevptIntegralsDevice& ints,
+                                            const GeneralIntegralsDevice& gen,
+                                            const RdmTensors& rdm, const Tensor& m,
+                                            const DeviceResources& res) {
+  NEVPT2_TRY(checkGeneralShapes(ints, gen));
+  const int64_t nmo = gen.nmo();
+  if (m.rank() != 2 || m.dim(0) != nmo || m.dim(1) != nmo)
+    return err_config(std::format("pcRestoredTracePairingDevice: M is not a {} x {} matrix", nmo, nmo));
+  const ScDotted traced = restoredTraces(ints, gen, m, res);
+  const std::vector<ScFullRotationPairing> r = NEVPT2_TRY(
+      pairDottedSetsAny(/*pc=*/true, ints, rdm, /*hbar=*/nullptr, {&traced}, {false}, res));
+  return r[0].adjoint;
 }
 
 // --- the orbital block's sandwich, I'^T Ehat'' I' (#158) -----------------------

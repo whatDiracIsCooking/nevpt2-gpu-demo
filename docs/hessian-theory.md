@@ -2022,14 +2022,15 @@ data is the same, and so is the rule:
 
 #180 lifts the refusal for both variants at once.
 
-**One precondition on the density-fitted case.** PC's first-order orbital
-source term on a fitted golden has no gate in the tree. `--kappa-full` is
-SC's, and `--pc --dump-source-terms` is refused there
+**One precondition on the density-fitted case.** Before #200, PC's
+first-order orbital source term on a fitted golden had no gate in the tree.
+`--kappa-full` is SC's, and `--pc --dump-source-terms` is refused there
 ([`gradients.md`](gradients.md), §6.2). K1 at an antisymmetric matrix is that
 first-order pairing. So #200's (and #201's, #202's) density-fitted entry
 must first gate PC's first-order dualities on the fitted inventory, the
 integral half and the full one on seeded directions, as `--kappa-full` does
-for SC. Its K1/K2 on that case mean nothing until then.
+for SC. Its K1/K2 on that case mean nothing until then. `--pc
+--sc-hessian-kk-int` runs that gate as its first check, on every case.
 
 ### 6.8 Identities for PC's orbital blocks
 

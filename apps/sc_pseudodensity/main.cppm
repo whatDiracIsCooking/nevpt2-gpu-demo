@@ -50,7 +50,10 @@
 // pairing along exp(s u + t v), out of the sidecar (required). K2 for a pair
 // with neither direction active-active is refused on a conventional case and
 // computed in three-index form on a density-fitted one; the partition
-// :hessian_kk_check is where that lives, with its own PASS line.
+// :hessian_kk_check is where that lives, with its own PASS line. With --pc
+// the same checks run on PC-NEVPT2's curvature <Ehat'_pc, I''> (#200),
+// after gating PC's first-order orbital source term on seeded directions --
+// on a density-fitted case the only gate of it in tree.
 //
 // WITH --sc-hessian-kk IT CHECKS THE WHOLE ORBITAL BLOCK (#158): the second
 // term, the energy's own curvature in its inputs I'^T Ehat'' I' = K3 + K4 +
@@ -91,7 +94,8 @@
 // mode -- instead of SC's, against the PC energy (pcEnergiesDevice, itself held
 // to the golden's block2 e_pc_total) and, for the oracle, a PC `.srcgold`.
 // --pc means nothing to the identities or --kappa-act / --kappa-full, which
-// are SC's, and nevpt2.cli refuses it there.
+// are SC's, and nevpt2.cli refuses it there; with --sc-hessian-kk-int it makes
+// the orbital curvature PC's (#200).
 
 // A module unit, so each binary is apps/<app>/{main.cppm,CMakeLists.txt}.
 // Nothing imports it. main() is written plainly: clang attaches main to the
@@ -291,9 +295,9 @@ int main(int argc, char** argv) {
   // dump writes it (docs/gradients.md, Sec. 6.2). Two things stay refused as
   // Unsupported:
   //   --pc on a fitted case: PC's orbital source term over the fitted
-  //     inventory has no gate of its own in tree (the SC --kappa-full checks
-  //     do not reach PC's rotation tangent), and a dump is never written
-  //     ungated;
+  //     inventory is gated only as --pc --sc-hessian-kk-int's first check
+  //     (#200), which writes nothing; a PC dump over the fitted inventory has
+  //     not been built, and a dump is never written ungated;
   //   --source-oracle on a fitted case: there is no oracle to compare with.
   //     reference_data/sc_source_oracle.py writes PySCF's / block2's exact
   //     source terms of the CONVENTIONAL calculation only, so no fitted
@@ -311,9 +315,9 @@ int main(int argc, char** argv) {
           "6.2)");
     if (opt.pc)
       return nevpt2::err_unsupported(std::format(
-          "--pc {} on a density-fitted case: PC's orbital source term over the fitted "
-          "inventory has no gate in tree (docs/gradients.md, Sec. 6.2); without --pc the SC "
-          "dump runs",
+          "--pc {} on a density-fitted case: the PC dump over the fitted inventory is not "
+          "built -- PC's fitted orbital source term is gated only inside --pc "
+          "--sc-hessian-kk-int (docs/gradients.md, Sec. 6.2); without --pc the SC dump runs",
           flag));
     return {};
   };
@@ -416,6 +420,8 @@ int main(int argc, char** argv) {
   // --sc-hessian-kk-int (#154): the orbital Hessian block's integral curvature
   // <Ehat', I''> (:hessian_kk_check). K1 reads the sidecar's arrays at a
   // symmetric argument, so the sidecar is required, as --kappa-full's is.
+  // With --pc it is PC's (#200), on a state the PC energy stage above has
+  // already held to the golden's block2 total.
   if (parsedOpts.scHessianKkInt) {
     nevpt2::Result<nevpt2::GradGoldFile> sidecar = loadSidecar();
     if (!sidecar) {
@@ -424,7 +430,7 @@ int main(int argc, char** argv) {
     }
     const nevpt2::GradGoldFile gg = *std::move(sidecar);
     const nevpt2::Result<bool> ok =
-        checkScHessianKkIntegral(g, gg, dInts, dDm1, dDm2, rdm, opt.rdm, *res);
+        checkScHessianKkIntegral(g, gg, dInts, dDm1, dDm2, rdm, opt.rdm, opt.pc, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;
