@@ -703,6 +703,32 @@ energy tangent's slab walk — do not scale with `--tiles`. The cases that run
 it today (those with a gradient sidecar: N2 CAS(4,4), CAS(8,8), LiF CAS(4,6),
 acrolein CAS(6,5)) are far below any floor at `--tiles 3`.
 
+### Which build sets a Hessian flag's floor
+
+The Hessian milestone's floors in one place. Each of the seven Hessian
+flags has the tile floor of the largest per-tile RDM build it runs, and only
+one of those builds is new: the three-argument build (#153). The measured
+floors are the "Tile floors" table and the paragraphs below it. The numbers
+live there and are not repeated here:
+
+| flag | largest per-tile build it runs | its floors | measured for the flag itself |
+|---|---|---|---|
+| `--sc-hessian` (#153) | the three-argument build (`buildRdmHessianTangentsDevice`) | the `--sc-hessian` rows: CAS(10,10), CAS(10,12), CAS(12,12), RTX 3080 | **yes**: the three-argument build is the flag's own, probed through it |
+| `--sc-hessian-vector` (#156) | the three-argument build, once per direction | the `--sc-hessian` rows, as a lower bound | no; pool high-water at the ctest entries only |
+| `--sc-hessian-kc` (#184) | the tangent build (forward) and the plain build (reverse) | the `--rdm-tangent` rows | no; pool high-water at the ctest entries only |
+| `--sc-hessian-kk-int` (#154) | the plain build and the digests' transpose | the plain rows and the transpose's | no; pool high-water at the ctest entries only |
+| `--sc-hessian-kk` (#158, #190) | the plain build and the digests' transpose | the plain rows and the transpose's | **yes**, on the three cases with a sidecar it reads: floor 1 (the table above) |
+| `--pc-hessian` (#152) | the three-argument build, beside the PC stage's own buffers | the `--sc-hessian` rows, as a lower bound | **no**. Its only entries are CAS(4,4) (`docs/testing.md`, "The Hessian tier's entries") |
+| `--pc-hessian-vector` (#155) | the three-argument build, beside the PC adjoint walk's buffers | the `--sc-hessian` rows, as a lower bound | **no**, likewise |
+
+So the three-argument build is the only new per-tile working set, and it sets
+the floor for both CI blocks and both PC flags. **No RX 9060 XT Hessian floor
+has been measured**, and no Hessian flag has been run above CAS(8,8) except
+`--sc-hessian`'s three-argument build in those probes. The orbital flags
+read a gradient sidecar, and the cases with one (N2 CAS(4,4) and CAS(8,8)
+with their density-fitted and CASSCF-orbital twins, LiF CAS(4,6), acrolein
+CAS(6,5)) sit far below any floor at `--tiles 3`.
+
 ### The tangent RDM build (`--rdm-tangent`)
 
 `buildRdmTangentsDevice` (`nevpt2.rdm_build`'s `:tangent` partition) is the

@@ -1744,6 +1744,49 @@ symmetry-breaking direction, `H_cc w` refuses exactly the classes
 three-term `y` is the gradient of the three-term `Edot` and the two-term `y`
 is not.
 
+## The Hessian tier's entries
+
+Every ctest entry the Hessian milestone added (#150–#158, #184, #190), in
+one place: its binary and flag, its gate (the `PASS_REGULAR_EXPRESSION` the
+entry matches) and its labels. What each one checks, and every number it
+comes out at, is in the section the last column names, not here.
+[`gradients.md`](gradients.md), §1.1 says what is in the tree and what is
+refused.
+
+**The golden entries.** Each runs `--tiles 3` on an N2/cc-pVDZ golden, on
+exact digests:
+
+| entry | binary, flag | gate: the PASS line it matches | labels | section |
+|---|---|---|---|---|
+| `nevpt2_cas44_sc_hessian`, `nevpt2_cas88_sc_hessian` | `nevpt2_demo --sc-hessian` | `PASS: the SC Hessian matches Euler` | `gpu;small` / `gpu` | "The SC Hessian's finite-difference cross-check" |
+| `nevpt2_cas44_sc_hessian_vector`, `nevpt2_cas88_sc_hessian_vector` | `nevpt2_demo --sc-hessian-vector` | `PASS: the SC Hessian-vector product matches` | `gpu;small` / `gpu` | "The SC Hessian-vector product's checks" |
+| `nevpt2_sc_pseudodensity_cas44_sc_hessian_kc`, `nevpt2_sc_pseudodensity_cas88_sc_hessian_kc` | `nevpt2_sc_pseudodensity --sc-hessian-kc` | `PASS: the SC mixed Hessian block H_kc's two orientations agree` | `gpu;small` / `gpu` | "The SC mixed Hessian block's checks" |
+| `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk_int`, `nevpt2_sc_pseudodensity_cas88_sc_hessian_kk_int`, `nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk_int` | `nevpt2_sc_pseudodensity --sc-hessian-kk-int` | `PASS: the SC orbital Hessian's integral curvature <Ehat', I''> = K1 + K2 agrees`; the fitted entry's line must also name the route, `(density-fitted: K2 by the three-index jets, both routes agree)` | `gpu;small` (the two CAS(4,4)) / `gpu` | "The orbital block's integral curvature" |
+| `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk`, `nevpt2_sc_pseudodensity_cas88_sc_hessian_kk`, `nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk` | `nevpt2_sc_pseudodensity --sc-hessian-kk` | `PASS: the SC orbital Hessian's sandwich I'^T Ehat'' I' = K3 + K4 + K5 + K6 agrees with itself by duality … 2 pairs refused, with no Hessian along them (rho_t, Sec. 5.6)`, the fitted entry's line ending `(density-fitted)` | `gpu;small` (the two CAS(4,4)) / `gpu` | "The orbital block's sandwich" |
+| `nevpt2_pc_hessian_cas44` | `nevpt2_pc_tangent --pc-hessian` | `PASS: the PC-NEVPT2 Hessian Eddot(u, v) matches Euler` | `gpu;small` | "The PC Hessian against a finite difference of the three-term tangent" |
+| `nevpt2_pc_hessian_vector_cas44` | `nevpt2_pc_tangent --pc-hessian-vector` | `PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches` | `gpu;small` | "The PC Hessian-vector product's checks" |
+| the seven `*_cas44_casscf*` Hessian entries, one per flag | the same seven flags on `n2_ccpvdz_cas44_casscf` | the CASCI twin's PASS line, plus the orbital-energy mode where the line names it, and on the two PC entries the smallest kept `s / s_max` and smallest gap | `gpu;small` | "The Hessian on CASSCF orbitals" |
+
+There is no CAS(8,8) PC Hessian entry: there both second-order checks
+converge to a value standing off the analytic one, for a conditioning reason
+no step can fix (#194; [`pc-nevpt2.md`](pc-nevpt2.md), "The second
+derivative, Eddot(u, v)"). Nor is there an entry above CAS(8,8). Which
+build sets each flag's tile floor is [`performance.md`](performance.md),
+"Which build sets a Hessian flag's floor".
+
+**The unit suites** (`unit`; host-only, no card, unless marked):
+
+| entry | binary | what it holds |
+|---|---|---|
+| `NormToEnergyHessianTests` | `energy_finish_tests` | §2's 3×3 against a hand case, a central difference of the gradient and the `t` form; the structural relations; the ray annihilated exactly; `N = 0` gives zero, not NaN |
+| `NormToEnergyMultiplierTangentTests`, `NormToEnergyMultiplierTangentDeathTest` (`death`) | `energy_finish_tests` | the multipliers' tangent is the 3×3 applied to the direction, and a central difference along a line; the class form per perturber and guarded; a length mismatch aborts |
+| `NormToEnergyHessianSandwichTests`, `NormToEnergyHessianSandwichDeathTest` (`death`) | `energy_finish_tests` | the sandwich against the tangent's central difference at fixed `Delta`, its symmetry, and a guarded perturber's zero; a length mismatch aborts |
+| `PcQuadSecondTests`, `PcAdjointSecondTests` | `energy_finish_tests` | PC's second-order quadratic form against the restricted inverse's differences on a turning null space, its polarisation, the lift as the Schur block; the adjoint as its reverse, and the third term completing the two-term adjoint |
+| `MixedTermsTests`, `PairTermsTests`, `GuardedCensusTests`, `SijrsFinishTests` | `gradient_plan_tests` | the mixed and pair terms as the finish's and the classes' mixed derivatives; the guarded-tuple census, K6 as a tuple's mixed derivative, `rho_t`'s scale freedom, Sijrs's own multiplier |
+| `RdmSecondDerivativeTests`, `RdmHessianTangentsTests` (`gpu`) | `rdm_tangent_tests` | the builder at `(u, v)` against a central difference of the tangent, the third derivative exactly zero; each three-argument set against the tangent build at its pair |
+| `PcHessianReportTests`, `PcHessianVectorReportTests` | `pc_tangent_tests` | the PC Hessian checks' gates: a refused class, a control that answers instead of refusing, a two-term tangent off the three-term one and a plateau in any class each fail |
+| `CliHessianRefusalTests` | `cli_tests` | every Hessian flag against every approximate digest, in both orders, refused as `err_unsupported`; each flag one binary's; the exact digests accepted |
+
 ## The density-fitted orbital source term
 
 #165 runs "The full orbital source term" above on the **density-fitted**
@@ -2189,10 +2232,12 @@ against `CI_STEP`'s 1e-4 for SC when this was measured; SC's is `2^-17` since
 
 PC-NEVPT2 solves one linear system per external tuple in a **linearly
 dependent** internally contracted basis: part of each block's spectrum is
-null, and `numpy.linalg.lstsq(rcond=None)` drops it. Those modes are null
-**structurally** — dependencies among the class's active-space operator
-strings, for any state of the reference's symmetry
-([`gradients.md`](gradients.md), §7). But `y_I = dE_corr/dc_I` is wanted *per
+null, and `numpy.linalg.lstsq(rcond=None)` drops it. Those modes are exact
+null modes of **this state's** metric, not of every CI vector: spin modes
+null for every singlet, rank-bound modes whose number is fixed but which turn
+with the state, and spatial-symmetry modes null only across states of the
+molecule's full symmetry ([`gradients.md`](gradients.md), §7;
+[`pc-nevpt2.md`](pc-nevpt2.md), "What the cut drops, and how it moves"). But `y_I = dE_corr/dc_I` is wanted *per
 determinant*, so the quotient displaces the CI vector along a bare
 determinant axis, and a bare determinant is spatially allowed (the sweep masks
 to the state's own irrep) and still **not a spin eigenfunction**. The
@@ -4505,6 +4550,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_pc_tangent_cas44`, `nevpt2_pc_tangent_cas88` | the PC tangent: a second solve per class, the tangent slab einsums and the `(m, m)` blocks' GEMMs, plus ten RDM builds and PC stages per entry ("The PC tangent against a finite difference", above) |
 | `nevpt2_pc_hessian_cas44` | the PC Hessian: the dropped eigenvectors kept from the solve, their `(d, nd)` projections and slab einsums, the three-argument RDM build and five more tangent builds ("The PC Hessian against a finite difference of the three-term tangent", above) |
 | `nevpt2_pc_hessian_vector_cas44` | the PC Hessian-vector product: the PC adjoint walk carrying a CI direction (the dropped eigenvectors, the tangent slab einsums against `T_u`, the `(d, nd)` bar accumulators and their sandwiches, a second sweep per class), per-class sigma calls, four Hessian-vector products, the three-term `y` at eight displaced states, and four `pcHessianDevice` runs for the duality ("The PC Hessian-vector product's checks", above) |
+| `nevpt2_cas44_casscf_sc_hessian`, `nevpt2_cas44_casscf_sc_hessian_vector`, `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kc`, `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kk_int`, `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kk`, `nevpt2_pc_hessian_cas44_casscf`, `nevpt2_pc_hessian_vector_cas44_casscf` | the seven Hessian flags on **CASSCF orbitals** (#157; "The Hessian on CASSCF orbitals", above), the three orbital flags reading the CASSCF sidecar. Their CASCI twins' shape |
 | `nevpt2_cas44_casscf`, `nevpt2_cas44_casscf_pc`, `nevpt2_df_cas44_casscf`, `nevpt2_df_cas44_casscf_pc` | the same four paths on **CASSCF orbitals** — a `NEVPT2G2` golden whose `reference_kind` is CASSCF ("The CASSCF-orbital entries", above). Same CAS(4,4) shape, so the same cost |
 | `nevpt2_cas44_casscf_sc_tangent`, `nevpt2_sc_pseudodensity_kappa_cas44_casscf` | the two source-term canaries on **CASSCF orbitals** (`--sc-tangent`, `--kappa-act`; "The source terms on CASSCF orbitals: the wave-0 canary", above). Their CASCI twins' cost |
 | `nevpt2_gradient_source_cas44_casscf`, `nevpt2_gradient_source_pc_cas44_casscf` | the SC and PC CI source terms' duality on **CASSCF orbitals**, with the CASSCF sidecar ("The source terms on CASSCF orbitals, measured", above). Their CASCI twins' cost |

@@ -9,9 +9,12 @@ rule, §1.3's active–active gauge, §2.1's source terms and §3's inventory ar
 assumed throughout and cited by section number.
 
 Like [`gradient-theory.md`](gradient-theory.md), it is **derivation, not code**,
-and it carries **no measured numbers**. Nothing described here is in the tree.
-Size formulas in `n_mo`, `n_core`, `n_act`, `n_virt` and `ndet` are algebra and
-stay here; what any of them works out to in bytes or seconds belongs in
+and it carries **no measured numbers**. Level 1 (§2–§6) has since been built:
+what is in the tree, what is refused and what is deliberately not built is
+[`gradients.md`](gradients.md), §1.1, and the "as built" notes below
+(§9.1's second table among them) say where the code sits. Levels 2 and 3
+(§7–§8) are not in the tree. Size formulas in `n_mo`, `n_core`, `n_act`,
+`n_virt` and `ndet` are algebra and stay here; what any of them works out to in bytes or seconds belongs in
 [`performance.md`](performance.md) or [`reference-data.md`](reference-data.md).
 
 **The result, stated once up front.** The NEVPT2 energy is *exactly quadratic*
@@ -116,25 +119,28 @@ theory. Three things have to hold, and it is worth separating them because only
 the first is interesting.
 
 **(a) The energy must be twice differentiable in `R`. Every condition for that
-but one is one the *gradient* already needs.** The exception is SC's, and it
-is the last row: an empty perturber that a displacement populates is harmless
-at first order and is not, in general, twice differentiable (§5.6).
+but two is one the *gradient* already needs.** The exceptions are the PC
+metric's rank (the fourth row) and SC's empty perturbers (the last): a
+dropped mode that a displacement lifts, and an empty perturber that a
+displacement populates, are both harmless at first order and not, in
+general, twice differentiable (§6.2, §5.6).
 
 | condition | which branch | why second order adds nothing |
 |---|---|---|
 | no intruder: `Delta_t + H_t/N_t` must not pass through zero | both | NEVPT2's Dyall zeroth order is what makes this rare rather than endemic; where it fails, the *energy* is singular, so there is no gradient either |
 | the CASSCF Hessian must be non-singular at the solution | CASSCF | the implicit function theorem gives `theta(R)` as smooth as the stationarity conditions, which are `C^infinity`. **One derivative and two need the same condition**; this is `gradient-theory.md`, §2.7's conditioning statement, unchanged |
 | the selection must be locally constant, and the pseudocanonical divisions non-degenerate | CASCI | `gradient-theory.md`, §4.1–§4.3 and §2.3's refusal. A selection change is a kink: the *gradient* is already wrong there |
-| the PC metric's rank must be locally constant | PC only | the dropped modes are linear dependencies among **active-space operator strings** (§6.2), which depend on the active-space size and the spin/particle sector and **not on geometry**. So the structural rank is constant along *any* displacement, and PC is no worse than SC here |
+| the PC metric's rank must be locally constant | PC only | **second order only, along a symmetry-breaking displacement.** The cut is a threshold cut, and what it drops are exact null modes of *this state's* metric — spin, rank-bound and spatial-symmetry modes — not modes null for every CI vector (§6.2). A Gram metric's dropped eigenvalues never move at first order (`P S_u P = 0`), so the gradient's condition is unchanged. At second order the rank stays constant along every direction that keeps the state's spin and full symmetry, a totally symmetric displacement's response included; along one that leaves the symmetry — a non-totally-symmetric displacement's CI response — a class whose dropped modes include spatial-symmetry ones lifts at `h^2` (`L_uv != 0`), and the energy is not twice differentiable along that pair |
 | no root crossing | both | `gradient-theory.md`, §4.4 |
 | no empty perturber populated by two displacements with different Dyall energies | SC only | **second order only.** At a geometry with point-group symmetry, a tuple whose integrals vanish by symmetry has `N_t = 0`; a non-totally-symmetric displacement populates it at first order, and its energy is then homogeneous of degree 2 but a quadratic form only when the contracted function's energy `H_t/N_t` is the same along every combination of the displacements (§5.6). The gradient is `C^1` there and exact; the Hessian is not a bilinear form |
 
-The PC row is the one that could have gone the other way, and it does not: PC's
-pseudo-inverse is differentiable along nuclear displacements for the same
-structural reason it is differentiable in the CI vector. The last row is the
-one that did go the other way, and only for SC: PC's energy is a quadratic
-form in `b_t` at fixed `A_t`, with no Rayleigh quotient, so an empty tuple
-costs it nothing.
+The PC row went the other way only in part. Along totally symmetric
+displacements PC's restricted inverse is twice differentiable for the same
+reason it is differentiable in the CI vector, but in the non-totally-symmetric
+blocks of a nuclear Hessian a class with spatial-symmetry dropped modes has no
+second derivative, and §9.1 refuses that (class, pair). The last row went the
+other way for SC alone: PC's energy is a quadratic form in `b_t` at fixed
+`A_t`, with no Rayleigh quotient, so an empty tuple costs it nothing.
 
 **(b) Every derivative object must be computable in closed form.** All of them
 are: second-derivative AO integrals (standard, and in PySCF); the parameter
@@ -1726,7 +1732,7 @@ code because two of its entries are not obvious.
 |---|---|---|
 | `--cublas`, `--ozaki` or `--fused-digest` with any Hessian | **refuse**, `err_unsupported` at flag parsing, before any other check on the digest flags (the tangent flags refuse the same digests as an invalid combination, [`gradients.md`](gradients.md), §8) | a second derivative built from an approximate digest is not the derivative of anything the energy stage computed — the same argument as for a tangent, with the same force |
 | a Hessian flag on a binary that does not implement it | **refuse**, `err_unsupported`, naming the binary that does | a flag parsed and then ignored answers a question nobody asked, under the name of the one they did |
-| a PC class the gap or denominator check refuses | **refuse** that class, `err_numerical` naming it, through the same status the energy, tangent and adjoint use | §6.2's licence is the structural cut. A refused class has no valid second derivative, and a zero would be a wrong answer rather than a missing one |
+| a PC class the gap or denominator check refuses | **refuse** that class, `err_numerical` naming it, through the same status the energy, tangent and adjoint use | `PC_MIN_GAP` is §6.2's licence for the rank: no kept mode can sink under the threshold cut, which drops only this state's own null modes. A refused class has no valid second derivative, and a zero would be a wrong answer rather than a missing one |
 | a PC (class, direction pair) along which the dropped modes lift: the Schur lift `L_uv = P (S_uv − S_u S⁺ S_v − S_v S⁺ S_u) P`, or `L_uu`, or `L_vv` (or, to first order, `P S_u P`), above round-off | **refuse** that (class, pair), `err_numerical` | along a direction that breaks the state's spatial symmetry the cut's dropped modes genuinely lift at `h²`, so the PC energy is not twice differentiable there (§6.2). A number would be the derivative of an energy whose rank changes under it |
 | a PC class whose kept `S` is ill-conditioned — a small smallest kept `s / s_max` — with its gap above `PC_MIN_GAP` | **not** a refusal: **print** it | `PC_MIN_GAP` guards the rank, not the `S⁺` conditioning §6.2's rotation terms carry; the derivative is still the energy's. Saying it on the PASS line is what keeps it visible |
 | a conventional case whose sidecar lacks the full MO-integral tensor K2 reads (§5.4), for a direction pair with neither member active–active | **refuse** `H_kk` | a partial `H_kk` is not a Hessian, and the omission would be invisible in every identity that pairs the two modes (both would omit it) — exactly how the §6 digest gap survived until #89 |
@@ -1846,17 +1852,54 @@ row above, as the tree has it:
   published NEVPT2 derivative implementations agree, taking their second
   derivatives seminumerically from their own analytic gradients.
 
-**Not settled, and these are the questions worth answering before any code.**
+**Answered by building it.** This list used to open the "not settled" one;
+the Hessian milestone (#149–#158, #184, #190) answered each, and level 1 is
+in the tree ([`gradients.md`](gradients.md), §1.1).
 
-- The three-tangent-set slab walk's working set, and therefore its tile floors
-  (§4.1). This is a measurement, and it decides which committed cases can run a
-  Hessian at all.
-- Where a conventional case's K2 gets its data (§5.4): an opt-in full
+- **The tile floors (§4.1, §4.4).** The three-argument build holds one `L2`
+  and one `R` block per vector, `3 n^4 + 4 n^2` doubles per determinant
+  against the tangent build's `2 n^4 + 3 n^2`, so its floors sit at or above
+  the tangent's, as §4.4 predicts; every other Hessian flag's floor is a build the
+  tree already had (#153, #156, #184, #154, #158). Which build sets each
+  flag's floor, and the measured floors, are
+  [`performance.md`](performance.md), "Tile floors" and "Which build sets a
+  Hessian flag's floor". At the integral-direct CAS(12,12) that floor sits
+  above the tile count the plain build is recommended at.
+- **`H_kc`'s route (§5.5).** Settled before code (#183) and built as settled
+  (#184): the forward scalar and the reverse determinant vector, gated by
+  duality, Euler in `c` and one finite difference of `y` along `kappa`. The
+  orbital-vector orientation is not built, on purpose.
+- **PC's second-order licence (§6.2).** The cut is a threshold cut whose
+  dropped modes are this state's own null modes, so the null-space terms do
+  not drop: the rotation terms are carried, and a (class, pair) along which
+  the dropped modes lift is refused on `L_uv`, `L_uu`, `L_vv` and `P S_u P`
+  against `PC_LIFT_TOL` (#152, #155). `PC_MIN_GAP` stays the rank's licence
+  and is not the conditioning's: the smallest kept `s / s_max` is printed on
+  every PC Hessian PASS line, never refused (§9.1).
+- **The empty perturbers (§5.6).** Built as derived (#190): K6 on the
+  integral-empty tuples whose tables are proportional on the pair, and an
+  `err_numerical` refusal of every (class, pair) whose worst `rho_t` exceeds
+  the device's threshold, and of any tuple empty by the state.
+- **K2's data on a conventional case (§5.4), decided as a refusal.** #154
+  builds K2 where the data already covers it — a direction pair with an
+  active–active member, or a density-fitted case by the three-index jets —
+  and refuses every other conventional pair as `err_unsupported`, never K1
+  alone. Which data source lifts that refusal is #180's question.
+
+**Not settled, and these are the questions worth answering before more code.**
+
+- Where a conventional case's K2 gets its data (#180): an opt-in full
   MO-integral array written by `generate_golden.py`'s `--gradgold` path —
   affordable only where a full dump is, which is a size question for
   [`reference-data.md`](reference-data.md) — or an AO-direct second-order
-  transformation, which needs AO integrals nothing in the tree carries; or
-  K2 on the density-fitted pair alone, in three-index form.
+  transformation, which needs AO integrals nothing in the tree carries.
+- PC's second derivative on a poorly conditioned metric (#194). §6.2's
+  second-order formula assumes `P A = 0`, which holds only to the golden's CI
+  residual, and `S^+` amplifies that residual by the inverse of the smallest
+  kept `s`. Where that is small the second-order checks converge to a value
+  that stands off the analytic one, so the PC Hessian's gated entries are the
+  CAS(4,4) ones ([`pc-nevpt2.md`](pc-nevpt2.md), "The second derivative,
+  Eddot(u, v)").
 - Level 2's CASSCF-branch third-derivative term (§7): whether anything in PySCF
   reaches it, or whether it would have to be built from `gen_g_hop`'s operator
   by differentiation.
@@ -1874,10 +1917,11 @@ row above, as the tree has it:
 
 ## 11. The order the pieces can be built in
 
-Not an implementation plan — that is a separate discussion, and this document
-describes no code. What belongs here is the **dependency order the derivation
-imposes**, and the gate each piece can be held to, because those are
-consequences of §2–§9 rather than choices.
+Not an implementation plan. Stages 1–6 have since been built, each behind
+its gate, and what each became is [`gradients.md`](gradients.md), §1.1.
+What belongs here is the **dependency order the derivation imposes**, and
+the gate each piece can be held to, because those are consequences of
+§2–§9 rather than choices.
 
 Two properties make the ordering unusually forgiving. Each stage's gate is
 available *before* the next stage exists, so nothing has to be built on trust;
