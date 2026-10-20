@@ -116,8 +116,9 @@ theory. Three things have to hold, and it is worth separating them because only
 the first is interesting.
 
 **(a) The energy must be twice differentiable in `R`. Every condition for that
-is one the *gradient* already needs** — the second derivative adds no new
-differentiability requirement, which is the central point of this subsection:
+but one is one the *gradient* already needs.** The exception is SC's, and it
+is the last row: an empty perturber that a displacement populates is harmless
+at first order and is not, in general, twice differentiable (§5.6).
 
 | condition | which branch | why second order adds nothing |
 |---|---|---|
@@ -126,10 +127,14 @@ differentiability requirement, which is the central point of this subsection:
 | the selection must be locally constant, and the pseudocanonical divisions non-degenerate | CASCI | `gradient-theory.md`, §4.1–§4.3 and §2.3's refusal. A selection change is a kink: the *gradient* is already wrong there |
 | the PC metric's rank must be locally constant | PC only | the dropped modes are linear dependencies among **active-space operator strings** (§6.2), which depend on the active-space size and the spin/particle sector and **not on geometry**. So the structural rank is constant along *any* displacement, and PC is no worse than SC here |
 | no root crossing | both | `gradient-theory.md`, §4.4 |
+| no empty perturber populated by two displacements with different Dyall energies | SC only | **second order only.** At a geometry with point-group symmetry, a tuple whose integrals vanish by symmetry has `N_t = 0`; a non-totally-symmetric displacement populates it at first order, and its energy is then homogeneous of degree 2 but a quadratic form only when the contracted function's energy `H_t/N_t` is the same along every combination of the displacements (§5.6). The gradient is `C^1` there and exact; the Hessian is not a bilinear form |
 
 The PC row is the one that could have gone the other way, and it does not: PC's
 pseudo-inverse is differentiable along nuclear displacements for the same
-structural reason it is differentiable in the CI vector.
+structural reason it is differentiable in the CI vector. The last row is the
+one that did go the other way, and only for SC: PC's energy is a quadratic
+form in `b_t` at fixed `A_t`, with no Rayleigh quotient, so an empty tuple
+costs it nothing.
 
 **(b) Every derivative object must be computable in closed form.** All of them
 are: second-derivative AO integrals (standard, and in PySCF); the parameter
@@ -154,11 +159,14 @@ So the four combinations differ in *work*, not in possibility:
 | **SC** | possible. Carries §2.3's selection multipliers and §4's hazard class, so the smooth branch's Hessian is not the PES Hessian near a selection change | **the cleanest of the four.** Park's Lagrangian as written, standard CP-CASSCF response, closed-form amplitudes |
 | **PC** | possible; both columns' and both rows' caveats at once | possible, and the extra algebra over SC is *smaller* at second order than at first (§6.3) — the cost is the per-tuple re-solves, not new derivation |
 
-Two things that are **not** blockers, despite looking like candidates. The
+One thing that is **not** a blocker, despite looking like a candidate: the
 eigendecomposition PC runs per class is never differentiated (§6.1), so no
-degenerate-eigenvalue case arises. And a vanishing perturber norm is benign:
-`E_t = -N_t^2/d_t` tends to zero with `N_t`, and all six second partials stay
-finite in the `d` form (§2.1).
+degenerate-eigenvalue case arises. A vanishing perturber norm was listed here
+as a second one, and that was wrong for SC at second order. `E_t` does tend
+to zero with `N_t`, but a perturber vanishes with `N_t` and `H_t` together,
+so `d_t` vanishes too. The finish's second partials then grow as `1/N_t`
+(§2.1), and the energy of an empty tuple populated along two directions is
+twice differentiable only in the case §5.6 names.
 
 The one qualification worth stating plainly: on the **CASCI-on-RHF** branch the
 active-space selection makes the potential energy surface only *piecewise*
@@ -210,9 +218,10 @@ guards for vanishing (`normToEnergy`'s `NUMERICAL_ZERO`). The singularities are
 **removable** — `T ~ N` as `N -> 0`, so `E_HH = 2T^3/N` is really `-2N^2/d^3`
 and tends to zero — and the two forms agree to round-off at every `N > 0`,
 small ones included; the failure is at `N = 0` **exactly**, where the `T` form
-evaluates `0/0` and returns a NaN while the `d` form returns zero. That is
-precisely the case the guard exists for, so it is the case that will be hit. In
-`d` the same six partials are `1/N`-free:
+evaluates `0/0` and returns a NaN while the `d` form, at `H != 0`, returns
+zero. The guard exists for `N = 0`, so that case will be hit, though with
+`H = 0` as well ("What "removable" does not cover", below). In `d` the same six partials
+are `1/N`-free:
 
 ```
   E_NN = -2/d + 4 N Delta/d^2 - 2 N^2 Delta^2/d^3
@@ -226,6 +235,17 @@ precisely the case the guard exists for, so it is the case that will be hit. In
 Note that **none of Park's first derivatives has this problem** — `P`, `Q`, `R`
 are `1/N`-free as written — so it is new at second order, and it is the second
 reason (after §2.2) to carry `(N, d)` rather than `(N, H, Delta)` and `T`.
+
+**What "removable" does not cover.** The limit above is at fixed `H != 0`. A
+real perturber does not vanish that way: `N_t` and `H_t` are both quadratic
+forms in the same function, so they vanish together, `H_t ~ eta N_t` with
+`eta` that function's Dyall energy, and `d_t = N_t (Delta_t + eta) -> 0`.
+Along that ray `T -> -1/(Delta + eta)` stays finite and the second partials
+grow as `1/N`, `E_NN = -2 eta^2 / (N (Delta + eta)^3)` and likewise
+`E_NH`, `E_HH`. Their contraction with `Ndot`, `Hdot` (each of order
+`sqrt(N)`) stays finite and depends on the direction. At `N = 0` exactly the
+`d` form is `0/0` too. So the guard's zero is the right value of the finish's
+partials there, and the tuple's second-order content is §5.6's sixth term.
 
 ### 2.2 The `(H, Delta)` block is rank one, so there are four new numbers, not six
 
@@ -355,6 +375,16 @@ So `Eddot(u, v)` is: the tangent RDM build at `(u, v)`, at `(c, u)` and at
 `(c, v)`; the existing block builders and class einsums on all of them; and
 §2's 3×3 in the scalar finish. **No new contraction logic, no new kernel, one
 new host expression.**
+
+The guard's skipped tuples add nothing here, on every golden §5.6's census
+covers. A tuple whose external integrals vanish (`x_t = 0`) has
+`N_t = H_t = 0` at every CI vector, so no CI direction can populate it. The
+census finds every guarded tuple of those cases to be either one of these or
+a real perturber below the guard, which the guard holds at zero near the
+state. A guarded tuple with `x_t != 0` and an exactly zero perturber, empty
+because of the state, would be populated by a CI direction that breaks the
+state's symmetry, and would need §5.6's term in `H_cc` too. None of the
+census's goldens has one.
 
 One API consequence worth stating, because it is the only place the second
 derivative is not simply "the first-order path called again": the second sum
@@ -561,9 +591,15 @@ them — `N_t` and `H_t` quadratic forms in the tuple's external integrals `x_t`
 (`src/gradient/gradient.cppm`'s header), `H_t`'s active-space operand a Dyall
 block `K` that is **linear** in `(h1e, h2e, f3)` (every `make_*` is; §5.2 has
 `f3` linear in `h2e`), and `Delta_t` linear in `eps`. The chain rule through
-`E = sum_t f(N_t, H_t, Delta_t)` at fixed `c` then has exactly five terms, and
-there is no sixth: `N_t` reads no active integral, `K` has no second
-derivative in the integrals, and `Delta_t` none in `eps`.
+`E = sum_t f(N_t, H_t, Delta_t)` at fixed `c` then has exactly five terms
+**over the tuples the energy stage keeps**: `N_t` reads no active integral,
+`K` has no second derivative in the integrals, and `Delta_t` none in `eps`.
+The chain rule assumes `f` is twice differentiable at each tuple's
+`(N_t, H_t)`, and at the tuples the guard skips (`N_t = H_t = 0`) it is not.
+Those tuples add a **sixth term**, K6, and on some direction pairs make
+`Eddot_kk` not a bilinear form at all. §5.6 derives both. An earlier version
+of this paragraph said "there is no sixth", and #158's ladders showed it was
+wrong.
 
 | # | term | what it is | existing contraction it reuses | arrays it reads |
 |---|---|---|---|---|
@@ -574,9 +610,10 @@ derivative in the integrals, and `Delta_t` none in `eps`.
 | K5 | **one external slot and the Dyall block** (second term) | `sum_t Q_t [ H terms with one x slot at X'[u] and K at K'[v] ] + (u <-> v)` | the same evaluator; `K'[v]` is the forward tangent's own block tangent — `make_*` at `h1e'[v]`, `h2e'[v]` (`rotationTangentBlocks`) — plus `f3'[v]`, `buildRdmsDevice` at `h2e'[v]` (#88) | the sidecar only (`h2e'` reads `g_xa_aa`, `h1e'` reads `heff`) |
 
 So `Eddot_kk(u, v)` is **five terms, every one an existing contraction at new
-arguments**, and the new code is two *input generators* — the promotion at a
-symmetric argument (K1) and the two-slot promotion (K2) — plus §2's 3×3. Per
-direction pair `(u, v)` that is:
+arguments, plus §5.6's K6 on the guarded tuples**, and the new code is two
+*input generators* — the promotion at a symmetric argument (K1) and the
+two-slot promotion (K2) — plus §2's 3×3. K6 is K4's own cross tables at
+different multipliers. Per direction pair `(u, v)` that is:
 
 - **one slab walk holding both directions' first-order dotted inputs**, for
   K3–K5 — the same "several tangent sets at once" shape §4.1 found for
@@ -690,7 +727,7 @@ where the expectation was that the answer would be cheap.
 | block / term | needs anything the `.gradgold` sidecar lacks? |
 |---|---|
 | `H_kc` | **no.** One `kappa` derivative (§5.5's C1–C5): the first-order dotted inputs `z'[w]` (sidecar), the RDM tangent at `(c, u)` (§3), the tangent build at dotted `h2e` (§5.2), and the orbital energies' mixed response — whose `gamma` line reads the tied rows `deps` already does (`g_xa_cc`, `g_xc_ca`, `g_xa_vv`, `g_xv_va`) and whose Fock line, the generalized Fock's off-diagonal response to `gamma`, reads four untied rows the sidecar also carries (`g_xc_aa`, `g_xa_ca`, `g_xv_aa`, `g_xa_va`) |
-| `H_kk`, K1 and K3–K5 | **no.** K1 reads exactly `Y`'s arrays at a symmetric argument; K3–K5 read only first-order dotted inputs (§5.1's table) |
+| `H_kk`, K1 and K3–K6 | **no.** K1 reads exactly `Y`'s arrays at a symmetric argument; K3–K5 read only first-order dotted inputs (§5.1's table), and so does K6, which is K4's cross tables on the guarded tuples (§5.6) |
 | `H_kk`, K2 | **yes**, on a conventional case: **twelve two-general-index arrays, whose union is the whole MO-integral tensor** (below). On a density-fitted case, **no**: the golden and its `NEVPT2F1` sidecar already carry all of `B[L,p,q]` |
 
 So the expectation recorded here before the enumeration — that §5.1's first
@@ -858,7 +895,13 @@ header writes `deps`). The chain rule through `E = sum_t f(N_t, H_t, Delta_t)`
 then has exactly five mixed terms. There is no sixth: `x` does not move with
 `c`; `N_t`'s metric reads no integral; the Dyall block is bilinear in RDMs and
 integrals, up to RDM-free terms with no `c`-derivative; and `Delta_t` is linear
-in the orbital energies.
+in the orbital energies. Unlike `H_kk`'s, this "no sixth" also holds on the
+guarded tuples of every golden §5.6's census covers. Each is either empty by
+its integrals or a real perturber below the guard. On an empty one the
+perturber is `s psi_t[w](c + t u) + O(s^2)`, with `psi_t[w]` linear in the CI
+vector, so `E_t = s^2 F_t(psi_t[w](c + t u)) + O(s^3)` (§5.6's `F_t`, degree
+2) and its mixed derivative at `s = t = 0` vanishes identically. A tuple empty because of the state would
+break this, as it would §4.1's.
 
 | # | term | what it is | existing contraction it reuses | arrays it reads |
 |---|---|---|---|---|
@@ -1027,6 +1070,234 @@ active–active `w` needs nothing the golden lacks. The gate is
 `nevpt2_sc_pseudodensity --sc-hessian-kc`, the binary that owns the orbital
 directions and the sidecar ([`testing.md`](testing.md), "The SC mixed
 Hessian block's checks").
+
+### 5.6 The empty perturbers: a sixth term, and pairs with no Hessian
+
+The energy stage skips every tuple with `|N_t| <= NUMERICAL_ZERO`
+(`normToEnergy`'s guard), and every derivative in the tree skips it too. At
+first order that is exact. At second order it is not, and it is where the
+orbital block's chain rule (§5.1) stops being complete.
+
+**Three kinds of guarded tuple.** They behave differently, so the derivation
+names them:
+
+| kind | what it is | where it comes from |
+|---|---|---|
+| **empty by the integrals** | `x_t = 0`: every external integral the tuple reads vanishes, so its perturber `psi_t = sum_mu x_t[mu] O_mu \|c>` is zero at **every** CI vector | point-group symmetry: no active label `mu` has the irrep the tuple's external orbitals need |
+| **empty by the state** | `x_t != 0` but `psi_t = 0` exactly (`S x_t = 0`) | the state's occupation, a rank bound, or a symmetry higher than the abelian group the CI vector is masked by (§6.2's three kinds of dropped mode, seen from SC) |
+| **small** | a real perturber with `0 < N_t <= NUMERICAL_ZERO` | tiny integrals: acrolein's deep cores |
+
+Only the first two are empty. A small tuple's energy is the guard's zero on a
+neighbourhood of the state, so every derivative of the energy the code
+computes is zero there. A ladder whose step leaves that neighbourhood sees
+the tuple switch on: a jump of order `NUMERICAL_ZERO`, and the tuple's own
+curvature, which is as small as its integrals. A census of six committed
+goldens ([`testing.md`](testing.md), "The empty-perturber term, offline")
+finds the first kind and the third, and none of the second.
+
+**When an empty tuple is populated at first order.** Along `kappa = s u + t v`
+the integrals move as `x_t = s x'_t[u] + t x'_t[v] + O(2)`, so the perturber
+is `s psi_t[u] + t psi_t[v] + O(2)`, with `psi_t[w] = sum_mu x'_t[w][mu]
+O_mu |c>` (the active operators move too along an active rotation, but they
+multiply `x_t = 0`). The tuple is populated along `w` exactly when
+`N_t^{ww} = 2 <psi_t[w]|psi_t[w]>` is non-zero; `N_t^{uv}` is K4's cross
+table (§5.1), both slots filled, one by each direction, and symmetrised.
+For a tuple empty by symmetry, a direction's totally symmetric component
+maps every tuple's symmetry sector to itself and cannot populate it. Only a
+non-totally-symmetric component can, and only one that carries a populated
+tuple's integrals into the empty tuple's sector. So which blocks populate
+which classes is a property of the orbitals' irreps. On the committed N2
+cases (measured, [`testing.md`](testing.md)):
+
+- **core × core** populates Sijrs alone. This is consistent with N2's core
+  orbitals all being σ: mixing them breaks inversion, which some of Sijrs's
+  empty tuples rest on. It does not break the parity in π orbitals that the
+  H classes' empty tuples rest on.
+- **virtual × virtual** populates every class whose empty tuples carry a
+  virtual index.
+- **active × active** at CAS(4,4) (four π actives) populates none.
+- a fully mixed direction populates every class with empty tuples (#158's
+  device run).
+- **a CI direction** populates none: `x_t = 0` does not depend on `c`.
+
+A tuple empty by the state is different. Any direction that moves `x_t` off
+`S`'s null space populates it, a symmetric orbital direction included, and
+so does a CI direction that breaks the state's symmetry. That is the one way
+`H_cc` and `H_kc` would acquire this term (§4.1, §5.5).
+
+**The tuple's energy along the plane.** `N_t` and `H_t` are quadratic forms
+in `x_t` at fixed RDMs, so on an empty tuple
+
+```
+  N_t(s, t) = Q_N(s, t) + O(3),   Q_N = (s^2 N^{uu} + 2 s t N^{uv} + t^2 N^{vv}) / 2
+  H_t(s, t) = Q_H(s, t) + O(3),   likewise from H^{uu}, H^{uv}, H^{vv}
+  E_t(s, t) = F_t(s, t) + O(3),   F_t = -Q_N^2 / (Q_N Delta_t + Q_H)
+```
+
+with `Delta_t` at the state (its change and `x''` enter at third order).
+`F_t` is homogeneous of degree 2 in `(s, t)`. Everything turns on whether it
+is a quadratic form.
+
+**When it is: the sixth term.** If the H tables are proportional to the N
+tables on the tuple, `(H^{uu}, H^{uv}, H^{vv}) = eta_t (N^{uu}, N^{uv},
+N^{vv})`, then `F_t = -Q_N / (Delta_t + eta_t)` and
+
+```
+  K6(u, v) = sum_{t guarded, empty} -N_t^{uv} / (Delta_t + eta_t)
+           = sum_{t guarded, empty} [ Pbar_t N_t^{uv} + Qbar_t H_t^{uv} ]
+  Pbar = 2 Tbar + Delta Tbar^2,   Qbar = Tbar^2,   Tbar = -1 / (Delta + eta)
+```
+
+which is **K4 on the guarded tuples, at Park's multipliers' limit along the
+ray** instead of the guard's zeros. The second form is the one to compute.
+`-(N^{uv})^2 / (N^{uv} Delta + H^{uv})` is the same number where it is
+defined, but it is `0/0` when the two perturbers are orthogonal
+(`N^{uv} = 0`).
+
+- **Sijrs has `H = 0`**, so `eta = 0` and `Pbar = -1/Delta` on every pair:
+  the class's own multiplier. Sijrs's energy is linear in `N_t`
+  (`energy_sijrs` applies no guard at all), so the only error is that its
+  derivative path applies the guard (`scMultipliers` zeroes `P` at
+  `|N_t| <= NUMERICAL_ZERO`). Sijrs should take `P = -1/Delta` on every
+  tuple at every order. #158's run shows this is the whole of the core ×
+  core gap ([`testing.md`](testing.md)).
+- **One direction alone** is always a quadratic form along its line:
+  `Eddot(u, u)` gains `-N^{uu} / (Delta + H^{uu}/N^{uu})` on every tuple `u`
+  populates.
+- **A tuple only one direction populates** contributes nothing to the mixed
+  term (`N^{uv} = H^{uv} = 0`, `F_t` depends on one variable).
+- **Parallel perturbers**, `psi_t[v] = alpha psi_t[u]`, make the tables rank
+  one and proportional automatically. A pair `v = alpha u + w` with `w`
+  totally symmetric is the non-trivial example.
+
+**Is proportionality automatic, SC having one function per tuple?** No. An
+empty tuple has no function at the state: the displacement defines it. Its
+perturbers along `u` and along `v` are two different functions in the
+tuple's uncontracted space `span{O_mu |c>}`. The condition is that the Dyall
+operator's compression onto their span be `eta` times the metric's. That is
+automatic only when the span is one-dimensional, so the two perturbers are
+parallel, or when `K` vanishes on it (Sijrs). In general it fails. Every
+H class's empty tuples that two random virtual directions both populate fail
+it on the N2 and LiF cases, by defects many decades above the round-off
+the proportional controls sit at ([`testing.md`](testing.md)).
+
+**When it is not: no Hessian along the pair.** A degree-2 homogeneous `F` is
+twice differentiable at the origin only if it is a quadratic form. If
+`-Q_N^2 / (Q_N Delta + Q_H) = q` for a quadratic `q`, then
+`Q_N^2 = q (Q_N Delta + Q_H)`. Where both directions populate the tuple and
+their perturbers are not parallel, `Q_N` is positive definite in two
+variables and so irreducible over the reals. It therefore divides `q` or
+`Q_N Delta + Q_H`, and either way `Q_H` is a multiple of `Q_N`. So outside
+the proportional case:
+
+- **the directional second derivative exists along every line**,
+  `D2(w) = 2 F_t(w)` plus the other five terms. The energy is `C^1` and its
+  gradient exact; the gradient is homogeneous of degree 1 and not
+  differentiable at the state, so a difference of the gradient's `A`
+  component along `B` returns `dF/dA` at the unit vector `e_B`, which is not
+  symmetric in `(A, B)`;
+- **the four-point ladder along `exp(s u + t v)` converges, to the wrong
+  thing.** Its leading term is independent of the step,
+  `(F(u + v) - F(u - v)) / 2 = (D2(u + v) - D2(u - v)) / 4`. That is the
+  polarisation of the directional second derivatives, and it is not
+  bilinear: the parallelogram defect
+  `D2(u + v) + D2(u - v) - 2 D2(u) - 2 D2(v)` is not zero. This is why
+  #158's ladders sat flat from one halving to the next, a fixed distance
+  from K1–K5, instead of failing to converge;
+- **rescaling one direction cannot expose it.** `F` is homogeneous, so
+  `v -> lambda v` scales the stencil by exactly `lambda` whether or not `F` is
+  a quadratic form. Only a sum of directions can.
+
+So along such a pair there is no `H_kk` operator to approximate. Any number
+returned would be the polarisation of a function that is not quadratic, and
+`H_kk u` as a vector, which needs linearity in `v`, would not exist. **The
+(class, pair) is refused.** The vector `H_kk u` exists only if every plane
+through `u` is proportional, which on these cases means `u` populates no
+H class's empty tuple: a totally symmetric `u`, or one breaking only
+symmetries the H classes' empty tuples do not rest on.
+
+**The refusal test.** It mirrors PC's `L_uv` (§6.2). It is computed per
+(class, pair) on the empty guarded tuples that both directions populate
+(`N^{uu}`, `N^{vv}` above a population floor), from K4's cross tables at
+`(u, u)`, `(v, v)` and `(u, v)`, which the walk already forms. Normalise to
+unit populations,
+
+```
+  c = N^{uv} / sqrt(N^{uu} N^{vv}),   k = H^{uv} / sqrt(N^{uu} N^{vv}),
+  eta_u = H^{uu} / N^{uu},   eta_v = H^{vv} / N^{vv},   eta = (eta_u + eta_v) / 2,
+
+  rho_t = max(|eta_u - eta_v|, 2 |k - c eta|) / |Delta_t + eta|
+```
+
+`rho_t` is zero exactly when the tables are proportional, and it is
+invariant under rescaling either direction. It measures the relative size of
+the tuple's departure from a quadratic form, since
+`F_t - (-Q_N/(Delta + eta)) = Q_N (R - eta) / ((Delta + R)(Delta + eta))`
+with `R = Q_H/Q_N` confined to the pencil's range. Refuse the (class, pair)
+as `err_numerical` when the largest `rho_t` exceeds a tolerance. The message
+should name the class, the number of tuples both directions populate and the
+worst `rho_t`. Otherwise add K6 at `eta`. Three details:
+
+- **Exempt Sijrs**, whose `H` is identically zero.
+- **Score empty tuples only.** A small tuple's cross tables are real, and
+  scoring it would refuse a pair over a perturber the guard holds at zero. To
+  tell the two kinds apart, read each tuple's largest integral against the
+  integrals' own symmetry noise ([`testing.md`](testing.md) has the
+  measured gap).
+- **Take the thresholds from the measured separation**, as `PC_LIFT_TOL`
+  was. The population floor sits between the noise of a symmetric
+  direction's tables and the smallest real population; `rho`'s tolerance sits
+  between the proportional controls' round-off and the smallest real defect.
+  The host's figures are in [`testing.md`](testing.md); the device's
+  reassociation must be measured on the card, not assumed. A metric in
+  Hartree, such as `|H^{uu}/N^{uu} - H^{uv}/N^{uv}|`, is the wrong test: it
+  is undefined when `N^{uv}` vanishes, which is exactly what two directions of
+  different irreps produce.
+
+A guarded tuple with `x_t != 0` whose `N_t` is round-off against
+`|x_t|^2 |S|` is empty by the state. None of the census's goldens has one.
+Until that case is derived and measured, the Hessian entry points should
+refuse it rather than score it.
+
+**The nuclear Hessian, and what it means physically.** At a geometry with
+point-group symmetry, a totally symmetric mode's response — orbitals, CI
+vector and derivative integrals — is totally symmetric and never populates a
+symmetry-empty tuple, so that block of the Hessian is unaffected. A
+non-totally-symmetric mode populates them:
+
+- its own diagonal second derivative exists, so a mode alone in its irrep
+  has a well-defined curvature;
+- **two modes of one irrep** generally give a non-proportional pair, so that
+  irrep's block of the harmonic analysis is not defined;
+- **two modes of different irreps** populate different symmetry sectors of
+  each tuple. Their perturbers are orthogonal, so `N^{AB} = H^{AB} = 0` and
+  the mixed value is zero either way, which is the block-diagonal Hessian
+  symmetry predicts. But `eta_A != eta_B` in general, so
+  `D2(A + B) != D2(A) + D2(B)` and the energy surface is not locally
+  quadratic there either.
+
+This is a property of SC-NEVPT2's strong contraction at symmetric
+geometries, not of this tree. The contracted function's energy `H_t/N_t` of
+an empty tuple is set by the direction of the displacement. Off symmetry
+nothing is empty by symmetry and the energy is `C^2`, but `F_t`'s Hessian is homogeneous
+of degree 0. So the Hessian near a symmetric geometry changes by a finite
+amount over a neighbourhood that shrinks onto it. The references this
+document cites do not discuss it. Of the committed cases, N2 and LiF are
+diatomic: their one mode is totally symmetric and unaffected. Acrolein (Cs)
+has non-totally-symmetric modes, but the census finds its empty tuples only
+in Sijrs (`H = 0`), so its K6 is exact. **PC is unaffected:** its `E_t` is a
+quadratic form in `b_t` at fixed `A_t`, and §6.1's `2 bdot_u^T G bdot_v` is
+evaluated on every tuple, so an empty one needs no sixth term and no
+refusal.
+
+**First order is unaffected.** An empty tuple's energy is `O(h^2)` along
+every direction, so its first derivative is zero, which is what the guard's
+zero multipliers give. `Y`, `y` and every `Edot` are exact. A central
+difference of the energy is even in the step and unaffected too, and so is
+[`gradients.md`](gradients.md) as a whole. The Sijrs guard above is the one
+first-order mismatch with the energy. It is zero on empty tuples, whose
+`Ndot` vanishes, and measured negligible on small ones
+([`testing.md`](testing.md)).
 
 ## 6. PC at second order: the eigen-derivative still does not appear
 
@@ -1456,7 +1727,10 @@ code because two of its entries are not obvious.
 | `--cublas`, `--ozaki` or `--fused-digest` with any Hessian | **refuse**, `err_unsupported` at flag parsing, as the tangent flags already are ([`gradients.md`](gradients.md), §8) | a second derivative built from an approximate digest is not the derivative of anything the energy stage computed — the same argument as for a tangent, with the same force |
 | a PC class the gap or denominator check refuses | **refuse** that class, `err_numerical` naming it, through the same status the energy, tangent and adjoint use | §6.2's licence is the structural cut. A refused class has no valid second derivative, and a zero would be a wrong answer rather than a missing one |
 | a conventional case whose sidecar lacks the full MO-integral tensor K2 reads (§5.4), for a direction pair with neither member active–active | **refuse** `H_kk` | a partial `H_kk` is not a Hessian, and the omission would be invisible in every identity that pairs the two modes (both would omit it) — exactly how the §6 digest gap survived until #89 |
-| `N_t = 0` exactly | **not** a refusal: contribute zero | `E_t = -N_t^2/d_t -> 0` and §2.1's `d` forms all stay finite. A NaN here would be an implementation bug, so this is a `check`-able invariant, not an error path |
+| a guarded tuple (`\|N_t\| <= NUMERICAL_ZERO`) that is **small**, a real perturber under the guard | **not** a refusal: contribute zero | the guard holds its energy at zero on a neighbourhood of the state, so zero is the derivative of the energy the code computes (§5.6) |
+| a guarded tuple **empty by the integrals**, populated by at most one direction of the pair, or by both with proportional tables (`rho_t` at round-off) | **not** a refusal: contribute §5.6's K6, which is K4 at the ray-limit multipliers | `E_t` is a quadratic form along the pair. A zero here was the earlier version of this row, and #158's ladders measured it as wrong. Sijrs always falls in this row and simply takes `P = -1/Delta` (§5.6) |
+| a guarded tuple **empty by the integrals** that both directions populate with non-proportional tables (`rho_t` above tolerance) | **refuse** that (class, pair), `err_numerical`, naming the class, the tuple count and the worst `rho_t` | the energy is not twice differentiable along the pair: the directional second derivatives exist but their polarisation is not bilinear (§5.6). A number here, even the one a ladder converges to, is not a Hessian element |
+| a guarded tuple **empty by the state** (`x_t != 0`, `N_t` round-off against `\|x_t\|^2 \|S\|`) | **refuse**, any block | a CI direction can populate it too, and §5.6 derives the integral-empty case only. None of the census's goldens has one |
 | the Euler gate with the orbital-energy response on | **not** a refusal: skip the gate and **say so** | §4.3 — the identity does not hold in that mode, but the *computation* is perfectly valid and is the one a nuclear gradient would consume. Refusing it would be refusing the useful mode. The PASS line names which mode ran, as `--gradient-source`'s already does |
 | a `casscf`-kind golden | **not** a refusal, unlike the in-tree Lagrangian path | level 1 is **reference-agnostic**: it differentiates the energy functional, which does not know how its orbitals were made ([`gradient-theory.md`](gradient-theory.md), §2.1 makes this argument for `Y` and `y`, and §2 of this document inherits it). Only levels 2 and 3 branch on the reference |
 
@@ -1498,7 +1772,23 @@ do not apply here.
   between the forward tangent's per-tuple scalars (K3), the class terms with
   their two external slots dotted along different directions (K4), and one
   external slot against the Dyall block's tangent (K5). The new code is two
-  input generators and the 3×3.
+  input generators and the 3×3. **Plus a sixth term on the tuples the
+  guard skips** (§5.6).
+- **The empty perturbers (§5.6).** A tuple whose integrals vanish by
+  symmetry is populated at first order by the non-totally-symmetric part of
+  an orbital direction, never by a CI direction. Its energy along a pair is
+  then homogeneous of degree 2. It is a quadratic form, adding
+  K6 = `sum -N^{uv}/(Delta + eta)` (K4 at the ray-limit multipliers), exactly
+  when its H tables are proportional to its N tables on the pair: always for
+  Sijrs (`H = 0`, `P = -1/Delta`), along one direction, and for parallel
+  perturbers. In general it is not, and the energy is then not twice
+  differentiable along the pair. The ladder converges to the polarisation of
+  the directional second derivatives, which is not bilinear, and the
+  (class, pair) is refused on the scale-free defect `rho_t`. First order is
+  untouched. `H_cc` and `H_kc` are untouched on every golden the census
+  covers. A nuclear Hessian at a symmetric geometry inherits it in its
+  non-totally-symmetric blocks, wherever an H class has empty tuples; PC
+  does not inherit it at all.
 - **The sidecar's sufficiency, settled (§5.4).** `H_kc` needs nothing new;
   `H_kk`'s K1 and K3–K5 need nothing new; K2 needs twelve two-general-index
   arrays whose union is the **whole MO-integral tensor** — four-virtual
@@ -1550,6 +1840,14 @@ do not apply here.
   lifted by carrying the affine part explicitly, which would recover an
   identity in the sidecar-fed mode rather than leaving that mode checked only
   by duality.
+- The device's thresholds for §5.6's refusal: the population floor, `rho`'s
+  tolerance, and the integral-noise floor that separates empty tuples from
+  small ones. The host's separations are measured; the device's
+  reassociation is not, and `PC_LIFT_TOL` is the precedent for taking a
+  threshold from the card.
+- A tuple empty by the state (§5.6): its term in `H_cc` and `H_kc` is not
+  derived here, and no committed golden in the census exercises it. Until a
+  case has one, it is refused.
 
 ## 11. The order the pieces can be built in
 
@@ -1570,7 +1868,7 @@ does not make an earlier one worse.
 | 3 | `H_cc u`, SC, vector (§4.2) | the duality `<v, H_cc u> == Eddot(u,v)` against stage 2, round-off exact; column by column where `ndet` allows (§4.4) | `gdot` through the pseudodensity walk, two sigma calls |
 | 4 | PC's `Eddot` and `H_cc u` (§6) | PC's Euler covers **five** classes against SC's three, plus the same duality; the refusals of §9.1 carried | extra solves against the existing factorisation. No new derivation (§6.3) |
 | 5 | `H_kc`: the scalar `Eddot_kc(w, u)` and the vector `H_kc^T w` (§5.5) | the duality `<H_kc^T w, u> == Eddot_kc(w, u)`, round-off exact, column by column where `ndet` allows; Euler in `c`, `Eddot_kc(w, c) == 2 <w, Y>` against the *already-gated* `Y`, homogeneous classes, orbital energies fixed in `c`; the intra-space exact zeros of C3–C4; one finite difference of the gated `y` along `kappa`; the full-range `f` identity for C5's generator | the walk carrying a CI tangent set beside the orbital dotted inputs (F); stage 3's `gdot` walk fed orbital operand tangents, with the RDM sweep at dotted integrals (R1); C5's Fock line; the per-tuple merge of the digests' orbital share that stage 6's K3 reuses. No data the sidecar lacks, no transpose, no three-vector working set |
-| 6 | `H_kk` as an action (§5.1–§5.4) | K1 reuses the pairing `Y` is built from, already validated block by block against PySCF, at a symmetric argument; the traced-pair zero for active–active pairs (§5.1); Hessian-vector ladders along `exp(s u + t v)` (§5.3) | the symmetric-argument and two-slot promotions (§5.1's table), and K2's data source (§5.4) — the full tensor on a conventional case. The expensive stage |
+| 6 | `H_kk` as an action (§5.1–§5.6) | K1 reuses the pairing `Y` is built from, already validated block by block against PySCF, at a symmetric argument; the traced-pair zero for active–active pairs (§5.1); Hessian-vector ladders along `exp(s u + t v)` (§5.3), which on a pair §5.6 refuses converge to a polarisation, not to a Hessian element, and must not be held to one | the symmetric-argument and two-slot promotions (§5.1's table), and K2's data source (§5.4) — the full tensor on a conventional case; K6 and the `rho_t` refusal on the guarded tuples (§5.6). The expensive stage |
 | 7 | levels 2 and 3, offline (§7–§8) | a stencil over `nevpt2_grad.py`'s analytic gradient — the oracle §8 argues against | `3N` reference response solves, second-derivative integrals, the constraints' second derivatives. A different kind of project |
 
 Stage 1 is a prerequisite for all six others and is the smallest piece in the
@@ -1603,6 +1901,7 @@ support, and the distinction matters for how much each part should be trusted:
 |---|---|
 | §2, the scalar finish's 3×3 and its identities | **none needed.** Elementary calculus on a rational function of three scalars, and verified against a central difference and its own two exact zeros |
 | §3–§5, the structural results | **none available, and none needed.** These are claims about *this tree's* multilinearity — the RDMs' exact quadraticity, the block builders' linearity, `f3`'s linearity in `h2e` — each checkable by inspection of the code they describe. §3–§4's chain was additionally verified on a model carrying the same algebra (quadratic densities, RDM-linear blocks, the rational finish): §4.1's two terms against a central difference, §4.2's duality and the Hessian's symmetry to round-off, and §4.3's Euler identity holding in the homogeneous frozen-`eps` case and **failing** in both of the cases §4.2–§4.3 say it must — an RDM-free term, and a responding `eps` |
+| §5.6, the empty perturbers | **none found.** Elementary: a degree-2 homogeneous rational function and when it is a quadratic form. Checked on a host model running PySCF's own class formulas on the committed goldens (`reference_data/sc_empty_perturber_probe.py`): the sixth term against a Richardson ladder, the parallelogram defect, the census, and `rho_t`'s separation ([`testing.md`](testing.md), "The empty-perturber term, offline"), plus synthetic hand cases. It was found the hard way: §5.1 said "no sixth term" until #158's ladders disagreed |
 | §6, the pseudo-inverse differentiated twice | **Golub–Pereyra**, and it was needed: the formula first written here carried a single `A^+` in the range-complement terms where the correct one carries `A^+ A^+` ([`references.md`](references.md), "Numerical linear algebra") |
 | §7–§8, what order of response a second derivative needs | **Helgaker–Jørgensen's 2n+1/2n+2 rules**, and these were needed too: the operator the `3N` responses solve against is the *reference's* Hessian, not level 1's or level 2's ([`references.md`](references.md), "Derivative theory") |
 | §8's oracle argument | **confirmed by practice.** Both 2019 NEVPT2 first-derivative papers take their second derivatives seminumerically from their analytic gradients |

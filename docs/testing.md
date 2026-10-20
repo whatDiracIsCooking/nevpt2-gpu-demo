@@ -205,6 +205,19 @@ What they are, all on synthetic inputs, no PySCF solve, no card, no network:
   `--df --reference casscf` and bare `--auxbasis` flags. The committed
   CAS(4,4) `_df` sidecar carries its four `grad_num*` arrays after the
   twelve, read through `golden_format` only.
+- **`test_sc_empty_perturber_probe.py`** — `sc_empty_perturber_probe.py`'s
+  algebra, on a synthetic tuple family (random positive semi-definite metric,
+  random Dyall block, first-order vectors). The four-point mixed difference
+  of `F` equals the polarisation at steps 1, 1e-2 and 1e-4. With `K = eta S`,
+  `rho` is zero, K6 equals the polarisation and K4 at the ray-limit
+  multipliers, and the parallelogram defect vanishes. With `H = 0` (Sijrs),
+  K6 is `-N^{uv}/Delta`. Otherwise `rho` and the defect are non-zero and
+  `rho` survives rescaling either direction. Parallel and one-sided pairs
+  give `rho = 0` whatever `K` is. `dotted` is checked as `rotate`'s
+  derivative. One case reads `golden/n2_ccpvdz_cas44`: the transcription
+  reproduces its class energies, and every guarded tuple is empty by its
+  integrals ([`hessian-theory.md`](hessian-theory.md), §5.6; "The
+  empty-perturber term, offline" below).
 
 **The thresholds are written into the tests as numbers**, not read from the
 module: a test comparing against `DEGENERACY_TOL` would move with it.
@@ -216,8 +229,8 @@ gradient), and `_block2_pc`'s block2-SC-equals-PySCF-SC gate (it runs both).
 Those stay with "The golden regeneration gate" below.
 
 It is the `pytest` phase of `cpp-tier.sh` ("No CI, and the local gate",
-above), after `ruff`. Measured: 119 tests, 1.4 s, no card (RTX 3080 box's
-CPU). Negative controls, run once in scratch and reverted: setting
+above), after `ruff`. Measured: 332 tests, 31 s, no card (RTX 3080 box's
+CPU, 2026-10-20; the ten empty-perturber cases take 1 s of it). Negative controls, run once in scratch and reverted: setting
 `DEGENERACY_TOL` to 1e-5 fails 4 tests (the pinned value and the three
 0.99e-4 refusals); leaving the constant alone and loosening the comparison
 inside `_check_degeneracy` to `DEGENERACY_TOL / 10` fails the same three
@@ -945,6 +958,123 @@ jet, which shares nothing with it past `B`, agrees with it at 1e-13 on
 A run takes about 1 s at CAS(4,4), 10 s at CAS(8,8) (the forward digests —
 one plain RDM build per term per pair, printed as they run — are most of
 it) and 2 s on the fitted CAS(4,4).
+
+## The empty-perturber term, offline
+
+[`hessian-theory.md`](hessian-theory.md), §5.6 has the theory: the orbital
+Hessian's sixth term (K6) on the tuples the guard skips, and the pairs along
+which no Hessian exists. Two kinds of evidence back it, and neither is a ctest
+entry.
+
+**#158's run, on the card.** The WIP branch `issue-158-ehat-sandwich`
+(218fe4b, with its `SW_DIAG` diagnostics) ran `nevpt2_sc_pseudodensity
+--golden golden/n2_ccpvdz_cas44.nevpt2gold --tiles 3 --sc-hessian-kk` on
+2026-10-20. The run was CUDA, `default` preset; the log does not name the
+card. Its (E − L) ladder along `exp(s u + t v)` against K3 + K4 + K5:
+
+| pair | ladder (E − L) | K3 + K4 + K5 | gap | Sijrs's K4 at `P = -1/Delta` on its guarded tuples |
+|---|---|---|---|---|
+| core x core | 3.45705786e-2 | 2.28138717e-2 | 1.1756707e-2 | 1.1756706e-2 (all tuples 1.2594490e-2, less the guarded run's 8.3778370e-4) |
+| core x virtual | 3.189e-3 | 2.865e-3 | 3.24e-4 | not printed |
+| virtual x virtual | 6.2687e-3 | 2.9145e-3 | 3.354e-3 | — (the H classes contribute; refused below) |
+
+From `2^-7` to `2^-13` each of the three ladders changed by less than 0.02%,
+at a ratio of 1.00 per halving. That is the step-independent polarisation
+§5.6 predicts, not a failure to converge. The run's own
+proportionality diagnostic (`|H/N(uu, vv) − H/N(uv)|`, in Eh) printed 0
+outside `full x full` and `virtual x virtual`. On those two pairs it printed
+0.17–11 for Sr, Si, Sijr, Srs and Sir, and 2.7–4.6 for Sijr at CAS(8,8).
+Scaling `v` by 2, −1 and 0.5 scaled every ladder by the same factor, to six
+figures at `h = 2^-10`, as homogeneity requires. So that check could not see
+the defect.
+
+**The host model.** `reference_data/sc_empty_perturber_probe.py` transcribes
+PySCF's eight SC class formulas onto a golden's stored blocks. Its
+`norm_h` reproduces each golden's `class_energies` to ≤1.2e-15. It rotates
+the external blocks and orbital energies along intra-space directions, the
+transformation the device's ladder applies, and evaluates §5.6's algebra on
+the empty tuples from the class formulas at the first-order dotted blocks,
+by polarisation, with no step. It holds the result against a
+Richardson-extrapolated four-point ladder (`h = 2^-5…2^-7`) of the empty
+tuples' energies under real rotations. The directions are seed 190: two
+random core-core rotations, two random virtual-virtual ones, and two
+proportional controls. The first control is `virt+sym`, `virt` plus a random
+rotation in the generators that populate no empty tuple, found from the
+integrals. The second is `2virt`. The box's CPU ran it, 4 threads, no card,
+on 2026-10-20:
+
+```bash
+uv run python reference_data/sc_empty_perturber_probe.py golden/<case>.nevpt2gold
+```
+
+The census. "Empty" means every integral the tuple reads is ≤1e-12;
+"small" means a guarded tuple with a larger one:
+
+| golden | guarded tuples, by class (empty / small) | largest \|x_t\| on an empty tuple | smallest on a small one |
+|---|---|---|---|
+| `n2_ccpvdz_cas44` (and `_df`) | Sr 11, Si 5, Sijrs 7912, Sijr 165, Srsi 510, Srs 176, Sir 40 (all empty) | 2.7e-15 (`_df` 8.5e-16) | — |
+| `n2_ccpvdz_cas88` (and `_df`) | Sijrs 2308, Sijr 24, Srsi 120 (all empty) | 2.1e-15 (`_df` 2.9e-16) | — |
+| `lif_def2svp_cas46` | Sr 9, Si 4, Sijrs 1760, Sijr 90, Srsi 220, Srs 72, Sir 16 (all empty) | 1.2e-16 | — |
+| `acrolein_def2svp_cas65` | Sijrs 198144 / 640, Sijr 0 / 41 | 0.0 | 2.6e-9 (Sijrs), 5.8e-8 (Sijr) |
+
+No guarded tuple on any of the six is empty by the state. Acrolein's 41
+small Sijr tuples have `N_t` from 4.5e-16 to 9.9e-15, against an unguarded
+minimum of 1.06e-14: a continuum the guard cuts through.
+
+The pairs on `n2_ccpvdz_cas44` (the `_df` case agrees to within 1%, with the
+same populations and refusals):
+
+| pair | class | tuples populated: u / v / both | max `rho` | K6, bilinear | polarisation | ladder | parallelogram defect |
+|---|---|---|---|---|---|---|---|
+| core x core2 | Sijrs | 1112 / 1112 / 1112 | 0 | 3.926843e-4 | 3.926843e-4 | 3.926843e-4 | −6.0e-19 |
+| core x virt | Sijrs | 1112 / 7860 / 1112 | 0 | 1.196800e-4 | 1.196800e-4 | 1.196800e-4 | −2.5e-19 |
+| core x virt | the five H classes `virt` populates | 0 / all / 0 | 0 | 0 | 0 | ≤5.6e-16 | 0 |
+| virt x virt2 | Sijrs | 7860 / 7860 / 7860 | 0 | −1.093395e-4 | −1.093395e-4 | −1.093395e-4 | −3.0e-20 |
+| virt x virt2 | Sr | 11 / 11 / 11 | 3.9e-2 | refused | 1.740044e-4 | 1.740044e-4 | 3.0e-7 |
+| virt x virt2 | Sijr | 165 / 165 / 165 | 1.2e-1 | refused | 1.971512e-4 | 1.971512e-4 | −2.1e-8 |
+| virt x virt2 | Srsi | 510 / 510 / 510 | 7.2e-2 | refused | 9.348625e-4 | 9.348625e-4 | −5.7e-7 |
+| virt x virt2 | Srs | 176 / 176 / 176 | 8.0e-2 | refused | 2.987551e-4 | 2.987551e-4 | −7.1e-8 |
+| virt x virt2 | Sir | 40 / 40 / 40 | 1.5e-1 | refused | −9.638299e-5 | −9.638299e-5 | −5.7e-6 |
+| virt x virt+sym | the six classes `virt` populates (all but Si) | all / all / all | 0 | = polarisation | e.g. Sir −3.875557e-3 | = polarisation | ≤2.9e-20 |
+| virt x 2virt | the same six | all / all / all | ≤2.3e-15 | = polarisation | e.g. Sir −7.751114e-3 | = polarisation | ≤1.9e-18 |
+
+CAS(8,8) shows the same pattern. Only Sijrs is populated by core × core
+and by core × virtual. On virtual × virtual, Sijr's `rho` is 5.4e-2 and
+Srsi's 2.2e-2. LiF's core orbitals populate nothing (they share one irrep). On
+virtual × virtual six of LiF's seven classes with empty tuples are populated (all but Si),
+with H-class `rho` 2.1e-2 – 2.2e-1. Acrolein's empty tuples are Sijrs's
+alone, so every acrolein pair is bilinear.
+
+The separations, worst over the six goldens:
+
+| quantity | noise (the side that must pass) | real (the side that must be caught) |
+|---|---|---|
+| an empty H-class tuple's first-order population `n[w, w]`, unit directions | ≤5.0e-33 (a symmetric direction's) | ≥1.0e-10 (LiF; ≥4.5e-8 on N2) |
+| `rho`, H classes, tuples both directions populate | ≤2.3e-12 (the two proportional controls) | ≥2.1e-2 (random virtual pairs) |
+| \|ladder − polarisation\| | ≤3.7e-12 | — |
+| the largest integral of a guarded tuple | ≤2.7e-15 (empty: symmetry noise) | ≥2.6e-9 (small: acrolein) |
+
+So the host's `RHO_TOL = 1e-7` sits more than four decades from either
+side. The device's own noise has to be measured before #190 picks its
+threshold.
+
+**First order.** The guard drops this much from `Edot` along the probe's
+core and virtual directions. Sijrs's `-Ndot/Delta`, summed over its guarded
+tuples, is ≤1.4e-17 on every N2 and LiF case and 1.3e-12 / 2.5e-13 on
+acrolein, where its 640 small tuples carry the whole of it. The H classes'
+largest `|Ndot|` on a guarded tuple is ≤5.8e-19 on N2 and LiF and 1.7e-11
+on acrolein (its small Sijr tuples). Each of these is far below every
+first-order gate.
+
+**What this means for #190's acceptance.** On N2 CAS(4,4), conventional and
+DF, the core × core and core × virtual pairs are Sijrs-only. K6 closes them,
+and on the card it closed core × core to the ladder's last digit. Every
+random virtual × virtual pair, and `full x full`, is refused under §5.6's
+test. They are not closed by K6, because no Hessian exists along them. The
+proportional H-class path is exercised by pairs like `virt x virt+sym`.
+
+The pytest hand cases are `reference_data/tests/test_sc_empty_perturber_probe.py`
+("The oracle's own tests").
 
 ## The active-rotation source term
 
