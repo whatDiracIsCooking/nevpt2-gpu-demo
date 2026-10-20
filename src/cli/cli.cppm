@@ -178,6 +178,11 @@ struct Options {
   // alone.
   bool kappaAct = false;
   bool kappaFull = false;
+  // nevpt2_sc_pseudodensity: --sc-hessian-kc, the SC energy's mixed
+  // orbital-CI Hessian block H_kc in both its orientations (#184); one job at
+  // a time with the four above, SC only, exact digests only. It reads the
+  // sidecar when there is one (--gradgold PATH, or `<case>.gradgold`).
+  bool scHessianKc = false;
   std::string gradgoldPath;
   std::string dumpSourceTermsPath;
   std::string sourceOraclePath;

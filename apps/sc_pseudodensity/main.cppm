@@ -33,6 +33,15 @@
 // the duality (#88); the partition :kappa_full_check is where that lives, and
 // it prints its own PASS line too.
 //
+// WITH --sc-hessian-kc IT CHECKS ONE ORDER UP (#184): the energy's mixed
+// orbital-CI Hessian block H_kc, the scalar Eddot_kc(w, u) and the vector
+// H_kc^T w against each other by duality, with Euler in the CI vector, the
+// intra-space exact zeros and finite differences of y along kappa
+// (docs/hessian-theory.md, Sec. 5.5). It reads the sidecar when there is one
+// and runs the active-active block alone, with every other w refused, when
+// there is none; the partition :hessian_kc_check is where that lives, with its
+// own PASS line. Not on a density-fitted case.
+//
 // A DENSITY-FITTED golden (`generate_golden.py --df`) runs here too (#165),
 // with no flag of its own: it carries its fitted four-index blocks beside the
 // B blocks, so the identities and --kappa-act read it as they read any
@@ -83,6 +92,9 @@ export import :kappa_full_check;
 export import :source_dump;
 // --source-oracle: the same two terms against PySCF's committed ones.
 export import :source_oracle;
+// --sc-hessian-kc: the energy's mixed orbital-CI Hessian block H_kc, its two
+// orientations against each other (#184). Its own PASS line.
+export import :hessian_kc_check;
 
 import std;
 // nevpt2.cli: every flag this binary takes, and the ones it refuses.
@@ -313,6 +325,42 @@ int main(int argc, char** argv) {
     const nevpt2::Result<bool> ok =
         checkSourceOracle(g, gg, oraclePath, opt.pc, energyTotal, dInts, dDm1, dDm2, rdm.dm3,
                           rdm.f3ac, rdm.f3ca, opt.rdm, *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
+
+  // --sc-hessian-kc (#184): the mixed orbital-CI Hessian block
+  // (:hessian_kc_check). It reads the sidecar when there is one -- --gradgold,
+  // or `<case>.gradgold` if that file exists -- and with none it runs the one
+  // thing a golden alone supports, an active-active w with the orbital
+  // energies frozen, and says so on its PASS line. A --gradgold that cannot be
+  // read is still the user's error, reported once here.
+  if (parsedOpts.scHessianKc) {
+    std::optional<nevpt2::GradGoldFile> gg;
+    bool haveSidecar = !gradgoldPath.empty();
+    if (!haveSidecar) {
+      static constexpr std::string_view kGoldenSuffix = ".nevpt2gold";
+      std::string derived = opt.goldenPath;
+      if (derived.ends_with(kGoldenSuffix)) derived.resize(derived.size() - kGoldenSuffix.size());
+      derived += ".gradgold";
+      haveSidecar = std::filesystem::exists(derived);
+      if (!haveSidecar)
+        std::printf("gradient sidecar:  none (%s does not exist)\n", derived.c_str());
+    }
+    if (haveSidecar) {
+      nevpt2::Result<nevpt2::GradGoldFile> sidecar = loadSidecar();
+      if (!sidecar) {
+        nevpt2::report(sidecar.error());
+        return 1;
+      }
+      gg.emplace(*std::move(sidecar));
+    }
+    const nevpt2::Result<bool> ok = checkScHessianKc(g, gg ? &*gg : nullptr, dInts, dDm1, dDm2,
+                                                     rdm, opt.rdm, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

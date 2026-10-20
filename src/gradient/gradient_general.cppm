@@ -372,6 +372,137 @@ ScEpsDot generalEpsResponse(const GeneralIntegralsDevice& gen, const DeviceTenso
   return out;
 }
 
+// --- the generalized Fock's response to gamma, off the diagonal (#184) -------
+//
+// docs/hessian-theory.md, Sec. 5.5's C5. The orbital energies are the
+// generalized Fock's diagonal, f_pp = h^eff_pp + f^gamma[gamma]_pp, with
+//
+//   f^gamma[g]_xp = sum_ab g_ab [ (xp|ab) - (1/2) (xa|bp) ]
+//
+// over the WHOLE MO range of x and p -- and generalEpsResponse above reads
+// f's off-diagonal columns STORED (its first line, 2 sum_x kappa_xp f_xp), so
+// the first-order path never forms f^gamma at all. The mixed derivative
+// d^2 e_p / dkappa dgamma does: differentiating that first line along a 1-RDM
+// tangent gamma' leaves 2 sum_x kappa_xp f^gamma[gamma']_xp, the FOCK LINE
+// below, beside generalEpsResponse's own active-density line read at gamma'
+// (the GAMMA LINE: it is linear in gamma, so its derivative is itself). The
+// core-density line and h^eff carry no gamma, and drop.
+//
+// One column block of the generator per orbital space P, as the four-index
+// (nmo, |P|, nact, nact) array G_P[x, p, a, b] = (xp|ab) - (1/2)(xa|bp): read
+// against a gamma it is f^gamma's column block, and against kappa's columns
+// it is the Fock line's coefficient on gamma'. The arrays are the sidecar's
+// untied rows (Sec. 5.4's row: g_xc_aa / g_xa_ca, g_xa_aa, g_xv_aa / g_xa_va),
+// `g_xP_QR[x, p, q, r] = (x p | q r)`:
+//
+//   P core:    (xi|ab) = g_xc_aa[x, i, a, b]   (xa|bi) = (xa|ib) = g_xa_ca[x, a, i, b]
+//   P active:  (xt|ab) = g_xa_aa[x, t, a, b]   (xa|bt)           = g_xa_aa[x, a, b, t]
+//   P virtual: (xr|ab) = g_xv_aa[x, r, a, b]   (xa|br) = (xa|rb) = g_xa_va[x, a, r, b]
+DeviceTensor fockGammaColumns(const GeneralIntegralsDevice& gen, RotSpace p,
+                              const DeviceResources& res) {
+  const wwrStream_t stream = res.stream();
+  switch (p) {
+    case RotSpace::Core: {
+      DeviceTensor g = deviceEinsumNew("xpab->xpab", {&gen.g_xc_aa}, 1.0, res);
+      deviceEinsumAccum("xapb->xpab", {&gen.g_xa_ca}, g, -0.5, stream);
+      return g;
+    }
+    case RotSpace::Act: {
+      DeviceTensor g = deviceEinsumNew("xpab->xpab", {&gen.g_xa_aa}, 1.0, res);
+      deviceEinsumAccum("xabp->xpab", {&gen.g_xa_aa}, g, -0.5, stream);
+      return g;
+    }
+    case RotSpace::Virt: {
+      DeviceTensor g = deviceEinsumNew("xpab->xpab", {&gen.g_xv_aa}, 1.0, res);
+      deviceEinsumAccum("xapb->xpab", {&gen.g_xa_va}, g, -0.5, stream);
+      return g;
+    }
+  }
+  return DeviceTensor();
+}
+
+// The full-range identity C5's generator carries (Sec. 5.5): h^eff +
+// f^gamma[gamma] at the state's own gamma IS the sidecar's f, every element
+// of it -- the off-diagonal extension of fockDiagResidual below, which
+// rebuilds f's core and virtual diagonals only, and the one check the Fock
+// line's arrays get beside the finite difference that sees C5. Assembled on
+// the host one column block at a time (the blocks are small at every size a
+// sidecar exists for), as a relative Frobenius residual.
+double fockFullResidual(const GeneralIntegralsDevice& gen, const DeviceTensor& gamma,
+                        const DeviceResources& res) {
+  const wwrStream_t stream = res.stream();
+  const int64_t nmo = gen.nmo();
+  Tensor rebuilt = downloadTensor(gen.heff, stream);
+  const Tensor f = downloadTensor(gen.f, stream);
+  for (const RotSpace p : {RotSpace::Core, RotSpace::Act, RotSpace::Virt}) {
+    const auto [lo, hi] = spanOf(gen, p);
+    if (hi <= lo) continue;
+    const DeviceTensor g = fockGammaColumns(gen, p, res);
+    const DeviceTensor cols = deviceEinsumNew("xpab,ab->xp", {&g, &gamma}, 1.0, res);
+    const Tensor host = downloadTensor(cols, stream);
+    for (int64_t x = 0; x < nmo; ++x)
+      for (int64_t q = lo; q < hi; ++q) rebuilt(x, q) += host(x, q - lo);
+  }
+  double num = 0.0, den = 0.0;
+  for (int64_t i = 0; i < f.size(); ++i) {
+    const double d = rebuilt.flat(i) - f.flat(i);
+    num += d * d;
+    den += f.flat(i) * f.flat(i);
+  }
+  return std::sqrt(num / std::max(den, 1e-300));
+}
+
+// The orbital energies' response to gamma, DIFFERENTIATED ALONG kappa: the
+// tangent W'[kappa] of nevpt2.gradient_plan's W (e_p = h^eff_pp + <gamma, W_p>),
+// so that the mixed second derivative of the orbital energies is
+//
+//   eps^{wu}_p = d^2 e_p / dkappa dgamma [w, gamma'] = <gamma', W'_p[w]>,
+//
+//   W'_p[w][a, b] = 2 sum_x w_xp [ (xp|ab) - (1/2)(xa|bp) ]        the Fock line
+//                 + 2 sum_x w_xa [ (pp|xb) - (1/2)(px|bp) ]        the gamma line
+//
+// for p core and virtual (docs/hessian-theory.md, Sec. 5.5's C5). In W's own
+// (nact, nact, ncore) / (nact, nact, nvirt) layout, symmetrized over (a, b)
+// (symmetrizedResponse) since only a symmetric gamma' ever reads it -- so ONE
+// tensor serves both orientations: forward, orbitalEnergyDot(W', gamma'[u])
+// is eps^{wu}; reverse, orbitalEnergyDm1Coefficient(W', dE/de) is the dm1
+// coefficient d/dw of the CI source term's orbital-energy fold acquires.
+// The gamma line is generalEpsResponse's own active-density line with gamma
+// left open (the same two tied arrays, the same einsum labels); the Fock line
+// is fockGammaColumns against kappa's own columns. `kC`, `kA`, `kV` are
+// kappa's FULL column blocks (no rows zeroed), as generalEpsResponse takes
+// them. Downloaded, as W is host-side.
+OrbitalEnergyResponse generalEpsResponseTangent(const GeneralIntegralsDevice& gen,
+                                                const DeviceTensor& kC, const DeviceTensor& kA,
+                                                const DeviceTensor& kV,
+                                                const DeviceResources& res) {
+  const wwrStream_t stream = res.stream();
+  const int64_t nact = gen.nact;
+  OrbitalEnergyResponse out{Tensor({nact, nact, gen.ncore}), Tensor({nact, nact, gen.nvirt})};
+  if (gen.ncore > 0) {
+    DeviceTensor d = DeviceTensor::zeros({nact, nact, gen.ncore}, res);
+    const DeviceTensor g = fockGammaColumns(gen, RotSpace::Core, res);
+    deviceEinsumAccum("zi,ziab->abi", {&kC, &g}, d, 2.0, stream);
+    // (ii|xb) = g_xa_cc[x, b, i, i], (ix|bi) = (xi|ib) = g_xc_ca[x, i, i, b]
+    const DeviceTensor cou = deviceEinsumNew("ztii->zti", {&gen.g_xa_cc}, 1.0, res);
+    const DeviceTensor exc = deviceEinsumNew("zmmt->zmt", {&gen.g_xc_ca}, 1.0, res);
+    deviceEinsumAccum("zu,zti->uti", {&kA, &cou}, d, 2.0, stream);
+    deviceEinsumAccum("zu,zit->uti", {&kA, &exc}, d, -1.0, stream);
+    out.core = downloadTensor(d, stream);
+  }
+  if (gen.nvirt > 0) {
+    DeviceTensor d = DeviceTensor::zeros({nact, nact, gen.nvirt}, res);
+    const DeviceTensor g = fockGammaColumns(gen, RotSpace::Virt, res);
+    deviceEinsumAccum("zr,zrab->abr", {&kV, &g}, d, 2.0, stream);
+    // (rr|xb) = g_xa_vv[x, b, r], (rx|br) = (xr|rb) = g_xv_va[x, r, r, b]
+    const DeviceTensor excA = deviceEinsumNew("zrrt->zrt", {&gen.g_xv_va}, 1.0, res);
+    deviceEinsumAccum("zu,ztr->utr", {&kA, &gen.g_xa_vv}, d, 2.0, stream);
+    deviceEinsumAccum("zu,zrt->utr", {&kA, &excA}, d, -1.0, stream);
+    out.virt = downloadTensor(d, stream);
+  }
+  return symmetrizedResponse(out);
+}
+
 // --- what checks the promotion table ----------------------------------------
 
 // sum of x's squares, as one einsum reduced to x's LEADING axis (never to a

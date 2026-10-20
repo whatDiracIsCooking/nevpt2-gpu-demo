@@ -643,7 +643,7 @@ Result<PcGradientResult> assemblePcClasses(const ActiveIntegralsDevice& ai, Inte
       sc.dEdCore.assign(static_cast<std::size_t>(ncore), 0.0);
       sc.dEdVirt.assign(static_cast<std::size_t>(nvirt), 0.0);
     }
-    gradientSijrs(src, batch, hostEC, hostEV, rot, sc, dr);
+    gradientSijrs(src, batch, hostEC, hostEV, rot, sc, /*mix=*/nullptr, dr);
     PcClassGradient& c = r.classes[2];
     c.result.status = PcStatus::Done;
     c.result.energy = sc.energy;

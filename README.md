@@ -283,7 +283,7 @@ ignores it. `test/cli/` holds this matrix against the table:
 | `--sc-tangent`, `--gradient-source` | ✓ | ✓ | refused | refused |
 | `--sc-hessian`, `--sc-hessian-vector` | ✓ | refused | refused | refused |
 | `--batch`, `--check-blocks` | refused | ✓ | refused | refused |
-| `--kappa-act`, `--kappa-full` | refused | refused | ✓ | refused |
+| `--kappa-act`, `--kappa-full`, `--sc-hessian-kc` | refused | refused | ✓ | refused |
 | `--gradgold` | ✓ | refused | ✓ | refused |
 | `--dump-source-terms`, `--source-oracle` | refused | refused | ✓ | refused |
 | `--fd-steps`, `--fd-start-pow` | refused | refused | refused | ✓ |
@@ -316,9 +316,10 @@ cannot run is an *invalid configuration* error (`--sc-tangent` with `--ozaki`,
 `--fused-digest` — both build the digests' tangent, which an approximate
 digest has no path for,
 `--kappa-act` with `--kappa-full`, `--dump-source-terms` with either,
-`--source-oracle` with any of the three,
-`--gradgold` without `--kappa-full`, `--dump-source-terms` or
-`--source-oracle`, or in
+`--source-oracle` with any of the three, `--sc-hessian-kc` with any of the
+four or with `--pc`, `--cublas`, `--ozaki` or `--fused-digest` (#184),
+`--gradgold` without `--kappa-full`, `--sc-hessian-kc`, `--dump-source-terms`
+or `--source-oracle`, or in
 `nevpt2_demo` without `--gradient-source`, `--check-blocks` with
 `--sc-tangent` or `--gradient-source`, `--pc` in
 `nevpt2_sc_pseudodensity` without `--dump-source-terms` or `--source-oracle`,
@@ -348,6 +349,7 @@ against the other. They read the same reference files, and each prints its own
 | `nevpt2_demo --gradient-source` | `[--gradgold PATH]`, `[--pc]` | the CI source term `y_I = dE/dc_I`, against that tangent by duality; with the `*.gradgold` sidecar, both carry the orbital energies' response to the active density, without it both hold them fixed. With `--pc`, PC-NEVPT2's `y_I` (the PC solve's adjoint) against the PC tangent (#74) |
 | `nevpt2_df_demo --gradient-source` | — | the SC CI source term against the tangent by the same duality, over the density-fitted slabs, with the orbital energies held fixed (#162) |
 | `nevpt2_sc_pseudodensity` | `--kappa-act`, or `--kappa-full [--gradgold PATH]` | the SC pseudodensity identities; with `--kappa-act`, the active–active orbital source term instead; with `--kappa-full`, the whole orbital source term out of the `*.gradgold` sidecar — on a `*_df` golden, out of the whole three-index `B`, with both of its terms (#165, #168) |
+| `nevpt2_sc_pseudodensity --sc-hessian-kc` | `[--gradgold PATH]` | the mixed orbital-CI block `H_kc` of the SC total's Hessian, as the scalar `Eddot_kc(w, u)` and the vector `H_kc^T w` against each other by duality, with Euler in `c` and a finite difference of `y` along `kappa`; out of the `*.gradgold` sidecar when there is one, the orbital energies responding, and with none along an active–active `w` alone, the orbital energies frozen (#184) |
 | `nevpt2_sc_pseudodensity --source-oracle PATH` | `[--gradgold PATH]` | the GPU's own `Y_xy` and `y_I` against PySCF's exact ones, committed as a `golden/*.srcgold`, block by block: every block must stay within the measured tolerance (the known-gap list is empty since #89) ([`docs/testing.md`](docs/testing.md), "The SC source terms against PySCF's, on a card"). With `--pc`, PC-NEVPT2's against block2's, `golden/n2_ccpvdz_cas44_pc.srcgold` (#74; docs/testing.md, "The PC source terms' oracle"); the oracle's scheme must be the run's. A directional oracle (`golden/*_dir.srcgold`, #105) is compared along its seeded directions per block instead (docs/testing.md, "The directional source-term oracle") |
 | `nevpt2_sc_pseudodensity --dump-source-terms PATH` | `[--gradgold PATH]`, `[--pc]` | writes the GPU's own `Y_xy` and `y_I` to a `.gradsrc` (a NumPy `.npz`) for `reference_data/nevpt2_grad.py --source dump` / `both`, and reads it back; what a nuclear gradient built from it comes out at is [`docs/testing.md`](docs/testing.md), "The GPU as the source-term provider". With `--pc`, PC-NEVPT2's, marked as such, with the PC adjoint held to the PC forward tangent along seeded rotations (#74; [`docs/pc-nevpt2.md`](docs/pc-nevpt2.md), "The source terms by reverse mode") |
 | `nevpt2_pc_tangent` | `--fd-steps N` (3..8, default 4), `--fd-start-pow N` (1..30, default 12: the first step is `2^-N`) | PC's derivative with respect to the CI vector, against a Richardson-verified finite difference |
@@ -357,7 +359,9 @@ Everything that builds a *tangent* — the first four rows and
 `--cublas`, `--ozaki` and `--fused-digest` are refused there, since a tangent
 of an approximate digest is not the derivative of what the energy stage
 computed. `nevpt2_sc_pseudodensity` builds no tangent RDMs and takes any
-digest. `--sc-tangent` and `--gradient-source` run on both demos and refuse
+digest, except with `--kappa-full`, `--dump-source-terms` and
+`--sc-hessian-kc`, which build the digests' tangent (and, the last, the
+tangent RDM build) and refuse them too. `--sc-tangent` and `--gradient-source` run on both demos and refuse
 each other; `--gradient-source` has a `--pc` path (#74) on the integral-direct
 demo only, `--sc-tangent` none (the PC tangent's own check is
 `nevpt2_pc_tangent`).

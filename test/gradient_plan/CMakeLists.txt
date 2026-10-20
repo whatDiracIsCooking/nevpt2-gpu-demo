@@ -74,6 +74,7 @@ add_gtest_suite_tests(
   TARGET gradient_plan_tests
   SUITES RotBlockTableTests GeneralPickTests PromotionPlanTests HeffDressingTests
          TermClassificationTests DeltaTests DeltaAdjointTests SlabMultiplierTests
+         MixedTermsTests
          CiSourceHostTests CiSourceFoldTests CiSourceFoldNegativeControlTests
          OrbitalEnergyResponseTests FourfoldRunTests)
 

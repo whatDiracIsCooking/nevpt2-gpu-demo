@@ -691,18 +691,46 @@ ScSlabMultipliers srsiMultipliers(const Tensor& normT, const Tensor& hT,
 // zero, as its multipliers are. The two symmetrized classes pack the tangents
 // through the SAME triangle as the values (the packing is linear) and scatter
 // the triangle's tangents back exactly as their multipliers are.
+//
+// ALONG AN ORBITAL DIRECTION w (#184, docs/hessian-theory.md Sec. 5.5's R1) the
+// same 3x3 applies, and Delta moves too when the orbital energies respond to
+// kappa: `diffDot` is the class's Delta construction read at deps(w), in
+// PERTURBER order (the order `delta` and R are in), and Rdot -- the third
+// output, in that order too -- is what carries dE/de's tangent. The
+// five-argument forms are the six-argument ones at diffDot = 0.
 struct ScSlabMultiplierTangents {
-  Tensor p;  // Pdot, shaped as the tuple vector
-  Tensor q;  // Qdot
+  Tensor p;               // Pdot, shaped as the tuple vector
+  Tensor q;               // Qdot
+  std::vector<double> r;  // Rdot, in perturber order (zero when diffDot and Ndot, Hdot are)
 };
 
 ScSlabMultiplierTangents plainMultiplierTangents(const Tensor& norm, const Tensor& h,
                                                  const std::vector<double>& delta,
-                                                 const Tensor& normDot, const Tensor& hDot) {
-  const std::vector<double> frozen(delta.size(), 0.0);
+                                                 const Tensor& normDot, const Tensor& hDot,
+                                                 const std::vector<double>& diffDot) {
   const ClassMultiplierTangents t = normToEnergyMultiplierTangent(
-      norm.data(), h.data(), delta, normDot.data(), hDot.data(), frozen);
-  return {Tensor::fromFlat(norm.dims(), t.p), Tensor::fromFlat(norm.dims(), t.q)};
+      norm.data(), h.data(), delta, normDot.data(), hDot.data(), diffDot);
+  return {Tensor::fromFlat(norm.dims(), t.p), Tensor::fromFlat(norm.dims(), t.q), t.r};
+}
+
+ScSlabMultiplierTangents plainMultiplierTangents(const Tensor& norm, const Tensor& h,
+                                                 const std::vector<double>& delta,
+                                                 const Tensor& normDot, const Tensor& hDot) {
+  return plainMultiplierTangents(norm, h, delta, normDot, hDot,
+                                 std::vector<double>(delta.size(), 0.0));
+}
+
+ScSlabMultiplierTangents sijrMultiplierTangents(const Tensor& normT, const Tensor& hT,
+                                                const Tensor& normTDot, const Tensor& hTDot,
+                                                const std::vector<double>& diffDot, int64_t b0,
+                                                const Tensor& hostECore,
+                                                const Tensor& hostEVirt) {
+  const int64_t nr = normT.dim(0), ncore = normT.dim(1);
+  const std::vector<double> delta = sijrDelta(nr, ncore, b0, hostECore, hostEVirt);
+  const ClassMultiplierTangents t =
+      normToEnergyMultiplierTangent(sijrTriangle(normT), sijrTriangle(hT), delta,
+                                    sijrTriangle(normTDot), sijrTriangle(hTDot), diffDot);
+  return {sijrScatter(t.p, nr, ncore), sijrScatter(t.q, nr, ncore), t.r};
 }
 
 ScSlabMultiplierTangents sijrMultiplierTangents(const Tensor& normT, const Tensor& hT,
@@ -710,12 +738,23 @@ ScSlabMultiplierTangents sijrMultiplierTangents(const Tensor& normT, const Tenso
                                                 int64_t b0, const Tensor& hostECore,
                                                 const Tensor& hostEVirt) {
   const int64_t nr = normT.dim(0), ncore = normT.dim(1);
-  const std::vector<double> delta = sijrDelta(nr, ncore, b0, hostECore, hostEVirt);
-  const std::vector<double> frozen(delta.size(), 0.0);
+  return sijrMultiplierTangents(
+      normT, hT, normTDot, hTDot,
+      std::vector<double>(static_cast<std::size_t>(nr * ncore * (ncore + 1) / 2), 0.0), b0,
+      hostECore, hostEVirt);
+}
+
+ScSlabMultiplierTangents srsiMultiplierTangents(const Tensor& normT, const Tensor& hT,
+                                                const Tensor& normTDot, const Tensor& hTDot,
+                                                const std::vector<double>& diffDot,
+                                                const Tensor& hostECore,
+                                                const Tensor& hostEVirt) {
+  const int64_t nvirt = normT.dim(0), ncore = normT.dim(2);
+  const std::vector<double> delta = srsiDelta(nvirt, ncore, hostECore, hostEVirt);
   const ClassMultiplierTangents t =
-      normToEnergyMultiplierTangent(sijrTriangle(normT), sijrTriangle(hT), delta,
-                                    sijrTriangle(normTDot), sijrTriangle(hTDot), frozen);
-  return {sijrScatter(t.p, nr, ncore), sijrScatter(t.q, nr, ncore)};
+      normToEnergyMultiplierTangent(srsiTriangle(normT), srsiTriangle(hT), delta,
+                                    srsiTriangle(normTDot), srsiTriangle(hTDot), diffDot);
+  return {srsiScatter(t.p, nvirt, ncore), srsiScatter(t.q, nvirt, ncore), t.r};
 }
 
 ScSlabMultiplierTangents srsiMultiplierTangents(const Tensor& normT, const Tensor& hT,
@@ -723,12 +762,142 @@ ScSlabMultiplierTangents srsiMultiplierTangents(const Tensor& normT, const Tenso
                                                 const Tensor& hostECore,
                                                 const Tensor& hostEVirt) {
   const int64_t nvirt = normT.dim(0), ncore = normT.dim(2);
-  const std::vector<double> delta = srsiDelta(nvirt, ncore, hostECore, hostEVirt);
-  const std::vector<double> frozen(delta.size(), 0.0);
-  const ClassMultiplierTangents t =
-      normToEnergyMultiplierTangent(srsiTriangle(normT), srsiTriangle(hT), delta,
-                                    srsiTriangle(normTDot), srsiTriangle(hTDot), frozen);
-  return {srsiScatter(t.p, nvirt, ncore), srsiScatter(t.q, nvirt, ncore)};
+  return srsiMultiplierTangents(
+      normT, hT, normTDot, hTDot,
+      std::vector<double>(static_cast<std::size_t>(nvirt * (nvirt + 1) / 2 * ncore), 0.0),
+      hostECore, hostEVirt);
+}
+
+// --- the mixed block's per-perturber finish (#184) ---------------------------
+//
+// docs/hessian-theory.md, Sec. 5.5: along an orbital direction w and a CI
+// direction u, per perturber k,
+//
+//   Eddot_kc,k(w, u) = (Ndot, Hdot, Ddot)_k[w] . Hess f_k . (Ndot, Hdot, Ddot)_k[u]   C1
+//                    + P_k N_k^{wu} + Q_k H_k^{wu,ext}                              C2
+//                    + Q_k H_k^{wu,int}                                             C3
+//                    + Q_k H_k^{wu,dig}                                             C4
+//                    + R_k Delta_k(eps^{wu})                                        C5
+//
+// -- the five terms, each reported on its own: an exact zero is a property of
+// ONE of them (C3, C4 and C1's digest share along an intra-space w), and
+// Euler and the duality read their sum. C1's digest share is the same
+// sandwich with only the digests' part of Hdot[w] in the orbital triple: the
+// sandwich is linear in each triple, so it is exactly that part of C1.
+struct ScMixedTerms {
+  double c1 = 0.0;        // the finish's curvature (the 3x3 sandwich)
+  double c1Digest = 0.0;  // the part of c1 the digests' share of Hdot[w] carries
+  double c2 = 0.0;        // one external slot along w, the block along u
+  double c3 = 0.0;        // the Dyall blocks at (h1e'[w], h2e'[w]) and the tangent RDMs
+  double c4 = 0.0;        // the Dyall blocks at the digests' mixed tangent f3^{wu}
+  double c5 = 0.0;        // the orbital energies' mixed response, R . Delta(eps^{wu})
+  [[nodiscard]] double total() const { return c1 + c2 + c3 + c4 + c5; }
+  ScMixedTerms& operator+=(const ScMixedTerms& o) {
+    c1 += o.c1;
+    c1Digest += o.c1Digest;
+    c2 += o.c2;
+    c3 += o.c3;
+    c4 += o.c4;
+    c5 += o.c5;
+    return *this;
+  }
+};
+
+// One slab's (or, for Srsi, one class's) per-tuple tables, every one shaped
+// as the class's raw tuple vector: the value pair, the two first-order pairs
+// and the four mixed pieces of the H side's and the norm's second derivative.
+struct ScMixedTables {
+  Tensor norm, h;          // N, H
+  Tensor normDotW, hDotW;  // along w -- the digests' share merged into hDotW
+  Tensor hDotWDigest;      // the digests' share of hDotW alone
+  Tensor normDotU, hDotU;  // along u
+  Tensor normWU, hWU;      // C2: one external slot along w, the block along u
+  Tensor hWUInt;           // C3
+  Tensor hWUDigest;        // C4
+};
+
+// The five terms over perturbers already in the class's own packed order:
+// every vector one per perturber, `delta` the class's Delta and the three
+// `diff*` its Delta construction at deps(w), e'(u) and eps^{wu}. A guarded
+// (empty) perturber contributes zero, through scMultipliers and the 3x3 alike.
+ScMixedTerms mixedTermsPacked(const std::vector<double>& norm, const std::vector<double>& h,
+                              const std::vector<double>& delta,
+                              const std::vector<double>& normDotW,
+                              const std::vector<double>& hDotW,
+                              const std::vector<double>& hDotWDigest,
+                              const std::vector<double>& diffDotW,
+                              const std::vector<double>& normDotU,
+                              const std::vector<double>& hDotU,
+                              const std::vector<double>& diffDotU,
+                              const std::vector<double>& normWU, const std::vector<double>& hWU,
+                              const std::vector<double>& hWUInt,
+                              const std::vector<double>& hWUDigest,
+                              const std::vector<double>& diffWU) {
+  const std::size_t k = norm.size();
+  check(h.size() == k && delta.size() == k && normDotW.size() == k && hDotW.size() == k &&
+            hDotWDigest.size() == k && diffDotW.size() == k && normDotU.size() == k &&
+            hDotU.size() == k && diffDotU.size() == k && normWU.size() == k &&
+            hWU.size() == k && hWUInt.size() == k && hWUDigest.size() == k &&
+            diffWU.size() == k,
+        "mixedTermsPacked: the per-perturber vectors' lengths differ");
+  const std::vector<double> zero(k, 0.0);
+  const ScMultipliers m = scMultipliers(norm, h, delta);
+  ScMixedTerms t;
+  t.c1 = normToEnergyHessianSandwich(norm, h, delta, normDotW, hDotW, diffDotW, normDotU, hDotU,
+                                     diffDotU);
+  t.c1Digest = normToEnergyHessianSandwich(norm, h, delta, zero, hDotWDigest, zero, normDotU,
+                                           hDotU, diffDotU);
+  for (std::size_t i = 0; i < k; ++i) {
+    t.c2 += m.p[i] * normWU[i] + m.q[i] * hWU[i];
+    t.c3 += m.q[i] * hWUInt[i];
+    t.c4 += m.q[i] * hWUDigest[i];
+    t.c5 += m.r[i] * diffWU[i];
+  }
+  return t;
+}
+
+// The tuple-is-perturber case: every table in the tuple vector's flat order,
+// as `delta` and the three Delta tangents are.
+ScMixedTerms plainMixedTerms(const ScMixedTables& t, const std::vector<double>& delta,
+                             const std::vector<double>& diffDotW,
+                             const std::vector<double>& diffDotU,
+                             const std::vector<double>& diffWU) {
+  return mixedTermsPacked(t.norm.data(), t.h.data(), delta, t.normDotW.data(), t.hDotW.data(),
+                          t.hDotWDigest.data(), diffDotW, t.normDotU.data(), t.hDotU.data(),
+                          diffDotU, t.normWU.data(), t.hWU.data(), t.hWUInt.data(),
+                          t.hWUDigest.data(), diffWU);
+}
+
+// Sijr: every raw (nr, ncore, ncore) table packed through the SAME triangle
+// as its multipliers (the packing is linear, so a packed tangent is the
+// tangent of the packed value), the Delta tangents already in that order.
+ScMixedTerms sijrMixedTerms(const ScMixedTables& t, const std::vector<double>& diffDotW,
+                            const std::vector<double>& diffDotU,
+                            const std::vector<double>& diffWU, int64_t b0,
+                            const Tensor& hostECore, const Tensor& hostEVirt) {
+  const int64_t nr = t.norm.dim(0), ncore = t.norm.dim(1);
+  return mixedTermsPacked(sijrTriangle(t.norm), sijrTriangle(t.h),
+                          sijrDelta(nr, ncore, b0, hostECore, hostEVirt),
+                          sijrTriangle(t.normDotW), sijrTriangle(t.hDotW),
+                          sijrTriangle(t.hDotWDigest), diffDotW, sijrTriangle(t.normDotU),
+                          sijrTriangle(t.hDotU), diffDotU, sijrTriangle(t.normWU),
+                          sijrTriangle(t.hWU), sijrTriangle(t.hWUInt),
+                          sijrTriangle(t.hWUDigest), diffWU);
+}
+
+// Srsi: the same over the whole (nvirt, nvirt, ncore) and srsiTriangle.
+ScMixedTerms srsiMixedTerms(const ScMixedTables& t, const std::vector<double>& diffDotW,
+                            const std::vector<double>& diffDotU,
+                            const std::vector<double>& diffWU, const Tensor& hostECore,
+                            const Tensor& hostEVirt) {
+  const int64_t nvirt = t.norm.dim(0), ncore = t.norm.dim(2);
+  return mixedTermsPacked(srsiTriangle(t.norm), srsiTriangle(t.h),
+                          srsiDelta(nvirt, ncore, hostECore, hostEVirt),
+                          srsiTriangle(t.normDotW), srsiTriangle(t.hDotW),
+                          srsiTriangle(t.hDotWDigest), diffDotW, srsiTriangle(t.normDotU),
+                          srsiTriangle(t.hDotU), diffDotU, srsiTriangle(t.normWU),
+                          srsiTriangle(t.hWU), srsiTriangle(t.hWUInt),
+                          srsiTriangle(t.hWUDigest), diffWU);
 }
 
 
@@ -895,6 +1064,25 @@ Tensor orbitalEnergyDm1Coefficient(const OrbitalEnergyResponse& w,
       g1(u, t) = s;
     }
   return g1;
+}
+
+// W with each orbital's (u, t) pair symmetrized, (W_p[u, t] + W_p[t, u]) / 2:
+// the part of a response any symmetric 1-RDM tangent reads, and all a dm1
+// coefficient can carry (the 1-RDM is symmetric identically in the CI vector,
+// so the antisymmetric part of its coefficient has no CI derivative). W itself
+// is symmetric already; its tangent along a rotation (#184,
+// generalEpsResponseTangent) is not until it passes through here.
+OrbitalEnergyResponse symmetrizedResponse(const OrbitalEnergyResponse& w) {
+  OrbitalEnergyResponse s{w.core, w.virt};
+  const int64_t nact = w.core.dim(0), ncore = w.core.dim(2), nvirt = w.virt.dim(2);
+  for (int64_t u = 0; u < nact; ++u)
+    for (int64_t t = 0; t < nact; ++t) {
+      for (int64_t i = 0; i < ncore; ++i)
+        s.core(u, t, i) = 0.5 * (w.core(u, t, i) + w.core(t, u, i));
+      for (int64_t r = 0; r < nvirt; ++r)
+        s.virt(u, t, r) = 0.5 * (w.virt(u, t, r) + w.virt(t, u, r));
+    }
+  return s;
 }
 
 // dE/de_p from one class's slab: the TRANSPOSE of its Delta construction

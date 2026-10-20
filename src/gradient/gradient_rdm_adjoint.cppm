@@ -88,6 +88,73 @@ struct ScCiDirection {
   ScRdmAdjoint& adjDot;
 };
 
+// THE MIXED DIRECTION (#184, docs/hessian-theory.md Sec. 5.5): an orbital
+// direction w -- rot.dirs[0], its tangent blocks built and the digests' share
+// merged -- and, forward, a CI direction u. What every class reads to build
+// its own ScMixedWalk (:terms), and where its reverse sweeps go.
+//
+// THE REVERSE SWEEP ALONG w. Every block sweep is AFFINE-linear: an
+// integral-free part L(M) (a raw RDM's accumulator added in, the hole RDMs'
+// delta terms, a16's / a22's f3 transposes) plus a part B(M; h1e, h2e)
+// bilinear in the accumulator and the active integrals. Along w both M and
+// the integrals move, so
+//
+//   d/dw sweep(M; h) = sweep(Mdot; h) + B(M; h'[w])
+//                    = sweep(Mdot; h) + sweep(M; h'[w]) - sweep(M; 0),
+//
+// the last term being L(M) exactly (B vanishes at zero integrals). The first
+// two go into `adjDot`, the third into `adjFree`, and the caller subtracts --
+// so no adjoint function needs an integrals-only flag, and the sweep each
+// class writes once runs four times with nothing transcribed.
+struct ScMixedDirection {
+  bool forward = false;
+  bool reverse = false;
+  bool epsKappa = false;  // the orbital energies respond to kappa
+  bool epsCi = false;     // ... and to the CI vector
+  // forward: u's tangent RDMs (the tangent build at (c, u) and h2e), the
+  // digests' mixed tangent f3^{wu} (the same build at h2e'[w]), and the
+  // orbital energies' tangents e'[u] and eps^{wu} (zero vectors when off).
+  const RdmTensors* dotU = nullptr;
+  const DeviceTensor* f3acWU = nullptr;
+  const DeviceTensor* f3caWU = nullptr;
+  Tensor epsCoreU, epsVirtU, epsCoreWU, epsVirtWU;
+  // zero (n, n) and (n, n, n, n): the integrals the digest-only blocks are
+  // built at, and the sweep's integral-free run.
+  const DeviceTensor* zeroH1e = nullptr;
+  const DeviceTensor* zeroH2e = nullptr;
+  // reverse
+  ScRdmAdjoint* adjDot = nullptr;
+  ScRdmAdjoint* adjFree = nullptr;
+};
+
+// A class's walk state for `d`, its flags and borrowed vectors set; the class
+// fills in its own blocks.
+ScMixedWalk mixedWalkOf(const ScMixedDirection& d) {
+  ScMixedWalk w;
+  w.forward = d.forward;
+  w.reverse = d.reverse;
+  w.epsKappa = d.epsKappa;
+  w.epsCi = d.epsCi;
+  w.epsCoreU = &d.epsCoreU;
+  w.epsVirtU = &d.epsVirtU;
+  w.epsCoreWU = &d.epsCoreWU;
+  w.epsVirtWU = &d.epsVirtWU;
+  return w;
+}
+
+// The three reverse sweeps above, for one class: `sweep(acts, h1e, h2e, out)`
+// is the class's own sweep written once, `acts` its M_G and `walk.dActive`
+// their tangents along w.
+template <class SweepFn>
+void mixedReverseSweeps(SweepFn&& sweep, const std::vector<ScActiveAccum>& acts,
+                        const ScMixedWalk& walk, const DeviceTensor& h1e,
+                        const DeviceTensor& h2e, const DeviceTensor& h1eDot,
+                        const DeviceTensor& h2eDot, const ScMixedDirection& d) {
+  sweep(walk.dActive, h1e, h2e, *d.adjDot);
+  sweep(acts, h1eDot, h2eDot, *d.adjDot);
+  sweep(acts, *d.zeroH1e, *d.zeroH2e, *d.adjFree);
+}
+
 // The derivative of ONE einsum term with respect to its operand `slot`,
 // weighted by `mult` (the adjoint of the term's OUTPUT) and accumulated into
 // `dst` (the adjoint of that operand). `subs` and `coef` are the forward

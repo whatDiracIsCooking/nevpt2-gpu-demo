@@ -55,6 +55,11 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   against --sc-hessian's Eddot by duality, column by column
 //                   at small ndet, and a finite difference of y. The same
 //                   "nothing has asked for it yet" holds for the DF demo.
+//   --sc-hessian-kc nevpt2_sc_pseudodensity alone (#184): the mixed block
+//                   H_kc needs the orbital directions and the sidecar this
+//                   binary owns (--kappa-full's), and its one finite
+//                   difference displaces along the directions --kappa-full and
+//                   --kappa-act already displace.
 //   each binary's own flags: that binary alone. --dump-source-terms is
 //                   nevpt2_sc_pseudodensity's because Y_xy needs the gradient
 //                   sidecar's full-MO-range arrays; nevpt2_demo computes y_I
@@ -92,6 +97,7 @@ constexpr std::array kFlagTable{
     FlagSpec{"--check-blocks", "", kDfDemo},
     FlagSpec{"--kappa-act", "", kScPd},
     FlagSpec{"--kappa-full", "", kScPd},
+    FlagSpec{"--sc-hessian-kc", "", kScPd},
     FlagSpec{"--gradgold", "path", kDemo | kScPd},
     FlagSpec{"--dump-source-terms", "path", kScPd},
     FlagSpec{"--source-oracle", "path", kScPd},
@@ -145,6 +151,8 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
     opt.kappaAct = true;
   } else if (a == "--kappa-full") {
     opt.kappaFull = true;
+  } else if (a == "--sc-hessian-kc") {
+    opt.scHessianKc = true;
   } else if (a == "--gradgold") {
     opt.gradgoldPath = std::string(args[++i]);
   } else if (a == "--dump-source-terms") {
@@ -277,17 +285,34 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
         return err_config(
             "--source-oracle compares the source terms --dump-source-terms writes and "
             "--kappa-act / --kappa-full check; run one at a time");
+      // --sc-hessian-kc (#184) is a check of its own: one job per run.
+      if (opt.scHessianKc && (opt.kappaAct || opt.kappaFull ||
+                              !opt.dumpSourceTermsPath.empty() || !opt.sourceOraclePath.empty()))
+        return err_config(
+            "--sc-hessian-kc checks the energy's mixed orbital-CI second derivative; "
+            "--kappa-act, --kappa-full, --dump-source-terms and --source-oracle are first-order "
+            "jobs -- run one at a time");
+      if (c.pc && opt.scHessianKc)
+        return err_config(
+            "--sc-hessian-kc differentiates the strongly-contracted energy twice; PC's half of "
+            "H_kc has no path (it waits on the PC projector terms, #152 / #155)");
       // --pc picks PC-NEVPT2's source terms (#74): only the two jobs that
       // assemble them take it.
       if (c.pc && opt.dumpSourceTermsPath.empty() && opt.sourceOraclePath.empty())
         return err_config(
             "--pc makes --dump-source-terms and --source-oracle PC-NEVPT2's; the identities, "
             "--kappa-act and --kappa-full are the SC energy's and have no --pc path");
-      if (!opt.gradgoldPath.empty() && !opt.kappaFull && opt.dumpSourceTermsPath.empty() &&
-          opt.sourceOraclePath.empty())
+      if (!opt.gradgoldPath.empty() && !opt.kappaFull && !opt.scHessianKc &&
+          opt.dumpSourceTermsPath.empty() && opt.sourceOraclePath.empty())
         return err_config(
-            "--gradgold is the sidecar --kappa-full, --dump-source-terms and --source-oracle "
-            "read; it does nothing on its own");
+            "--gradgold is the sidecar --kappa-full, --sc-hessian-kc, --dump-source-terms and "
+            "--source-oracle read; it does nothing on its own");
+      // --sc-hessian-kc runs the tangent RDM build (its forward orientation)
+      // and the digests' tangent: exact digests only, as every tangent path.
+      if (opt.scHessianKc && (c.rdm.cublas || c.rdm.ozaki || c.rdm.fusedDigest))
+        return err_config(
+            "--sc-hessian-kc runs the tangent RDM build and the digests' tangent, which are "
+            "the emitted digest or --blas-digest; not --cublas, --ozaki or --fused-digest");
       // --kappa-full and --dump-source-terms build the f3ac/f3ca digests'
       // tangent along a rotation (#88) -- the RDM build rerun at the dotted
       // integrals -- and a tangent is only ever formed from an exact digest,
