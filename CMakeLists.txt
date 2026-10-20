@@ -779,6 +779,41 @@ if(NEVPT2_BUILD_TESTING)
       PASS_REGULAR_EXPRESSION
         "--source-oracle on a density-fitted case: there is no fitted oracle to compare against")
   endif()
+
+  # --- the mixed orbital-CI Hessian block H_kc, --sc-hessian-kc (#184) -----------
+  #
+  # nevpt2_sc_pseudodensity --sc-hessian-kc (apps/sc_pseudodensity/
+  # hessian_kc_check.cppm; docs/hessian-theory.md, Sec. 5.5): the SC energy's
+  # mixed second derivative in its two orientations -- the scalar
+  # Eddot_kc(w, u) forward over forward, the vector H_kc^T w reverse in c --
+  # held to each other by DUALITY (1e-7; column by column at CAS(4,4)), with
+  # Euler in c on the homogeneous classes, the digests' share merged per tuple
+  # against the first-order source term, the intra-space exact zeros, the
+  # full-range f identity for the orbital-energy term's generator, three
+  # Richardson-verified finite differences of y (core-core, virtual-virtual,
+  # active-active, the orbital energies responding on both legs), and the
+  # no-sidecar functional with its refusals. Both cases read the committed
+  # sidecar beside the golden. CAS(4,4) is `small`, so the sanitizer tier runs
+  # its device work; CAS(8,8)'s four ladders are a full y each per rung, which
+  # keeps it out (docs/testing.md, "The SC mixed Hessian block's checks").
+  set(_nevpt2_sc_hessian_kc_pass "PASS: the SC mixed Hessian block H_kc's two orientations agree")
+  foreach(_case cas44 cas88)
+    set(_kc_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.nevpt2gold")
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.gradgold")
+      message(FATAL_ERROR "nevpt2: committed gradient sidecar missing for n2_ccpvdz_${_case}")
+    endif()
+    _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_${_case}_sc_hessian_kc
+                          "${_kc_gold}" --tiles 3 --sc-hessian-kc)
+    unset(_kc_gold)
+  endforeach()
+  if(TEST nevpt2_sc_pseudodensity_cas44_sc_hessian_kc)
+    set_tests_properties(nevpt2_sc_pseudodensity_cas44_sc_hessian_kc PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_kc_pass}" LABELS "gpu;small")
+  endif()
+  if(TEST nevpt2_sc_pseudodensity_cas88_sc_hessian_kc)
+    set_tests_properties(nevpt2_sc_pseudodensity_cas88_sc_hessian_kc PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_kc_pass}")
+  endif()
   unset(_df_y_gold)
   unset(_df_y_side)
 

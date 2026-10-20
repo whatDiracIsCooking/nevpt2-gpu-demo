@@ -206,6 +206,131 @@ void evalTermsTangent(const std::vector<ScTerm>& terms,
   }
 }
 
+// --- the mixed block H_kc: an orbital direction w beside a CI direction u (#184) ---
+//
+// docs/hessian-theory.md, Sec. 5.5. Along w the external blocks AND the
+// Dyall blocks move (the rotation's slab dots and tangent blocks); along u
+// only the active blocks do (ScCiWalk's). So a term x . G . x has, at second
+// order in (w, u), exactly two kinds of piece:
+//
+//   * an external slot along w and the active block along u -- C2, the
+//     product rule's cross terms (evalTermsMixed below), and
+//   * the active block's own mixed tangent G^{wu}: every make_* at the dotted
+//     integrals AND the tangent RDMs (C3), and at the digests' mixed tangent
+//     f3^{wu} (C4) -- evalTermsTangent with those blocks in place.
+//
+// A class carrying the mixed direction holds one of these. FORWARD (the
+// scalar Eddot_kc(w, u), orientation F) it holds u's tangent blocks and the
+// two mixed sets; REVERSE (the vector H_kc^T w, orientation R1) it holds the
+// Mdot_G accumulators along w, which the class's own RDM sweep reads as it
+// reads M_G. Both hold `wDigest`, the digests' share of w's tangent blocks on
+// its own (the f3-reading blocks at f3'[w] alone), which is C1's digest part.
+// The orbital direction itself is rot.dirs[0], tangent blocks built and the
+// digests' share merged (ScRotationDir::f3acDot).
+struct ScMixedWalk {
+  bool forward = false;
+  bool reverse = false;
+  // Whether the orbital energies respond to kappa (Deltadot[w] from deps) and
+  // to the CI vector (Deltadot[u], and with both, C5).
+  bool epsKappa = false;
+  bool epsCi = false;
+  std::vector<ScGDot> wDigest;   // the digests' share of G'[w] alone
+  // forward
+  std::vector<ScGDot> uDots;     // G'[u]: ScCiWalk's tangent blocks
+  std::vector<ScGDot> wuInt;     // C3: G at (h1e'[w], h2e'[w]) and the tangent RDMs
+  std::vector<ScGDot> wuDigest;  // C4: the f3-reading blocks at f3^{wu} alone
+  const Tensor* epsCoreU = nullptr;   // e'[u], zero unless epsCi
+  const Tensor* epsVirtU = nullptr;
+  const Tensor* epsCoreWU = nullptr;  // eps^{wu}, zero unless both
+  const Tensor* epsVirtWU = nullptr;
+  // reverse
+  std::vector<ScActiveAccum> dActive;  // Mdot_G along w
+};
+
+// The SECOND-ORDER cross terms of a term list: every term with one EXTERNAL
+// operand replaced by its tangent along w (`blockDotsW`, as slabDots hands
+// it) and its ACTIVE operand by its tangent along u (`gDotsU`), summed over
+// the external slots -- C2. The pairs a CI direction cannot reach (two
+// external slots, or the active block along both) are not here: an external
+// block does not move with the CI vector, and the active block's own mixed
+// tangent is a block of its own (ScMixedWalk::wuInt / wuDigest).
+void evalTermsMixed(const std::vector<ScTerm>& terms,
+                    const std::vector<const DeviceTensor*>& blockDotsW,
+                    const std::vector<ScGDot>& gDotsU, const DeviceTensor& out,
+                    wwrStream_t stream) {
+  for (const ScTerm& term : terms) {
+    for (std::size_t j = 0; j < term.ops.size(); ++j) {
+      if (term.ops[j].block != kScActive) continue;
+      const DeviceTensor* dotU = gDotOf(gDotsU, term.ops[j].t);
+      if (dotU == nullptr) continue;
+      for (std::size_t k = 0; k < term.ops.size(); ++k) {
+        if (k == j || term.ops[k].block == kScActive) continue;
+        const DeviceTensor* dotW = blockDotsW[static_cast<std::size_t>(term.ops[k].block)];
+        if (dotW == nullptr) continue;
+        std::vector<const DeviceTensor*> ops;
+        ops.reserve(term.ops.size());
+        for (std::size_t i = 0; i < term.ops.size(); ++i)
+          ops.push_back(i == j ? dotU : (i == k ? dotW : term.ops[i].t));
+        deviceEinsumAccum(term.subs, ops, out, term.coef, stream);
+      }
+    }
+  }
+}
+
+// The Eqs. 42-43 accumulators' EXTERNAL-SLOT tangent along w: M_G =
+// sum_t mult_t dTerm_t/dG, and dTerm_t/dG carries the term's external
+// operands, so along w each of them is replaced in turn by its tangent
+// (`blockDots`) with `mult` -- the multiplier itself, not its tangent -- held.
+// The other half of Mdot_G, the multiplier's tangent against the plain
+// derivative, is accumActiveDerivatives at Pdot / Qdot. Together they are
+// the walk's tangent along w (R1's gdot, docs/hessian-theory.md Sec. 5.5).
+void accumActiveDerivativesAlong(const std::vector<ScTerm>& terms, const DeviceTensor& mult,
+                                 const std::vector<const DeviceTensor*>& blockDots,
+                                 std::vector<ScActiveAccum>& dActive,
+                                 const DeviceResources& res) {
+  const wwrStream_t stream = res.stream();
+  for (const ScTerm& term : terms) {
+    for (std::size_t k = 0; k < term.ops.size(); ++k) {
+      if (term.ops[k].block != kScActive) continue;
+      const std::string subs = derivativeSubscripts(term.subs, static_cast<int>(k));
+      for (std::size_t j = 0; j < term.ops.size(); ++j) {
+        if (j == k || term.ops[j].block == kScActive) continue;
+        const DeviceTensor* dot = blockDots[static_cast<std::size_t>(term.ops[j].block)];
+        if (dot == nullptr) continue;
+        std::vector<const DeviceTensor*> ops;
+        ops.reserve(term.ops.size());
+        for (std::size_t i = 0; i < term.ops.size(); ++i)
+          if (i != k) ops.push_back(i == j ? dot : term.ops[i].t);
+        ops.push_back(&mult);
+        deviceEinsumAccum(subs, ops, activeAccumFor(dActive, term.ops[k].t, res), term.coef,
+                          stream);
+      }
+    }
+  }
+}
+
+// One per-tuple table of a term list's tangent, on the host: evalTermsTangent
+// into a fresh zero vector of the tuple shape, read back (downloadTensor
+// synchronizes the stream the einsums were issued on).
+Tensor tangentTable(const std::vector<ScTerm>& terms,
+                    const std::vector<const DeviceTensor*>& blockDots,
+                    const std::vector<ScGDot>& gDots, const std::vector<int64_t>& tupleDims,
+                    const DeviceResources& res) {
+  const DeviceTensor out = DeviceTensor::zeros(tupleDims, res);
+  evalTermsTangent(terms, blockDots, gDots, out, res.stream());
+  return downloadTensor(out, res.stream());
+}
+
+// The same for evalTermsMixed (C2).
+Tensor mixedTable(const std::vector<ScTerm>& terms,
+                  const std::vector<const DeviceTensor*>& blockDotsW,
+                  const std::vector<ScGDot>& gDotsU, const std::vector<int64_t>& tupleDims,
+                  const DeviceResources& res) {
+  const DeviceTensor out = DeviceTensor::zeros(tupleDims, res);
+  evalTermsMixed(terms, blockDotsW, gDotsU, out, res.stream());
+  return downloadTensor(out, res.stream());
+}
+
 // One slab's blocks dotted along ONE direction: the tangent of each block
 // something in the direction moves, and a nullptr for each block nothing
 // does -- which is what the product rule skips. The tensors own their memory
@@ -331,8 +456,24 @@ double pairSlabDots(const ScSlabDots& dots, const std::vector<DeviceTensor>& dBl
 // are energiesTangentDevice's), and the multipliers' tangents from
 // `multiplierDotFn(norm, h, normDot, hDot)` -- the class's own *MultiplierTangents,
 // at fixed orbital energies -- accumulated into ci->dActive. Null runs none of
-// it, and `multiplierDotFn` is never called.
-template <class MultiplierFn, class DeltaFn, class MultiplierDotFn>
+// it. `multiplierDotFn(norm, h, normDot, hDot, diffDot)` takes the Delta
+// tangent in perturber order (zeros along a CI direction: the walk holds the
+// orbital energies fixed).
+//
+// `mix` non-null adds the MIXED direction (#184, ScMixedWalk above): w is
+// rot.dirs[0]. Every slab forms its per-tuple tangents along w (the digests'
+// share merged, and on its own), the orbital energies' Delta tangent along w
+// when they respond to kappa, and acc.mixedEdotW = P.Ndot + Q.Hdot + R.Ddot
+// along w -- the free check that the merge is #88's term. Forward, it adds
+// u's tangents and the four mixed tables and finishes them with
+// `mixedFn(tables, diffDotW, diffDotU, diffWU)` -- plainMixedTerms or the
+// class's packed one -- into acc.mixed. Reverse, it accumulates Mdot_G along
+// w into mix->dActive (the multipliers' tangents against the plain
+// derivative, plus the multipliers against the external slots' tangents) and,
+// with the orbital energies responding to the CI vector, Rdot into
+// acc.dEdCoreDot / dEdVirtDot. Null runs none of it, and `mixedFn` is never
+// called.
+template <class MultiplierFn, class DeltaFn, class MultiplierDotFn, class MixedFn>
 void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm>& hTerms,
                   const std::vector<int64_t>& tupleDims,
                   const std::vector<const DeviceTensor*>& blocks,
@@ -340,8 +481,8 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
                   DeltaFn&& deltaOf, const ScRotation& rot,
                   const std::vector<RotBlock>& kinds,
                   const std::vector<std::vector<ScGDot>>& gDots, ScCiWalk* ci,
-                  MultiplierDotFn&& multiplierDotFn, ScClassGradient& acc,
-                  const DeviceResources& res) {
+                  MultiplierDotFn&& multiplierDotFn, ScMixedWalk* mix, MixedFn&& mixedFn,
+                  ScClassGradient& acc, const DeviceResources& res) {
   const wwrStream_t stream = res.stream();
 
   // The with-active halves kept apart, so actReference can exclude the terms
@@ -402,11 +543,56 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
     const Tensor hostHDot = downloadTensor(hDot, stream);
     acc.ciTangent +=
         dotHost(m.p.data(), hostNormDot.data()) + dotHost(m.q.data(), hostHDot.data());
-    const ScSlabMultiplierTangents t = multiplierDotFn(hostNorm, hostH, hostNormDot, hostHDot);
+    const ScSlabMultiplierTangents t = multiplierDotFn(
+        hostNorm, hostH, hostNormDot, hostHDot, std::vector<double>(m.r.size(), 0.0));
     const DeviceTensor pDot = uploadTensor(t.p, res);
     const DeviceTensor qDot = uploadTensor(t.q, res);
     accumActiveDerivatives(normTerms, pDot, ci->dActive, res);
     accumActiveDerivatives(hTerms, qDot, ci->dActive, res);
+  }
+
+  // --- the mixed direction (#184) -------------------------------------------
+  if (mix != nullptr) {
+    check(rot.size() == 1 && rot.dirs[0].tangent,
+          "assembleSlab: the mixed direction is rot.dirs[0], with its tangent blocks");
+    const ScRotationDir& w = rot.dirs[0];
+    const ScSlabDots dots = slabDots(blocks, kinds, w, rot.gen, res);
+    const std::vector<const DeviceTensor*> none(blocks.size(), nullptr);
+    ScMixedTables tab;
+    tab.norm = hostNorm;
+    tab.h = hostH;
+    tab.normDotW = tangentTable(normTerms, dots.ptr, gDots[0], tupleDims, res);
+    tab.hDotW = tangentTable(hTerms, dots.ptr, gDots[0], tupleDims, res);
+    tab.hDotWDigest = tangentTable(hTerms, none, mix->wDigest, tupleDims, res);
+    const std::vector<double> zero(m.r.size(), 0.0);
+    const std::vector<double> diffDotW =
+        mix->epsKappa ? deltaOf(w.epsCoreDot, w.epsVirtDot) : zero;
+    acc.mixedEdotW += dotHost(m.p.data(), tab.normDotW.data()) +
+                      dotHost(m.q.data(), tab.hDotW.data()) + dotHost(m.r, diffDotW);
+    if (mix->forward) {
+      tab.normDotU = tangentTable(normTerms, none, mix->uDots, tupleDims, res);
+      tab.hDotU = tangentTable(hTerms, none, mix->uDots, tupleDims, res);
+      tab.normWU = mixedTable(normTerms, dots.ptr, mix->uDots, tupleDims, res);
+      tab.hWU = mixedTable(hTerms, dots.ptr, mix->uDots, tupleDims, res);
+      tab.hWUInt = tangentTable(hTerms, none, mix->wuInt, tupleDims, res);
+      tab.hWUDigest = tangentTable(hTerms, none, mix->wuDigest, tupleDims, res);
+      const std::vector<double> diffDotU = deltaOf(*mix->epsCoreU, *mix->epsVirtU);
+      const std::vector<double> diffWU = deltaOf(*mix->epsCoreWU, *mix->epsVirtWU);
+      acc.mixedEdotU += dotHost(m.p.data(), tab.normDotU.data()) +
+                        dotHost(m.q.data(), tab.hDotU.data()) + dotHost(m.r, diffDotU);
+      acc.mixed += mixedFn(tab, diffDotW, diffDotU, diffWU);
+    }
+    if (mix->reverse) {
+      const ScSlabMultiplierTangents t =
+          multiplierDotFn(hostNorm, hostH, tab.normDotW, tab.hDotW, diffDotW);
+      const DeviceTensor pDot = uploadTensor(t.p, res);
+      const DeviceTensor qDot = uploadTensor(t.q, res);
+      accumActiveDerivatives(normTerms, pDot, mix->dActive, res);
+      accumActiveDerivatives(hTerms, qDot, mix->dActive, res);
+      accumActiveDerivativesAlong(normTerms, mp, dots.ptr, mix->dActive, res);
+      accumActiveDerivativesAlong(hTerms, mq, dots.ptr, mix->dActive, res);
+      if (mix->epsCi) deltaAdjointInto(deltaOf, t.r, acc.dEdCoreDot, acc.dEdVirtDot);
+    }
   }
 
   // --- the rotation, one direction at a time --------------------------------

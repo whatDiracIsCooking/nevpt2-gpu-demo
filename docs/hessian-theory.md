@@ -951,6 +951,39 @@ rather than return the integral half alone (§9.1's discipline). The
 density-fitted case needs no new data either (first-order `Bdot` per
 direction), but `scFullRotationDevice` is integral-direct, and so is this.
 
+In the tree (#184) F is `nevpt2.gradient`'s `scMixedHessianDevice` and R1
+its `scMixedHessianVectorDevice`, both over the same slab walk with a
+**mixed direction** (`:rdm_adjoint`'s `ScMixedDirection`, `:terms`'
+`ScMixedWalk`): `w` is the walk's one rotation direction, and each class
+builds `u`'s tangent blocks, C3's (its integral-carrying `make_*` at `w`'s
+dotted integrals and `u`'s tangent RDMs, tangent-only builders where a block
+has an RDM-free term) and, for `a16` / `a22`, the digest-only builds C1's
+digest share and C4 read. F finishes each slab's eleven tables per perturber
+(`nevpt2.gradient_plan`'s `mixedTermsPacked`, through each symmetrized
+class's own packing) into the five terms, reported apart. R1 accumulates
+`Mdot_G` along `w` — the multipliers' tangents against the plain
+derivative, and the multipliers against the external slots' tangents — and
+runs each class's own sweep on it; the sweep is affine in the integrals it is
+handed, so its tangent along `w` is the sweep at `h'[w]` less the sweep at
+zero integrals, and no adjoint function is touched. **The per-tuple merge of
+the digests' share is `ScRotationDir::f3acDot` / `f3caDot`**
+(`attachDigestTangents`): a tangent direction handed the RDM build at its
+own `h2eDot` builds its `a16` / `a22` tangents with them in place of the
+zeros, so every tuple's `Hdot_t` carries the share before anything nonlinear
+meets it — C1's requirement here and K3's in §5.1. C5's generator is
+`:general`'s `generalEpsResponseTangent`, the tangent `W'[w]` of the
+orbital energies' response `W`, symmetrized over its active pair so one
+tensor serves F (`orbitalEnergyDot(W', gamma'[u])`) and R1
+(`orbitalEnergyDm1Coefficient(W', dE/de)`), out of `fockGammaColumns`,
+whose full-range identity is `scGeneralIntegralCheck`'s `fockFull`. With no
+sidecar both entry points form an active–active `w` with the orbital
+energies frozen and refuse every other `w`, and a responding mode, as
+Unsupported; the digests still move there, since `h2e'[w]` along an
+active–active `w` needs nothing the golden lacks. The gate is
+`nevpt2_sc_pseudodensity --sc-hessian-kc`, the binary that owns the orbital
+directions and the sidecar ([`testing.md`](testing.md), "The SC mixed
+Hessian block's checks").
+
 ## 6. PC at second order: the eigen-derivative still does not appear
 
 ### 6.1 Differentiating the solve twice
@@ -1332,7 +1365,10 @@ the GPU's own `y` along `u` against `H_cc u`, the orbital-energy mode matched
 on both legs. It pins no convention the duality leaves open (`Eddot`'s
 difference already licenses the scalar the duality holds `H_cc u` to); it
 holds the vector against the reverse walk's own `y` directly, independent of
-`Eddot`.
+`Eddot`. #184's adds the mixed block's, §5.5's one difference of the gated
+`y` along `kappa`, run along each of the directions `--kappa-full` and
+`--kappa-act` displace: unlike `H_cc u`'s it is not redundant, being the one
+check that sees C5.
 
 ### 9.1 What a second derivative must refuse, and what it must merely say
 

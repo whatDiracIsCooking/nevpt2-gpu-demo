@@ -625,6 +625,18 @@ entries' `--tiles 3` the pool's used high-water for the whole run was 0.9 MB
 preset), 2026-10-20 — the CAS(8,8) figure is the three-argument build's
 above.
 
+**`--sc-hessian-kc` (#184) has no floors of its own measured.** Its forward
+orientation (the scalar `Eddot_kc(w, u)`) runs the tangent build at `(c, u)`
+twice per CI direction — at `h2e` and at `h2e'[w]` — so the tangent build's
+floors are its own; the reverse one (the vector `H_kc^T w`) runs the plain
+build, once, for the digests' tangent along `w`, so the plain build's floors
+are. Neither forms the three-vector working set `--sc-hessian` does. Beside
+the builds, the vector holds three sets of the five coefficient tensors
+(`3 (n^2 + n^4 + 3 n^6)` doubles: `g`, the walk's tangent and the sweep's
+integral-free part). At the ctest entries' `--tiles 3` the pool's used
+high-water for the whole run was 2.6 MB (CAS(4,4)) and 133.0 MB (CAS(8,8)),
+on the RTX 3080 (CUDA, `default` preset), 2026-10-20.
+
 **The digests' transpose (#89) has the plain build's per-tile working set.**
 `buildDigestAdjointDevice` (`nevpt2.rdm_build`'s `:adjoint` partition) holds
 the plain build's `R` and `L2` per tile and one `n^2`-by-width `Wbar` in

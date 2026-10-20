@@ -557,7 +557,9 @@ tangent's (a derivative of a solve, which has no identity at all). One order
 up, `--sc-hessian` adds the Hessian's own, a difference of `Edot`
 itself ("The SC Hessian's finite-difference cross-check", below), and
 `--sc-hessian-vector` one of `y` against the vector `H_cc u` ("The SC
-Hessian-vector product's checks", below). It
+Hessian-vector product's checks", below), and `--sc-hessian-kc` four of `y`
+along `kappa` against the mixed block's `H_kc^T w` ("The SC mixed Hessian
+block's checks", below). It
 validates `energiesTangentDevice` (`nevpt2.energy`'s `:sc_tangent`
 partition) so that
 every later check of the reverse-mode assembly can be an exact dot-product
@@ -754,6 +756,105 @@ The host half — the multipliers' tangents per slab, including the two
 symmetrized classes' packing — is `test/gradient_plan/`'s
 `SlabMultiplierTests` (card-free), over `nevpt2.energy_finish`'s
 `normToEnergyMultiplierTangent`, which `test/energy_finish/` already pins.
+
+## The SC mixed Hessian block's checks
+
+`nevpt2_sc_pseudodensity_cas44_sc_hessian_kc` and
+`nevpt2_sc_pseudodensity_cas88_sc_hessian_kc` (`gpu`; the CAS(4,4) one
+`small`) run `nevpt2_sc_pseudodensity --golden <case> --tiles 3
+--sc-hessian-kc` and match `PASS: the SC mixed Hessian block H_kc's two
+orientations agree` (#184). They check `nevpt2.gradient`'s
+`scMixedHessianDevice` — the scalar `Eddot_kc(w, u)`, forward over forward,
+in Sec. 5.5's five terms — and `scMixedHessianVectorDevice` — the vector
+`H_kc^T w`, `y` differentiated along `w` — against each other and against
+what neither shares ([`hessian-theory.md`](hessian-theory.md), §5.5). Both
+read the committed sidecar. `apps/sc_pseudodensity/hessian_kc_check.cppm`
+has the derivation; every check prints its orbital-energy mode: FULL (they
+respond to `kappa` and to `c`), EULER (to `kappa` alone) or FROZEN (to
+neither, the one mode a case with no sidecar has). `w` is a seeded fully
+mixed antisymmetric `kappa` (seed `0x5eed0184`), `u` three seeded CI
+directions and the state. RTX 3080 (CUDA, `default` preset), the worst of
+three runs at each size, 2026-10-20:
+
+| exact check | mode | CAS(4,4) | CAS(8,8) | gate |
+|---|---|---|---|---|
+| `h^eff + f^gamma[gamma]` against the sidecar's `f`, the whole range (relative) | — | 1.1e-16 | 4.2e-16 | 1e-10 |
+| the walk's own `Edot(w)`, digests merged per tuple, against the frozen-digest tangent + `eps` + #88's term, worst class | FULL | 1.9e-14 | 8.0e-15 | 1e-7 |
+| the duality `<H_kc^T w, u> == Eddot_kc(w, u)`, worst of three seeded `u` | FULL | 1.1e-13 | 2.1e-16 | 1e-7 |
+| the same, `u` = the state | FULL | 2.3e-11 | 1.5e-14 | 1e-7 |
+| column by column, `(H_kc^T w)_I` vs `Eddot_kc(w, e_I)`, worst of 36 | FULL | 3.0e-11 | not run (ndet 4900) | 1e-7 |
+| Euler, `Eddot_kc(w, c)` vs `2 <w, Y>`, worst of Sr / Srsi / Srs | EULER | 4.5e-14 | 1.6e-14 | 1e-7 |
+| the duality in that mode, a seeded `u` and the state | EULER | 5.9e-12 | 2.1e-14 | 1e-7 |
+| along a core-core `w`: `|C3|` (`max|h1e'[w]|`) | FULL | 1.1e-19 (9.9e-17) | 1.6e-19 (3.1e-16) | 1e-13 |
+| along a virtual-virtual `w`: `|C3|` | FULL | 0 | 0 | 1e-13 |
+| along both: the duality | FULL | 2.0e-15 | 4.7e-17 | 1e-7 |
+| no sidecar, an active-active `w`: the duality, three seeded `u` and the state | FROZEN | 1.2e-14 | 3.4e-14 | 1e-7 |
+| the same: Euler, worst of Sr / Srsi / Srs | FROZEN | 7.0e-28 | 4.0e-15 | 1e-7 |
+| the same: the walk's `Edot(w)` against `scActiveRotationDevice`'s tangent + the digests' term, worst class | FROZEN | 2.5e-28 | 1.4e-15 | 1e-7 |
+
+Exact in every run, at both sizes: along both intra-space directions
+`max|h2e'[w]|`, C4 and C1's digest share are `0.0`; in the Euler mode Sijrs'
+`Eddot_kc(w, c)` is `0.0` (its only route to `c` is the orbital energies,
+held fixed in `c` there); and with no sidecar both refusals fire — a `w`
+leaving the active space and a responding mode, each Unsupported.
+
+**C3 along a core-core `w` is round-off, not `0.0`, and that is `h1e'`'s.**
+`h2e'[w]` is an exactly-zero tensor there, so C4 and C1's digest share
+vanish identically, as §5.5 says. `h1e'[w]` is `h^eff`'s active block's
+tangent, and its core dressing's two promotions of the tied core pair cancel
+against an antisymmetric `w` in exact arithmetic but only to round-off in the
+einsum's accumulation order (`max|h1e'[w]|` above), so C3 is that round-off
+carried through the blocks. Along a virtual-virtual `w`, which no dressing
+reads, `h1e'[w]` and C3 are `0.0`. The C3 gate leaves six decades over the
+worst measured and sits decades below any real term.
+
+**The Euler rows at CAS(4,4) with no sidecar are zero by symmetry.** The four
+active orbitals of N2's CAS(4,4) are four different irreps, so every
+active-active rotation's source term is exactly zero (as "The
+active-rotation source term" records for `--kappa-act`), and both sides of
+that Euler row are at `1e-17`. The duality along the same `w` is not
+trivial — the seeded `u` span every irrep — and CAS(8,8) carries the
+non-trivial Euler rows.
+
+**C1's digest share alone is not small.** Along the full-mode `w` and the
+first `u`, Sr's is 3.3e-1 at CAS(4,4) against a C1 of -1.1e-3 for the class
+(1.9e-3 against 1.3e-4 at CAS(8,8)): the digests' and the integrals' shares
+of `Hdot[w]` cancel per tuple, as the first-order digest term and the
+frozen-digest tangent do (`--kappa-full`'s table). The per-tuple merge is
+therefore not an optimisation but the only order in which the 3x3 meets the
+right number; the merge row above is what pins it.
+
+**The finite differences: `y`, the GPU's own exact one, dotted with `u`.**
+`scCiSourceDevice`'s `y` at `exp(s w)`, both legs in the same mode as the
+vector it is held to, differenced against `<H_kc^T w, u>`: along a core-core
+and a virtual-virtual `w` (the stored blocks' inactive axes, the orbital
+energies and `W` rotated on the host — `W` out of the sidecar's untied
+`(cc|aa)` / `(ca|ca)` and `(vv|aa)` / `(va|va)` rows, held at `s = 0` to the
+tied rows' `W`), an active-active one in the FULL mode (the active axes
+rotated, the digests rebuilt, `W` rotated on its active pair and the orbital
+energies re-formed from it) and the same active-active one in the FROZEN
+mode. The same ladder (k = 6…18), run rule and gate (1e-6 of
+`max(|<H_kc^T w, u>|, |<u, y>|)`) as `--kappa-full`'s sweeps:
+
+| direction, mode | CAS(4,4) best relative | fourfold halvings | CAS(8,8) best relative | fourfold halvings |
+|---|---|---|---|---|
+| core-core, FULL | 1.0e-10–5.2e-9 | 6–8 | 1.0e-9–2.8e-9 | 7–9 |
+| virtual-virtual, FULL | 6.9e-11–6.0e-10 | 5–6 | 4.6e-12–1.7e-9 | 4–6 |
+| active-active, FULL | 2.8e-9–1.4e-8 | 7–9 | 2.1e-9–2.6e-9 | 5 |
+| active-active, FROZEN | 4.8e-9–2.8e-8 | 7–8 | 6.3e-10–2.0e-9 | 8 |
+
+These are the only checks that see C5, the orbital energies' mixed response
+(the duality's two sides share its generator, and Euler runs without it);
+the full-range `f` row above is the one check its Fock line's arrays get
+beside them. A run takes about 3 s at CAS(4,4) and 77 s at CAS(8,8), the
+four ladders' 108 `y` builds being most of the latter.
+
+The host half — the five terms' per-perturber finish, plain and through the
+two symmetrized classes' packing, and the multipliers' tangents with a Delta
+tangent — is `test/gradient_plan/`'s `MixedTermsTests` and
+`SlabMultiplierTests` (card-free), each against a central difference of the
+class energy or of the multipliers themselves; the flag's refusals are
+`test/cli/`'s `CliScPseudodensityFlagTests`.
 
 ## The active-rotation source term
 
@@ -3927,6 +4028,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_cas44_sc_hessian` | `--sc-hessian`: the three-argument tangent RDM build (three `L2`/`R` blocks per tile) and the SC energy's second derivative over four RDM sets, against Euler at second order, the norms' second-order increment and a finite difference of `Edot` ("The SC Hessian's finite-difference cross-check", below). `nevpt2_cas88_sc_hessian` runs the same at CAS(8,8) and is **not** `small` |
 | `nevpt2_cas44_sc_hessian_vector` | `--sc-hessian-vector`: the gradient walk carrying a CI direction (a second set of block tangents and accumulators per class, swept beside the plain ones), three sigma calls, and `H_cc` materialised over 36 Hessian-vector products against as many three-argument builds ("The SC Hessian-vector product's checks", above). `nevpt2_cas88_sc_hessian_vector` runs the duality and the difference at CAS(8,8) and is **not** `small` |
 | `nevpt2_sc_pseudodensity_cas44`, `nevpt2_sc_pseudodensity_cas88` | the SC gradient's pseudodensity assembly and its identities ("The SC pseudodensity identities", above) |
+| `nevpt2_sc_pseudodensity_cas44_sc_hessian_kc` | `--sc-hessian-kc`: the gradient walk carrying a mixed direction (an orbital `w` with its digests' tangent merged, a CI `u`'s tangent blocks and the mixed blocks; or the walk's tangent along `w` with three sweeps more per class), the tangent RDM build at `h2e'[w]`, the sigma calls at `h2e'[w]`, and 36 columns ("The SC mixed Hessian block's checks", above). `nevpt2_sc_pseudodensity_cas88_sc_hessian_kc` runs the same at CAS(8,8) less the columns and is **not** `small` |
 | `nevpt2_pc_tangent_cas44`, `nevpt2_pc_tangent_cas88` | the PC tangent: a second solve per class, the tangent slab einsums and the `(m, m)` blocks' GEMMs, plus ten RDM builds and PC stages per entry ("The PC tangent against a finite difference", above) |
 | `nevpt2_cas44_casscf`, `nevpt2_cas44_casscf_pc`, `nevpt2_df_cas44_casscf`, `nevpt2_df_cas44_casscf_pc` | the same four paths on **CASSCF orbitals** — a `NEVPT2G2` golden whose `reference_kind` is CASSCF ("The CASSCF-orbital entries", above). Same CAS(4,4) shape, so the same cost |
 | `nevpt2_cas44_casscf_sc_tangent`, `nevpt2_sc_pseudodensity_kappa_cas44_casscf` | the two source-term canaries on **CASSCF orbitals** (`--sc-tangent`, `--kappa-act`; "The source terms on CASSCF orbitals: the wave-0 canary", above). Their CASCI twins' cost |

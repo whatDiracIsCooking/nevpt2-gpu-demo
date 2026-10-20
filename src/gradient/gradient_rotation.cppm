@@ -134,6 +134,23 @@ struct ScRotationDir {
   DeviceTensor kVirt;  // kappa[:, virt]                       (n_mo, n_virt)
   Tensor epsCoreDot;   // deps_i  (n_core)
   Tensor epsVirtDot;   // deps_r  (n_virt)
+  // kappa[:, act] WITH its active rows (generalEpsResponse's column block, kept
+  // for the orbital energies' mixed response, generalEpsResponseTangent, #184).
+  DeviceTensor kActFull;
+
+  // THE DIGESTS' SHARE, MERGED PER TUPLE (#184). Null by default, and then
+  // every class's Dyall-block tangent along this direction is its make_* at
+  // the dotted integrals with the f3 addends ZEROED -- the frozen-digest
+  // functional every first-order entry point differentiates, the digests'
+  // own term kept apart as #88's separate walk. Set (attachDigestTangents),
+  // it is the digests' tangent along this direction -- the RDM build at
+  // h2eDot, linear in h2e -- and the f3-reading blocks (Sr's a16, Si's a22)
+  // take it in place of the zeros, so each tuple's Hdot_t carries the
+  // digests' share BEFORE anything nonlinear meets it: what the mixed block's
+  // 3x3 sandwich needs (docs/hessian-theory.md, Sec. 5.5's C1) and K3 will
+  // (#158). Borrowed: the owner outlives every walk the direction enters.
+  const DeviceTensor* f3acDot = nullptr;
+  const DeviceTensor* f3caDot = nullptr;
 
   // The column block a slot over `s` contracts with. Only ever called on a
   // general direction (the active-only path never reaches :general).
@@ -268,9 +285,9 @@ Result<ScRotation> makeGeneralRotation(const std::vector<ScRotationRequest>& req
     // The orbital energies, read back to the host: the active column block
     // used here is the FULL one (no intra-active half to complement), so it
     // is rebuilt rather than reusing dir.kAct.
-    const DeviceTensor kActFull =
-        uploadTensor(kappaColumnBlock(k, actLo, actHi, actLo, actHi, false), res);
-    const ScEpsDot eps = generalEpsResponse(gen, dm1, dir.kCore, kActFull, dir.kVirt, res);
+    dir.kActFull = uploadTensor(kappaColumnBlock(k, actLo, actHi, actLo, actHi, false), res);
+    const ScEpsDot eps =
+        generalEpsResponse(gen, dm1, dir.kCore, dir.kActFull, dir.kVirt, res);
     dir.epsCoreDot = eps.core;
     dir.epsVirtDot = eps.virt;
     rot.dirs.push_back(std::move(dir));
@@ -296,6 +313,41 @@ const DeviceTensor* gDotOf(const std::vector<ScGDot>& gDots, const DeviceTensor*
   for (const ScGDot& d : gDots)
     if (d.g == g) return &d.dot;
   return nullptr;
+}
+
+// THE PER-TUPLE MERGE OF THE DIGESTS' SHARE (#184, for #158's K3 as well):
+// the digests' tangent along every TANGENT direction of `rot` -- the RDM build
+// run at that direction's own h2eDot (linear in h2e at a fixed CI vector:
+// #88's construction), so it is exactly the h2e_dot the Dyall blocks read,
+// the sidecar's general part included -- attached to the direction
+// (ScRotationDir::f3acDot / f3caDot), after which every class's Dyall-block
+// tangent along it, and so every tuple's Hdot_t, carries the digests' share.
+// The returned builds OWN the attached tensors: the caller holds them for as
+// long as `rot` is walked. An adjoint-only direction gets none (its tangent
+// blocks are never built up front). Exact digests only, as every tangent
+// build: `opt` naming --cublas / --ozaki / --fused-digest is our bug (cli
+// refuses the flags that reach here).
+std::vector<RdmBuildResult> attachDigestTangents(ScRotation& rot, const RdmBuildOptions& opt,
+                                                 const Tensor& ci, int64_t nelecA,
+                                                 int64_t nelecB, const DeviceResources& res) {
+  check(!opt.cublas && !opt.ozaki && !opt.fusedDigest,
+        "attachDigestTangents runs the emitted or the native-fp64 BLAS digest");
+  std::vector<RdmBuildResult> owned;
+  owned.reserve(rot.size());
+  for (ScRotationDir& d : rot.dirs) {
+    if (!d.tangent) {
+      owned.emplace_back();
+      continue;
+    }
+    const int64_t norb = d.h2eDot.dims[0];
+    // downloadTensor synchronizes the stream, so the rotation's einsums that
+    // wrote h2eDot are complete; the build takes its integrals on the host.
+    const Tensor h2eDot = downloadTensor(d.h2eDot, res.stream());
+    owned.push_back(buildRdmsDevice(opt, ci, norb, nelecA, nelecB, h2eDot, res));
+    d.f3acDot = &owned.back().f3ac;
+    d.f3caDot = &owned.back().f3ca;
+  }
+  return owned;
 }
 
 }  // namespace nevpt2

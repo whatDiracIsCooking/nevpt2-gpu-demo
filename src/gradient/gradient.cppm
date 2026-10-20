@@ -154,6 +154,21 @@ struct ScClassGradient {
   // walk's own tangent blocks while it accumulates the M_G tangents
   // (scCiHessianVectorDevice). Zero when the walk carried no CI direction.
   double ciTangent = 0.0;
+
+  // --- the mixed block H_kc along an orbital w and a CI u (#184) ---
+  // Forward (scMixedHessianDevice): this class's Eddot_kc(w, u) in its five
+  // terms, and the walk's own Edot(u). Both orientations: the walk's own
+  // Edot(w), P.Ndot + Q.Hdot + R.Ddot with the digests' share merged per
+  // tuple -- which must be the first-order source term's (the frozen-digest
+  // tangent plus #88's digest term). Reverse (scMixedHessianVectorDevice),
+  // with the orbital energies responding to the CI vector: dE/de's tangent
+  // along w, Rdot scattered as dEdCore / dEdVirt are R. Zero / empty when the
+  // walk carried no mixed direction.
+  ScMixedTerms mixed{};
+  double mixedEdotW = 0.0;
+  double mixedEdotU = 0.0;
+  std::vector<double> dEdCoreDot{};
+  std::vector<double> dEdVirtDot{};
 };
 
 struct ScGradientResult {
@@ -523,12 +538,19 @@ Result<Tensor> scFullRotationMatrix(const NevptIntegralsDevice& ints,
 //
 // Each number is a worst case over everything in its family, as a relative
 // Frobenius norm; `worstBlock` names where `blocks` peaked.
+//
+// And, for the mixed block's orbital-energy term (#184,
+// docs/hessian-theory.md Sec. 5.5's C5), the FULL-RANGE identity its Fock-line
+// generator carries: h^eff + f^gamma[gamma] at the state's gamma is the
+// sidecar's f over the whole MO range, off-diagonal blocks included --
+// `fockFull`, the extension of `fock`, which rebuilds the diagonal only.
 struct ScGeneralCheck {
   double blocks = 0.0;
   std::string worstBlock{};
   double heff = 0.0;
   double fock = 0.0;
   double eps = 0.0;
+  double fockFull = 0.0;
 };
 
 Result<ScGeneralCheck> scGeneralIntegralCheck(const NevptIntegralsDevice& ints,
@@ -593,6 +615,17 @@ Result<std::vector<ScDigestTangent>> scDigestRotationTangentDevice(
     const DeviceTensor& dm2, const DeviceTensor& dm3, const DeviceTensor& f3ac,
     const DeviceTensor& f3ca, const std::vector<ScRotationRequest>& dirs,
     const DeviceResources& res);
+
+// The same along ACTIVE-ACTIVE directions with no sidecar (#184): `dirs`'
+// kappas are (n_act, n_act), as scActiveRotationDevice's, and h2e_dot is the
+// intra-active action alone -- which is all of it there, and needs nothing the
+// golden lacks. What the mixed block's Euler identity is held to when no
+// sidecar is read.
+Result<std::vector<ScDigestTangent>> scDigestRotationTangentDevice(
+    const RdmBuildOptions& opt, const Tensor& ci, int64_t nelecA, int64_t nelecB,
+    const NevptIntegralsDevice& ints, const DeviceTensor& dm1, const DeviceTensor& dm2,
+    const DeviceTensor& dm3, const DeviceTensor& f3ac, const DeviceTensor& f3ca,
+    const std::vector<ScRotationRequest>& dirs, const DeviceResources& res);
 
 // Prints Edot(kappa) in its two terms -- the frozen-digest tangent, the
 // digest term -- and their sum, one line per direction. `full` and `digest`
@@ -854,6 +887,114 @@ ScCiHessianResult scCiHessianVectorDevice(const ActiveIntegralsDevice& active,
                                           const RdmTensors& dotU,
                                           const SigmaVectorOptions& sigma,
                                           const DeviceResources& res);
+
+// --- the mixed orbital-CI block, H_kc (#184) ----------------------------------
+//
+// docs/hessian-theory.md, Sec. 5.5. With w an orbital direction (an ordinary
+// antisymmetric (n_mo, n_mo) kappa) and u a CI direction,
+//
+//   Eddot_kc(w, u) = d^2/ds dt E(exp(s w), c + t u) = <H_kc^T w, u>,
+//
+// built in BOTH of the orientations Sec. 5.5 settles on, so that each gates
+// the other:
+//
+//   F   the SCALAR, forward over forward (scMixedHessianDevice): one slab walk
+//       carrying the plain blocks, u's tangent blocks and w's dotted inputs,
+//       finished per perturber in Sec. 5.5's five terms (ScMixedTerms):
+//       C1 the 3x3 sandwich between w's and u's (Ndot, Hdot, Ddot), C2 one
+//       external slot along w against the block along u, C3 the Dyall blocks
+//       at w's dotted integrals and u's tangent RDMs, C4 the blocks at the
+//       digests' mixed tangent f3^{wu} (the tangent RDM build at (c, u) handed
+//       h2e'[w] -- #88's pattern one order up), and C5 R against the orbital
+//       energies' mixed response eps^{wu};
+//   R1  the VECTOR H_kc^T w, reverse in c and forward in kappa
+//       (scMixedHessianVectorDevice): y = sigma(g; h2e) differentiated along
+//       w, which is y's walk differentiated along w (the multipliers'
+//       tangents from the orbital triple, the external slots' tangents, the
+//       RDM sweep at the dotted integrals) through ONE sigma call, plus the
+//       4-body sigmas with only (gac, gca) at h2e'[w] -- y is linear in h2e,
+//       so no transpose and no tangent RDM build.
+//
+// Their gate is the DUALITY <H_kc^T w, u> == Eddot_kc(w, u), with no step
+// size. They share the operand tangents (the promotion rule, the slab dots,
+// the tangent blocks, deps), the 3x3, the multiplier tangents, h2e'[w], the
+// digests' tangent f3'[w] and C5's generator, and nothing past those: the
+// tangent RDM build against the sigma vectors, forward against reverse.
+// R2, the orbital vector H_kc u, is not built (Sec. 5.5 says why).
+//
+// THE DIGESTS' SHARE IS MERGED PER TUPLE: w's tangent blocks are built with
+// the digests' own tangent along w (the RDM build at h2e'[w]) in place of the
+// zeros the first-order entry points use, so every tuple's Hdot[w] carries it
+// before the 3x3 meets it -- C1's requirement, and #158's K3's. Both results
+// report the walk's own Edot(w) per class, which must be the first-order
+// source term's (the frozen-digest tangent plus #88's digest term).
+//
+// THE ORBITAL ENERGIES' MODE is the caller's and is part of every check:
+// `epsKappa` lets them respond to kappa (deps, out of the sidecar), `epsCi`
+// to the CI vector (through W, `epsResponse`); with both, C5 is on. Euler in
+// c (Eddot_kc(w, c) == 2 <w, Y> on the homogeneous classes) is an identity
+// with `epsCi` off; the duality and the finite difference of y hold in any
+// mode, both legs in the same one.
+//
+// WITHOUT A SIDECAR (`gen` null) only an active-active w can be formed, with
+// the orbital energies frozen in both legs: any other w, or either mode on,
+// is refused as Unsupported -- never answered with the integral half alone
+// (docs/hessian-theory.md, Sec. 9.1). The digests still move: along an
+// active w, h2e'[w] needs nothing the golden lacks.
+//
+// Integral-direct, one slab per block (as scFullRotationDevice); every
+// device tensor from res's pool, everything on res.stream(). Exact digests
+// only (`opt`), at `opt.nTiles` -- F runs the tangent RDM build (its floors),
+// R1 the plain build (its floors). A malformed w, a sidecar that does not fit
+// the integrals, or a missing W is the caller's input: an Error.
+struct ScMixedHessianSetup {
+  const NevptIntegralsDevice& ints;
+  const GeneralIntegralsDevice* gen;  // the gradient sidecar, or null
+  const RdmTensors& rdm;              // the state's five RDMs
+  const Tensor& ci;                   // (nstringsA, nstringsB)
+  int64_t nelecA = 0;
+  int64_t nelecB = 0;
+  const RdmBuildOptions& opt;
+  bool epsKappa = false;
+  bool epsCi = false;
+  const OrbitalEnergyResponse* epsResponse = nullptr;  // W: required when epsCi
+};
+
+// F along (w, u): per class and summed.
+struct ScMixedHessianResult {
+  std::array<ScMixedTerms, 8> classes{};  // CLASSES order
+  ScMixedTerms total{};
+  double eddot = 0.0;                     // total.total(): Eddot_kc(w, u)
+  std::array<double, 8> edotW{};          // the walk's own Edot(w), digests merged
+  std::array<double, 8> edotU{};          // the walk's own Edot(u)
+  double edotWTotal = 0.0;
+  double edotUTotal = 0.0;
+  double h1eDotMax = 0.0;                 // max |h1e'[w]|, max |h2e'[w]|: did w
+  double h2eDotMax = 0.0;                 // move the active integrals at all
+};
+
+// F along w and each of `us` (each shaped like `ci`): w's dotted inputs, its
+// digests' tangent and C5's generator built once, then per u its tangent RDMs
+// (dm1/dm2 on the host, dm3/f3ac/f3ca and f3^{wu} on the device) and one walk.
+Result<std::vector<ScMixedHessianResult>> scMixedHessianDevice(const ScMixedHessianSetup& setup,
+                                                               const Tensor& w,
+                                                               const std::vector<Tensor>& us,
+                                                               const DeviceResources& res);
+
+// R1 along w.
+struct ScMixedHessianVectorResult {
+  Tensor hkcTw;            // H_kc^T w, (nstringsA, nstringsB)
+  Tensor fromWalkTangent;  // sigma(gdot[w], c; h2e): the walk's tangent, eps fold included
+  Tensor fromDigests;      // sigma(0, 0, 0, gac, gca; h2e'[w])
+  std::array<double, 8> edotW{};  // as ScMixedHessianResult's
+  double edotWTotal = 0.0;
+  double h2eDotMax = 0.0;
+};
+
+Result<ScMixedHessianVectorResult> scMixedHessianVectorDevice(const ScMixedHessianSetup& setup,
+                                                              const Tensor& w,
+                                                              const SigmaVectorOptions& sigma,
+                                                              const DeviceResources& res);
 
 // --- PC-NEVPT2's reverse mode (#74) -------------------------------------------
 //

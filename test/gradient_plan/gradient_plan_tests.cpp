@@ -46,8 +46,15 @@
 //                             the multipliers' tangents (#156): by hand on
 //                             one perturber, zero on an empty one, and the
 //                             symmetrized classes' against a central
-//                             difference of their own multipliers
-//   CiSourceHostTests         ciSourceAddInto / ciSourceSymmetrized /
+//                             difference of their own multipliers; and
+//                             (#184) with a Delta tangent too, Rdot included
+//   MixedTermsTests           the mixed block's per-perturber finish (#184):
+//                             the five terms' sum against a mixed central
+//                             difference of the class energy along a
+//                             two-parameter family, plain and through Sijr's
+//                             and Srsi's own packing; C1's digest share as
+//                             the same sandwich, linear in its triple
+//   CiSourceHostTests        ciSourceAddInto / ciSourceSymmetrized /
 //                             ciSourceFolded's basic shape
 //   CiSourceFoldTests         the fold against an UNFOLDED host reference
 //                             (#63): host transition dm1/dm2/dm3 pinned to
@@ -68,8 +75,9 @@
 //                             sidecars; forward and reverse as transposes;
 //                             and NEGATIVE CONTROLS (exchange at full weight,
 //                             Coulomb/exchange swapped, x without its ncore
-//                             offset) that miss the rebuild by decades
-//   CiSourceVectorTests       (REQUIRES_GPU) ciSourceVector's shape, its pure
+//                             offset) that miss the rebuild by decades; and
+//                             symmetrizedResponse (#184)
+//   CiSourceVectorTests      (REQUIRES_GPU) ciSourceVector's shape, its pure
 //                             accumulation over the five tensors, and y_I
 //                             against the unfolded host derivative, CAS(4,4)
 //   FourfoldRunTests          longestFourfoldRun, the step-ladder rule: a run
@@ -857,6 +865,204 @@ TEST(SlabMultiplierTests, SymmetrizedMultiplierTangentsAreTheirDerivatives) {
         srsiMultipliers(stepped(n, nd, -h), stepped(hh, hd, -h), ec, ev);
     expectNear(mp.p, mm.p, t.p);
     expectNear(mp.q, mm.q, t.q);
+  }
+}
+
+// The tangents along an ORBITAL direction (#184) carry a Delta tangent too:
+// the six-argument form's Pdot / Qdot / Rdot against a central difference of
+// the multipliers themselves along (normDot, hDot, the orbital energies'
+// tangent) -- plain, and Sijr's packed one with the orbital energies
+// displaced through its own Delta construction. The five-argument form is the
+// six-argument one at diffDot = 0, exactly.
+TEST(SlabMultiplierTests, MultiplierTangentsCarryADeltaTangent) {
+  const double h = std::ldexp(1.0, -16);
+  const auto stepped = [](const Tensor& t, const Tensor& d, double s) {
+    Tensor out = t;
+    for (int64_t k = 0; k < out.size(); ++k) out.flatRef(k) += s * d.flat(k);
+    return out;
+  };
+  {  // plain: three perturbers, Delta displaced along dd.
+    const Tensor n = vec({2.0, 0.5, 1.5}), hh = vec({-1.0, 0.25, -2.0});
+    const std::vector<double> delta{1.0, 2.0, 0.75}, dd{0.5, -0.25, 1.0};
+    const Tensor nd = vec({0.25, -0.5, 1.0}), hd = vec({0.5, 1.0, -0.25});
+    const ScSlabMultiplierTangents t = plainMultiplierTangents(n, hh, delta, nd, hd, dd);
+    std::vector<double> dp = delta, dm = delta;
+    for (std::size_t k = 0; k < dd.size(); ++k) {
+      dp[k] += h * dd[k];
+      dm[k] -= h * dd[k];
+    }
+    const ScSlabMultipliers mp = plainMultipliers(stepped(n, nd, h), stepped(hh, hd, h), dp);
+    const ScSlabMultipliers mm = plainMultipliers(stepped(n, nd, -h), stepped(hh, hd, -h), dm);
+    for (std::size_t k = 0; k < 3; ++k) {
+      const auto i = static_cast<int64_t>(k);
+      EXPECT_NEAR(t.p(i), (mp.p(i) - mm.p(i)) / (2.0 * h), 1e-6) << k;
+      EXPECT_NEAR(t.q(i), (mp.q(i) - mm.q(i)) / (2.0 * h), 1e-6) << k;
+      EXPECT_NEAR(t.r[k], (mp.r[k] - mm.r[k]) / (2.0 * h), 1e-6) << k;
+    }
+    const ScSlabMultiplierTangents t5 = plainMultiplierTangents(n, hh, delta, nd, hd);
+    const ScSlabMultiplierTangents t0 =
+        plainMultiplierTangents(n, hh, delta, nd, hd, std::vector<double>(3, 0.0));
+    EXPECT_EQ(t5.p.data(), t0.p.data());
+    EXPECT_EQ(t5.q.data(), t0.q.data());
+    EXPECT_EQ(t5.r, t0.r);
+  }
+  {  // Sijr: the hand triangle above, the orbital energies displaced.
+    const Tensor ec = vec({-1, -2}), ev = vec({5, 3});
+    const Tensor ecd = vec({0.25, -0.5}), evd = vec({0.75, 0.5});
+    const Tensor n = sijrNorm(1, 1), hh = sijrH(-5, -5);
+    const Tensor nd = Tensor::fromFlat({1, 2, 2}, {0.5, 0.25, -0.75, 1.0});
+    const Tensor hd = Tensor::fromFlat({1, 2, 2}, {-1.0, 0.5, 0.25, -0.5});
+    const std::vector<double> dd = sijrDelta(1, 2, 1, ecd, evd);
+    const ScSlabMultiplierTangents t = sijrMultiplierTangents(n, hh, nd, hd, dd, 1, ec, ev);
+    const ScSlabMultipliers mp = sijrMultipliers(stepped(n, nd, h), stepped(hh, hd, h), 1,
+                                                 stepped(ec, ecd, h), stepped(ev, evd, h));
+    const ScSlabMultipliers mm = sijrMultipliers(stepped(n, nd, -h), stepped(hh, hd, -h), 1,
+                                                 stepped(ec, ecd, -h), stepped(ev, evd, -h));
+    for (int64_t k = 0; k < t.p.size(); ++k) {
+      EXPECT_NEAR(t.p.flat(k), (mp.p.flat(k) - mm.p.flat(k)) / (2.0 * h), 1e-6) << k;
+      EXPECT_NEAR(t.q.flat(k), (mp.q.flat(k) - mm.q.flat(k)) / (2.0 * h), 1e-6) << k;
+    }
+    ASSERT_EQ(t.r.size(), mp.r.size());
+    for (std::size_t k = 0; k < t.r.size(); ++k)
+      EXPECT_NEAR(t.r[k], (mp.r[k] - mm.r[k]) / (2.0 * h), 1e-6) << k;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// MixedTermsTests (#184): the mixed block's per-perturber finish
+// ---------------------------------------------------------------------------
+//
+// The five terms are the second mixed derivative of the scalar finish, summed
+// over perturbers, along a two-parameter family
+//
+//   N(s, t) = N + s Ndot[w] + t Ndot[u] + s t N^{wu}
+//   H(s, t) = H + s Hdot[w] + t Hdot[u] + s t (H^{wu} + H^{wu,int} + H^{wu,dig})
+//   e(s, t) = e + s e'[w] + t e'[u] + s t eps^{wu}      (Delta through its own construction)
+//
+// -- which is how each enters the walk -- so their sum must be the mixed
+// central difference (E(+,+) - E(+,-) - E(-,+) + E(-,-)) / 4h^2 of the class
+// energy along it. h = 2^-12 on O(1) inputs: the truncation is O(h^2) with
+// fourth derivatives of order ten here, near 1e-6, so the bound is 1e-5 --
+// a card-free check of the assembly, not the Hessian's gate (that is the
+// duality, on the card).
+
+// t + s dw + u du + s u dwu.
+Tensor mixedAt(const Tensor& t, const Tensor& dw, const Tensor& du, const Tensor& dwu, double s,
+               double u) {
+  Tensor out = t;
+  for (int64_t k = 0; k < out.size(); ++k)
+    out.flatRef(k) += s * dw.flat(k) + u * du.flat(k) + s * u * dwu.flat(k);
+  return out;
+}
+
+// The tables of one hand case, `dims` the raw tuple shape, filled from a seed.
+ScMixedTables mixedTables(const std::vector<int64_t>& dims, std::uint64_t seed) {
+  std::mt19937_64 gen(seed);
+  std::uniform_real_distribution<double> dist(-0.5, 0.5);
+  const auto fill = [&](double base) {
+    Tensor t(dims);
+    for (int64_t k = 0; k < t.size(); ++k) t.flatRef(k) = base + dist(gen);
+    return t;
+  };
+  ScMixedTables tab;
+  // N well away from the empty-perturber guard, and H positive so that every
+  // d = N Delta + H is O(1) and the finish's pole far off.
+  tab.norm = fill(2.0);
+  tab.h = fill(1.0);
+  tab.normDotW = fill(0.0);
+  tab.hDotW = fill(0.0);
+  tab.hDotWDigest = fill(0.0);
+  tab.normDotU = fill(0.0);
+  tab.hDotU = fill(0.0);
+  tab.normWU = fill(0.0);
+  tab.hWU = fill(0.0);
+  tab.hWUInt = fill(0.0);
+  tab.hWUDigest = fill(0.0);
+  return tab;
+}
+
+TEST(MixedTermsTests, PlainTermsAreTheFinishsMixedDerivative) {
+  const ScMixedTables t = mixedTables({4}, 0x5eed'4184u);
+  const std::vector<double> delta{1.0, 1.5, 0.75, 2.0};
+  const std::vector<double> dW{0.25, -0.5, 0.125, 0.5}, dU{-0.25, 0.375, 0.5, -0.125},
+      dWU{0.5, 0.25, -0.375, 0.25};
+  const ScMixedTerms m = plainMixedTerms(t, delta, dW, dU, dWU);
+  Tensor hWUAll = t.hWU;
+  for (int64_t k = 0; k < hWUAll.size(); ++k)
+    hWUAll.flatRef(k) += t.hWUInt.flat(k) + t.hWUDigest.flat(k);
+  const auto energyAt = [&](double s, double u) {
+    std::vector<double> d = delta;
+    for (std::size_t k = 0; k < d.size(); ++k) d[k] += s * dW[k] + u * dU[k] + s * u * dWU[k];
+    return scMultipliers(mixedAt(t.norm, t.normDotW, t.normDotU, t.normWU, s, u).data(),
+                         mixedAt(t.h, t.hDotW, t.hDotU, hWUAll, s, u).data(), d)
+        .energy;
+  };
+  const double h = std::ldexp(1.0, -12);
+  const double fd =
+      (energyAt(h, h) - energyAt(h, -h) - energyAt(-h, h) + energyAt(-h, -h)) / (4.0 * h * h);
+  EXPECT_NEAR(m.total(), fd, 1e-5);
+  EXPECT_GT(std::fabs(m.c1), 1e-3);
+  EXPECT_GT(std::fabs(m.c2), 1e-3);
+  EXPECT_GT(std::fabs(m.c5), 1e-3);
+  // C1's digest share is the same sandwich with the digests' part of Hdot[w]
+  // alone in the orbital triple: hand it the whole Hdot[w] and nothing else,
+  // and it is C1 -- linear in the triple, exactly.
+  ScMixedTables only = t;
+  only.normDotW = Tensor(t.norm.dims());
+  only.hDotWDigest = t.hDotW;
+  const ScMixedTerms o = plainMixedTerms(only, delta, std::vector<double>(4, 0.0), dU, dWU);
+  EXPECT_EQ(o.c1, o.c1Digest);
+}
+
+// The two symmetrized classes pack every raw table through their own triangle:
+// the five terms' sum is the mixed difference of THEIR class energy (the
+// packed multipliers' energy) along the raw tables and the orbital energies
+// displaced through their own Delta construction.
+TEST(MixedTermsTests, SymmetrizedClassesAreTheirEnergysMixedDerivative) {
+  const double h = std::ldexp(1.0, -12);
+  const auto fdOf = [h](const std::function<double(double, double)>& e) {
+    return (e(h, h) - e(h, -h) - e(-h, h) + e(-h, -h)) / (4.0 * h * h);
+  };
+  const auto hAll = [](const ScMixedTables& t) {
+    Tensor a = t.hWU;
+    for (int64_t k = 0; k < a.size(); ++k) a.flatRef(k) += t.hWUInt.flat(k) + t.hWUDigest.flat(k);
+    return a;
+  };
+  const Tensor ec = vec({-1.0, -2.0}), ev = vec({5.0, 3.0});
+  const Tensor ecW = vec({0.25, -0.5}), evW = vec({0.75, 0.5});
+  const Tensor ecU = vec({-0.25, 0.125}), evU = vec({0.5, -0.25});
+  const Tensor ecWU = vec({0.125, 0.25}), evWU = vec({-0.5, 0.375});
+  const auto epsAt = [](const Tensor& e, const Tensor& w, const Tensor& u, const Tensor& wu,
+                        double s, double t) { return mixedAt(e, w, u, wu, s, t); };
+  {  // Sijr: nr = 1 virtual from b0 = 1, two core orbitals.
+    const ScMixedTables t = mixedTables({1, 2, 2}, 0x5eed'5184u);
+    const ScMixedTerms m =
+        sijrMixedTerms(t, sijrDelta(1, 2, 1, ecW, evW), sijrDelta(1, 2, 1, ecU, evU),
+                       sijrDelta(1, 2, 1, ecWU, evWU), 1, ec, ev);
+    const Tensor hwu = hAll(t);
+    const double fd = fdOf([&](double s, double u) {
+      return sijrMultipliers(mixedAt(t.norm, t.normDotW, t.normDotU, t.normWU, s, u),
+                             mixedAt(t.h, t.hDotW, t.hDotU, hwu, s, u), 1,
+                             epsAt(ec, ecW, ecU, ecWU, s, u), epsAt(ev, evW, evU, evWU, s, u))
+          .energy;
+    });
+    EXPECT_NEAR(m.total(), fd, 1e-5);
+  }
+  {  // Srsi: two virtuals, the two core orbitals' first.
+    const ScMixedTables t = mixedTables({2, 2, 1}, 0x5eed'6184u);
+    const Tensor ec1 = vec({-1.0}), ecW1 = vec({0.25}), ecU1 = vec({-0.25}),
+                 ecWU1 = vec({0.125});
+    const ScMixedTerms m =
+        srsiMixedTerms(t, srsiDelta(2, 1, ecW1, evW), srsiDelta(2, 1, ecU1, evU),
+                       srsiDelta(2, 1, ecWU1, evWU), ec1, ev);
+    const Tensor hwu = hAll(t);
+    const double fd = fdOf([&](double s, double u) {
+      return srsiMultipliers(mixedAt(t.norm, t.normDotW, t.normDotU, t.normWU, s, u),
+                             mixedAt(t.h, t.hDotW, t.hDotU, hwu, s, u),
+                             epsAt(ec1, ecW1, ecU1, ecWU1, s, u), epsAt(ev, evW, evU, evWU, s, u))
+          .energy;
+    });
+    EXPECT_NEAR(m.total(), fd, 1e-5);
   }
 }
 
@@ -1885,6 +2091,37 @@ TEST(OrbitalEnergyResponseTests, TheTwoModesAreTransposes) {
   for (int64_t r = 0; r < nv; ++r) rhs += b[static_cast<std::size_t>(r)] * eDot.virt(r);
   EXPECT_NEAR(lhs, rhs, 1e-14 * std::max(1.0, scale));
   EXPECT_GT(std::fabs(lhs), 1e-3);
+}
+
+// symmetrizedResponse (#184): each orbital's (u, t) pair symmetric, a
+// symmetric 1-RDM tangent reads it exactly as it reads the unsymmetrized
+// tensor, and W itself -- symmetric already, up to the sidecar's own storage
+// of (ii|ut) against (ii|tu) -- comes back to round-off.
+TEST(OrbitalEnergyResponseTests, SymmetrizedResponseKeepsWhatASymmetricGammaReads) {
+  const EpsCase* c = loadEpsCase(kGoldenCas44, kGradGoldCas44);
+  ASSERT_NE(c, nullptr);
+  const OrbitalEnergyResponse w = responseOf(c->sidecar);
+  const OrbitalEnergyResponse same = symmetrizedResponse(w);
+  for (int64_t k = 0; k < w.core.size(); ++k)
+    EXPECT_NEAR(same.core.flat(k), w.core.flat(k), 1e-13) << k;
+  for (int64_t k = 0; k < w.virt.size(); ++k)
+    EXPECT_NEAR(same.virt.flat(k), w.virt.flat(k), 1e-13) << k;
+  const int64_t na = w.core.dim(0);
+  std::mt19937_64 gen(0x5eed'7184u);
+  std::uniform_real_distribution<double> dist(-1.0, 1.0);
+  OrbitalEnergyResponse lop = w;  // a deliberately unsymmetric "response"
+  for (int64_t k = 0; k < lop.core.size(); ++k) lop.core.flatRef(k) += dist(gen);
+  for (int64_t k = 0; k < lop.virt.size(); ++k) lop.virt.flatRef(k) += dist(gen);
+  const OrbitalEnergyResponse sym = symmetrizedResponse(lop);
+  Tensor g({na, na});
+  for (int64_t u = 0; u < na; ++u)
+    for (int64_t t = 0; t <= u; ++t) g(u, t) = g(t, u) = dist(gen);
+  const OrbitalEnergyDot a = orbitalEnergyDot(lop, g), b = orbitalEnergyDot(sym, g);
+  for (int64_t i = 0; i < a.core.size(); ++i) EXPECT_NEAR(a.core(i), b.core(i), 1e-13) << i;
+  for (int64_t r = 0; r < a.virt.size(); ++r) EXPECT_NEAR(a.virt(r), b.virt(r), 1e-13) << r;
+  for (int64_t u = 0; u < na; ++u)
+    for (int64_t t = 0; t < na; ++t)
+      EXPECT_EQ(sym.core(u, t, 0), sym.core(t, u, 0)) << u << " " << t;
 }
 
 // NEGATIVE CONTROLS: the same rebuild FAILS for the picks a transcription

@@ -22,7 +22,8 @@
 //   CliDfDemoFlagTests   nevpt2_df_demo's --batch / --check-blocks, and its
 //                        --sc-tangent / --gradient-source (#162)
 //   CliScPseudodensityFlagTests  --kappa-act / --kappa-full / --gradgold /
-//                                --dump-source-terms / --source-oracle
+//                                --dump-source-terms / --source-oracle /
+//                                --sc-hessian-kc
 //   CliPcTangentFlagTests        --fd-steps / --fd-start-pow
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
@@ -400,9 +401,10 @@ constexpr std::array kExpectedMatrix{
     MatrixRow{"--gradient-source", "DF"},   MatrixRow{"--sc-hessian", "D"},
     MatrixRow{"--sc-hessian-vector", "D"},  MatrixRow{"--batch", "F"},
     MatrixRow{"--check-blocks", "F"},       MatrixRow{"--kappa-act", "S"},
-    MatrixRow{"--kappa-full", "S"},         MatrixRow{"--gradgold", "DS"},
-    MatrixRow{"--dump-source-terms", "S"},  MatrixRow{"--source-oracle", "S"},
-    MatrixRow{"--fd-steps", "P"},           MatrixRow{"--fd-start-pow", "P"},
+    MatrixRow{"--kappa-full", "S"},         MatrixRow{"--sc-hessian-kc", "S"},
+    MatrixRow{"--gradgold", "DS"},          MatrixRow{"--dump-source-terms", "S"},
+    MatrixRow{"--source-oracle", "S"},      MatrixRow{"--fd-steps", "P"},
+    MatrixRow{"--fd-start-pow", "P"},
 };
 
 char letterOf(const Binary b) {
@@ -634,6 +636,7 @@ TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
       {Binary::ScPseudodensity, {"--tiles", "3", "--kappa-full"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--dump-source-terms", "x.gradsrc"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--source-oracle", "x.srcgold"}},
+      {Binary::ScPseudodensity, {"--tiles", "3", "--sc-hessian-kc"}},
       {Binary::PcTangent, {"--tiles", "3"}},
       {Binary::PcTangent, {"--tiles", "40", "--fd-steps", "3"}},
   };
@@ -977,8 +980,8 @@ TEST(CliScPseudodensityFlagTests, GradgoldNeedsKappaFull) {
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
     EXPECT_EQ(r.error().message,
-              "--gradgold is the sidecar --kappa-full, --dump-source-terms and --source-oracle "
-              "read; it does nothing on its own");
+              "--gradgold is the sidecar --kappa-full, --sc-hessian-kc, --dump-source-terms and "
+              "--source-oracle read; it does nothing on its own");
   }
 }
 
@@ -1079,6 +1082,70 @@ TEST(CliScPseudodensityFlagTests, SourceOracleRefusesTheOtherJobs) {
     EXPECT_EQ(r.error().message,
               "--source-oracle compares the source terms --dump-source-terms writes and "
               "--kappa-act / --kappa-full check; run one at a time");
+  }
+}
+
+// --sc-hessian-kc (#184), nevpt2_sc_pseudodensity alone: the mixed block
+// H_kc, one job at a time, SC only, exact digests only, with or without the
+// sidecar (--gradgold rides on it).
+TEST(CliScPseudodensityFlagTests, ScHessianKcSetsItsFieldAndTakesGradgold) {
+  const Result<Options> r = parse(Binary::ScPseudodensity, {"--sc-hessian-kc"});
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_TRUE(r->scHessianKc);
+  EXPECT_FALSE(r->kappaAct);
+  EXPECT_FALSE(r->kappaFull);
+  const Result<Options> g = parse(
+      Binary::ScPseudodensity, {"--sc-hessian-kc", "--gradgold", "s.gradgold", "--blas-digest"});
+  ASSERT_TRUE(g.has_value()) << g.error().message;
+  EXPECT_EQ(g->gradgoldPath, "s.gradgold");
+}
+
+TEST(CliScPseudodensityFlagTests, ScHessianKcRefusesTheOtherJobs) {
+  for (const std::vector<std::string_view>& other :
+       {std::vector<std::string_view>{"--kappa-act"}, std::vector<std::string_view>{"--kappa-full"},
+        std::vector<std::string_view>{"--dump-source-terms", "x.gradsrc"},
+        std::vector<std::string_view>{"--source-oracle", "x.srcgold"}}) {
+    std::vector<std::string_view> args{"--sc-hessian-kc"};
+    args.insert(args.end(), other.begin(), other.end());
+    const Result<Options> r = parse(Binary::ScPseudodensity, args);
+    ASSERT_FALSE(r.has_value()) << other.front();
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(r.error().message,
+              "--sc-hessian-kc checks the energy's mixed orbital-CI second derivative; "
+              "--kappa-act, --kappa-full, --dump-source-terms and --source-oracle are "
+              "first-order jobs -- run one at a time");
+  }
+}
+
+TEST(CliScPseudodensityFlagTests, ScHessianKcRefusesPcAndTheApproximateDigests) {
+  const Result<Options> pc = parse(Binary::ScPseudodensity, {"--sc-hessian-kc", "--pc"});
+  ASSERT_FALSE(pc.has_value());
+  EXPECT_EQ(pc.error().kind, ErrorKind::InvalidConfig);
+  EXPECT_EQ(pc.error().message,
+            "--sc-hessian-kc differentiates the strongly-contracted energy twice; PC's half of "
+            "H_kc has no path (it waits on the PC projector terms, #152 / #155)");
+  for (const std::vector<std::string_view>& digest :
+       {std::vector<std::string_view>{"--cublas"}, std::vector<std::string_view>{"--ozaki"},
+        std::vector<std::string_view>{"--fused-digest", "--blas-digest"}}) {
+    if (digest.front() == "--cublas" && !kHaveCublasEmul) continue;
+    std::vector<std::string_view> args{"--sc-hessian-kc"};
+    args.insert(args.end(), digest.begin(), digest.end());
+    const Result<Options> r = parse(Binary::ScPseudodensity, args);
+    ASSERT_FALSE(r.has_value()) << digest.front();
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig) << digest.front();
+    EXPECT_EQ(r.error().message,
+              "--sc-hessian-kc runs the tangent RDM build and the digests' tangent, which are "
+              "the emitted digest or --blas-digest; not --cublas, --ozaki or --fused-digest");
+  }
+}
+
+TEST(CliScPseudodensityFlagTests, OtherBinariesRefuseScHessianKc) {
+  for (const Binary b : {Binary::Demo, Binary::DfDemo, Binary::PcTangent}) {
+    const Result<Options> r = parse(b, {"--sc-hessian-kc"});
+    ASSERT_FALSE(r.has_value()) << binaryName(b);
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << binaryName(b);
+    EXPECT_NE(r.error().message.find("only nevpt2_sc_pseudodensity"), std::string::npos)
+        << r.error().message;
   }
 }
 

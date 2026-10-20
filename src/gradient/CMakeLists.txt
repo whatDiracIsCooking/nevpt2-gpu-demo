@@ -91,6 +91,9 @@ add_cxx_module_library(
   IMPLEMENTATION gradient.cpp gradient_df.cpp
   LINK_PUBLIC nevpt2::energy nevpt2::sc_amplitudes nevpt2::gradient_plan
               nevpt2::sigma_vector nevpt2::rdm_build
+  # The mixed block's forward orientation (#184) builds its CI direction's
+  # dm1/dm2 tangents itself, on the host, as nevpt2.ci_checks does.
+  LINK_PRIVATE nevpt2::rdm_host_dm
 )
 
 # nevpt2.pc_tangent -- the finite-difference check of PC-NEVPT2's CI-vector
