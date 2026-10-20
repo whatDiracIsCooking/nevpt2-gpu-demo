@@ -700,7 +700,7 @@ constexpr std::int64_t kHessianColumnMaxDet = 256;
 // above the rest on the determinants the state occupies. Symmetry is a
 // round-off identity between two different columns' walks, so its residual
 // scales with those entries; an absolute bound would measure the matrix's
-// scale, not the algebra. About fifty times what is measured
+// scale, not the algebra. About forty times the worst measured
 // (docs/testing.md, "The SC Hessian-vector product's checks").
 constexpr double kHessianSymmetryRelTol = 1e-9;
 // The finite difference of y's gate: the best relative error of the sweep,
@@ -712,7 +712,7 @@ constexpr double kHessianSymmetryRelTol = 1e-9;
 // y's own round-off decades larger than along the direction. The plateau
 // sits where the two cross, a step or two wide, and at CAS(4,4) that is
 // within a factor of ten of 1e-6 on its neighbouring rows; this leaves about
-// sixty over the measured best (docs/testing.md, "The SC Hessian-vector
+// twenty over the worst measured best (docs/testing.md, "The SC Hessian-vector
 // product's checks"). The ladder is CHECK 2's: round-off takes over above
 // its shortest step, so a longer one buys nothing (measured, same section).
 constexpr double kHessianVectorFdTol = 1e-5;
