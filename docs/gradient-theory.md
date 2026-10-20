@@ -33,6 +33,7 @@ once:
 | §4.1–§4.2 — the active-space-selection hazard | **CASCI** |
 | §4.3 — the in-plane-`Cs` displacement rule | shared |
 | §4.4 — what is not that hazard, Park's SC non-invariance included | shared |
+| §4.5 — first-order related work, and why the Hessian's two refusals do not reach the gradient | shared |
 | §5 — what this settles | one column per reference |
 
 **Both branches' Z-vector solves are offline Python only**
@@ -1273,6 +1274,52 @@ them leads to chasing the wrong bug. All three apply to both branches:
   case is therefore a useful deliberate test of the former and a thing to
   avoid for the latter; when the two are measured against each other, the
   result belongs in [`testing.md`](testing.md) with its card and flags.
+
+### 4.5 Related work at first order, and what the Hessian's two refusals leave alone
+
+[`hessian-theory.md`](hessian-theory.md) finds two places where an energy
+second derivative does not exist. One is SC's symmetry-empty perturbers,
+populated along a symmetry-breaking pair (§5.6 there). The other is PC's cut
+null modes, lifted along a symmetry-breaking direction (§6.2 there). The
+first-order literature closest to them is below. Full entries are in
+[`references.md`](references.md), "Related work: the two 'no Hessian here'
+findings".
+
+- **Park 2019 (Ref. [1])**: SC non-invariance at degenerate inactive
+  orbitals (§4.4). It is a first-order effect, but it is not the empty
+  perturbers. The SC functional moves under a rotation inside core or
+  virtual, so its gradient and its numerical gradient disagree where those
+  orbitals are degenerate. The empty-perturber finding leaves the gradient
+  exact and concerns only the second derivative.
+- **Nishimoto 2019 (PC-NEVPT2 first derivatives)**: linearly dependent
+  functions are removed by a threshold, and the gradient's accuracy "is not
+  affected because all postenergy processes … use only linearly independent
+  vectors". The energy's continuity across geometries "has not been
+  investigated carefully". The first statement agrees with what this tree
+  uses: at an exact eigenstate the two-term PC tangent
+  ([`gradients.md`](gradients.md), §4.3) is the derivative of the energy
+  the code computes.
+- **Nishimoto 2023 (IPEA-shifted CASPT2 first derivatives)**: a term that
+  couples the linearly dependent and independent spaces. It has the
+  structure of the third term `-2 rho^T Sdot P A x` in
+  [`hessian-theory.md`](hessian-theory.md), §6.2. In CASPT2 the IPEA shift
+  makes the coupling. In PC-NEVPT2 it appears only off the eigenstate, at
+  the displaced CI vectors a finite difference visits, and it vanishes at
+  the state the gradient is taken at.
+- **Park 2021 (XMCQDPT2 gradients)**: a spurious acrolein frequency traced
+  to the overlap threshold. It shows a threshold that is harmless to a
+  gradient appearing in a Hessian built from that gradient.
+
+**First order is unaffected by both findings**, as each section of
+[`hessian-theory.md`](hessian-theory.md) shows:
+
+- An empty SC tuple's energy is `O(h^2)` along every direction, so its
+  first derivative is the guard's zero.
+- A Gram metric's dropped eigenvalues do not move at first order.
+- The PC third term vanishes at an exact eigenstate.
+
+Nothing in §1–§4 changes, and the Z-vector equations, source terms and
+validation rule stand as written.
 
 ## 5. What this settles
 
