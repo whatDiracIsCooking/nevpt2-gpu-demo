@@ -48,7 +48,24 @@
   by [`hessian-theory.md`](hessian-theory.md), §8 for its *second* derivatives:
   they are seminumerical — a stencil over the analytic gradient — which is the
   state of the art for this class of method and the reason that document's
-  level 3 has no analytic oracle to be checked against.
+  level 3 has no analytic oracle to be checked against. Also cited for its
+  threshold on linear dependence ("accuracy of the gradient is not
+  affected"; continuity "has not been investigated carefully"), by
+  [`gradient-theory.md`](gradient-theory.md), §4.5 and
+  [`hessian-theory.md`](hessian-theory.md), §6.2.
+- Y. Nishimoto, *Analytic first-order derivatives of CASPT2 with IPEA
+  shift*, J. Chem. Phys. **158**, 174112 (2023).
+  [doi:10.1063/5.0147611](https://doi.org/10.1063/5.0147611). Its §II B 3
+  and Eqs. 55–63 couple the linearly dependent and independent spaces. This
+  is the analogue of [`hessian-theory.md`](hessian-theory.md), §6.2's
+  off-eigenstate third term ([`gradient-theory.md`](gradient-theory.md),
+  §4.5).
+- J. W. Park, *Analytical gradient theory for resolvent-fitted second-order
+  extended multiconfiguration perturbation theory (XMCQDPT2)*, J. Chem.
+  Theory Comput. **17**, 6122 (2021).
+  [doi:10.1021/acs.jctc.1c00613](https://doi.org/10.1021/acs.jctc.1c00613),
+  [arXiv:2106.10817](https://arxiv.org/abs/2106.10817). Traces a spurious
+  acrolein frequency to the overlap threshold.
 
 ## Derivative theory: Lagrangians, and what order of response a derivative needs
 
@@ -99,6 +116,65 @@ responses a given derivative order needs**, which is what separates a gradient
   Moore–Penrose pseudo-inverse at locally constant rank, which
   [`hessian-theory.md`](hessian-theory.md), §6 differentiates a second time.
   Note the two range-complement terms carry `A^+ A^+`, **not** `A^+`.
+- G. W. Stewart, *On the continuity of the generalized inverse*, SIAM J.
+  Appl. Math. **17**, 33 (1969).
+  [doi:10.1137/0117004](https://doi.org/10.1137/0117004). The pseudo-inverse
+  is continuous only at constant rank. Cited by
+  [`hessian-theory.md`](hessian-theory.md), §6.2.
+- T. Kato, *Perturbation Theory for Linear Operators*, 2nd ed. (Springer,
+  1995). Rellich–Kato analytic perturbation theory: how a zero eigenvalue
+  of an analytic family moves, and the second-order degenerate (Schur
+  complement) correction [`hessian-theory.md`](hessian-theory.md), §6.2's
+  `L_uv` is an instance of.
+
+## Related work: the two "no Hessian here" findings
+
+The literature [`hessian-theory.md`](hessian-theory.md), §5.6 and §6.2
+place their findings against, and [`gradient-theory.md`](gradient-theory.md),
+§4.5 at first order. These come from a search on 2026-10-20 that was not
+exhaustive. The papers it did not read are listed in those sections. Park
+2019, Nishimoto 2019 and 2023, Park 2021 (under "Analytic gradients"),
+Golub–Pereyra, Stewart and Kato are cited there too.
+
+- C. Angeli, M. Pastore, R. Cimiraglia, *New perspectives in multireference
+  perturbation theory: the n-electron valence state approach*, Theor. Chem.
+  Acc. **117**, 743 (2007).
+  [doi:10.1007/s00214-006-0207-0](https://doi.org/10.1007/s00214-006-0207-0).
+  SC-NEVPT2's non-invariance to inactive and virtual rotations. Not read in
+  full.
+- S. Li, Z. Zhao, F. A. Evangelista, *Equation-of-motion internally
+  contracted multireference unitary coupled-cluster theory*, J. Chem. Phys.
+  **162**, 154112 (2025).
+  [doi:10.1063/5.0261000](https://doi.org/10.1063/5.0261000),
+  [arXiv:2501.17421](https://arxiv.org/abs/2501.17421). Potential energy
+  curves that are discontinuous where the number of linearly independent
+  operators changes.
+- L. Joubert-Doriol, *A variational approach for linearly dependent moving
+  bases in quantum dynamics: application to Gaussian functions*, J. Chem.
+  Theory Comput. **18**, 5799 (2022).
+  [doi:10.1021/acs.jctc.2c00461](https://doi.org/10.1021/acs.jctc.2c00461),
+  [arXiv:2205.02358](https://arxiv.org/abs/2205.02358). The same
+  discontinuity in a moving basis of changing dimension, outside electronic
+  structure.
+- A. A. Safari, R. J. Anderson, G. Li Manni, *Toward a stochastic complete
+  active space second-order perturbation theory*, J. Phys. Chem. A **128**,
+  281 (2024).
+  [doi:10.1021/acs.jpca.3c05109](https://doi.org/10.1021/acs.jpca.3c05109).
+  RDM noise propagating non-linearly through the inversion of the CASPT2
+  metric.
+- S. Battaglia, L. Fransén, I. Fdez. Galván, R. Lindh, *Regularized CASPT2:
+  an intruder-state-free approach*, J. Chem. Theory Comput. **18**, 4814
+  (2022). [doi:10.1021/acs.jctc.2c00368](https://doi.org/10.1021/acs.jctc.2c00368).
+  Background on CASPT2's denominators.
+- OpenMolcas CASPT2 manual, keyword `THRESHOLDS`:
+  <https://molcas.gitlab.io/OpenMolcas/sphinx/users.guide/programs/caspt2.html>.
+  Separate thresholds for zero-norm components and for near linear
+  dependencies.
+- F. A. Evangelista, J. Gauss, *An orbital-invariant internally contracted
+  multireference coupled cluster approach*, J. Chem. Phys. **134**, 114102
+  (2011). [doi:10.1063/1.3559149](https://doi.org/10.1063/1.3559149).
+  Listed because it was **not** read. It is on §6.2's list of papers to
+  check.
 
 ## Related work
 

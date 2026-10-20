@@ -1287,8 +1287,8 @@ geometries, not of this tree. The contracted function's energy `H_t/N_t` of
 an empty tuple is set by the direction of the displacement. Off symmetry
 nothing is empty by symmetry and the energy is `C^2`, but `F_t`'s Hessian is homogeneous
 of degree 0. So the Hessian near a symmetric geometry changes by a finite
-amount over a neighbourhood that shrinks onto it. The references this
-document cites do not discuss it. Of the committed cases, N2 and LiF are
+amount over a neighbourhood that shrinks onto it. What the literature we
+could read says around it is below ("Related work"). Of the committed cases, N2 and LiF are
 diatomic: their one mode is totally symmetric and unaffected. Acrolein (Cs)
 has non-totally-symmetric modes, but the census finds its empty tuples only
 in Sijrs (`H = 0`), so its K6 is exact. **PC is unaffected:** its `E_t` is a
@@ -1304,6 +1304,56 @@ difference of the energy is even in the step and unaffected too, and so is
 first-order mismatch with the energy. It is zero on empty tuples, whose
 `Ndot` vanishes, and measured negligible on small ones
 ([`testing.md`](testing.md)).
+
+**Related work.** From a literature search on 2026-10-20, which was not
+exhaustive. Full entries are in [`references.md`](references.md), "Related
+work: the two 'no Hessian here' findings".
+
+- **What is known around it.** SC-NEVPT2 is not invariant to rotations
+  within the inactive and virtual spaces (Angeli, Pastore and Cimiraglia
+  2007; Guo *et al.* 2016). Park 2019 reports SC gradients failing at
+  degenerate inactive orbitals (benzene, porphine) "due to the lack of the
+  invariance". That is a first-order effect with a different mechanism: the
+  functional moves under a rotation the gradient assumes free. Here the
+  gradient is exact, and what fails is the existence of a bilinear second
+  derivative. Internally contracted MRCI and ACPF also delete zero-norm
+  functions, and CASPT2 programs remove zero-norm components by threshold
+  (the OpenMolcas manual's `THRESHOLDS`). In a variational contraction the
+  function's coefficient absorbs its scale. Our reading, which no paper we
+  found states, is that this pathology belongs to strong contraction: the
+  contracted function is `V Psi_0` itself, with no free coefficient, so its
+  energy `H_t/N_t` is set by the direction of the displacement.
+- **The mathematics is elementary.** A degree-2 homogeneous rational
+  function is twice differentiable at the origin only if it is a quadratic
+  form. The application to SC's empty classes is what we did not find.
+- **What we did not find stated:**
+  - that a class empty by symmetry is populated at first order along a
+    symmetry-breaking direction;
+  - that the SC energy is then not `C^2` at a symmetric geometry along
+    non-proportional pairs;
+  - the proportionality condition, or K6;
+  - that Sijrs (`H = 0`) is always exact.
+  We found no analytic SC- or PC-NEVPT2 Hessian at all (§8).
+- **An observation about PySCF.** PySCF's `_norm_to_energy`
+  (`pyscf/mrpt/nevpt2.py`, the version `uv.lock` pins) skips a tuple only
+  when `|norm| <= NUMERICAL_ZERO`, and evaluates `-norm / (diff + h/norm)` on
+  every other tuple. Its Sijrs path applies no cutoff. A finite-difference
+  step of size `h` populates an empty tuple at order `h^2`, far above that
+  cutoff for any practical step. So a finite-difference SC Hessian built
+  from PySCF energies at a symmetric
+  geometry includes the populated tuple at every displaced point. Along a
+  non-proportional pair it returns the step-independent polarisation above,
+  with no sign that the pair has no Hessian. This describes the cutoff's
+  effect, not a PySCF bug: PySCF's energy and its first derivative are
+  right.
+- **Status.** Not found in the literature we could read (date 2026-10-20).
+  Not read:
+  - the full text of the Angeli SC originals (2001, both papers; 2002;
+    2007);
+  - the cited-by lists of Angeli 2001 and Park 2019;
+  - Molpro's, ORCA's and BAGEL's empty-class thresholds;
+  - the older contracted perturbation theories that use one function per
+    class (Malrieu's; Meyer's CEPA).
 
 ## 6. PC at second order: the eigen-derivative still does not appear
 
@@ -1475,6 +1525,9 @@ its own finite difference needs, and how far a CI-convergence-sized error in
 `c` moves it. The measured sizes are in
 [`pc-nevpt2.md`](pc-nevpt2.md), "What the cut drops, and how it moves"; a
 second-derivative gate should print the smallest kept `s` beside the gap.
+How sensitive the inversion is to noise in `c` is known in general (see
+"Related work" below). That the CI residual limits an analytic second
+derivative through it is not something we found stated.
 
 One qualification is unchanged: the conclusions depend on the cut sitting
 below the first real mode. A cut raised to drop physics
@@ -1507,6 +1560,83 @@ Hessian-vector product's checks"). That gate runs the duality against
 `pcHessianDevice`, and a per-class difference of the three-term `y`. The
 difference is the only check that sees the rotation terms: the duality would
 still pass if both sides omitted them.
+
+**Related work.** From the same search as §5.6's (2026-10-20), which was
+also not exhaustive. Full entries are in [`references.md`](references.md),
+"Related work: the two 'no Hessian here' findings". None of this section's
+five claims is stated in our form. Each has known parts around it. Nobody
+has needed the claims about lifted modes and the projector terms: the
+literature has no analytic CASPT2 or NEVPT2 Hessian, and every second
+derivative we found is a finite difference of an analytic gradient (§8).
+
+- **The dropped modes are exactly null (spin, rank bound, point group).**
+  - *Known.* Exact linear dependence among contracted functions is
+    recognised. The OpenMolcas CASPT2 manual's `THRESHOLDS` keyword has
+    separate thresholds "for removal of zero-norm components" and "for
+    removal of near linear dependencies". Nishimoto 2023 (§II B 3) calls
+    the effect "noticeable even when only exact linear dependency exists".
+  - *Not found.* That every mode PC's cut drops is exactly null at the
+    reference, or the split into spin, rank-bound and spatial-symmetry
+    modes.
+- **Symmetry-breaking directions lift null modes at `h^2`, so there is no
+  Hessian.**
+  - *Known: a change of rank makes the energy discontinuous.*
+    - Li, Zhao and Evangelista 2025 find EOM-ic-MRUCCSD curves
+      "discontinuous … due to the change in the number of linearly
+      independent operators". They expect this to affect any theory that
+      applies excitation operators to an internally contracted state.
+    - Nishimoto 2023 (after Eq. 63) notes that his treatment "does not solve
+      the problem arising when the number of linearly independent vectors
+      varies in different geometries".
+    - Nishimoto 2019 says the energy's continuity "has not been investigated
+      carefully".
+    - Park 2021 traces a spurious XMCQDPT2 frequency for acrolein to the
+      overlap threshold.
+    - Joubert-Doriol 2022 finds the same discontinuity outside electronic
+      structure, for moving bases whose dimension changes.
+  - *Known: the mathematics is textbook.* Stewart 1969: the pseudo-inverse
+    is continuous only at constant rank. Golub–Pereyra 1973: its
+    derivative needs locally constant rank. Rellich–Kato perturbation
+    theory (Kato): a zero eigenvalue of an analytic positive semidefinite
+    family rises at second order.
+  - *Not found:*
+    - spatial-symmetry-protected null modes that become non-null at a
+      distorted geometry, in any multireference method;
+    - the `h^2` law in this setting;
+    - the energy failing to be `C^2` at the symmetric point under a fixed
+      relative cut;
+    - the split between directions that keep the modes null and directions
+      that lift them.
+- **`L_uv` as the test.** It is the textbook second-order degenerate
+  (Schur-complement) correction to a zero eigenvalue (Kato). We found no
+  use of it, in quantum chemistry, to decide whether a Hessian exists.
+- **The projector terms do not drop, and the off-eigenstate third term.**
+  - *Known.* Golub–Pereyra give the constant-rank first derivative.
+    Nishimoto 2023 (Eqs. 55–63, IPEA-shifted CASPT2) adds a term coupling
+    the dependent and independent spaces, with the structure of our
+    `-2 rho^T Sdot_v P A x`. There the IPEA shift couples into the
+    dependent space; here the coupling comes from being off the eigenstate.
+  - *Consistent with it.* Nishimoto 2019 states that a PC-NEVPT2
+    gradient's accuracy "is not affected because all postenergy processes
+    … use only linearly independent vectors". That holds at an exact
+    eigenstate, where the third term vanishes, as above.
+  - *Not found.* Any citation of Golub–Pereyra for an internally
+    contracted metric in quantum chemistry, or any second-order projector
+    term.
+- **The smallest kept `s` amplifies the CI residual.**
+  - *Known in general.* Safari, Anderson and Li Manni find that noise in
+    stochastic RDMs "propagates non-linearly" through the inversion of the
+    CASPT2 metric. Approximate (cumulant-truncated) RDMs are known to give
+    false intruders.
+  - *Not found.* Residual amplification as a limit on an analytic second
+    derivative.
+- **Status.** Not found in the literature we could read (date 2026-10-20),
+  for each "not found" above. Not read:
+  - Evangelista–Gauss 2011; Hanauer–Köhn 2011 and 2012;
+  - Celani–Werner 2003; Györffy 2013; Werner–Knowles 1988;
+  - Nishimoto 2023's supporting Tables S1–S2;
+  - the RMS-CASPT2 gradient (Song, Martínez, Shiozaki);
+  - any analytic CASPT2 or NEVPT2 Hessian preprint from 2025–26.
 
 ### 6.3 Why PC gains relative to SC here
 
@@ -1968,8 +2098,8 @@ support, and the distinction matters for how much each part should be trusted:
 |---|---|
 | §2, the scalar finish's 3×3 and its identities | **none needed.** Elementary calculus on a rational function of three scalars, and verified against a central difference and its own two exact zeros |
 | §3–§5, the structural results | **none available, and none needed.** These are claims about *this tree's* multilinearity — the RDMs' exact quadraticity, the block builders' linearity, `f3`'s linearity in `h2e` — each checkable by inspection of the code they describe. §3–§4's chain was additionally verified on a model carrying the same algebra (quadratic densities, RDM-linear blocks, the rational finish): §4.1's two terms against a central difference, §4.2's duality and the Hessian's symmetry to round-off, and §4.3's Euler identity holding in the homogeneous frozen-`eps` case and **failing** in both of the cases §4.2–§4.3 say it must — an RDM-free term, and a responding `eps` |
-| §5.6, the empty perturbers | **none found.** Elementary: a degree-2 homogeneous rational function and when it is a quadratic form. Checked on a host model running PySCF's own class formulas on the committed goldens (`reference_data/sc_empty_perturber_probe.py`): the sixth term against a Richardson ladder, the parallelogram defect, the census, and `rho_t`'s separation ([`testing.md`](testing.md), "The empty-perturber term, offline"), plus synthetic hand cases. It was found the hard way: §5.1 said "no sixth term" until #158's ladders disagreed |
-| §6, the pseudo-inverse differentiated twice | **Golub–Pereyra**, and it was needed: the formula first written here carried a single `A^+` in the range-complement terms where the correct one carries `A^+ A^+` ([`references.md`](references.md), "Numerical linear algebra") |
+| §5.6, the empty perturbers | **none found** in the literature we could read (§5.6, "Related work", which lists what is known around it and what was not read). Elementary: a degree-2 homogeneous rational function and when it is a quadratic form. Checked on a host model running PySCF's own class formulas on the committed goldens (`reference_data/sc_empty_perturber_probe.py`): the sixth term against a Richardson ladder, the parallelogram defect, the census, and `rho_t`'s separation ([`testing.md`](testing.md), "The empty-perturber term, offline"), plus synthetic hand cases. It was found the hard way: §5.1 said "no sixth term" until #158's ladders disagreed |
+| §6, the pseudo-inverse differentiated twice | **Golub–Pereyra**, and it was needed: the formula first written here carried a single `A^+` in the range-complement terms where the correct one carries `A^+ A^+` ([`references.md`](references.md), "Numerical linear algebra"). The null modes that lift, `L_uv` and the projector terms: textbook mathematics (Stewart, Kato) with partial precedents in quantum chemistry, none stated in this form (§6.2, "Related work") |
 | §7–§8, what order of response a second derivative needs | **Helgaker–Jørgensen's 2n+1/2n+2 rules**, and these were needed too: the operator the `3N` responses solve against is the *reference's* Hessian, not level 1's or level 2's ([`references.md`](references.md), "Derivative theory") |
 | §8's oracle argument | **confirmed by practice.** Both 2019 NEVPT2 first-derivative papers take their second derivatives seminumerically from their analytic gradients |
 
