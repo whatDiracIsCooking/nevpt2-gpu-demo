@@ -624,14 +624,17 @@ so every second derivative through the digests is either
 
 - `f3(d^2 h2e / dkappa^2)` — the **plain** digest path run once at §5.1's
   second-order dotted integrals, or
-- the tangent build at `(c, u)` with dotted integrals — the **existing** #88
-  mixed path, which is what `H_kc` is made of.
+- the tangent build at `(c, u)` with dotted integrals —
+  `buildRdmTangentsDevice` handed `h2e'` in place of `h2e`, #88's pattern
+  one order up — which is `H_kc`'s digest term in its forward orientation.
 
 The digests contribute no new tensor machinery to the orbital Hessian at all.
-What the reverse side needs is #89's transpose applied to *tangent* digests
-rather than a second-order transpose — again because of linearity — though
-which of the two modes `H_kc` should actually be computed in is §10's open
-question, since the duality between them is what would check it.
+A reverse side that carried a *CI* tangent of the digests back onto `h2e`
+would need #89's transpose applied to *tangent* digests rather than a
+second-order transpose — again because of linearity — and §5.5 is why
+`H_kc` is not computed in that orientation: in the one it is computed in,
+the digests' orbital response goes through the 4-body sigma's own `h2e`
+operand and needs no transpose at all.
 
 ### 5.3 Sizes: action only, and the asymmetry that follows
 
@@ -675,7 +678,7 @@ where the expectation was that the answer would be cheap.
 
 | block / term | needs anything the `.gradgold` sidecar lacks? |
 |---|---|
-| `H_kc` | **no.** One `kappa` derivative: the first-order dotted inputs `z'[u]` (sidecar), the RDM tangent at `(c, w)` (§3), the digests' mixed path at dotted `h2e` (§5.2, #88), and the orbital energies' CI response, whose `gamma` line reads the same tied rows `deps` already does (`g_xa_cc`, `g_xc_ca`, `g_xa_vv`, `g_xv_va`) |
+| `H_kc` | **no.** One `kappa` derivative (§5.5's C1–C5): the first-order dotted inputs `z'[w]` (sidecar), the RDM tangent at `(c, u)` (§3), the tangent build at dotted `h2e` (§5.2), and the orbital energies' mixed response — whose `gamma` line reads the tied rows `deps` already does (`g_xa_cc`, `g_xc_ca`, `g_xa_vv`, `g_xv_va`) and whose Fock line, the generalized Fock's off-diagonal response to `gamma`, reads four untied rows the sidecar also carries (`g_xc_aa`, `g_xa_ca`, `g_xv_aa`, `g_xa_va`) |
 | `H_kk`, K1 and K3–K5 | **no.** K1 reads exactly `Y`'s arrays at a symmetric argument; K3–K5 read only first-order dotted inputs (§5.1's table) |
 | `H_kk`, K2 | **yes**, on a conventional case: **twelve two-general-index arrays, whose union is the whole MO-integral tensor** (below). On a density-fitted case, **no**: the golden and its `NEVPT2F1` sidecar already carry all of `B[L,p,q]` |
 
@@ -768,6 +771,174 @@ trigger: K2 on a conventional case without the full tensor, for any direction
 pair with neither member active–active. An omitted K2 is invisible to the
 forward/reverse duality (both modes would omit it) and to the symmetry check;
 only a Hessian-vector ladder sees it.
+
+### 5.5 The mixed block `H_kc`: three orientations, two of them built
+
+Write `w` for an orbital direction — an ordinary antisymmetric
+`(n_mo, n_mo)` `kappa`, no relation to §5.1's symmetric `W`, which does not
+arise here — and `u` for a CI direction. The mixed block is the bilinear form
+
+```
+  Eddot_kc(w, u) = d^2/ds dt  E( exp(s w), c + t u )  at s = t = 0
+                 = <w, H_kc u>  =  <H_kc^T w, u>
+```
+
+**There is no parameterisation term, and so none of K1's hazards.** `c` enters
+linearly and `kappa` only once, so `exp`'s second-order term `W` never appears.
+`w` is an antisymmetric `kappa` like every first-order direction:
+`makeRotation` / `makeGeneralRotation` accept it, the three traced-pair
+promotions that cancel against an antisymmetric `kappa` cancel here too (they
+are integral-side and do not depend on `c`), and the antisymmetric part of
+`Y` — the only part the stored matrix holds — is the only part an
+antisymmetric `w` pairs with. Everything in §5.1's list of K1's hazards is
+specific to `H_kk`.
+
+**What depends on what.** The external blocks `x_t`, the active `h1e` / `h2e`
+and the `h^eff` slices depend on `kappa` alone. The RDMs `dm1`–`dm3` depend on
+`c` alone. Two inputs depend on both: the digests `f3`, quadratic in `c` and
+linear in `h2e` (§5.2), and the orbital energies, affine in the active density
+`gamma` and moving with `kappa` through the integrals and the generalized Fock
+([`gradients.md`](gradients.md), §5.5; `src/gradient/gradient_general.cppm`'s
+header writes `deps`). The chain rule through `E = sum_t f(N_t, H_t, Delta_t)`
+then has exactly five mixed terms. There is no sixth: `x` does not move with
+`c`; `N_t`'s metric reads no integral; the Dyall block is bilinear in RDMs and
+integrals, up to RDM-free terms with no `c`-derivative; and `Delta_t` is linear
+in the orbital energies.
+
+| # | term | what it is | existing contraction it reuses | arrays it reads |
+|---|---|---|---|---|
+| C1 | **the finish's curvature** | `sum_t (Ndot, Hdot, Ddot)_t[w] . Hess f_t . (Ndot, Hdot, Ddot)_t[u]` | the orbital triple is `scFullRotationDevice`'s tangent mode per tuple (`assembleSlab`'s `normDot` / `hDot`, `deltaOf` at `deps`), **with #88's digest share merged in per tuple** — K3's requirement, §5.1; the CI triple is `energiesTangentDevice`'s per tuple, with `epsDot`; §2's 3×3 between them, as `normToEnergyHessianSandwich` already does for two CI triples | first-order dotted inputs only |
+| C2 | **one external slot along `w`, the block along `u`** | `sum_t [ P_t N_t + Q_t H_t ]` with one `x` slot at `x'[w]` and the metric or Dyall block at its CI tangent, symmetrised over the two slots | `evalTermsTangent` over the class term lists, with the block operand the CI tangent block (`make_*` at the tangent RDMs, as the energy's tangent builds it) instead of the plain one | the sidecar's slab tangents |
+| C3 | **the Dyall block, both legs** | `sum_t Q_t x^T K^{wu} x`, `K^{wu}` every `make_*` at the tangent RDMs **and** the dotted `h1e'[w]`, `h2e'[w]`, digests zeroed | `rotationTangentBlocks`' builders, handed the tangent RDMs in place of the plain ones — every `make_*` is bilinear in the two, and the RDM-free terms drop exactly as in the CI tangent | `h1e'` reads `heff`, `h2e'` reads `g_xa_aa` |
+| C4 | **the digests, both legs** | `sum_t Q_t x^T K(f3^{wu}) x`, `f3^{wu} = d^2 f3 / dc dh2e [u, h2e'[w]]` | §5.2: `buildRdmTangentsDevice` at `(c, u)` with `h2e'[w]` in place of `h2e` (its `dm*` outputs read no integral and are the CI tangent's again), fed to `energiesTangentDevice` with every other tangent zero — #88's construction one order up | `g_xa_aa` |
+| C5 | **the orbital energies, both legs** | `sum_t R_t Delta(eps^{wu})_t` with `eps^{wu}_p = 2 sum_x w_xp f^gamma_xp[gamma'] + 2 sum_{x, a, b in act} w_xa gamma'_ab [(pp\|xb) - (1/2)(px\|bp)]`, `gamma' = dm1'[u]`, `f^gamma[g]_xp = sum_ab g_ab [(xp\|ab) - (1/2)(xa\|bp)]` (`p` core or virtual) | the second line is `generalEpsResponse`'s `gamma` line at `dm1'[u]`. **The first is new**: the generalized Fock's *off-diagonal* response to `gamma`, which the first-order path never forms because it reads the stored `f`. The `h^eff` line and the core-density line have no `c`-derivative | `g_xa_cc`, `g_xc_ca`, `g_xa_vv`, `g_xv_va` (the `gamma` line); `g_xc_aa`, `g_xa_ca`, `g_xv_aa`, `g_xa_va` (the Fock line) |
+
+C1 is K3 and C2 is K5 with one direction moved from the integrals to the
+RDMs — C1 needs the same per-tuple merge of the digests' orbital share that K3
+does — and C3–C4 sit where `H_kk` has K1–K2, a block at a second-order input,
+except that here the input is mixed and reads first-order data only. C5 is the one input generator `H_kc` adds; it reads
+only sidecar arrays, and it carries its own exact identity —
+`h^eff + f^gamma[gamma]` at the state's `gamma` is the sidecar's `f` over the
+**whole** MO range, the off-diagonal extension of `scGeneralIntegralCheck`'s
+`fock`, which rebuilds the diagonal only.
+
+**Three orientations.** The same bilinear form can leave the computation in
+three shapes, and §10's question was which to build:
+
+| | orientation | how | the digests' share | RDM build | what is new |
+|---|---|---|---|---|---|
+| **F** | the scalar `Eddot_kc(w, u)` | forward over forward: one slab walk carrying the plain blocks, the CI tangent set at `u` and the orbital dotted inputs at `w`, finished by C1's sandwich | C4: the **tangent build at dotted integrals** | the tangent build at `(c, u)`, at `h2e` and at `h2e'[w]` (or one sweep carrying both integral tensors); plus #88's plain build at `h2e'[w]` for C1's orbital triple | the walk holding a CI tangent set beside an orbital one — four block sets per class, the count `energiesHessianDevice` already holds; C5's Fock line |
+| **R1** | `H_kc^T w`, a determinant vector | reverse in `c`, forward in `kappa`: the derivative along `w` of `y = ciSourceVector(g; h2e)` | `ciSourceVector(0, 0, 0, gac, gca; h2e'[w])` — the 4-body sigmas at dotted `h2e`, **no transpose** | none beyond the plain build's: #88's plain build at `h2e'[w]` for the multiplier tangents | the pseudodensity walk's tangent along an *orbital* direction — §4.2's `gdot` with the operand tangents `scFullRotationDevice` forms instead of RDM tangents, the multiplier tangents §2.4 fed the orbital triple, and the RDM sweep at dotted integrals (it is linear in them); C5's `W'[w]` in the `eps` fold |
+| **R2** | `H_kc u`, an orbital vector | forward in `c`, reverse in `kappa`: the derivative along `u` of `Y`, **probed** basis direction by basis direction as `Y` is (the gauge argument of [`gradients.md`](gradients.md), §6 holds at every `c`, so it holds for `Ydot` too) | `<hbardot[u], h2e'[w]>`, where `hbardot[u]` needs **#89's transpose applied to tangent digests** — the transpose at the pair `(c, u)` | the transpose's tangent: no new kernel (the four `f3_transpose.cu` kernels are linear in each operand), but a new driver at the tangent build's working set, `produce` at `c` and at `u` per tile | that driver, plus §4.2's `gdot[u]` walk paired against `z'[w]` in chunks |
+
+R1 is the cheap one, and the reason is §5.2's linearity seen from the other
+side. `y` reads `h2e` in exactly two places — the 4-body sigmas' operand and
+the RDM sweep's block chains — and is linear in it in both, so differentiating
+`y` along `w` is two `ciSourceVector` calls (one at `gdot[w]`, one with only
+`gac`, `gca` at `h2e'[w]`) and never asks for a transpose. Nor does it run a
+tangent RDM build: the CI vector is fixed along `w`, so R1 runs at the
+**plain** build's tile floors ([`performance.md`](performance.md), "Tile
+floors"). F needs the tangent build, at the tangent build's floors. Neither
+needs §4.4's three-vector working set: `H_kc` involves two CI vectors, `c` and
+`u`, not three, so the unmeasured floors of §10's first bullet do not gate it.
+
+**The verdict: F and R1, with the duality between them as the gate.**
+
+```
+  <H_kc^T w, u>  ==  Eddot_kc(w, u)        to round-off, no step size
+```
+
+the mixed block's analogue of `<u, y> == Edot(u)` and §4.2's
+`<v, H_cc u> == Eddot(u, v)`, and column by column where `ndet` allows (the
+`--gradient-source` bound, §4.4). **R2 is not built.** Every consumer this
+document describes contracts `H_kc` between an orbital vector and a CI vector
+— level 3's `3N` responses (§8) consume `Eddot` on pairs of response vectors,
+so `H_ck` applied to each response's orbital half is R1 — and for any such
+contraction `<w, H_kc u> = <H_kc^T w, u>` makes R1 sufficient. Only a consumer
+that wants the orbital half of the action as a vector in its own right — a
+second-order orbital optimiser's residual, which nothing in the tree is —
+needs R2, and if one arrives the gate is the same duality, against R1, with
+the transpose's tangent as the new piece.
+
+**What the duality sees, and what it cannot.** F and R1 share the operand
+tangents `z'[w]` (the promotion rule, `slabDots`, `rotationTangentBlocks`,
+`generalEpsResponse`), §2's 3×3 and the multiplier tangents, `h2e'[w]` and C5's
+Fock-line generator. They share no code past those: the tangent RDM build
+against the sigma vectors, forward-over-forward against the differentiated
+walk, and — for the digests — the tangent build at `h2e'[w]` against the
+4-body sigma at `h2e'[w]`. So the duality pins the assembly and nothing it is
+fed. What it is fed is already pinned: `z'[w]` by every first-order check `Y`
+passes, PySCF's exact `A` among them; the 3×3 card-free (§2.3); C5's generator
+by the full-range `f` identity above. And **a term both routes omit is
+invisible to it** — C4 or C5 left out of both cancels exactly, the way the §6
+digest gap survived until #89. Three things outside the pair see an omission:
+
+- **Euler in `c`.** For a class homogeneous of degree 2 in `c` (§4.3's three
+  SC classes; PC's five), `E(kappa, s c) = s^2 E(kappa, c)` at orbital
+  energies held fixed *in `c`*, so its `kappa`-derivative is homogeneous too
+  and, per class,
+
+  ```
+    Eddot_kc(w, c)  ==  2 <w, Y>            any w, mixed rotations included
+  ```
+
+  against the **already-gated** first-order `Y` (`scFullRotationDevice`'s
+  pairing with the digests' share, or the forward tangent plus #88's term,
+  per class). It reaches C1–C4 — C4's `u = c` case is
+  `buildRdmTangentsDevice(c, c) == 2 buildRdmsDevice(c)` at `h2e'[w]`, the
+  `--rdm-tangent` identity at dotted integrals — and holds for F and R1 alike
+  (`<H_kc^T w, c>`). Its mode is §4.3's: the orbital energies may respond to
+  `kappa` (`deps` at the state's `gamma`) but not to `c`, so C5 and the CI
+  triple's `Ddot` are off, and the PASS line says so.
+- **The intra-space exact zeros.** Along a core–core or virtual–virtual `w`
+  no active integral moves, so C3, C4 and the digests' share of C1 vanish
+  **identically** — the negative control `--kappa-full` already runs for the
+  first-order digest term. C1's integral part, C2 and C5 do *not* vanish
+  there: the external blocks move, and so does the Fock line, since `f`'s
+  core and virtual blocks are diagonal only at the state, not along `u`.
+- **One finite difference: of the gated `y`, along `kappa`.** A central
+  difference of `scCiSourceDevice` (orbital-energy response on, digests
+  rebuilt at the displaced `h2e`) along `exp(s w)`, dotted with `u`, against
+  `<H_kc^T w, u>` — along the directions `--kappa-full` already displaces: a
+  core–core and a virtual–virtual rotation, whose displaced blocks, orbital
+  energies and `W` are host transforms of stored arrays, and an
+  active–active one through the device `kappa` action (as `--kappa-act`
+  displaces the energy), with the orbital energies and `W` rotated on their
+  active indices. It is the only check that sees C5 (Euler
+  runs with it off) and the only one that sees the digests' mixed term on the
+  affine classes. A mixed `w` cannot be displaced and need not be, for
+  `--kappa-full`'s reason: each promotion is one contraction over the whole
+  general index. A difference of `Y` along `c` is the weaker choice: in the
+  complete functional it needs `f` at the displaced `gamma`, which is C5's own
+  generator — the difference would share the term it is meant to check.
+
+Like every second derivative here, both legs must run in the same
+orbital-energy mode, and the mode is part of the check: Euler with the
+response in `c` off, the difference and the duality in either, named.
+
+**PC.** The same five terms and the same three orientations, through §6.1's
+`-nu b^T A^+ b`: along `w`, `S` and `S_1` do not move (they are RDM-only;
+[`gradients.md`](gradients.md), §6.1), so `b'_w = S x'_w + S_1 h1'_w` and
+`A'_w = K'_w + Delta'_w S`; along `u`, `S`, `S_1`, `K` and `Delta` move; the
+mixed `b^{wu} = S'_u x'_w + S_1'_u h1'_w` and
+`A^{wu} = K^{wu} + Delta^{wu} S + Delta'_w S'_u`. The orbital leg adds no
+null-space question of its own: the cut is on `S`'s eigenvalues
+([`pc-nevpt2.md`](pc-nevpt2.md), "The singular-metric convention") and `S`
+does not move with `kappa`, so the kept span is fixed along `w` and
+`G'_w = -G A'_w G` exactly. Whatever §6.2 settles for the pseudo-inverse's
+derivative along a CI direction is used once per `(w, u)`, and nothing about it
+moves along `w`. F is `pcTangentsDevice`'s walk beside
+`pcFullRotationDevice`'s orbital tangents; R1 is PC's adjoint (`pcCiSourceDevice`)
+differentiated along `w` — the walk tangent PC's `H_cc u` builds, fed orbital
+operands; Euler covers PC's five homogeneous classes.
+
+**Data.** §5.4's row stands: nothing the sidecar lacks, the Fock line's four
+rows included. A case with no sidecar can form `H_kc` only along active–active
+`w` with the orbital energies held fixed in both legs — the functional
+`--kappa-act` differentiates at first order — and must refuse any other `w`
+rather than return the integral half alone (§9.1's discipline). The
+density-fitted case needs no new data either (first-order `Bdot` per
+direction), but `scFullRotationDevice` is integral-direct, and so is this.
 
 ## 6. PC at second order: the eigen-derivative still does not appear
 
@@ -1123,6 +1294,22 @@ do not apply here.
   integrals included, so §3.4's omitted `(xv|vv)` comes back — on a
   conventional case, unless one direction is active–active, and **nothing new**
   on a density-fitted one, whose golden and sidecar already carry all of `B`.
+- **`H_kc` is five terms and is built in two orientations (§5.5).** C1–C5:
+  §2's 3×3 between the orbital and the CI tangent triples, one external slot
+  against the block's CI tangent, the Dyall block and the digests each at
+  both legs, and the orbital energies' mixed response — whose Fock line is
+  the one new input generator. Built forward as the scalar
+  `Eddot_kc(w, u)` (the tangent build at dotted integrals) and in reverse as
+  the determinant vector `H_kc^T w` (`y` differentiated along `w`: two
+  `ciSourceVector` calls, no transpose, plain-build tile floors), gated by
+  `<H_kc^T w, u> == Eddot_kc(w, u)`. The orbital-vector orientation — the
+  one that would need #89's transpose applied to tangent digests — is not
+  built: every consumer contracts `H_kc` between two vectors, for which the
+  duality makes `H_kc^T w` sufficient. What the duality cannot see, a term
+  both omit, is held by Euler in `c` against the already-gated `Y`
+  (`Eddot_kc(w, c) == 2 <w, Y>`, homogeneous classes), the intra-space exact
+  zeros of the active-integral terms, and one finite difference of the gated
+  `y` along `kappa`.
 - The exactness budget costs **one** new finite difference (§9).
 - A second derivative needs the wavefunction parameters only to **first** order
   and the multipliers only to **zeroth** — the 2n+1/2n+2 rules, §7. So no
@@ -1145,9 +1332,6 @@ do not apply here.
   [`reference-data.md`](reference-data.md) — or an AO-direct second-order
   transformation, which needs AO integrals nothing in the tree carries; or
   K2 on the density-fitted pair alone, in three-index form.
-- Whether `H_kc` should be computed from the digests' transpose applied to
-  tangent digests, or from the tangent build at dotted integrals, or both —
-  given that the duality between the two is what would check it.
 - Level 2's CASSCF-branch third-derivative term (§7): whether anything in PySCF
   reaches it, or whether it would have to be built from `gen_g_hop`'s operator
   by differentiation.
@@ -1174,15 +1358,19 @@ does not make an earlier one worse.
 | 2 | `Eddot(u, v)`, SC, scalar (§4.1) | §4.3's Euler, frozen `eps` — against the *already-gated* `Edot(u)`. Plus the one finite difference of `Edot` (§9) | the three-argument slab walk (§4.4) |
 | 3 | `H_cc u`, SC, vector (§4.2) | the duality `<v, H_cc u> == Eddot(u,v)` against stage 2, round-off exact; column by column where `ndet` allows (§4.4) | `gdot` through the pseudodensity walk, two sigma calls |
 | 4 | PC's `Eddot` and `H_cc u` (§6) | PC's Euler covers **five** classes against SC's three, plus the same duality; the refusals of §9.1 carried | extra solves against the existing factorisation. No new derivation (§6.3) |
-| 5 | `H_kc`, `H_kk` as an action (§5) | K1 reuses the pairing `Y` is built from, already validated block by block against PySCF, at a symmetric argument; the traced-pair zero for active–active pairs (§5.1); Hessian-vector ladders along `exp(s u + t v)` (§5.3) | the symmetric-argument and two-slot promotions (§5.1's table), and K2's data source (§5.4) — the full tensor on a conventional case. The expensive stage |
-| 6 | levels 2 and 3, offline (§7–§8) | a stencil over `nevpt2_grad.py`'s analytic gradient — the oracle §8 argues against | `3N` reference response solves, second-derivative integrals, the constraints' second derivatives. A different kind of project |
+| 5 | `H_kc`: the scalar `Eddot_kc(w, u)` and the vector `H_kc^T w` (§5.5) | the duality `<H_kc^T w, u> == Eddot_kc(w, u)`, round-off exact, column by column where `ndet` allows; Euler in `c`, `Eddot_kc(w, c) == 2 <w, Y>` against the *already-gated* `Y`, homogeneous classes, orbital energies fixed in `c`; the intra-space exact zeros of C3–C4; one finite difference of the gated `y` along `kappa`; the full-range `f` identity for C5's generator | the walk carrying a CI tangent set beside the orbital dotted inputs (F); stage 3's `gdot` walk fed orbital operand tangents, with the RDM sweep at dotted integrals (R1); C5's Fock line; the per-tuple merge of the digests' orbital share that stage 6's K3 reuses. No data the sidecar lacks, no transpose, no three-vector working set |
+| 6 | `H_kk` as an action (§5.1–§5.4) | K1 reuses the pairing `Y` is built from, already validated block by block against PySCF, at a symmetric argument; the traced-pair zero for active–active pairs (§5.1); Hessian-vector ladders along `exp(s u + t v)` (§5.3) | the symmetric-argument and two-slot promotions (§5.1's table), and K2's data source (§5.4) — the full tensor on a conventional case. The expensive stage |
+| 7 | levels 2 and 3, offline (§7–§8) | a stencil over `nevpt2_grad.py`'s analytic gradient — the oracle §8 argues against | `3N` reference response solves, second-derivative integrals, the constraints' second derivatives. A different kind of project |
 
-Stage 1 is a prerequisite for all five others and is the smallest piece in the
+Stage 1 is a prerequisite for all six others and is the smallest piece in the
 document. Stages 2–4 are the ones §9's "one new finite difference" claim covers
-in full. Stage 5's enumeration is done (§5.1, §5.4), and what it found is that
-the orbital block's cost is set by its data, not its algebra: K2 reads the
-whole integral tensor on a conventional case.
-Stage 6 is where the character of the work changes, and §8 is the argument for
+in full. Stage 5 needs stages 2 and 3 (the sandwich, and the walk's tangent)
+and nothing from stage 6, and goes first of the two orbital stages because it
+is the cheap one and lands a piece stage 6 reuses; its PC half rides on stage
+4. Stage 6's enumeration is done (§5.1, §5.4), and what it found is that the
+orbital block's cost is set by its data, not its algebra: K2 reads the whole
+integral tensor on a conventional case.
+Stage 7 is where the character of the work changes, and §8 is the argument for
 not starting there.
 
 ## References
