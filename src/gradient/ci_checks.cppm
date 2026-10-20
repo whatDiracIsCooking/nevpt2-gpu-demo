@@ -10,6 +10,10 @@
 //                    directional derivative Eddot(u, v) against Euler, the
 //                    norms' exact second-order increment and one finite
 //                    difference of Edot (ci_checks_tangent.cpp, #153);
+//   checkScHessianVector  --sc-hessian-vector (nevpt2_demo): the vector
+//                    H_cc u by reverse over forward, against Eddot by
+//                    duality, column by column where ndet allows, and one
+//                    finite difference of y (ci_checks_tangent.cpp, #156);
 //   checkCiSource    --gradient-source: nevpt2.gradient's CI source term
 //                    y_I = dE/dc_I (Park Eq. 48) against that tangent by the
 //                    forward-reverse duality <u, y> == Edot(u), exact, plus
@@ -86,6 +90,22 @@ Result<bool> checkScHessian(const GoldenFile& g, const RdmBuildOptions& rdmOpt,
                             const CiCheckIntegrals& ints, const RdmBuildResult& baseRdm,
                             std::uint64_t seedU, std::uint64_t seedV,
                             const DeviceResources& res);
+
+// --sc-hessian-vector on the golden state `g` (#156): nevpt2.gradient's
+// scCiHessianVectorDevice, H_cc u by reverse over forward along `seedU`'s
+// direction, at the golden's fixed orbital energies, against the duality
+// <v, H_cc u> == Eddot(u, v) (energiesHessianDevice) for `seedV`'s and
+// further seeded directions and the state, H_cc materialised column by column
+// against Eddot(e_I, v) where ndet allows, and one Richardson-verified
+// central difference of the GPU's own y (no orbital-energy response on
+// either leg). Prints the tables and the gate line "PASS: the SC
+// Hessian-vector product matches ..." / "FAIL: ...". `baseRdm` as for
+// checkScTangent. Returns whether every criterion held; an active space the
+// host RDM builder refuses is a configuration Error.
+Result<bool> checkScHessianVector(const GoldenFile& g, const RdmBuildOptions& rdmOpt,
+                                  const CiCheckIntegrals& ints, const RdmBuildResult& baseRdm,
+                                  std::uint64_t seedU, std::uint64_t seedV,
+                                  const DeviceResources& res);
 
 // --gradient-source on `g`: y_I against Edot(u) along four seeded directions
 // and the state itself, plus the full Jacobian where ndet allows, all to 1e-7;

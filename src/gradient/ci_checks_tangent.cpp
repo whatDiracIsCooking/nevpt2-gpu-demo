@@ -638,4 +638,360 @@ nevpt2::Result<bool> checkScHessian(const nevpt2::GoldenFile& g,
   return ok;
 }
 
+// =============================================================================
+// --sc-hessian-vector (#156): the VECTOR H_cc u, reverse-over-forward.
+//
+// WHAT IS BEING CHECKED: nevpt2.gradient's scCiHessianVectorDevice, the walk
+// behind y differentiated along u and finished by two sigma calls,
+// H_cc u = sigma(gdot[u], c) + sigma(g, u) (docs/hessian-theory.md,
+// Sec. 4.2), on the same functional as --sc-hessian's: plain bilinear RDMs,
+// the golden's e_core / e_virt held fixed.
+//
+// CHECK V1, EXACT: THE DUALITY. For any v,
+//
+//   <v, H_cc u> == Eddot(u, v),
+//
+// the right side energiesHessianDevice's (the forward-over-forward scalar
+// --sc-hessian gates) on its own three-argument RDM build. The two share no
+// code past the RDM builders: one is the reverse walk's tangent swept to the
+// RDM coefficients and contracted by the sigma kernels, the other the class
+// einsums at second-order RDMs and the 3x3 sandwich. Several seeded v, and the
+// state itself (the one direction the projected seeds never reach). Like
+// --gradient-source's <u, y> == Edot(u), an identity between two
+// computations -- no step size -- so a 1e-7 gate.
+//
+// CHECK V2, EXACT, WHERE ndet ALLOWS: COLUMN BY COLUMN. H_cc e_I for every
+// determinant I (so H_cc materialised, one Hessian-vector product per
+// column), each column held to the duality against Eddot(e_I, v): a
+// disagreement names the determinant, which a dot product cannot
+// (Sec. 4.4: affordable exactly where --gradient-source's Jacobian is, so the
+// same kJacobianMaxDet bound). The materialised H_cc's symmetry comes free --
+// nothing in reverse-over-forward makes it symmetric but the algebra.
+//
+// CHECK V3, THE ONE FINITE DIFFERENCE: of the GPU's own EXACT y along u,
+// (y(c + h u) - y(c - h u)) / 2h against H_cc u, y from scCiSourceDevice on
+// fresh builds at each displaced state -- WITH THE ORBITAL-ENERGY MODE MATCHED
+// ON BOTH LEGS: y carries the orbital energies' response only when handed a
+// sidecar, and differencing that y against this H_cc u would difference two
+// different functionals; both legs here are handed none. Same ladder and
+// Richardson rules as CHECK 2 / H3, on the difference's 2-norm, with a gate
+// of its own (kHessianVectorFdTol says why).
+//
+// Also free, and checked exactly: the walk's own Edot(u) against
+// energiesTangentDevice (which pins the walk's tangent blocks to the forward
+// tangent's), and <u, y> == Edot(u) for the y the same walk produces.
+// docs/testing.md, "The SC Hessian-vector product's checks", records the
+// measured residuals and plateau.
+
+// The duality's gate: an identity between two computations, the tree's usual
+// 1e-7 (the bound --gradient-source's <u, y> == Edot(u) carries), decades
+// above what is measured (docs/testing.md, "The SC Hessian-vector product's
+// checks").
+constexpr double kHessianDualityTol = 1e-7;
+// Up to how many determinants the column-by-column check runs: the bound
+// --gradient-source's Jacobian uses (CAS(4,4) is 36, CAS(8,8) 4900), and for
+// the same reason -- one Hessian-vector product and one Eddot per column.
+constexpr std::int64_t kHessianColumnMaxDet = 256;
+// The materialised H_cc's symmetry, RELATIVE to its largest entry. The
+// matrix is the Hessian of the UNNORMALIZED functional, so it is not small
+// along the state: the hole metrics' RDM-free terms (make_hdm1's 2 delta and
+// its kin) make a nearly-filled hole perturber's norm move at FIRST order
+// along c, and through the finish's -2/d that puts entries several decades
+// above the rest on the determinants the state occupies. Symmetry is a
+// round-off identity between two different columns' walks, so its residual
+// scales with those entries; an absolute bound would measure the matrix's
+// scale, not the algebra. About forty times the worst measured
+// (docs/testing.md, "The SC Hessian-vector product's checks").
+constexpr double kHessianSymmetryRelTol = 1e-9;
+// The finite difference of y's gate: the best relative error of the sweep,
+// ||(y+ - y-)/2h - H_cc u|| / ||H_cc u||, over the same ladder CHECK 2 runs.
+// Its own bound, not kTangentFdTol, because a VECTOR's difference has a
+// higher floor than a scalar's: every component of y is differenced, the
+// ones on the state's own determinants included, where the curvature
+// kHessianSymmetryRelTol describes makes both the truncation constant and
+// y's own round-off decades larger than along the direction. The plateau
+// sits where the two cross, a step or two wide, and at CAS(4,4) that is
+// within a factor of ten of 1e-6 on its neighbouring rows; this leaves about
+// twenty over the worst measured best (docs/testing.md, "The SC Hessian-vector
+// product's checks"). The ladder is CHECK 2's: round-off takes over above
+// its shortest step, so a longer one buys nothing (measured, same section).
+constexpr double kHessianVectorFdTol = 1e-5;
+// The duality's further directions v, fixed so a run is reproducible.
+constexpr std::array<std::uint64_t, 3> kHessianDualSeeds = {0x5eed'0156u, 0x5eed'1156u,
+                                                            0x5eed'2156u};
+
+// <x, y> over two same-shaped vectors.
+double hessianDot(const nevpt2::Tensor& x, const nevpt2::Tensor& y) {
+  double s = 0.0;
+  for (std::int64_t i = 0; i < x.size(); ++i) s += x.flat(i) * y.flat(i);
+  return s;
+}
+
+// ||x||_2.
+double hessianNorm(const nevpt2::Tensor& x) { return std::sqrt(hessianDot(x, x)); }
+
+// H_cc u at the base state, the whole way from the direction: dm1/dm2's
+// tangent along u on the host, dm3/f3ac/f3ca's on the device, then
+// scCiHessianVectorDevice. Every device tensor it allocates is freed (on
+// res's stream) when it returns.
+nevpt2::ScCiHessianResult scHessianVectorAt(const nevpt2::HostDm12Builder& builder,
+                                            const nevpt2::Tensor& ci, const nevpt2::Tensor& u,
+                                            const nevpt2::RdmBuildOptions& rdmOpt,
+                                            const CiCheckIntegrals& ints,
+                                            const nevpt2::RdmTensors& base,
+                                            const nevpt2::DeviceResources& res) {
+  const nevpt2::HostDm12 dot = builder.dm12Dot(ci, u);
+  const nevpt2::DeviceTensor dDm1Dot = nevpt2::uploadTensor(dot.dm1, res);
+  const nevpt2::DeviceTensor dDm2Dot = nevpt2::uploadTensor(dot.dm2, res);
+  const nevpt2::RdmBuildResult rdmDot = nevpt2::buildRdmTangentsDevice(
+      rdmOpt, ci, u, builder.norb(), builder.nelecA(), builder.nelecB(), ints.h2e, res);
+  const nevpt2::RdmTensors dotU{dDm1Dot, dDm2Dot, rdmDot.dm3, rdmDot.f3ac, rdmDot.f3ca};
+  nevpt2::SigmaVectorOptions sigmaOpt;
+  sigmaOpt.nTiles = rdmOpt.nTiles;
+  return nevpt2::scCiHessianVectorDevice(ints.active, ints.source, ints.batch, ci, u,
+                                         builder.nelecA(), builder.nelecB(), base, dotU,
+                                         sigmaOpt, res);
+}
+
+// Eddot(u, v) at the base state, forward over forward: the three-argument
+// RDM build at (ci, u, v), dm1/dm2's three tangent sets on the host, then
+// energiesHessianDevice. No reverse-mode code is involved, which is what
+// makes it a reference for the vector. Freed on return, as above.
+double scEddotAt(const nevpt2::HostDm12Builder& builder, const nevpt2::Tensor& ci,
+                 const nevpt2::Tensor& u, const nevpt2::Tensor& v,
+                 const nevpt2::RdmBuildOptions& rdmOpt, const CiCheckIntegrals& ints,
+                 const nevpt2::RdmTensors& base, const nevpt2::DeviceResources& res) {
+  const nevpt2::HostDm12 dotU = builder.dm12Dot(ci, u);
+  const nevpt2::HostDm12 dotV = builder.dm12Dot(ci, v);
+  const nevpt2::HostDm12 ddot = builder.dm12Dot(u, v);
+  const nevpt2::DeviceTensor dDm1U = nevpt2::uploadTensor(dotU.dm1, res);
+  const nevpt2::DeviceTensor dDm2U = nevpt2::uploadTensor(dotU.dm2, res);
+  const nevpt2::DeviceTensor dDm1V = nevpt2::uploadTensor(dotV.dm1, res);
+  const nevpt2::DeviceTensor dDm2V = nevpt2::uploadTensor(dotV.dm2, res);
+  const nevpt2::DeviceTensor dDm1UV = nevpt2::uploadTensor(ddot.dm1, res);
+  const nevpt2::DeviceTensor dDm2UV = nevpt2::uploadTensor(ddot.dm2, res);
+  const nevpt2::RdmHessianTangents t3 = nevpt2::buildRdmHessianTangentsDevice(
+      rdmOpt, ci, u, v, builder.norb(), builder.nelecA(), builder.nelecB(), ints.h2e, res);
+  const nevpt2::RdmTensors setU{dDm1U, dDm2U, t3.cu.dm3, t3.cu.f3ac, t3.cu.f3ca};
+  const nevpt2::RdmTensors setV{dDm1V, dDm2V, t3.cv.dm3, t3.cv.f3ac, t3.cv.f3ca};
+  const nevpt2::RdmTensors setUV{dDm1UV, dDm2UV, t3.uv.dm3, t3.uv.f3ac, t3.uv.f3ca};
+  return nevpt2::energiesHessianDevice(ints.active, ints.source, ints.batch, base, setU, setV,
+                                       setUV, res)
+      .totalDDot;
+}
+
+// y at the CI vector `ci`, the whole way from the vector, with the orbital
+// energies held FIXED (no OrbitalEnergyResponse): dm1/dm2 rebuilt on the
+// host, dm3/f3ac/f3ca built on the device, then scCiSourceDevice. The
+// finite difference's two legs, in the one mode H_cc u is computed in.
+nevpt2::Tensor scSourceAt(const nevpt2::HostDm12Builder& builder, const nevpt2::Tensor& ci,
+                          const nevpt2::RdmBuildOptions& rdmOpt, const CiCheckIntegrals& ints,
+                          const nevpt2::DeviceResources& res) {
+  const nevpt2::HostDm12 dm = builder.dm12(ci);
+  const nevpt2::DeviceTensor dDm1 = nevpt2::uploadTensor(dm.dm1, res);
+  const nevpt2::DeviceTensor dDm2 = nevpt2::uploadTensor(dm.dm2, res);
+  const nevpt2::RdmBuildResult rdm = nevpt2::buildRdmsDevice(
+      rdmOpt, ci, builder.norb(), builder.nelecA(), builder.nelecB(), ints.h2e, res);
+  nevpt2::SigmaVectorOptions sigmaOpt;
+  sigmaOpt.nTiles = rdmOpt.nTiles;
+  return nevpt2::scCiSourceDevice(ints.active, ints.source, ints.batch, ci, builder.nelecA(),
+                                  builder.nelecB(), dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca,
+                                  sigmaOpt, /*eps=*/nullptr, res)
+      .y;
+}
+
+nevpt2::Result<bool> checkScHessianVector(const nevpt2::GoldenFile& g,
+                                          const nevpt2::RdmBuildOptions& rdmOpt,
+                                          const CiCheckIntegrals& ints,
+                                          const nevpt2::RdmBuildResult& baseRdm,
+                                          std::uint64_t seedU, std::uint64_t seedV,
+                                          const nevpt2::DeviceResources& res) {
+  nevpt2::Result<nevpt2::HostDm12Builder> builder =
+      nevpt2::HostDm12Builder::create(g.ncas, g.nelecA, g.nelecB);
+  if (!builder) return std::unexpected(builder.error());
+  const nevpt2::Tensor& ci = g.get("ci");
+
+  std::printf("\n--sc-hessian-vector: H_cc u, the SC total's CI Hessian-vector product "
+              "(reverse over forward)\n");
+  // Which functional, said where the gates are stated (docs/hessian-theory.md,
+  // Sec. 9.1): both sides of every check below hold the orbital energies fixed.
+  std::printf("  functional: the orbital energies held fixed (the golden's e_core / e_virt), "
+              "on every side of every check\n");
+
+  const nevpt2::HostDm12 base = builder->dm12(ci);
+  const nevpt2::DeviceTensor dDm1 = nevpt2::uploadTensor(base.dm1, res);
+  const nevpt2::DeviceTensor dDm2 = nevpt2::uploadTensor(base.dm2, res);
+  const nevpt2::RdmBuildResult& rdm = baseRdm;
+  const nevpt2::RdmTensors baseSet{dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca};
+
+  const nevpt2::Tensor u = tangentDirection(ci, seedU);
+  bool ok = true;
+
+  // --- H_cc u, and the two free checks on its walk ---------------------------
+  const auto t0 = std::chrono::steady_clock::now();
+  const nevpt2::ScCiHessianResult hu =
+      scHessianVectorAt(*builder, ci, u, rdmOpt, ints, baseSet, res);
+  const double huSeconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("  H_cc u built in %.2fs (ndet=%lld, seed 0x%llx); |H_cc u| = %.10f  "
+              "(|sigma(gdot, c)| = %.10f, |sigma(g, u)| = %.10f)\n",
+              huSeconds, static_cast<long long>(hu.hu.size()),
+              static_cast<unsigned long long>(seedU), hessianNorm(hu.hu),
+              hessianNorm(hu.fromWalkTangent), hessianNorm(hu.fromDirection));
+  {
+    const nevpt2::HostDm12 dotU = builder->dm12Dot(ci, u);
+    const nevpt2::DeviceTensor dDm1U = nevpt2::uploadTensor(dotU.dm1, res);
+    const nevpt2::DeviceTensor dDm2U = nevpt2::uploadTensor(dotU.dm2, res);
+    const nevpt2::RdmBuildResult rdmDot = nevpt2::buildRdmTangentsDevice(
+        rdmOpt, ci, u, g.ncas, g.nelecA, g.nelecB, ints.h2e, res);
+    const nevpt2::EnergyTangentResult t = nevpt2::energiesTangentDevice(
+        ints.active, ints.source, ints.batch, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1U,
+        dDm2U, rdmDot.dm3, rdmDot.f3ac, rdmDot.f3ca, /*epsDot=*/nullptr, res);
+    std::printf("\n  the walk's own Edot(u) against energiesTangentDevice's, per class:\n");
+    std::printf("  %-7s %18s %18s %10s\n", "class", "walk", "forward", "|delta|");
+    bool walk = true;
+    for (int c = 0; c < 8; ++c) {
+      const double d = std::fabs(hu.edotU[c] - t.energyDots[c]);
+      walk = walk && d < kTangentExactTol;
+      std::printf("  %-7s %18.12f %18.12f %10.2e\n", nevpt2::CLASSES[c].c_str(), hu.edotU[c],
+                  t.energyDots[c], d);
+    }
+    const double dTotal = std::fabs(hu.edotUTotal - t.totalDot);
+    const double uy = hessianDot(u, hu.y);
+    const double dUy = std::fabs(uy - t.totalDot);
+    walk = walk && dTotal < kTangentExactTol && dUy < kHessianDualityTol;
+    ok = ok && walk;
+    std::printf("  total   %18.12f %18.12f %10.2e\n", hu.edotUTotal, t.totalDot, dTotal);
+    std::printf("  <u, y> of the same walk's y: %.12f  |delta| against Edot(u) = %.2e\n", uy,
+                dUy);
+    std::printf("  the walk's tangent blocks and its y: %s\n", walk ? "ok" : "FAILED");
+  }
+
+  // --- check V1: the duality ---------------------------------------------------
+  std::printf("\n  <v, H_cc u> against Eddot(u, v) (energiesHessianDevice), for several "
+              "seeded v and the state\n");
+  std::printf("  %-18s %20s %20s %11s %11s\n", "v", "<v, H_cc u>", "Eddot(u, v)", "|delta|",
+              "relative");
+  const auto dual = [&](const std::string& what, const nevpt2::Tensor& v) {
+    const double lhs = hessianDot(v, hu.hu);
+    const double rhs = scEddotAt(*builder, ci, u, v, rdmOpt, ints, baseSet, res);
+    const double d = std::fabs(lhs - rhs);
+    ok = ok && d < kHessianDualityTol;
+    std::printf("  %-18s %20.12f %20.12f %11.2e %11.2e\n", what.c_str(), lhs, rhs, d,
+                d / std::max(1e-30, std::fabs(rhs)));
+  };
+  dual(std::format("seed 0x{:x}", seedV), tangentDirection(ci, seedV));
+  for (const std::uint64_t seed : kHessianDualSeeds)
+    dual(std::format("seed 0x{:x}", seed), tangentDirection(ci, seed));
+  dual("the state itself", ci);
+
+  // --- check V2: column by column, where ndet allows ---------------------------
+  const std::int64_t ndet = ci.size();
+  if (ndet <= kHessianColumnMaxDet) {
+    const nevpt2::Tensor v = tangentDirection(ci, seedV);
+    std::printf("\n  H_cc materialised, column by column: <v, H_cc e_I> against "
+                "Eddot(e_I, v) for all %lld determinants\n",
+                static_cast<long long>(ndet));
+    std::vector<nevpt2::Tensor> cols;
+    cols.reserve(static_cast<std::size_t>(ndet));
+    double cWorst = 0.0;
+    std::int64_t cAt = 0;
+    for (std::int64_t I = 0; I < ndet; ++I) {
+      nevpt2::Tensor e(ci.dims());
+      e.flatRef(I) = 1.0;
+      cols.push_back(scHessianVectorAt(*builder, ci, e, rdmOpt, ints, baseSet, res).hu);
+      const double lhs = hessianDot(v, cols.back());
+      const double rhs = scEddotAt(*builder, ci, e, v, rdmOpt, ints, baseSet, res);
+      const double d = std::fabs(lhs - rhs);
+      if (d > cWorst) {
+        cWorst = d;
+        cAt = I;
+      }
+    }
+    // The materialised matrix's symmetry, against its own largest entry (see
+    // kHessianSymmetryRelTol for why relative).
+    double sWorst = 0.0, hMax = 0.0;
+    std::int64_t sI = 0, sJ = 0;
+    for (std::int64_t I = 0; I < ndet; ++I)
+      for (std::int64_t J = 0; J < ndet; ++J) {
+        const double hIJ = cols[static_cast<std::size_t>(J)].flat(I);
+        const double hJI = cols[static_cast<std::size_t>(I)].flat(J);
+        if (std::fabs(hIJ - hJI) > sWorst) {
+          sWorst = std::fabs(hIJ - hJI);
+          sI = I;
+          sJ = J;
+        }
+        hMax = std::max(hMax, std::fabs(hIJ));
+      }
+    const double sRel = sWorst / std::max(1e-30, hMax);
+    const bool colsOk = cWorst < kHessianDualityTol;
+    const bool symOk = sRel < kHessianSymmetryRelTol;
+    ok = ok && colsOk && symOk;
+    std::printf("  worst column |delta| = %.2e at determinant %lld (< %.0e): %s\n", cWorst,
+                static_cast<long long>(cAt), kHessianDualityTol, colsOk ? "ok" : "FAILED");
+    std::printf("  symmetry: max|H_IJ - H_JI| = %.2e at (%lld, %lld), max|H_IJ| = %.6e, "
+                "relative %.2e (< %.0e): %s\n",
+                sWorst, static_cast<long long>(sI), static_cast<long long>(sJ), hMax, sRel,
+                kHessianSymmetryRelTol, symOk ? "ok" : "FAILED");
+  } else {
+    std::printf("\n  column-by-column check skipped: ndet = %lld is above %lld (the action "
+                "and its duality only, docs/hessian-theory.md Sec. 4.4)\n",
+                static_cast<long long>(ndet), static_cast<long long>(kHessianColumnMaxDet));
+  }
+
+  // --- check V3: the one finite difference, of y along u ------------------------
+  std::printf("\n  central differences of y along c + h u (scCiSourceDevice on fresh builds, "
+              "no orbital-energy response on either leg):\n");
+  std::printf("  %5s %14s %16s %12s %12s %8s\n", "k", "h = 2^-k", "|(y+ - y-)/2h|",
+              "|err|", "rel err", "ratio");
+  const double huNorm = hessianNorm(hu.hu);
+  std::array<double, kStepCount> step{};
+  std::array<double, kStepCount> err{};
+  for (std::size_t i = 0; i < kStepCount; ++i) {
+    const int k = kFirstStepExp + static_cast<int>(i);
+    const double h = std::ldexp(1.0, -k);
+    step[i] = h;
+    const nevpt2::Tensor plus = scSourceAt(*builder, tangentStep(ci, h, u), rdmOpt, ints, res);
+    const nevpt2::Tensor minus =
+        scSourceAt(*builder, tangentStep(ci, -h, u), rdmOpt, ints, res);
+    nevpt2::Tensor d(ci.dims());
+    double e2 = 0.0;
+    for (std::int64_t j = 0; j < d.size(); ++j) {
+      d.flatRef(j) = (plus.flat(j) - minus.flat(j)) / (2.0 * h);
+      const double r = d.flat(j) - hu.hu.flat(j);
+      e2 += r * r;
+    }
+    err[i] = std::sqrt(e2);
+    const double rel = err[i] / std::max(1e-30, huNorm);
+    if (i == 0) {
+      std::printf("  %5d %14.3e %16.10f %12.3e %12.3e %8s\n", k, h, hessianNorm(d), err[i],
+                  rel, "-");
+    } else {
+      std::printf("  %5d %14.3e %16.10f %12.3e %12.3e %8.2f\n", k, h, hessianNorm(d), err[i],
+                  rel, err[i] > 0.0 ? err[i - 1] / err[i] : 0.0);
+    }
+  }
+  std::size_t bestAt = 0;
+  for (std::size_t i = 1; i < kStepCount; ++i)
+    if (err[i] < err[bestAt]) bestAt = i;
+  const double bestRel = err[bestAt] / std::max(1e-30, huNorm);
+  ok = ok && bestRel < kHessianVectorFdTol;
+  std::printf("\n  plateau: |err| = %.3e (relative %.3e) at h = %.3e (2^-%d); round-off takes "
+              "over below it\n",
+              err[bestAt], bestRel, step[bestAt], kFirstStepExp + static_cast<int>(bestAt));
+  const nevpt2::FourfoldRun run = nevpt2::longestFourfoldRun(err);
+  const bool richardson = run.length >= kRichardsonRun;
+  ok = ok && richardson;
+  std::printf("  Richardson: %d consecutive halvings cut the error fourfold (ratio in [%.1f, "
+              "%.1f]), ending at h = %.3e -- %s, %d needed\n",
+              run.length, nevpt2::kFourfoldLow, nevpt2::kFourfoldHigh, step[run.end],
+              richardson ? "ok" : "NOT ENOUGH", kRichardsonRun);
+
+  std::printf("\n%s: the SC Hessian-vector product matches Eddot(u, v) by duality to %.0e, and "
+              "the finite difference of y to %.0e relative (the orbital energies held fixed "
+              "on both legs)\n",
+              ok ? "PASS" : "FAIL", kHessianDualityTol, kHessianVectorFdTol);
+  return ok;
+}
+
 }  // namespace nevpt2

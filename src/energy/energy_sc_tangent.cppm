@@ -63,6 +63,10 @@ import :sc_finish;   // finish, sliceHost
 namespace nevpt2 {
 
 // --- the tangent-only builders ------------------------------------------------
+//
+// Declared in energy.cppm and exported: nevpt2.gradient's reverse-over-forward
+// walk (#156) builds the same blocks' tangents along a CI direction and must
+// drop exactly these terms.
 
 // The tangent of make_hdm1 (and of energy_Si's dm1_h, which is the same
 // expression 2 delta - dm1^T): the constant 2 delta is gone, so this is

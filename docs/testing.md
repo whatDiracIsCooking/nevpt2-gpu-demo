@@ -554,8 +554,10 @@ three in all, and they are the three conventions no identity can pin
 (`docs/gradients.md`, §2): this one, the `--kappa-act` entries' third number
 (the device kappa action against the exponential map, below) and the PC
 tangent's (a derivative of a solve, which has no identity at all). One order
-up, `--sc-hessian` adds the Hessian's single one, a difference of `Edot`
-itself ("The SC Hessian's finite-difference cross-check", below). It
+up, `--sc-hessian` adds the Hessian's own, a difference of `Edot`
+itself ("The SC Hessian's finite-difference cross-check", below), and
+`--sc-hessian-vector` one of `y` against the vector `H_cc u` ("The SC
+Hessian-vector product's checks", below). It
 validates `energiesTangentDevice` (`nevpt2.energy`'s `:sc_tangent`
 partition) so that
 every later check of the reverse-mode assembly can be an exact dot-product
@@ -643,7 +645,9 @@ the norms' increment at the second-order RDM set, `norm_k(dm + X'') -
 norm_k(dm) == N''_k`, exact because the norms are affine in the RDMs. Sijrs
 reads no RDM, and its every second derivative is exactly zero. The Hessian
 walk's own value and first derivatives come along against `energiesDevice`
-and `energiesTangentDevice`. RTX 3080 (CUDA, `default` preset):
+and `energiesTangentDevice`. The vector form `H_cc u` is held to this
+`Eddot` by duality ("The SC Hessian-vector product's checks", below).
+RTX 3080 (CUDA, `default` preset):
 
 | exact check | CAS(4,4) | CAS(8,8) |
 |---|---|---|
@@ -681,6 +685,75 @@ tangents — is `test/energy_finish/`'s `NormToEnergyHessianSandwichTests`
 (card-free), and the three-argument build's three sets are each the tangent
 build at their pair to 1e-12 in `test/rdm/rdm_tangent_tests.cpp`'s
 `RdmHessianTangentsTests`.
+
+## The SC Hessian-vector product's checks
+
+`nevpt2_cas44_sc_hessian_vector` and `nevpt2_cas88_sc_hessian_vector`
+(`gpu`; the CAS(4,4) one `small`) run `nevpt2_demo --golden <case> --tiles 3
+--sc-hessian-vector` and match `PASS: the SC Hessian-vector product matches`
+(#156). They check `scCiHessianVectorDevice` (`nevpt2.gradient`), the vector
+`H_cc u` by reverse over forward — the pseudodensity walk differentiated
+along `u`, with the multipliers' tangents as its one new ingredient, then
+`sigma(gdot[u], c) + sigma(g, u)` ([`hessian-theory.md`](hessian-theory.md),
+§4.2) — at the golden's **fixed** orbital energies, on every side of every
+check. `u` is `--sc-hessian`'s (seed `0x5eed0032`).
+`src/gradient/ci_checks_tangent.cpp` ("--sc-hessian-vector") has the
+derivation. RTX 3080 (CUDA, `default` preset), the worst of three runs at
+each size (the RDM build's `atomicAdd`s reassociate, so runs differ):
+
+| exact check | CAS(4,4) | CAS(8,8) | gate |
+|---|---|---|---|
+| the walk's own `Edot(u)` vs `energiesTangentDevice`'s, worst class or total | 7.7e-15 | 1.0e-16 | 1e-10 |
+| `<u, y>` of the same walk's `y` vs `Edot(u)` | 7.7e-15 | 1.6e-16 | 1e-7 |
+| the duality `<v, H_cc u> == Eddot(u, v)`, worst of four seeded `v` | 2.9e-13 | 4.9e-16 | 1e-7 |
+| the same, `v` = the state | 7.4e-12 | 1.5e-15 | 1e-7 |
+| column by column, `<v, H_cc e_I>` vs `Eddot(e_I, v)`, worst of 36 | 4.3e-12 | not run (ndet 4900) | 1e-7 |
+| `H_cc`'s symmetry, `max|H_IJ - H_JI|` relative to `max|H_IJ|` | 2.4e-11 | not run | 1e-9 |
+
+`Eddot` is `energiesHessianDevice` on its own three-argument build, so the
+duality's two sides share nothing past the RDM builders. The first row pins
+the walk's tangent blocks — the CI direction's — to the forward tangent's.
+
+**`H_cc` is large along the state, and that is the functional's.** At
+CAS(4,4) `max|H_IJ|` is 1.82e4, on the diagonal of the dominant determinant
+(`c_0` = 0.974), against entries of 0.36–0.57 on the determinants the state
+does not occupy. The functional is the *unnormalized* one, and the hole
+metrics' RDM-free terms (`hdm1`'s `2 delta` and its kin) make a nearly-filled
+hole perturber's norm move at first order along `c`; the finish's `-2/d`
+does the rest. Symmetry's absolute residual (2.3–4.4e-7) scales with those
+entries, which is why that one gate is relative; the gate leaves about forty
+over the worst measured residual.
+
+**The finite difference: `y`, the GPU's own exact one.** `scCiSourceDevice`'s
+`y` at `c ± h u`, each point a fresh host dm1/dm2 rebuild and a fresh RDM
+build, **with no orbital-energy response on either leg**, differenced against
+`H_cc u`, on the difference's 2-norm. Same ladder (k = 6…19) and Richardson
+rule as the tangent's; the gate on the best relative error is 1e-5:
+
+| case | `|H_cc u|` | fourfold halvings | plateau `|err|` | plateau relative | at `h` |
+|---|---|---|---|---|---|
+| CAS(4,4) | 0.86090 | 6 (k = 12…17) | 1.4–4.3e-7 | 1.7–5.0e-7 | 2^-18 or 2^-19 |
+| CAS(8,8) | 0.69375 | 10 (k = 7…16) | 4.1–4.5e-9 | 5.9–6.4e-9 | 2^-18 |
+
+A vector difference has a higher floor than `Edot`'s scalar one. Every
+component of `y` is differenced, the state's own determinants included, and
+the curvature above makes both the truncation constant and `y`'s round-off
+decades larger there. At CAS(4,4) the two cross within one step: in one run
+the rows either side of a 1.7e-7 plateau are 2.5e-6 (k = 17, still
+truncation) and 1.2e-6 (k = 19, already round-off), and in another the best
+row is 5.0e-7. The 1e-6 the scalar differences use would pass only on a
+lucky row, so the vector difference has its own gate, twenty over the worst
+measured best. **A longer ladder does not help:** run down to
+k = 26, both cases' errors rise again below 2^-18, to 8.4e-5 (CAS(4,4)) and
+1.5e-5 (CAS(8,8)) relative at 2^-26. The CAS(4,4) sweep shows the
+empty-perturber row at k = 9 again (relative error 6.6e8, "The SC tangent's
+finite-difference cross-check", above), and the Richardson run starts after
+it.
+
+The host half — the multipliers' tangents per slab, including the two
+symmetrized classes' packing — is `test/gradient_plan/`'s
+`SlabMultiplierTests` (card-free), over `nevpt2.energy_finish`'s
+`normToEnergyMultiplierTangent`, which `test/energy_finish/` already pins.
 
 ## The active-rotation source term
 
@@ -3852,6 +3925,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_cas88_rdm_tangent` | `--rdm-tangent`: the tangent RDM build beside the plain one, checked against twice it (the derivative itself is checked against a finite difference in the unit tier, `test/rdm/rdm_tangent_tests.cpp`) |
 | `nevpt2_cas44_sc_tangent` | `--sc-tangent`: the SC class energies' tangent with respect to the RDMs, against the norms' exact affine increment, Euler's identity and a finite difference ("The SC tangent's finite-difference cross-check", below). `nevpt2_cas88_sc_tangent` runs the same at CAS(8,8) and is **not** `small` |
 | `nevpt2_cas44_sc_hessian` | `--sc-hessian`: the three-argument tangent RDM build (three `L2`/`R` blocks per tile) and the SC energy's second derivative over four RDM sets, against Euler at second order, the norms' second-order increment and a finite difference of `Edot` ("The SC Hessian's finite-difference cross-check", below). `nevpt2_cas88_sc_hessian` runs the same at CAS(8,8) and is **not** `small` |
+| `nevpt2_cas44_sc_hessian_vector` | `--sc-hessian-vector`: the gradient walk carrying a CI direction (a second set of block tangents and accumulators per class, swept beside the plain ones), three sigma calls, and `H_cc` materialised over 36 Hessian-vector products against as many three-argument builds ("The SC Hessian-vector product's checks", above). `nevpt2_cas88_sc_hessian_vector` runs the duality and the difference at CAS(8,8) and is **not** `small` |
 | `nevpt2_sc_pseudodensity_cas44`, `nevpt2_sc_pseudodensity_cas88` | the SC gradient's pseudodensity assembly and its identities ("The SC pseudodensity identities", above) |
 | `nevpt2_pc_tangent_cas44`, `nevpt2_pc_tangent_cas88` | the PC tangent: a second solve per class, the tangent slab einsums and the `(m, m)` blocks' GEMMs, plus ten RDM builds and PC stages per entry ("The PC tangent against a finite difference", above) |
 | `nevpt2_cas44_casscf`, `nevpt2_cas44_casscf_pc`, `nevpt2_df_cas44_casscf`, `nevpt2_df_cas44_casscf_pc` | the same four paths on **CASSCF orbitals** — a `NEVPT2G2` golden whose `reference_kind` is CASSCF ("The CASSCF-orbital entries", above). Same CAS(4,4) shape, so the same cost |

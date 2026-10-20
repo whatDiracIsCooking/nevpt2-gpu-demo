@@ -50,6 +50,11 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   Euler, the norms' increment and a finite difference of
 //                   Edot. The density-fitted demo could run it over its slabs
 //                   as it runs --sc-tangent; nothing has asked for that yet.
+//   --sc-hessian-vector
+//                   nevpt2_demo alone (#156): the vector H_cc u, checked
+//                   against --sc-hessian's Eddot by duality, column by column
+//                   at small ndet, and a finite difference of y. The same
+//                   "nothing has asked for it yet" holds for the DF demo.
 //   each binary's own flags: that binary alone. --dump-source-terms is
 //                   nevpt2_sc_pseudodensity's because Y_xy needs the gradient
 //                   sidecar's full-MO-range arrays; nevpt2_demo computes y_I
@@ -82,6 +87,7 @@ constexpr std::array kFlagTable{
     FlagSpec{"--sc-tangent", "", kDemos},
     FlagSpec{"--gradient-source", "", kDemos},
     FlagSpec{"--sc-hessian", "", kDemo},
+    FlagSpec{"--sc-hessian-vector", "", kDemo},
     FlagSpec{"--batch", "N", kDfDemo},
     FlagSpec{"--check-blocks", "", kDfDemo},
     FlagSpec{"--kappa-act", "", kScPd},
@@ -131,6 +137,8 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
     opt.gradientSource = true;
   } else if (a == "--sc-hessian") {
     opt.scHessian = true;
+  } else if (a == "--sc-hessian-vector") {
+    opt.scHessianVector = true;
   } else if (a == "--check-blocks") {
     opt.checkBlocks = true;
   } else if (a == "--kappa-act") {
@@ -163,7 +171,8 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
 }
 
 // The checks the demos share on --sc-tangent / --gradient-source (and
-// nevpt2_demo's --sc-hessian, which only it can set): one at a time, the
+// nevpt2_demo's --sc-hessian / --sc-hessian-vector, which only it can set):
+// one at a time, the
 // tangent RDM build's digests only, no --pc for the SC tangent or Hessian,
 // no --profile. Each demo's own rules (the sidecar, --pc on the source term,
 // --check-blocks) are its case below.
@@ -178,10 +187,17 @@ Status checkDifferentiationFlags(const Options& opt) {
         "--sc-hessian and {} are two different checks of the energy's CI derivatives; run "
         "one at a time",
         opt.scTangent ? "--sc-tangent" : "--gradient-source"));
-  if (!(opt.scTangent || opt.gradientSource || opt.scHessian)) return {};
-  const std::string_view which = opt.scTangent    ? "--sc-tangent"
-                                 : opt.scHessian ? "--sc-hessian"
-                                                 : "--gradient-source";
+  if (opt.scHessianVector && (opt.scTangent || opt.gradientSource || opt.scHessian))
+    return err_config(std::format(
+        "--sc-hessian-vector and {} are two different checks of the energy's CI "
+        "derivatives; run one at a time",
+        opt.scTangent ? "--sc-tangent"
+                      : (opt.scHessian ? "--sc-hessian" : "--gradient-source")));
+  if (!(opt.scTangent || opt.gradientSource || opt.scHessian || opt.scHessianVector)) return {};
+  const std::string_view which = opt.scTangent         ? "--sc-tangent"
+                                 : opt.scHessian       ? "--sc-hessian"
+                                 : opt.scHessianVector ? "--sc-hessian-vector"
+                                                       : "--gradient-source";
   // Both differentiation checks run the tangent RDM build, which is the
   // emitted or the native-fp64 BLAS digest only -- the rule finalize()
   // applies to --rdm-tangent.
@@ -201,6 +217,10 @@ Status checkDifferentiationFlags(const Options& opt) {
     return err_config(
         "--sc-hessian differentiates the strongly-contracted energy twice; it has no --pc "
         "path");
+  if (c.pc && opt.scHessianVector)
+    return err_config(
+        "--sc-hessian-vector differentiates the strongly-contracted energy twice; it has no "
+        "--pc path");
   // Each check prints its own report and returns before the profile tables
   // are printed, so --profile would be parsed and ignored.
   if (c.profile)

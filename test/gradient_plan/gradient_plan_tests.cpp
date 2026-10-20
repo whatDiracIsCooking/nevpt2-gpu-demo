@@ -42,7 +42,11 @@
 //   SlabMultiplierTests       plainMultipliers; sijrMultipliers and
 //                             srsiMultipliers on hand triangles, their
 //                             symmetric scatter and perturber-order R; the
-//                             homogeneous-vs-affine distinction (#32)
+//                             homogeneous-vs-affine distinction (#32); and
+//                             the multipliers' tangents (#156): by hand on
+//                             one perturber, zero on an empty one, and the
+//                             symmetrized classes' against a central
+//                             difference of their own multipliers
 //   CiSourceHostTests         ciSourceAddInto / ciSourceSymmetrized /
 //                             ciSourceFolded's basic shape
 //   CiSourceFoldTests         the fold against an UNFOLDED host reference
@@ -774,6 +778,86 @@ TEST(SlabMultiplierTests, AnAffineClassHasTheNormIncrementButNoEuler) {
   const ScSlabMultipliers l2 =
       sijrMultipliers(scaled(normAt(1), 2.0, 2), scaled(hAt(1), -4.0, 2), 1, ec, ev);
   EXPECT_EQ(l2.energy, 2.0 * l1.energy);
+}
+
+// The multipliers' tangents (#156): the 3x3 against (Ndot, Hdot) at fixed
+// orbital energies. One perturber, N = 2, H = 2, Delta = 1 (T = -1/2): with
+// T(N) = -N / (N Delta + H), dT/dN = -H / (N Delta + H)^2 = -1/8, so along
+// Ndot = 1, Hdot = 0, Pdot = dT (2 + 2 Delta T) = -1/8 and Qdot = 2 T dT =
+// 1/8; along Hdot = 1, dT/dH = N / d^2 = 1/8, so Pdot = 1/8 and Qdot = -1/8.
+// Dyadic, so exact.
+TEST(SlabMultiplierTests, PlainMultiplierTangentsOnOnePerturber) {
+  const ScSlabMultiplierTangents n =
+      plainMultiplierTangents(vec({2}), vec({2}), {1}, vec({1}), vec({0}));
+  EXPECT_EQ(n.p.dims(), (std::vector<int64_t>{1}));
+  EXPECT_EQ(n.p(0), -0.125);
+  EXPECT_EQ(n.q(0), 0.125);
+  const ScSlabMultiplierTangents h =
+      plainMultiplierTangents(vec({2}), vec({2}), {1}, vec({0}), vec({1}));
+  EXPECT_EQ(h.p(0), 0.125);
+  EXPECT_EQ(h.q(0), -0.125);
+}
+
+// A guarded (empty) perturber has no multipliers, so no tangents either.
+TEST(SlabMultiplierTests, AnEmptyPerturberHasZeroMultiplierTangents) {
+  const ScSlabMultiplierTangents t =
+      plainMultiplierTangents(vec({0, 2}), vec({0, 2}), {1, 1}, vec({1, 1}), vec({1, 0}));
+  EXPECT_EQ(t.p(0), 0.0);
+  EXPECT_EQ(t.q(0), 0.0);
+  EXPECT_EQ(t.p(1), -0.125);
+}
+
+// The symmetrized classes' tangents are the derivatives of their own
+// scattered multipliers: a central difference of sijrMultipliers /
+// srsiMultipliers along (normDot, hDot) on the raw tables. h = 2^-16 on O(1)
+// inputs leaves an O(h^2) truncation near 1e-8 (third derivatives of order
+// ten here) and a round-off near 1e-11, so the bound is 1e-6 -- a card-free
+// sanity check of the packing, not the Hessian's gate.
+TEST(SlabMultiplierTests, SymmetrizedMultiplierTangentsAreTheirDerivatives) {
+  const double h = std::ldexp(1.0, -16);
+  const auto stepped = [](const Tensor& t, const Tensor& d, double s) {
+    Tensor out = t;
+    for (int64_t k = 0; k < out.size(); ++k) out.flatRef(k) += s * d.flat(k);
+    return out;
+  };
+  const auto expectNear = [h](const Tensor& plus, const Tensor& minus, const Tensor& dot) {
+    ASSERT_EQ(dot.dims(), plus.dims());
+    for (int64_t k = 0; k < dot.size(); ++k)
+      EXPECT_NEAR(dot.flat(k), (plus.flat(k) - minus.flat(k)) / (2.0 * h), 1e-6) << k;
+  };
+  {  // Sijr: the hand triangle above, displaced asymmetrically in (j, i).
+    const Tensor ec = vec({-1, -2}), ev = vec({5, 3});
+    const Tensor n = sijrNorm(1, 1), hh = sijrH(-5, -5);
+    const Tensor nd = Tensor::fromFlat({1, 2, 2}, {0.5, 0.25, -0.75, 1.0});
+    const Tensor hd = Tensor::fromFlat({1, 2, 2}, {-1.0, 0.5, 0.25, -0.5});
+    const ScSlabMultiplierTangents t = sijrMultiplierTangents(n, hh, nd, hd, 1, ec, ev);
+    const ScSlabMultipliers mp =
+        sijrMultipliers(stepped(n, nd, h), stepped(hh, hd, h), 1, ec, ev);
+    const ScSlabMultipliers mm =
+        sijrMultipliers(stepped(n, nd, -h), stepped(hh, hd, -h), 1, ec, ev);
+    expectNear(mp.p, mm.p, t.p);
+    expectNear(mp.q, mm.q, t.q);
+  }
+  {  // Srsi: the hand triangle above, displaced asymmetrically in (r, s).
+    Tensor n({2, 2, 1}), hh({2, 2, 1});
+    n(0, 0, 0) = 2;
+    n(0, 1, 0) = 0.5;
+    n(1, 0, 0) = 1.5;
+    n(1, 1, 0) = 4;
+    hh(0, 0, 0) = -2;
+    hh(0, 1, 0) = -1;
+    hh(1, 0, 0) = -5;
+    hh(1, 1, 0) = -4;
+    const Tensor nd = Tensor::fromFlat({2, 2, 1}, {0.25, -0.5, 1.0, 0.75});
+    const Tensor hd = Tensor::fromFlat({2, 2, 1}, {0.5, 0.25, -1.0, -0.25});
+    const Tensor ec = vec({-1}), ev = vec({1, 2});
+    const ScSlabMultiplierTangents t = srsiMultiplierTangents(n, hh, nd, hd, ec, ev);
+    const ScSlabMultipliers mp = srsiMultipliers(stepped(n, nd, h), stepped(hh, hd, h), ec, ev);
+    const ScSlabMultipliers mm =
+        srsiMultipliers(stepped(n, nd, -h), stepped(hh, hd, -h), ec, ev);
+    expectNear(mp.p, mm.p, t.p);
+    expectNear(mp.q, mm.q, t.q);
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -425,6 +425,18 @@ DeviceTensor make_a23(const DeviceTensor& h1e, const DeviceTensor& h2e, const De
                       const DeviceResources& res);
 DeviceTensor make_a25(const DeviceTensor& h1e, const DeviceTensor& h2e, const DeviceTensor& dm1,
                       const DeviceTensor& dm2, const DeviceResources& res);
+// The three tangent-only builders (defined in energy_sc_tangent.cppm): the
+// tangents of make_hdm1 (and of energy_Si's dm1_h, the same expression),
+// make_hdm2 and make_a25, which drop their RDM-free terms -- every other
+// block's tangent is its own make_* at the tangent RDMs. Exported because
+// nevpt2.gradient's reverse-over-forward walk (#156) differentiates the same
+// blocks along a CI direction and must build exactly these tangents.
+DeviceTensor make_hdm1_dot(const DeviceTensor& dm1Dot, const DeviceResources& res);
+DeviceTensor make_hdm2_dot(const DeviceTensor& dm1Dot, const DeviceTensor& dm2Dot,
+                           const DeviceResources& res);
+DeviceTensor make_a25_dot(const DeviceTensor& h1e, const DeviceTensor& h2e,
+                          const DeviceTensor& dm1Dot, const DeviceTensor& dm2Dot,
+                          const DeviceResources& res);
 
 // --- PC-NEVPT2 (energy_pc.cpp) ----------------------------------------------
 

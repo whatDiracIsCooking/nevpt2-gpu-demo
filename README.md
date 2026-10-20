@@ -281,7 +281,7 @@ ignores it. `test/cli/` holds this matrix against the table:
 | `--profile` | ✓ | ✓ | refused | refused |
 | `--rdm-tangent` | ✓ | ✓ | refused | refused |
 | `--sc-tangent`, `--gradient-source` | ✓ | ✓ | refused | refused |
-| `--sc-hessian` | ✓ | refused | refused | refused |
+| `--sc-hessian`, `--sc-hessian-vector` | ✓ | refused | refused | refused |
 | `--batch`, `--check-blocks` | refused | ✓ | refused | refused |
 | `--kappa-act`, `--kappa-full` | refused | refused | ✓ | refused |
 | `--gradgold` | ✓ | refused | ✓ | refused |
@@ -322,9 +322,11 @@ digest has no path for,
 `nevpt2_demo` without `--gradient-source`, `--check-blocks` with
 `--sc-tangent` or `--gradient-source`, `--pc` in
 `nevpt2_sc_pseudodensity` without `--dump-source-terms` or `--source-oracle`,
-`--sc-tangent` or `--sc-hessian` with `--pc`, `--sc-hessian` with
-`--sc-tangent` or `--gradient-source`), and
-`--sc-tangent` / `--gradient-source` / `--sc-hessian` with `--profile` is
+`--sc-tangent`, `--sc-hessian` or `--sc-hessian-vector` with `--pc`,
+`--sc-hessian` with `--sc-tangent` or `--gradient-source`,
+`--sc-hessian-vector` with any of those three), and
+`--sc-tangent` / `--gradient-source` / `--sc-hessian` / `--sc-hessian-vector`
+with `--profile` is
 refused as *unsupported*, since none prints the tables, as is `nevpt2_df_demo
 --gradient-source --pc` (the PC source term has no density-fitted slab path).
 
@@ -342,6 +344,7 @@ against the other. They read the same reference files, and each prints its own
 | `nevpt2_demo --rdm-tangent` (also `nevpt2_df_demo`) | — | the tangent RDM build beside the plain one, against twice it |
 | `nevpt2_demo --sc-tangent` (also `nevpt2_df_demo`) | — | the SC total's derivative with respect to the CI vector |
 | `nevpt2_demo --sc-hessian` | — | the SC total's second directional derivative `Eddot(u, v)`, with the orbital energies held fixed (#153) |
+| `nevpt2_demo --sc-hessian-vector` | — | the vector `H_cc u` (the CI block of the SC total's Hessian, by reverse over forward) against `Eddot` by duality, with the orbital energies held fixed (#156) |
 | `nevpt2_demo --gradient-source` | `[--gradgold PATH]`, `[--pc]` | the CI source term `y_I = dE/dc_I`, against that tangent by duality; with the `*.gradgold` sidecar, both carry the orbital energies' response to the active density, without it both hold them fixed. With `--pc`, PC-NEVPT2's `y_I` (the PC solve's adjoint) against the PC tangent (#74) |
 | `nevpt2_df_demo --gradient-source` | — | the SC CI source term against the tangent by the same duality, over the density-fitted slabs, with the orbital energies held fixed (#162) |
 | `nevpt2_sc_pseudodensity` | `--kappa-act`, or `--kappa-full [--gradgold PATH]` | the SC pseudodensity identities; with `--kappa-act`, the active–active orbital source term instead; with `--kappa-full`, the whole orbital source term out of the `*.gradgold` sidecar — on a `*_df` golden, out of the whole three-index `B`, with both of its terms (#165, #168) |

@@ -112,12 +112,16 @@ DeviceTensor& activeAccumFor(std::vector<ScActiveAccum>& accums, const DeviceTen
 // (nevpt2.sc_amplitudes' derivativeSubscripts), never hand-written: each is
 // the same contraction with one operand replaced by `mult` and the term's
 // output labels and the dropped operand's swapping roles.
-void accumDerivatives(const std::vector<ScTerm>& terms, const DeviceTensor& mult,
-                      std::vector<DeviceTensor>& dBlocks,
-                      std::vector<ScActiveAccum>& dActive, const DeviceResources& res) {
+//
+// `dBlocks` null skips the external slots altogether (accumActiveDerivatives
+// below): the reverse-over-forward walk wants only the M_G tangents.
+void accumDerivativesInto(const std::vector<ScTerm>& terms, const DeviceTensor& mult,
+                          std::vector<DeviceTensor>* dBlocks,
+                          std::vector<ScActiveAccum>& dActive, const DeviceResources& res) {
   const wwrStream_t stream = res.stream();
   for (const ScTerm& term : terms) {
     for (std::size_t k = 0; k < term.ops.size(); ++k) {
+      if (dBlocks == nullptr && term.ops[k].block != kScActive) continue;
       const std::string subs = derivativeSubscripts(term.subs, static_cast<int>(k));
       std::vector<const DeviceTensor*> ops;
       ops.reserve(term.ops.size());
@@ -128,12 +132,48 @@ void accumDerivatives(const std::vector<ScTerm>& terms, const DeviceTensor& mult
         const DeviceTensor& out = activeAccumFor(dActive, term.ops[k].t, res);
         deviceEinsumAccum(subs, ops, out, term.coef, stream);
       } else {
-        deviceEinsumAccum(subs, ops, dBlocks[static_cast<std::size_t>(term.ops[k].block)],
+        deviceEinsumAccum(subs, ops, (*dBlocks)[static_cast<std::size_t>(term.ops[k].block)],
                           term.coef, stream);
       }
     }
   }
 }
+
+void accumDerivatives(const std::vector<ScTerm>& terms, const DeviceTensor& mult,
+                      std::vector<DeviceTensor>& dBlocks,
+                      std::vector<ScActiveAccum>& dActive, const DeviceResources& res) {
+  accumDerivativesInto(terms, mult, &dBlocks, dActive, res);
+}
+
+// The active slots alone: Eqs. 42-43's M / E weighted by `mult`, no D.
+void accumActiveDerivatives(const std::vector<ScTerm>& terms, const DeviceTensor& mult,
+                            std::vector<ScActiveAccum>& dActive, const DeviceResources& res) {
+  accumDerivativesInto(terms, mult, nullptr, dActive, res);
+}
+
+// --- the walk's tangent along a CI direction (#156) ---------------------------
+//
+// Reverse-over-forward (docs/hessian-theory.md, Sec. 4.2). Every active
+// accumulator is M_G = sum_t mult_t * dTerm_t/dG, and in every term the
+// active block G is the ONLY operand that moves with the CI vector -- the
+// other two are external integrals, constant at fixed orbitals -- so
+// dTerm_t/dG is constant and
+//
+//   Mdot_G = the same accumulation with mult_t replaced by its tangent,
+//
+// Pdot / Qdot of nevpt2.gradient_plan's *MultiplierTangents (the 3x3 against
+// this slab's Ndot, Hdot). Those per-tuple tangents are the SAME term lists'
+// product rule with each active block replaced by its tangent along u -- the
+// same evalTermsTangent the rotation's forward tangent runs, with no external
+// block moving. A class carrying a CI direction holds one of these: the
+// tangents of its active blocks, keyed by the base block each belongs to
+// (ScGDot, which may VIEW a caller's tensor -- a raw RDM's tangent), and the
+// Mdot_G accumulators under the same keys, so the class's own RDM sweep reads
+// them exactly as it reads M_G.
+struct ScCiWalk {
+  std::vector<ScGDot> gDots;
+  std::vector<ScActiveAccum> dActive;
+};
 
 // The FORWARD TANGENT of a term list: the product rule, each operand
 // replaced in turn by its own tangent, with the term's OWN subscripts (no
@@ -284,14 +324,23 @@ double pairSlabDots(const ScSlabDots& dots, const std::vector<DeviceTensor>& dBl
 // orbital energies, linear and homogeneous in them, so its tangent is the
 // same formula at the dotted vectors -- the same reason a Dyall block's
 // tangent is its own make_* at the dotted integrals.
-template <class MultiplierFn, class DeltaFn>
+//
+// `ci` non-null adds the walk's TANGENT along a CI direction (#156, ScCiWalk
+// above): this slab's per-tuple Ndot / Hdot from ci->gDots, Edot(u) =
+// P.Ndot + Q.Hdot into acc.ciTangent (the free check that the tangent blocks
+// are energiesTangentDevice's), and the multipliers' tangents from
+// `multiplierDotFn(norm, h, normDot, hDot)` -- the class's own *MultiplierTangents,
+// at fixed orbital energies -- accumulated into ci->dActive. Null runs none of
+// it, and `multiplierDotFn` is never called.
+template <class MultiplierFn, class DeltaFn, class MultiplierDotFn>
 void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm>& hTerms,
                   const std::vector<int64_t>& tupleDims,
                   const std::vector<const DeviceTensor*>& blocks,
                   std::vector<ScActiveAccum>& dActive, MultiplierFn&& multiplierFn,
                   DeltaFn&& deltaOf, const ScRotation& rot,
                   const std::vector<RotBlock>& kinds,
-                  const std::vector<std::vector<ScGDot>>& gDots, ScClassGradient& acc,
+                  const std::vector<std::vector<ScGDot>>& gDots, ScCiWalk* ci,
+                  MultiplierDotFn&& multiplierDotFn, ScClassGradient& acc,
                   const DeviceResources& res) {
   const wwrStream_t stream = res.stream();
 
@@ -338,6 +387,27 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
   double ext = 0.0;
   for (std::size_t i = 0; i < blocks.size(); ++i) ext += dotTensors(*blocks[i], dBlocks[i], res);
   acc.extContraction += 0.5 * ext;
+
+  // --- the tangent along a CI direction (#156) ------------------------------
+  if (ci != nullptr) {
+    // A CI direction moves no integral: every external block's dot is null,
+    // so the product rule reaches the active blocks alone.
+    const std::vector<const DeviceTensor*> noBlockMoves(blocks.size(), nullptr);
+    const DeviceTensor normDot = DeviceTensor::zeros(tupleDims, res);
+    const DeviceTensor hDot = DeviceTensor::zeros(tupleDims, res);
+    evalTermsTangent(normTerms, noBlockMoves, ci->gDots, normDot, stream);
+    evalTermsTangent(hTerms, noBlockMoves, ci->gDots, hDot, stream);
+    // No sync before the downloads, for the reason the base pair's give.
+    const Tensor hostNormDot = downloadTensor(normDot, stream);
+    const Tensor hostHDot = downloadTensor(hDot, stream);
+    acc.ciTangent +=
+        dotHost(m.p.data(), hostNormDot.data()) + dotHost(m.q.data(), hostHDot.data());
+    const ScSlabMultiplierTangents t = multiplierDotFn(hostNorm, hostH, hostNormDot, hostHDot);
+    const DeviceTensor pDot = uploadTensor(t.p, res);
+    const DeviceTensor qDot = uploadTensor(t.q, res);
+    accumActiveDerivatives(normTerms, pDot, ci->dActive, res);
+    accumActiveDerivatives(hTerms, qDot, ci->dActive, res);
+  }
 
   // --- the rotation, one direction at a time --------------------------------
   for (std::size_t d = 0; d < rot.size(); ++d) {
