@@ -1073,6 +1073,153 @@ The duality's worst class is ≤3.4e-9 relative, the symmetry ≤1.7e-7 Eh on
 which holds only to the golden's CI residual (4.3e-7), and `S^+` amplifies
 that by up to `1e10`. The fix would be a tighter CI vector, not a looser gate.
 
+### The orbital blocks, offline
+
+PC's orbital Hessian blocks are derived in
+[`hessian-theory.md`](hessian-theory.md), §6.4–§6.8 (#199). They are not yet
+in the tree; #200–#202 build them. Before any code, three of the theory's
+claims were measured offline:
+
+- `S` does not move along any orbital direction, so `H_kk` needs no rotation
+  term;
+- `H_kc` needs exactly one;
+- an empty tuple costs PC nothing.
+
+The probe is `reference_data/pc_orbital_hessian_probe.py` (2026-10-20; **no
+card**: CPU, PySCF 2.14.0, numpy 2.5.3, 6 OpenMP threads on the
+12-physical-core Ryzen 5900X). It reuses `pc_null_mode_probe.py`'s class
+matrices, which reproduce the golden's block2 `pc_class_energies` ("What the
+cut drops, and how it moves", above). It rotates the golden's active
+integrals and every stored block's active axes by `exp(kappa)` at the fixed
+CI vector, which is the functional the device differentiates. The orbital
+energies are held fixed, and the digests are rebuilt at the rotated `h2e`. An
+active–active direction is the only orbital direction the golden alone can
+rotate exactly, so the `kk` and `mixed` parts use one. The `empty` part uses
+the intra-space pairs `sc_empty_perturber_probe.py` runs.
+
+```
+uv run python reference_data/pc_orbital_hessian_probe.py golden/n2_ccpvdz_cas44.nevpt2gold    # 5.9 s
+uv run python reference_data/pc_orbital_hessian_probe.py golden/acrolein_def2svp_cas65.nevpt2gold \
+    --parts kk,mixed --kk-pows 12,13,14 --fd-pows 18,19,20 --first-pows 14,15,16     # 12 s
+uv run python reference_data/pc_orbital_hessian_probe.py golden/n2_ccpvdz_cas1010.nevpt2gold \
+    --parts mixed --kinds singlet --fd-pows 16,17,18 --first-pows 12,13,14           # 4.4 min
+```
+
+**`H_kk` with no rotation term is the energy's second derivative.** The
+closed form is §6.4's `-(2 b_vw.x - x.A_vw.x + 2 g_v.M.g_w)` along two random
+unit active–active directions. It is set against a Richardson-extrapolated
+four-point ladder of the rotated class energy along `exp(s v + t w)`. Beside
+it is the step-free gauge of §6.8,
+`Eddot_kk(v, w) + Edot([v, w])/2 - Eddot_kc(v, what c)`, whose right side is
+the mixed formula, rotation term included:
+
+| golden (ladder steps) | class (dropped) | `Eddot_kk` | \|ladder − formula\| | gauge residual | `Eddot_kc`'s rotation term on the right |
+|---|---|---:|---:|---:|---:|
+| `cas44` (`2^-6..2^-8`) | Sr (44) | 2.6808782831e-04 | 5.0e-13 | 8.8e-17 | −4.8e-05 |
+| | Sir (2) | −2.5755567874e-02 | 2.6e-11 | 2.0e-16 | −2.6e-07 |
+| | Srs (0) | 1.5815925200e-02 | 1.5e-12 | 2.4e-15 | 0 |
+| `acrolein` (`2^-12..2^-14`) | Sr (50) | 2.6371125971e+02 | 4.0e-04 | 2.2e-07 | 2.7e-03 |
+| | Si (85) | 1.2217000663e-02 | 1.4e-09 | 6.3e-14 | 7.2e-06 |
+| | Sir (2) | 1.1399334231e+01 | 7.0e-08 | 8.6e-12 | 8.4e-05 |
+| | Srs (0) | 1.3266257854e-01 | 1.4e-06 | 1.2e-13 | 0 |
+
+CAS(4,4)'s Si is exactly zero in every part. Its integrals (`h2e_v_Si`,
+`h1e_v_Si`) vanish by N2's symmetry, so the class energy is zero too.
+Acrolein's Sr ladder is short-ranged, like its CI-block difference above
+("What the cut drops", smallest kept `s` 1.8e-10). `2^-14..2^-16` agree to
+1.9e-4 and `2^-16..2^-18` to 1.1e-3, and in each the gauge is
+step-free at 2.2e-7.
+
+**`H_kc` needs one rotation term, and the device would get it wrong
+without.** The mixed block along one active–active `w` and a CI direction
+`u` of each kind (`pc_null_mode_probe.py`'s `Epq`, `sector` and `singlet`)
+is set against two references:
+
+- a Richardson difference, along `c + t u`, of the exact orbital first
+  derivative. That derivative is the two-term formula at any CI vector, since
+  `S` is fixed along `w`, so the difference carries no eigenstate
+  assumption;
+- the step-free gauge `Eddot_cc(what c, u) + Edot(what u)`, by
+  `pc_null_mode_probe.py`'s CI-block formulas.
+
+The gauge is shown with and without the CI side's own rotation terms along
+`what c`. Every rotation term equals its eigenstate form
+`-2 rho.S_u.P.A_w.x`: to ≤3e-05 absolute for acrolein's Sr (on a term of
+49) and ≤3e-12 elsewhere. The rows with a non-zero value:
+
+| golden, class, `u` | `Eddot_kc` (reference) | \|§6.1's terms − ref\| | \|with rotation − ref\| | rotation term | `‖P K_w x‖/‖K_w x‖` | `L_uu / s_max` | gauge residual (CI side without its rotation) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `cas44` Sr, `singlet` | 1.4483063761e-05 | 1.4e-03 | 6.2e-14 | 1.4e-03 | 0.37 | 5e-14 | 1.0e-16 (1.4e-03) |
+| `cas44` Sir, `singlet` | 6.3658879042e-03 | 8.5e-05 | 9.1e-14 | −8.5e-05 | 0.023 | **3e-02** | 1.6e-16 (8.5e-05) |
+| `cas44` Srs, `singlet` | −9.8527273736e-03 | 5.2e-14 | 5.2e-14 | 0 | 0 | 0 | 1.3e-15 (1.3e-15) |
+| `acrolein` Si, `Epq` | 1.0018033355e-02 | 1.6e-06 | 5.0e-10 | 1.6e-06 | 0.12 | 4e-12 | 7.8e-15 (3.7e-06) |
+| `acrolein` Si, `sector` | −4.7422230846e-03 | 1.3e-03 | 9.6e-10 | −1.3e-03 | 0.12 | 3e-12 | 5.9e-14 (1.3e-03) |
+| `acrolein` Si, `singlet` | −2.8923269933e-02 | 1.3e-03 | 2.4e-09 | −1.3e-03 | 0.12 | 5e-12 | 2.6e-13 (1.3e-03) |
+| `acrolein` Sr, `Epq` | −2.8384867415e+01 | 2.4e-03 | 2.3e-03 | 4.7e-03 | 0.028 | 3e-11 | 3.8e-08 (4.6e-03) |
+| `acrolein` Sr, `sector` | −7.4302256992e+01 | 1.5e+00 | 6.6e-03 | −1.5e+00 | 0.028 | 4e-09 | 1.1e-06 (1.5e+00) |
+| `acrolein` Sr, `singlet` | −3.0757004475e+02 | 4.9e+01 | 7.6e-03 | 4.9e+01 | 0.028 | 9e-08 | 2.8e-05 (4.9e+01) |
+| `acrolein` Sir, `Epq` / `sector` | −4.06 / −5.91 | ≤2.8e-08 | ≤2.8e-08 | ≤1.1e-11 | 0.013 | ≤1e-14 | ≤1.4e-11 (≤2.1e-11) |
+| `acrolein` Sir, `singlet` | −6.9417325196e+00 | 5.1e-03 | 1.5e-08 | −5.1e-03 | 0.013 | **2e-02** | 1.7e-11 (5.1e-03) |
+| `acrolein` Srs, every kind | 1.25 / −0.70 / −0.50 | ≤7.6e-09 | ≤7.6e-09 | 0 | 0 | 0 | ≤3.6e-12 |
+
+- **The term is real and large.** On CAS(4,4)'s Sr (rank-bound modes, no
+  lift along a singlet) it is 100 times the whole mixed derivative.
+  Acrolein's Si carries it along all three kinds. Without it, both
+  references disagree with the analytic block by the term's own size. With
+  it, both agree to round-off, except acrolein's Sr: there the difference is
+  conditioning-limited (as above), and the gauge stays tight.
+- **It vanishes where §6.5 says it does.** Srs drops nothing. Acrolein's
+  Sir does not turn along `Epq` or `sector` (coupling 0.00 in "What the cut
+  drops"). CAS(10,10) drops spin modes only, and they are annihilated from
+  both sides (below).
+- **Rows in bold lift**, so the device would refuse that (class, `u`) on
+  `L_uu` (`PC_LIFT_TOL` 1e-5). Their numbers are the fixed-rank
+  continuation's, still useful as algebra. CAS(4,4)'s `sector` draw lifts
+  Sir too (`L_uu` 6e-2).
+- **`Epq` and `sector` on CAS(4,4) are symmetry zeros.** Every
+  active–active rotation of four π orbitals breaks D2h, and those `u` keep
+  it, so every class is ≤3e-12 there, with the gauge ≤4e-16.
+- **First order.** The orbital first derivative against a ladder of the
+  energy along `exp(h w)`: ≤3.1e-13 on CAS(4,4) and ≤1.2e-8 on acrolein
+  (Sr, on 9.8e-4). The first-order gauge `dE/dw = Edot(what c)`: ≤4.4e-14
+  on both.
+
+**The spin-modes control, `cas1010`** (`singlet` `u`; every class drops spin
+modes only). `‖P K_w x‖/‖K_w x‖` is round-off: 1.5e-10 (Sr), 1.7e-9 (Si),
+2.6e-13 (Sir). The rotation term is 2.9e-10 on Sr's −39.46 and ≤6.7e-14
+elsewhere. With or without it, the mixed block meets the difference to
+1.3e-7 (Sr; ≤4.2e-10 elsewhere), and the gauge holds to ≤3.7e-10. The
+first-order ladders agree to ≤3.8e-10.
+
+**PC has no empty-perturber pathology.** This is the `empty` part on
+`cas44`. Three pairs are run: two random core–core directions, two random
+virtual–virtual ones, and one of each. The orbital energies are rotated as
+`sc_empty_perturber_probe.py` rotates them. The PC class energy's
+closed-form mixed derivative is set against a Richardson-extrapolated
+four-point ladder (`2^-5..2^-7`), beside SC's worst `rho` on the same
+(class, pair). Only the virtual–virtual pair populates empty tuples with
+both directions. The other two leave "populated by both" at zero in both
+variants:
+
+| `virt × virt2` | empty PC tuples | populated by both | PC mixed derivative | its empty tuples' share | \|ladder − closed form\| / \|closed form\| | SC: populated by both | SC: worst `rho` |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Sr | 11 | 11 | −2.68992353e-04 | 2.38558e-04 | 1.9e-11 | 11 | 7.8e-02 |
+| Sijr | 550 | 550 | −5.65572500e-05 | 2.09391e-04 | 6.4e-10 | 165 | 1.5e-01 |
+| Srsi | 1850 | 1850 | −7.28413245e-04 | 4.94692e-04 | 2.0e-09 | 510 | 1.1e-01 |
+| Srs | 176 | 176 | −1.62471736e-04 | 2.92599e-04 | 2.6e-09 | 176 | 9.6e-02 |
+| Sir | 40 | 40 | 5.92189065e-05 | 6.96256e-04 | 8.1e-10 | 40 | 1.2e-01 |
+
+- **SC has no Hessian along this pair; PC's ladders land on their bilinear
+  forms.** Every SC `rho` here is far above the device's refusal threshold
+  ([`testing.md`](testing.md), "The orbital block's sandwich"), so SC refuses
+  each of these (class, pair)s. The PC ladders meet the closed form to
+  ≤2.6e-9, and the empty tuples are a large share of each class's value.
+- **The counts differ by construction.** PC's tuple lists hold each ordered
+  pair and each coupling as its own row (Sijr and Srsi carry two rows per
+  ordered tuple), where SC's census counts unordered tuples.
+- **Worst over all 21 (pair, class) rows: 1.0e-6.** That is core × virt's
+  Sir, whose value is 4.7e-6, at the ladder's truncation error.
+
 ## The source terms by reverse mode
 
 #74 gives PC what SC has had since #73–#89: `y_I = dE_pc/dc_I` and
