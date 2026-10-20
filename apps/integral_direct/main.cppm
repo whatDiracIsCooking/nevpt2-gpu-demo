@@ -95,11 +95,20 @@ int main(int argc, char** argv) {
   // two checks.
   const bool scTangentArg = parsedOpts.scTangent;
   const bool gradientSourceArg = parsedOpts.gradientSource;
+  //
+  // --sc-hessian-vector (#156): the vector H_cc u by reverse over forward
+  // (nevpt2.gradient's scCiHessianVectorDevice), against --sc-hessian's
+  // Eddot by duality, column by column at small ndet, and one finite
+  // difference of y (nevpt2.ci_checks' checkScHessianVector). Refused as
+  // --sc-hessian is.
   const bool scHessianArg = parsedOpts.scHessian;
-  const bool differentiates = scTangentArg || gradientSourceArg || scHessianArg;
-  const char* const whichFlag = scTangentArg   ? "--sc-tangent"
-                                : scHessianArg ? "--sc-hessian"
-                                               : "--gradient-source";
+  const bool scHessianVectorArg = parsedOpts.scHessianVector;
+  const bool differentiates =
+      scTangentArg || gradientSourceArg || scHessianArg || scHessianVectorArg;
+  const char* const whichFlag = scTangentArg         ? "--sc-tangent"
+                                : scHessianArg       ? "--sc-hessian"
+                                : scHessianVectorArg ? "--sc-hessian-vector"
+                                                     : "--gradient-source";
 
   // A missing, unreadable or malformed golden file -- or one without an
   // array this demo reads -- is the user's input: reported once, here, with a
@@ -262,6 +271,21 @@ int main(int argc, char** argv) {
   if (scHessianArg) {
     const nevpt2::Result<bool> ok = nevpt2::checkScHessian(g, opt.rdm, checkInts, rdm,
                                                            kTangentSeed, kHessianSeedV, *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
+
+  // --sc-hessian-vector: H_cc u along --sc-hessian's u, its duality against
+  // Eddot(u, v) along --sc-hessian's v (and further seeds), the materialised
+  // columns where ndet allows and one finite difference of y. Its own PASS
+  // line is the gate; the golden comparison below does not run.
+  if (scHessianVectorArg) {
+    const nevpt2::Result<bool> ok = nevpt2::checkScHessianVector(
+        g, opt.rdm, checkInts, rdm, kTangentSeed, kHessianSeedV, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

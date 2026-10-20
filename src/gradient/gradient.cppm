@@ -148,6 +148,12 @@ struct ScClassGradient {
   bool epsAdjoint = false;
   std::vector<double> dEdCore{};
   std::vector<double> dEdVirt{};
+
+  // --- the walk's tangent along a CI direction u (#156) ---
+  // sum_t (P_t Ndot_t + Q_t Hdot_t): this class's Edot(u), formed from the
+  // walk's own tangent blocks while it accumulates the M_G tangents
+  // (scCiHessianVectorDevice). Zero when the walk carried no CI direction.
+  double ciTangent = 0.0;
 };
 
 struct ScGradientResult {
@@ -780,6 +786,74 @@ Tensor ciSourceVector(const SigmaVectorOptions& opt, const Tensor& ci, int64_t n
                       int64_t nelecA, int64_t nelecB, const Tensor& g1, const Tensor& g2,
                       const Tensor& g3, const Tensor& gac, const Tensor& gca, const Tensor& h2e,
                       const DeviceResources& res);
+
+// --- the CI block's Hessian-vector product, H_cc u (#156) ---------------------
+//
+// docs/hessian-theory.md, Sec. 4.2: REVERSE-OVER-FORWARD. y = sigma(g, c),
+// with g = (g1, g2, g3, gac, gca) the five coefficient tensors of the sweep
+// above and sigma(., .) ciSourceVector -- linear in g at fixed state, and
+// linear in the state at fixed g (each RDM is a bilinear form in the CI
+// vector, so dRDM/dc is linear in c). So along a CI direction u
+//
+//   H_cc u  =  sigma(gdot[u], c)  +  sigma(g, u),
+//
+// two calls of the SAME ciSourceVector at different arguments. gdot is the
+// walk differentiated along u, and every step of the walk is linear or
+// bilinear: the per-tuple norms and Dyall elements are linear in the blocks,
+// the blocks in the RDMs, and the RDM sweep in the accumulators with
+// constant coefficients -- so gdot is the same einsums at the tangent inputs
+// (the blocks at the RDMs' tangents along u), with the multipliers replaced
+// by their tangents Pdot / Qdot (nevpt2.energy_finish's
+// normToEnergyMultiplierTangent: the 3x3 of Sec. 2.4, the only new
+// ingredient). One walk carries both g and gdot.
+//
+// THE ORBITAL ENERGIES ARE HELD FIXED (the golden's e_core / e_virt;
+// Deltadot = 0), the functional energiesHessianDevice differentiates: the
+// exact gate is the duality <v, H_cc u> == Eddot(u, v), and the two sides
+// must differentiate one functional. The orbital energies' response at
+// second order is later work.
+//
+// Everything runs on res.stream(); every device allocation is a DeviceBuffer
+// from res's pool. The ten coefficient tensors (g and gdot) live from the
+// first class to the last sigma call, 2 (n^2 + n^4 + 3 n^6) doubles, beside
+// the walk's own per-class blocks and their tangents.
+struct ScRdmCoefficients {
+  Tensor dm1, dm2, dm3, f3ac, f3ca;
+};
+
+struct ScCiHessianResult {
+  // H_cc u over the determinant space, in the CI vector's (nstringsA,
+  // nstringsB) shape, and its two halves.
+  Tensor hu;
+  Tensor fromWalkTangent;  // sigma(gdot[u], c)
+  Tensor fromDirection;    // sigma(g, u)
+  // y = sigma(g, c) from the same walk, at fixed orbital energies: free, and
+  // what scCiSourceDevice returns with no OrbitalEnergyResponse.
+  Tensor y;
+  // gdot[u] itself, host-resident: the reverse side's walk tangent.
+  ScRdmCoefficients gDot;
+  // The walk's own Edot(u) per class (CLASSES order) and summed:
+  // sum_t P_t Ndot_t + Q_t Hdot_t from the tangent blocks it built, which
+  // must be energiesTangentDevice's Edot(u) -- the free check that the
+  // tangent blocks are the forward tangent's.
+  std::array<double, 8> edotU{};
+  double edotUTotal = 0.0;
+  // The walk's Eq. 40-47 numbers, as scCiSourceDevice reports them.
+  ScGradientResult pseudodensities;
+};
+
+// `ci` and `u` are (nstringsA, nstringsB); `rdm` is the state's five RDMs
+// (the caller's dm1/dm2 upload and dm3/f3ac/f3ca build, as for
+// scCiSourceDevice) and `dotU` their tangents along u (nevpt2.rdm_host_dm's
+// dm12Dot(ci, u) and nevpt2.rdm_build's buildRdmTangentsDevice(ci, u)).
+// `source`/`batch` as for energiesDevice; `sigma` as for scCiSourceDevice.
+ScCiHessianResult scCiHessianVectorDevice(const ActiveIntegralsDevice& active,
+                                          IntegralSource& source, int64_t batch,
+                                          const Tensor& ci, const Tensor& u, int64_t nelecA,
+                                          int64_t nelecB, const RdmTensors& rdm,
+                                          const RdmTensors& dotU,
+                                          const SigmaVectorOptions& sigma,
+                                          const DeviceResources& res);
 
 // --- PC-NEVPT2's reverse mode (#74) -------------------------------------------
 //

@@ -33,12 +33,16 @@ namespace nevpt2 {
 // independent: a caller asks for either, both or neither. `epsAdjoint` also
 // accumulates each class's dE/de (ScClassGradient::dEdCore / dEdVirt), which
 // the CI source term folds onto dm1 when the orbital energies move (#87).
+// `ci` non-null ALSO differentiates the walk and its sweep along a CI
+// direction, accumulating the coefficient tensors' tangent into ci->adjDot
+// and each class's Edot(u) into ScClassGradient::ciTangent (#156; the
+// :rdm_adjoint partition's ScCiDirection). Independent of the other three.
 ScGradientResult assembleClasses(const ActiveIntegralsDevice& ai, IntegralSource& src,
                                  int64_t batch, const DeviceTensor& dm1,
                                  const DeviceTensor& dm2, const DeviceTensor& dm3,
                                  const DeviceTensor& f3ac, const DeviceTensor& f3ca,
                                  const ScRotation& rot, ScRdmAdjoint* adj, bool epsAdjoint,
-                                 const DeviceResources& dr) {
+                                 const ScCiDirection* ci, const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const int64_t norb = dm1.dims[0];
   const Tensor hostECore = downloadTensor(ai.e_core, s);
@@ -61,23 +65,26 @@ ScGradientResult assembleClasses(const ActiveIntegralsDevice& ai, IntegralSource
     }
   }
   gradientSr(ai, src, batch, hostECore, hostEVirt, dm1, dm2, dm3, f3ac, f3ca, norb, rot,
-             r.classes[0], adj, dr);
+             r.classes[0], adj, ci, dr);
   gradientSi(ai, src, batch, hostECore, hostEVirt, dm1, dm2, dm3, f3ac, f3ca, norb, rot,
-             r.classes[1], adj, dr);
+             r.classes[1], adj, ci, dr);
   // Sijrs contracts no RDM at all, so it has nothing to sweep and takes no
-  // `adj`. It DOES take `rot`: every one of cvcv's four labels is core or
-  // virtual, so an ACTIVE rotation moves nothing it reads while a GENERAL one
-  // moves all of it, and its Delta_t is four orbital energies
+  // `adj` -- nor `ci`: its every CI derivative is exactly zero at fixed
+  // orbital energies. It DOES take `rot`: every one of cvcv's four labels is
+  // core or virtual, so an ACTIVE rotation moves nothing it reads while a
+  // GENERAL one moves all of it, and its Delta_t is four orbital energies
   // (gradient_sc_classes.cppm).
   gradientSijrs(src, batch, hostECore, hostEVirt, rot, r.classes[2], dr);
-  gradientSijr(ai, src, batch, hostECore, hostEVirt, dm1, dm2, rot, r.classes[3], adj, dr);
-  gradientSrsi(ai, src, batch, hostECore, hostEVirt, dm1, dm2, rot, r.classes[4], adj, dr);
+  gradientSijr(ai, src, batch, hostECore, hostEVirt, dm1, dm2, rot, r.classes[3], adj, ci,
+               dr);
+  gradientSrsi(ai, src, batch, hostECore, hostEVirt, dm1, dm2, rot, r.classes[4], adj, ci,
+               dr);
   gradientSrs(ai, src, batch, hostECore, hostEVirt, dm1, dm2, dm3, rot, r.classes[5], adj,
-              dr);
+              ci, dr);
   gradientSij(ai, src, batch, hostECore, hostEVirt, dm1, dm2, dm3, rot, r.classes[6], adj,
-              dr);
+              ci, dr);
   gradientSir(ai, src, batch, hostECore, hostEVirt, dm1, dm2, dm3, rot, r.classes[7], adj,
-              dr);
+              ci, dr);
   for (const ScClassGradient& c : r.classes) r.total += c.energy;
   return r;
 }
@@ -88,7 +95,7 @@ ScGradientResult scPseudodensityDevice(const ActiveIntegralsDevice& ai, Integral
                                        const DeviceTensor& f3ac, const DeviceTensor& f3ca,
                                        const DeviceResources& dr) {
   return assembleClasses(ai, src, batch, dm1, dm2, dm3, f3ac, f3ca, ScRotation{},
-                         /*adj=*/nullptr, /*epsAdjoint=*/false, dr);
+                         /*adj=*/nullptr, /*epsAdjoint=*/false, /*ci=*/nullptr, dr);
 }
 
 ScCiSourceResult scCiSourceDevice(const ActiveIntegralsDevice& ai, IntegralSource& src,
@@ -106,7 +113,8 @@ ScCiSourceResult scCiSourceDevice(const ActiveIntegralsDevice& ai, IntegralSourc
   ScRdmAdjoint adj = ScRdmAdjoint::zeros(norb, dr);
   ScCiSourceResult out;
   out.pseudodensities = assembleClasses(ai, src, batch, dm1, dm2, dm3, f3ac, f3ca,
-                                        ScRotation{}, &adj, /*epsAdjoint=*/eps != nullptr, dr);
+                                        ScRotation{}, &adj, /*epsAdjoint=*/eps != nullptr,
+                                        /*ci=*/nullptr, dr);
 
   // Read back, then the sigma vectors. downloadTensor synchronizes the stream
   // the sweep's einsums were issued on, so each tensor is complete when it
@@ -136,6 +144,53 @@ ScCiSourceResult scCiSourceDevice(const ActiveIntegralsDevice& ai, IntegralSourc
   return out;
 }
 
+ScCiHessianResult scCiHessianVectorDevice(const ActiveIntegralsDevice& ai, IntegralSource& src,
+                                          int64_t batch, const Tensor& ci, const Tensor& u,
+                                          int64_t nelecA, int64_t nelecB, const RdmTensors& rdm,
+                                          const RdmTensors& dotU,
+                                          const SigmaVectorOptions& sigma,
+                                          const DeviceResources& dr) {
+  const wwrStream_t s = dr.stream();
+  const int64_t norb = rdm.dm1.dims[0];
+  check(u.dims() == ci.dims(), "scCiHessianVectorDevice: u is not shaped like the CI vector");
+  // g and its tangent along u, zero-filled and accumulated over the eight
+  // classes by ONE walk: the plain sweep into `adj`, the tangent's into
+  // `adjDot`. The orbital energies are held fixed (epsAdjoint off, and the
+  // multiplier tangents' Deltadot = 0).
+  ScRdmAdjoint adj = ScRdmAdjoint::zeros(norb, dr);
+  ScRdmAdjoint adjDot = ScRdmAdjoint::zeros(norb, dr);
+  const ScCiDirection dir{dotU, adjDot};
+  ScCiHessianResult out;
+  out.pseudodensities =
+      assembleClasses(ai, src, batch, rdm.dm1, rdm.dm2, rdm.dm3, rdm.f3ac, rdm.f3ca,
+                      ScRotation{}, &adj, /*epsAdjoint=*/false, &dir, dr);
+  for (std::size_t c = 0; c < out.edotU.size(); ++c) {
+    out.edotU[c] = out.pseudodensities.classes[c].ciTangent;
+    out.edotUTotal += out.edotU[c];
+  }
+
+  // Read back (downloadTensor synchronizes the stream the sweeps' einsums
+  // were issued on), then the three sigma calls -- the only GPU work left.
+  const Tensor g1 = downloadTensor(adj.dm1, s);
+  const Tensor g2 = downloadTensor(adj.dm2, s);
+  const Tensor g3 = downloadTensor(adj.dm3, s);
+  const Tensor gac = downloadTensor(adj.f3ac, s);
+  const Tensor gca = downloadTensor(adj.f3ca, s);
+  out.gDot = ScRdmCoefficients{downloadTensor(adjDot.dm1, s), downloadTensor(adjDot.dm2, s),
+                               downloadTensor(adjDot.dm3, s), downloadTensor(adjDot.f3ac, s),
+                               downloadTensor(adjDot.f3ca, s)};
+  const Tensor h2e = downloadTensor(ai.h2e, s);
+  const ScRdmCoefficients& gd = out.gDot;
+  out.y = ciSourceVector(sigma, ci, norb, nelecA, nelecB, g1, g2, g3, gac, gca, h2e, dr);
+  out.fromWalkTangent = ciSourceVector(sigma, ci, norb, nelecA, nelecB, gd.dm1, gd.dm2,
+                                       gd.dm3, gd.f3ac, gd.f3ca, h2e, dr);
+  out.fromDirection =
+      ciSourceVector(sigma, u, norb, nelecA, nelecB, g1, g2, g3, gac, gca, h2e, dr);
+  out.hu = out.fromWalkTangent;
+  ciSourceAddInto(out.fromDirection, out.hu);
+  return out;
+}
+
 ScGradientResult scPseudodensityDevice(const NevptIntegralsDevice& ints, const DeviceTensor& dm1,
                                        const DeviceTensor& dm2, const DeviceTensor& dm3,
                                        const DeviceTensor& f3ac, const DeviceTensor& f3ca,
@@ -160,7 +215,7 @@ Result<ScRotationResult> scActiveRotationDevice(const ActiveIntegralsDevice& ai,
   ScRotationResult out;
   out.grad =
       assembleClasses(ai, src, batch, dm1, dm2, dm3, f3ac, f3ca, rot, /*adj=*/nullptr,
-                      /*epsAdjoint=*/false, dr);
+                      /*epsAdjoint=*/false, /*ci=*/nullptr, dr);
   out.dirs.assign(dirs.size(), ScRotationPairing{});
   for (std::size_t d = 0; d < dirs.size(); ++d) {
     ScRotationPairing& p = out.dirs[d];
@@ -316,7 +371,7 @@ Result<ScFullRotationResult> scFullRotationDevice(const NevptIntegralsDevice& in
       NEVPT2_TRY(makeGeneralRotation(dirs, ai.h1e, ai.h2e, gen, dm1, dr));
   ScFullRotationResult out;
   out.grad = assembleClasses(ai, src, /*batch=*/0, dm1, dm2, dm3, f3ac, f3ca, rot,
-                             /*adj=*/nullptr, /*epsAdjoint=*/false, dr);
+                             /*adj=*/nullptr, /*epsAdjoint=*/false, /*ci=*/nullptr, dr);
   out.dirs.assign(dirs.size(), ScFullRotationPairing{});
   for (std::size_t d = 0; d < dirs.size(); ++d) {
     ScFullRotationPairing& p = out.dirs[d];
@@ -542,7 +597,7 @@ DeviceTensor scDigestAdjointDevice(const RdmBuildOptions& opt, const Tensor& ci,
   // the five coefficient tensors only the two digests' are read here.
   ScRdmAdjoint adj = ScRdmAdjoint::zeros(norb, res);
   (void)assembleClasses(ai, src, /*batch=*/0, dm1, dm2, dm3, f3ac, f3ca, ScRotation{}, &adj,
-                        /*epsAdjoint=*/false, res);
+                        /*epsAdjoint=*/false, /*ci=*/nullptr, res);
   return buildDigestAdjointDevice(opt, ci, norb, nelecA, nelecB, dm3, adj.f3ac, adj.f3ca, res);
 }
 

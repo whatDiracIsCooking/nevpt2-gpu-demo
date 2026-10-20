@@ -1103,6 +1103,32 @@ if(NEVPT2_BUILD_TESTING)
       PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_pass}" LABELS "gpu")
   endif()
 
+  # --- --sc-hessian-vector (#156) -------------------------------------------------
+  #
+  # The VECTOR H_cc u by reverse over forward (nevpt2.gradient's
+  # scCiHessianVectorDevice: the pseudodensity walk differentiated along u,
+  # then sigma(gdot, c) + sigma(g, u)), checked by
+  # src/gradient/ci_checks_tangent.cpp's checkScHessianVector at the golden's
+  # fixed orbital energies: the exact duality <v, H_cc u> == Eddot(u, v)
+  # against --sc-hessian's energiesHessianDevice; at CAS(4,4) (ndet = 36) H_cc
+  # materialised column by column against Eddot(e_I, v), and its symmetry; and
+  # ONE Richardson-verified central difference of the GPU's own y, no
+  # orbital-energy response on either leg (docs/hessian-theory.md, Sec. 4.2;
+  # docs/testing.md, "The SC Hessian-vector product's checks"). The same
+  # `small` split and --tiles 3 as --sc-hessian, whose three-argument build
+  # the duality runs.
+  set(_nevpt2_sc_hessian_vector_pass "PASS: the SC Hessian-vector product matches")
+  add_golden_test(nevpt2_cas44_sc_hessian_vector "${_gold_44}" --tiles 3 --sc-hessian-vector)
+  add_golden_test(nevpt2_cas88_sc_hessian_vector "${_gold_88}" --tiles 3 --sc-hessian-vector)
+  if(TEST nevpt2_cas44_sc_hessian_vector)
+    set_tests_properties(nevpt2_cas44_sc_hessian_vector PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_vector_pass}" LABELS "gpu;small")
+  endif()
+  if(TEST nevpt2_cas88_sc_hessian_vector)
+    set_tests_properties(nevpt2_cas88_sc_hessian_vector PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_vector_pass}" LABELS "gpu")
+  endif()
+
   # --- *_pc, small ----------------------------------------------------
   #
   # --pc at CAS(4,4)/CAS(8,8), both demos, labelled `small` so the sanitizer

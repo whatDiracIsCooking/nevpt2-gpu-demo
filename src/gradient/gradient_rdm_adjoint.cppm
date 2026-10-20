@@ -71,6 +71,23 @@ struct ScRdmAdjoint {
   }
 };
 
+// The sweep's TANGENT along a CI direction u (#156, docs/hessian-theory.md
+// Sec. 4.2): every block sweep below is LINEAR in its accumulator, with
+// coefficients (integrals, the Kronecker delta) that do not move with the CI
+// vector, so the tangent of dE/d(rho) is the SAME sweep run on the M_G
+// tangents. A class handed one of these builds its active blocks' tangents
+// from `dot` (the RDMs' tangents along u: nevpt2.energy's make_* at the
+// tangent RDMs, and its three tangent-only builders for the blocks with an
+// RDM-free term), accumulates Mdot_G beside M_G over its walk
+// (nevpt2.gradient:terms' ScCiWalk), and sweeps Mdot_G into `adjDot` exactly
+// as it sweeps M_G into the plain ScRdmAdjoint -- one function per class,
+// called on each. `dot` is borrowed for the call; `adjDot` is the caller's,
+// accumulated over all eight classes.
+struct ScCiDirection {
+  const RdmTensors& dot;
+  ScRdmAdjoint& adjDot;
+};
+
 // The derivative of ONE einsum term with respect to its operand `slot`,
 // weighted by `mult` (the adjoint of the term's OUTPUT) and accumulated into
 // `dst` (the adjoint of that operand). `subs` and `coef` are the forward

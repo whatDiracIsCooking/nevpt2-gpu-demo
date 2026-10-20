@@ -218,7 +218,10 @@ In dependency order:
                                             energies' own slab walk, and the
                                             f3ac/f3ca digests' orbital
                                             response in forward mode (the RDM
-                                            build rerun at the dotted h2e);
+                                            build rerun at the dotted h2e),
+                                            and H_cc u, the walk behind y_I
+                                            differentiated along a CI
+                                            direction (#156);
                                             re-exports the amplitudes and the
                                             plan. A LEAF: nothing in src/
                                             imports it

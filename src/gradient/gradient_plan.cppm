@@ -582,6 +582,41 @@ std::vector<int64_t> pcSijrPartner(int64_t nr, int64_t ncore) {
 
 // --- the two symmetrized classes' multipliers --------------------------------
 
+
+// The symmetrization and triangular packing of nevpt2.energy's energy_Sijr,
+// verbatim: (r, j, i) and (r, i, j) summed, the diagonal halved, and the
+// (r, j <= i) triangle read out in the order sijrDelta builds. Linear in
+// `t`, so the same packing of a TANGENT table is the tangent of the packed one
+// (sijrMultiplierTangents below).
+std::vector<double> sijrTriangle(const Tensor& t) {
+  const int64_t nr = t.dim(0), ncore = t.dim(1);
+  Tensor sym({nr, ncore, ncore});
+  for (int64_t r = 0; r < nr; ++r)
+    for (int64_t j = 0; j < ncore; ++j)
+      for (int64_t i = 0; i < ncore; ++i) sym(r, j, i) = t(r, j, i) + t(r, i, j);
+  for (int64_t r = 0; r < nr; ++r)
+    for (int64_t kk = 0; kk < ncore; ++kk) sym(r, kk, kk) *= 0.5;
+  std::vector<double> tri;
+  for (int64_t r = 0; r < nr; ++r)
+    for (int64_t j = 0; j < ncore; ++j)
+      for (int64_t i = j; i < ncore; ++i) tri.push_back(sym(r, j, i));
+  return tri;
+}
+
+// One weight per (r, j <= i) perturber scattered back over the raw
+// (nr, ncore, ncore) tuples: (r, j, i) and (r, i, j) both get it.
+Tensor sijrScatter(const std::vector<double>& tri, int64_t nr, int64_t ncore) {
+  Tensor full({nr, ncore, ncore});
+  std::size_t k = 0;
+  for (int64_t r = 0; r < nr; ++r)
+    for (int64_t j = 0; j < ncore; ++j)
+      for (int64_t i = j; i < ncore; ++i, ++k) {
+        full(r, j, i) = tri[k];
+        full(r, i, j) = tri[k];
+      }
+  return full;
+}
+
 // The symmetrization and triangular packing of nevpt2.energy's energy_Sijr,
 // verbatim, plus the scatter back. The perturbers are (r, j <= i); the weight
 // that multiplies the RAW normT(r, j, i) is that perturber's, and (r, j, i)
@@ -592,40 +627,44 @@ std::vector<int64_t> pcSijrPartner(int64_t nr, int64_t ncore) {
 ScSlabMultipliers sijrMultipliers(const Tensor& normT, const Tensor& hT, int64_t b0,
                                   const Tensor& hostECore, const Tensor& hostEVirt) {
   const int64_t nr = normT.dim(0), ncore = normT.dim(1);
-  Tensor normSym({nr, ncore, ncore}), hSym({nr, ncore, ncore});
-  for (int64_t r = 0; r < nr; ++r)
-    for (int64_t j = 0; j < ncore; ++j)
-      for (int64_t i = 0; i < ncore; ++i) {
-        normSym(r, j, i) = normT(r, j, i) + normT(r, i, j);
-        hSym(r, j, i) = hT(r, j, i) + hT(r, i, j);
-      }
-  for (int64_t r = 0; r < nr; ++r)
-    for (int64_t kk = 0; kk < ncore; ++kk) {
-      normSym(r, kk, kk) *= 0.5;
-      hSym(r, kk, kk) *= 0.5;
-    }
-  std::vector<double> normTri, hTri;
-  for (int64_t r = 0; r < nr; ++r)
-    for (int64_t j = 0; j < ncore; ++j)
-      for (int64_t i = j; i < ncore; ++i) {
-        normTri.push_back(normSym(r, j, i));
-        hTri.push_back(hSym(r, j, i));
-      }
-  const ScMultipliers m =
-      scMultipliers(normTri, hTri, sijrDelta(nr, ncore, b0, hostECore, hostEVirt));
-  Tensor p({nr, ncore, ncore}), q({nr, ncore, ncore});
-  std::size_t k = 0;
-  for (int64_t r = 0; r < nr; ++r)
-    for (int64_t j = 0; j < ncore; ++j)
-      for (int64_t i = j; i < ncore; ++i, ++k) {
-        p(r, j, i) = m.p[k];
-        p(r, i, j) = m.p[k];
-        q(r, j, i) = m.q[k];
-        q(r, i, j) = m.q[k];
-      }
+  const ScMultipliers m = scMultipliers(sijrTriangle(normT), sijrTriangle(hT),
+                                        sijrDelta(nr, ncore, b0, hostECore, hostEVirt));
   // `r` stays in the triangle's own order: it multiplies Deltadot, which
   // sijrDelta builds there too.
-  return ScSlabMultipliers{std::move(p), std::move(q), m.r, m.norm, m.energy};
+  return ScSlabMultipliers{sijrScatter(m.p, nr, ncore), sijrScatter(m.q, nr, ncore), m.r,
+                           m.norm, m.energy};
+}
+
+// energy_Srsi's symmetrization and packing, verbatim: (r, s, i) and (s, r, i)
+// summed, the diagonal halved, the (r <= s, i) triangle read out in the order
+// srsiDelta builds. Linear in `t`, as sijrTriangle is.
+std::vector<double> srsiTriangle(const Tensor& t) {
+  const int64_t nvirt = t.dim(0), ncore = t.dim(2);
+  Tensor sym({nvirt, nvirt, ncore});
+  for (int64_t r = 0; r < nvirt; ++r)
+    for (int64_t ss = 0; ss < nvirt; ++ss)
+      for (int64_t i = 0; i < ncore; ++i) sym(r, ss, i) = t(r, ss, i) + t(ss, r, i);
+  for (int64_t r = 0; r < nvirt; ++r)
+    for (int64_t i = 0; i < ncore; ++i) sym(r, r, i) *= 0.5;
+  std::vector<double> tri;
+  for (int64_t r = 0; r < nvirt; ++r)
+    for (int64_t ss = r; ss < nvirt; ++ss)
+      for (int64_t i = 0; i < ncore; ++i) tri.push_back(sym(r, ss, i));
+  return tri;
+}
+
+// One weight per (r <= s, i) perturber scattered back over (nvirt, nvirt,
+// ncore), symmetric in (r, s).
+Tensor srsiScatter(const std::vector<double>& tri, int64_t nvirt, int64_t ncore) {
+  Tensor full({nvirt, nvirt, ncore});
+  std::size_t k = 0;
+  for (int64_t r = 0; r < nvirt; ++r)
+    for (int64_t ss = r; ss < nvirt; ++ss)
+      for (int64_t i = 0; i < ncore; ++i, ++k) {
+        full(r, ss, i) = tri[k];
+        full(ss, r, i) = tri[k];
+      }
+  return full;
 }
 
 // energy_Srsi's symmetrization and packing, verbatim, plus the scatter back --
@@ -633,39 +672,65 @@ ScSlabMultipliers sijrMultipliers(const Tensor& normT, const Tensor& hT, int64_t
 ScSlabMultipliers srsiMultipliers(const Tensor& normT, const Tensor& hT,
                                   const Tensor& hostECore, const Tensor& hostEVirt) {
   const int64_t nvirt = normT.dim(0), ncore = normT.dim(2);
-  Tensor normSym({nvirt, nvirt, ncore}), hSym({nvirt, nvirt, ncore});
-  for (int64_t r = 0; r < nvirt; ++r)
-    for (int64_t ss = 0; ss < nvirt; ++ss)
-      for (int64_t i = 0; i < ncore; ++i) {
-        normSym(r, ss, i) = normT(r, ss, i) + normT(ss, r, i);
-        hSym(r, ss, i) = hT(r, ss, i) + hT(ss, r, i);
-      }
-  for (int64_t r = 0; r < nvirt; ++r)
-    for (int64_t i = 0; i < ncore; ++i) {
-      normSym(r, r, i) *= 0.5;
-      hSym(r, r, i) *= 0.5;
-    }
-  std::vector<double> normTri, hTri;
-  for (int64_t r = 0; r < nvirt; ++r)
-    for (int64_t ss = r; ss < nvirt; ++ss)
-      for (int64_t i = 0; i < ncore; ++i) {
-        normTri.push_back(normSym(r, ss, i));
-        hTri.push_back(hSym(r, ss, i));
-      }
-  const ScMultipliers m =
-      scMultipliers(normTri, hTri, srsiDelta(nvirt, ncore, hostECore, hostEVirt));
-  Tensor p({nvirt, nvirt, ncore}), q({nvirt, nvirt, ncore});
-  std::size_t k = 0;
-  for (int64_t r = 0; r < nvirt; ++r)
-    for (int64_t ss = r; ss < nvirt; ++ss)
-      for (int64_t i = 0; i < ncore; ++i, ++k) {
-        p(r, ss, i) = m.p[k];
-        p(ss, r, i) = m.p[k];
-        q(r, ss, i) = m.q[k];
-        q(ss, r, i) = m.q[k];
-      }
-  return ScSlabMultipliers{std::move(p), std::move(q), m.r, m.norm, m.energy};
+  const ScMultipliers m = scMultipliers(srsiTriangle(normT), srsiTriangle(hT),
+                                        srsiDelta(nvirt, ncore, hostECore, hostEVirt));
+  return ScSlabMultipliers{srsiScatter(m.p, nvirt, ncore), srsiScatter(m.q, nvirt, ncore),
+                           m.r, m.norm, m.energy};
 }
+
+// --- the slab multipliers' tangents along a CI direction (#156) ---------------
+//
+// Reverse-over-forward (docs/hessian-theory.md, Sec. 4.2): differentiating the
+// pseudodensity walk along a CI direction u replaces each multiplier by its
+// tangent, Pdot = E_NN Ndot + E_NH Hdot and Qdot = E_NH Ndot + E_HH Hdot --
+// nevpt2.energy_finish's normToEnergyMultiplierTangent, Sec. 2.4's 3x3 -- at
+// FIXED orbital energies (Deltadot = 0: a CI direction moves Delta only
+// through the orbital energies' response, which this walk holds fixed, as
+// energiesHessianDevice does). `normDot` / `hDot` are the per-tuple tangents
+// along u, shaped as `norm` / `h`. A guarded (empty) perturber's tangents are
+// zero, as its multipliers are. The two symmetrized classes pack the tangents
+// through the SAME triangle as the values (the packing is linear) and scatter
+// the triangle's tangents back exactly as their multipliers are.
+struct ScSlabMultiplierTangents {
+  Tensor p;  // Pdot, shaped as the tuple vector
+  Tensor q;  // Qdot
+};
+
+ScSlabMultiplierTangents plainMultiplierTangents(const Tensor& norm, const Tensor& h,
+                                                 const std::vector<double>& delta,
+                                                 const Tensor& normDot, const Tensor& hDot) {
+  const std::vector<double> frozen(delta.size(), 0.0);
+  const ClassMultiplierTangents t = normToEnergyMultiplierTangent(
+      norm.data(), h.data(), delta, normDot.data(), hDot.data(), frozen);
+  return {Tensor::fromFlat(norm.dims(), t.p), Tensor::fromFlat(norm.dims(), t.q)};
+}
+
+ScSlabMultiplierTangents sijrMultiplierTangents(const Tensor& normT, const Tensor& hT,
+                                                const Tensor& normTDot, const Tensor& hTDot,
+                                                int64_t b0, const Tensor& hostECore,
+                                                const Tensor& hostEVirt) {
+  const int64_t nr = normT.dim(0), ncore = normT.dim(1);
+  const std::vector<double> delta = sijrDelta(nr, ncore, b0, hostECore, hostEVirt);
+  const std::vector<double> frozen(delta.size(), 0.0);
+  const ClassMultiplierTangents t =
+      normToEnergyMultiplierTangent(sijrTriangle(normT), sijrTriangle(hT), delta,
+                                    sijrTriangle(normTDot), sijrTriangle(hTDot), frozen);
+  return {sijrScatter(t.p, nr, ncore), sijrScatter(t.q, nr, ncore)};
+}
+
+ScSlabMultiplierTangents srsiMultiplierTangents(const Tensor& normT, const Tensor& hT,
+                                                const Tensor& normTDot, const Tensor& hTDot,
+                                                const Tensor& hostECore,
+                                                const Tensor& hostEVirt) {
+  const int64_t nvirt = normT.dim(0), ncore = normT.dim(2);
+  const std::vector<double> delta = srsiDelta(nvirt, ncore, hostECore, hostEVirt);
+  const std::vector<double> frozen(delta.size(), 0.0);
+  const ClassMultiplierTangents t =
+      normToEnergyMultiplierTangent(srsiTriangle(normT), srsiTriangle(hT), delta,
+                                    srsiTriangle(normTDot), srsiTriangle(hTDot), frozen);
+  return {srsiScatter(t.p, nvirt, ncore), srsiScatter(t.q, nvirt, ncore)};
+}
+
 
 // --- the CI source term's host half (Park Eq. 48) ----------------------------
 //

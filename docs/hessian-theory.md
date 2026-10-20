@@ -409,6 +409,17 @@ validation strategy, and it has the same property: the two sides share no code
 past the slab walk. Where `ndet` allows, the same comparison column by column
 localises a mis-transcribed index, exactly as `--gradient-source` does today.
 
+In the tree (#156) this is `nevpt2.gradient`'s `scCiHessianVectorDevice`:
+one walk carries the plain accumulators and their tangents along `u` (each
+class's active blocks rebuilt at the RDMs' tangents with `nevpt2.energy`'s
+own builders, the per-slab `Pdot`/`Qdot` from `normToEnergyMultiplierTangent`,
+and the class's RDM sweep run on both), at fixed orbital energies only. Its
+gate is `nevpt2_demo --sc-hessian-vector`: the duality against
+`energiesHessianDevice`, the columns and `H_cc`'s symmetry at CAS(4,4), and
+one finite difference of the GPU's own `y` with the orbital-energy mode
+matched on both legs ([`testing.md`](testing.md), "The SC Hessian-vector
+product's checks").
+
 ### 4.3 Euler at second order — and why it is a frozen-orbital-energy identity
 
 For a class homogeneous of degree 2 in `c`, `H c = y`, so
@@ -1065,6 +1076,13 @@ identity the first order does not have:
 **One new finite difference for the whole of level 1.** That is the argument for
 doing it: the second-derivative tier can be as nearly step-size-free as the
 first, which is not a property a second derivative usually has.
+
+*As built*, #156's acceptance adds a second ladder beside it: a difference of
+the GPU's own `y` along `u` against `H_cc u`, the orbital-energy mode matched
+on both legs. It pins no convention the duality leaves open (`Eddot`'s
+difference already licenses the scalar the duality holds `H_cc u` to); it
+holds the vector against the reverse walk's own `y` directly, independent of
+`Eddot`.
 
 ### 9.1 What a second derivative must refuse, and what it must merely say
 

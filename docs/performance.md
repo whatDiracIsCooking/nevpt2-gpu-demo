@@ -615,6 +615,16 @@ the ratio §4.4 predicts. `--tiles 40` is **below** the CAS(12,12) floor here,
 so the integral-direct CAS(12,12) recommendation for `--sc-hessian` is 60, not
 the 40 the plain and tangent builds run at; no RX 9060 XT row was measured.
 
+**`--sc-hessian-vector` (#156) has no floors of its own measured.** Its
+duality runs the same three-argument build once per direction, so the
+`--sc-hessian` rows are a lower bound for it; beside that build it holds the
+gradient walk's two sets of five coefficient tensors (`2 (n^2 + n^4 + 3 n^6)`
+doubles) and, per class, one extra set of block tangents. At the ctest
+entries' `--tiles 3` the pool's used high-water for the whole run was 0.9 MB
+(CAS(4,4)) and 183.2 MB (CAS(8,8)), on the RTX 3080 (CUDA, `default`
+preset), 2026-10-20 — the CAS(8,8) figure is the three-argument build's
+above.
+
 **The digests' transpose (#89) has the plain build's per-tile working set.**
 `buildDigestAdjointDevice` (`nevpt2.rdm_build`'s `:adjoint` partition) holds
 the plain build's `R` and `L2` per tile and one `n^2`-by-width `Wbar` in
