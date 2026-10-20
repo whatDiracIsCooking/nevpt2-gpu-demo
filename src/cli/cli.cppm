@@ -189,6 +189,10 @@ struct Options {
   // nevpt2_pc_tangent: --fd-steps N, --fd-start-pow N.
   int fdSteps = kDefaultFdSteps;
   int fdStartPow = kDefaultFdStartPow;
+  // nevpt2_pc_tangent: --pc-hessian, the PC energy's SECOND directional
+  // derivative Eddot(u, v) in place of the tangent check (#152); the same
+  // finite-difference steps, now of Edot.
+  bool pcHessian = false;
 };
 
 // Parses `args` (argv without argv[0]) for binary `b`, then finalize()s the

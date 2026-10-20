@@ -17,6 +17,7 @@ import :shared;
 import :pc_solve;
 import :pc_classes;
 import :pc_tangent;
+import :pc_hessian;  // the per-class second derivatives behind pcHessianDevice (#152)
 import :sc_tangent;  // tangent_Sijrs: PC's Sijrs IS SC's, Delta term included (#74)
 import nevpt2.profile;
 // The wwrsolverStatus_t error specializations, which make gpuCheck accept a
@@ -130,6 +131,75 @@ Result<PcTangentResult> pcTangentsDevice(const NevptIntegralsDevice& ints,
                            ints.h1e_v_Sir.view()};
   return pcTangentsDevice(ai, src, /*batch=*/0, dm1, dm2, dm3, f3ac, f3ca, dm1Dot, dm2Dot,
                           dm3Dot, f3acDot, f3caDot, epsDot, res);
+}
+
+Result<PcHessianResult> pcHessianDevice(const ActiveIntegralsDevice& ai, IntegralSource& src,
+                                        int64_t batch, const PcHessianSets& sets,
+                                        const DeviceResources& dr) {
+  const PcRdms& rdm = sets.rdm;
+  check(sets.ddot == nullptr || (sets.ddotUU != nullptr && sets.ddotVV != nullptr),
+        "pcHessianDevice: a second derivative needs the (u, u) and (v, v) sets for its lift "
+        "test");
+  const wwrStream_t s = dr.stream();
+  // --profile: the second derivative's einsums land in the energy table, as
+  // the tangent's do.
+  const profile::Section profileSection(profile::kEnergy);
+  Tensor ec = downloadTensor(ai.e_core, s);
+  Tensor ev = downloadTensor(ai.e_virt, s);
+
+  // The RDMs plus each tangent set: every class's matrix tangent, first- or
+  // second-order, is then ONE subtraction of two builds (energy_pc_tangent.cppm,
+  // `tangentMatrices`). Up to twenty-five extra n^2..n^6 tensors, freed when
+  // this returns.
+  struct Sum {
+    DeviceTensor dm1, dm2, dm3, f3ac, f3ca;
+    PcRdms view() const { return {&dm1, &dm2, &dm3, &f3ac, &f3ca}; }
+  };
+  const auto plus = [&](const PcRdms& dot) {
+    return Sum{sumTensors(*rdm.dm1, *dot.dm1, dr), sumTensors(*rdm.dm2, *dot.dm2, dr),
+               sumTensors(*rdm.dm3, *dot.dm3, dr), sumTensors(*rdm.f3ac, *dot.f3ac, dr),
+               sumTensors(*rdm.f3ca, *dot.f3ca, dr)};
+  };
+  const Sum sumU = plus(sets.dotU), sumV = plus(sets.dotV);
+  std::optional<Sum> sumUV, sumUU, sumVV;
+  PcRdms viewUV, viewUU, viewVV;
+  PcHessianBundles b{rdm, sumU.view(), sumV.view()};
+  if (sets.ddot != nullptr) {
+    sumUV.emplace(plus(*sets.ddot));
+    sumUU.emplace(plus(*sets.ddotUU));
+    sumVV.emplace(plus(*sets.ddotVV));
+    viewUV = sumUV->view();
+    viewUU = sumUU->view();
+    viewVV = sumVV->view();
+    b.sumUV = &viewUV;
+    b.sumUU = &viewUU;
+    b.sumVV = &viewVV;
+  }
+
+  PcHessianResult r;
+  r.classes[0] = NEVPT2_TRY(pcHessSr(ai, src, batch, ev, b, dr));
+  r.classes[1] = NEVPT2_TRY(pcHessSi(ai, src, batch, ec, b, dr));
+  // Sijrs contracts no RDM, so its energy is the SC one -- the same function,
+  // not a copy -- and at fixed orbital energies every CI derivative of it is
+  // EXACTLY zero, not a number too small to see.
+  r.classes[2].result.status = PcStatus::Done;
+  r.classes[2].result.energy = energy_Sijrs(ai, src, batch, dr).second;
+  r.classes[3] = NEVPT2_TRY(pcHessSijr(ai, src, batch, ec, ev, b, dr));
+  r.classes[4] = NEVPT2_TRY(pcHessSrsi(ai, src, batch, ec, ev, b, dr));
+  r.classes[5] = NEVPT2_TRY(pcHessSrs(ai, src, batch, ev, b, dr));
+  r.classes[6] = NEVPT2_TRY(pcHessSij(ai, src, batch, ec, b, dr));
+  r.classes[7] = NEVPT2_TRY(pcHessSir(ai, src, batch, ec, ev, b, dr));
+  return r;
+}
+
+Result<PcHessianResult> pcHessianDevice(const NevptIntegralsDevice& ints,
+                                        const PcHessianSets& sets, const DeviceResources& res) {
+  FullBlockSource src(ints);
+  // Views: `ints` keeps owning everything.
+  ActiveIntegralsDevice ai{ints.h1e.view(),      ints.h2e.view(),      ints.e_core.view(),
+                           ints.e_virt.view(),   ints.h1e_v_Sr.view(), ints.h1e_v_Si.view(),
+                           ints.h1e_v_Sir.view()};
+  return pcHessianDevice(ai, src, /*batch=*/0, sets, res);
 }
 
 PcMatrices pcClassMatrices(const int cls, const DeviceTensor& h1e, const DeviceTensor& h2e,

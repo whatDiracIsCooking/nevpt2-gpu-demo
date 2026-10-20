@@ -1273,6 +1273,40 @@ derivative, and (`PcTangentLadderTests`) that the difference is gated on a
 run and that a displaced state with no conditioning record fails — the two
 rows added for "Residual-independent checks of the gradient path" below.
 
+## The PC Hessian against a finite difference of the three-term tangent
+
+`nevpt2_pc_hessian_cas44` (`gpu;small`) runs `nevpt2_pc_tangent --golden
+golden/n2_ccpvdz_cas44.nevpt2gold --tiles 3 --pc-hessian` and matches
+`PASS: the PC-NEVPT2 Hessian Eddot(u, v) matches Euler` (#152). It checks
+`pcHessianDevice`, the PC energy's second directional derivative at the
+golden's **fixed** orbital energies (the PASS line says so, as
+[`hessian-theory.md`](hessian-theory.md), §9.1 asks), with §6.2's rotation
+terms: CAS(4,4)'s Sr null space is a rank bound that turns with the state, the
+case those terms exist for.
+
+| check | against | tolerance |
+|---|---|---|
+| each class energy from the Hessian walk's own `S` and `K` | `pcEnergiesDevice` | 1e-9 |
+| its three-term `Edot(u)`, `Edot(v)` | `pcTangentsDevice`'s two-term one: equal at the eigenstate, to the state's convergence | 1e-8, relative, floor 1 |
+| Euler `Eddot(c, u)`, five classes | `Edot(u)`, exact for a degree-2 class | 1e-9, relative, floor 1 |
+| the negative control `(u, w)`, `w` a random amplitude vector | at least one class refused for its lift, none for any other reason | — |
+| the central difference of the **three-term** `Edot(v)` along `c(h)` | a run of at least two fourfold halvings, 4 ± 0.5, every displaced state's gap recorded and ≥ `PC_MIN_GAP` | — |
+| its Richardson extrapolation | `Eddot(u, v)` | 1e-8 |
+| a class refused by the gap, the denominator or the lift test along `(u, v)` | nothing: the entry FAILS, and no second derivative is reported for it | — |
+
+The difference is of the three-term `Edot`, not of `pcTangentsDevice`'s.
+Off the eigenstate the two-term one lacks a term, and a difference of it
+converges to something else; #152's first ladder plateaued for exactly that
+reason (`hessian-theory.md`, §6.2). The host halves are card-free.
+`test/energy_finish/`'s `PcQuadSecondTests` hold the per-tuple formula
+against an independent rank-bound Gram metric whose null space turns,
+re-solved by a full eigendecomposition at every point and differenced. The
+same suite shows §6.1's terms alone missing there. `test/pc_tangent/`'s
+`PcHessianReportTests` lock in that a refused class, a control that answers,
+or a broken ladder fails. The measured numbers, and why there is no CAS(8,8)
+entry, are in [`pc-nevpt2.md`](pc-nevpt2.md), "The second derivative,
+Eddot(u, v)".
+
 ## The density-fitted orbital source term
 
 #165 runs "The full orbital source term" above on the **density-fitted**
@@ -4030,6 +4064,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_sc_pseudodensity_cas44`, `nevpt2_sc_pseudodensity_cas88` | the SC gradient's pseudodensity assembly and its identities ("The SC pseudodensity identities", above) |
 | `nevpt2_sc_pseudodensity_cas44_sc_hessian_kc` | `--sc-hessian-kc`: the gradient walk carrying a mixed direction (an orbital `w` with its digests' tangent merged, a CI `u`'s tangent blocks and the mixed blocks; or the walk's tangent along `w` with three sweeps more per class), the tangent RDM build at `h2e'[w]`, the sigma calls at `h2e'[w]`, and 36 columns ("The SC mixed Hessian block's checks", above). `nevpt2_sc_pseudodensity_cas88_sc_hessian_kc` runs the same at CAS(8,8) less the columns and is **not** `small` |
 | `nevpt2_pc_tangent_cas44`, `nevpt2_pc_tangent_cas88` | the PC tangent: a second solve per class, the tangent slab einsums and the `(m, m)` blocks' GEMMs, plus ten RDM builds and PC stages per entry ("The PC tangent against a finite difference", above) |
+| `nevpt2_pc_hessian_cas44` | the PC Hessian: the dropped eigenvectors kept from the solve, their `(d, nd)` projections and slab einsums, the three-argument RDM build and five more tangent builds ("The PC Hessian against a finite difference of the three-term tangent", above) |
 | `nevpt2_cas44_casscf`, `nevpt2_cas44_casscf_pc`, `nevpt2_df_cas44_casscf`, `nevpt2_df_cas44_casscf_pc` | the same four paths on **CASSCF orbitals** — a `NEVPT2G2` golden whose `reference_kind` is CASSCF ("The CASSCF-orbital entries", above). Same CAS(4,4) shape, so the same cost |
 | `nevpt2_cas44_casscf_sc_tangent`, `nevpt2_sc_pseudodensity_kappa_cas44_casscf` | the two source-term canaries on **CASSCF orbitals** (`--sc-tangent`, `--kappa-act`; "The source terms on CASSCF orbitals: the wave-0 canary", above). Their CASCI twins' cost |
 | `nevpt2_gradient_source_cas44_casscf`, `nevpt2_gradient_source_pc_cas44_casscf` | the SC and PC CI source terms' duality on **CASSCF orbitals**, with the CASSCF sidecar ("The source terms on CASSCF orbitals, measured", above). Their CASCI twins' cost |

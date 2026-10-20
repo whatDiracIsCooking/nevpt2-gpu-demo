@@ -1273,6 +1273,31 @@ if(NEVPT2_BUILD_TESTING)
       LABELS "gpu;slow")
   endif()
 
+  # --- the PC second derivative, Eddot(u, v) (#152) -------------------------------
+  #
+  # nevpt2_pc_tangent --pc-hessian: nevpt2.energy's pcHessianDevice -- the PC
+  # solve differentiated twice, with docs/hessian-theory.md Sec. 6.2's
+  # rotation terms (S's dropped space turns with the state) -- at the golden's
+  # fixed orbital energies, against Euler at second order (Eddot(c, u) ==
+  # Edot(u), exact, on the five homogeneous classes), a negative control (a
+  # symmetry-breaking direction, along which the dropped modes lift, must be
+  # REFUSED), and a Richardson-verified central difference of the three-term
+  # Edot along the unit sphere (docs/pc-nevpt2.md, "The second derivative,
+  # Eddot(u, v)"). CAS(4,4), whose Sr null space is a rank bound that turns
+  # with the state -- the case the rotation terms exist for; `small`, so the
+  # sanitizer tier covers the dropped-space projections. --tiles 3 is far
+  # above the three-argument build's floor (docs/performance.md, "Tile
+  # floors").
+  set(_pc_hess_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44.nevpt2gold")
+  _add_golden_test_with(nevpt2_pc_tangent nevpt2_pc_hessian_cas44 "${_pc_hess_gold}"
+                        --tiles 3 --pc-hessian)
+  if(TEST nevpt2_pc_hessian_cas44)
+    set_tests_properties(nevpt2_pc_hessian_cas44 PROPERTIES
+      PASS_REGULAR_EXPRESSION "PASS: the PC-NEVPT2 Hessian Eddot\\(u, v\\) matches Euler"
+      LABELS "gpu;small")
+  endif()
+  unset(_pc_hess_gold)
+
   # --- salicylaldimine CAS(8,8)/6-31G** -------------------------------------------
   #
   # The first molecule that is not N2: salicylaldimine (C7H7NO, PubChem CID

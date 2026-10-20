@@ -26,6 +26,13 @@
 // module header, "PC'S TANGENT DIFFERENTIATES THE SOLVE";
 // docs/pc-nevpt2.md, "The singular-metric convention").
 //
+// With --pc-hessian (#152) it checks the SECOND directional derivative
+// instead, nevpt2.energy's pcHessianDevice, at the golden's fixed orbital
+// energies: Euler at second order (Eddot(c, u) == Edot(u), exact, on the same
+// five classes) and a Richardson-verified central difference of the tangent
+// Edot(v) along u -- the Hessian's one finite difference
+// (docs/hessian-theory.md, Sec. 6 and 9).
+//
 // It is the only caller of nevpt2.pc_tangent; the demos do not link it.
 
 // A module unit, so each binary is apps/<app>/{main.cppm,CMakeLists.txt}.
@@ -158,6 +165,48 @@ int main(int argc, char** argv) {
   dInts.h2e_v1_Sir = nevpt2::uploadTensor(g.get("h2e_v1_Sir"), *res);
   dInts.h2e_v2_Sir = nevpt2::uploadTensor(g.get("h2e_v2_Sir"), *res);
   dInts.h1e_v_Sir = nevpt2::uploadTensor(g.get("h1e_v_Sir"), *res);
+
+  // --pc-hessian (#152): the second directional derivative Eddot(u, v)
+  // instead, at the golden's fixed orbital energies, against Euler at second
+  // order and a Richardson-verified central difference of Edot(v) along u
+  // (nevpt2.pc_tangent's pcHessianFdCheck). u is the tangent check's own
+  // direction (kSeed), so its Euler half differentiates the very Edot(u) this
+  // binary's tangent run gates.
+  if (parsedOpts.pcHessian) {
+    constexpr std::uint64_t kSeedV = 0x5eed'0152u;
+    constexpr std::uint64_t kSeedControl = 0x5eed'c152u;
+    // The tolerances, each with its reason (the measured residuals are in
+    // docs/pc-nevpt2.md, "The second derivative, Eddot(u, v)"):
+    //   kHessIdTol    the exact checks -- the Hessian walk's energies against
+    //                 pcEnergiesDevice's, and Euler -- which are algebra;
+    //   kHessEdotTol  the three-term Edot against pcTangentsDevice's two-term
+    //                 one: equal only to the state's convergence, the third
+    //                 term carrying P K (zero at an exact eigenstate,
+    //                 |P K|/|K| <= 1.2e-12 on the N2 CAS(4,4) golden,
+    //                 amplified by S^+), so looser than algebra;
+    //   kHessAtol     the Richardson extrapolation against Eddot: what the
+    //                 difference can deliver from the tangent's own 2^-12
+    //                 start, Edot's round-off divided by 2h;
+    //   the ratio band, as the tangent's.
+    constexpr double kHessIdTol = 1e-9;
+    constexpr double kHessEdotTol = 1e-8;
+    constexpr double kHessAtol = 1e-8;
+    constexpr double kHessRatioTol = 0.5;
+    std::printf("second direction: seed=0x%llx, built the same way; negative control seed=0x%llx\n",
+                static_cast<unsigned long long>(kSeedV),
+                static_cast<unsigned long long>(kSeedControl));
+    const nevpt2::Result<nevpt2::PcHessianCheck> hess =
+        nevpt2::pcHessianFdCheck(opt.rdm, dInts, g.get("ci"), norb, g.nelecA, g.nelecB,
+                                 g.get("h2e"), steps, kSeed, kSeedV, kSeedControl, *res);
+    if (!hess) {
+      nevpt2::report(hess.error());
+      return 1;
+    }
+    const bool ok = nevpt2::printPcHessianReport(*hess, kHessAtol, kHessIdTol, kHessEdotTol,
+                                                 kHessRatioTol);
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return ok ? 0 : 1;
+  }
 
   const nevpt2::Result<nevpt2::PcTangentCheck> check =
       nevpt2::pcTangentFdCheck(opt.rdm, dInts, g.get("ci"), norb, g.nelecA, g.nelecB,

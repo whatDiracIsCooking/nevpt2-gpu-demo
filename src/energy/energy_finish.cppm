@@ -6,8 +6,10 @@
 // (normToEnergyHessian, the 3x3 in the d form, and the multiplier tangents
 // applyFinishHessian / normToEnergyMultiplierTangent -- #150,
 // docs/hessian-theory.md Sec. 2), the partially-contracted
-// finish (pcRankCut, finishSingle, checkDenominator) and the PC TANGENT's per-tuple
-// arithmetic (pcCoefficients, pcQuadForm, tangentSingle), with the PC result
+// finish (pcRankCut, finishSingle, checkDenominator), the PC TANGENT's per-tuple
+// arithmetic (pcCoefficients, pcQuadForm, tangentSingle) and its SECOND
+// derivative's (pcQuadSecond, pcRotationBlocks, hessianSingle, hessianPair,
+// pcLiftNorm -- #152), with the PC result
 // types they all fill. No device, no BLAS, no solver: nevpt2.energy
 // re-exports this module, and its partitions (:sc_finish, :sc_tangent,
 // :pc_solve, :pc_tangent, the class files) do the device work and call these.
@@ -367,6 +369,34 @@ struct PcClassTangent {
   double edot = 0.0;  // d/dh of result.energy along the caller's CI direction
 };
 
+// One class's SECOND directional derivative beside the energy and the two
+// first derivatives it is built from (#152, docs/hessian-theory.md Sec. 6):
+// `result` is the class's own PcClassResult from the same solve, exactly as
+// PcClassTangent's, so a class the gap or denominator check refuses -- or,
+// here, whose dropped modes lift along the direction pair (`lift`) -- is
+// refused and none of the three numbers means anything.
+struct PcClassHessian {
+  PcClassResult result;
+  double edotU = 0.0;  // Edot(u), all three terms (Sec. 6.2): exact at any state
+  double edotV = 0.0;  // Edot(v)
+  double eddot = 0.0;  // Eddot(u, v), at the eigenstate (0 when not asked for)
+  // The largest of |P S_a P|_F and |L_ab|_F over (a, b) in {u, v}, relative
+  // to s_max: S's dropped eigenvalues leaving zero at first or second order
+  // along the pair (0 when nothing is dropped, or no second derivative was
+  // asked for).
+  double lift = 0.0;
+};
+
+// The relative lift above which a (class, direction pair) is refused: S's
+// dropped modes rise at the order the second derivative probes, so the
+// energy is the derivative of the PC_TAU threshold, not a smooth function
+// (docs/hessian-theory.md, Sec. 6.2). Measured (docs/pc-nevpt2.md, "What the
+// cut drops, and how it moves"): where nothing lifts, |L| / s_max is
+// round-off, at most 3.4e-8 (acrolein Sr, S^+ amplifying rounding); every
+// real h^2 lift is at least 1.1e-2. 1e-5 sits between them with almost three
+// decades of margin either way.
+inline constexpr double PC_LIFT_TOL = 1e-5;
+
 // The cut and the gap check, on S's eigenvalues `s` in ASCENDING order (as
 // syevd returns them), so the dropped modes are a prefix: every s_k <=
 // PC_TAU * s_max is dropped, the rest are kept, and the class is refused
@@ -531,6 +561,287 @@ double pcDeltaTangentSingle(const Tensor& y, const std::vector<double>& lambda,
     sum += factor * gg * deltaDot[narrowTo<std::size_t>(t)];
   }
   return sum;
+}
+
+// --- PC: the second derivative's per-tuple arithmetic (#152) ------------------
+//
+// docs/hessian-theory.md Sec. 6.2, in the solve's eigenbasis. The solve is
+// S's cut restricted inverse M = Q (Q^T A Q)^-1 Q^T = U D U^T, with U the
+// solve's (d, m) eigenvectors (U^T S U = 1, U^T K U = lambda), D =
+// diag(1 / (lambda + Delta)), S^+ = U U^T and P = Vn^T Vn the projector on
+// S's dropped space (Vn its (nd, d) dropped eigenvectors). Every class energy
+// is a sum of quadratic forms Q(r) = b_r^T M b_r over a tuple's rows (the
+// single-coupling classes); Sijr / Srsi need the bilinear b_a^T M b_b, which
+// is Q's polarisation, [Q(a + b) - Q(a - b)] / 4, exactly -- every row below
+// is linear in the slab row, so a row of (a +- b) is the rows' sum or
+// difference.
+//
+// With y = U^T b, y_u = U^T b_u, y_uv = U^T b_uv, g = D y (so x = M b = U g),
+// alpha_u = U^T A_u U = mK_u + Delta nS_u, beta the same at (u, v),
+// C = U^T U (rho = S^+ x = U C g, sigma = S^+ b = U y), and the dropped-space
+// blocks G_u = Vn S_u U, H_u = Vn K_u U, H_0 = Vn K U (nd x m), r_v = Vn b_v:
+//
+//   Q     = g . y
+//   Q_u   = 2 g . y_u - g^T alpha_u g - 2 g^T C G_u^T H_0 g
+//
+// The third term is -2 rho^T S_u P A x (P S = 0, so P A = P K): it vanishes at
+// the eigenstate, where P K = 0, and is why the device's two-term tangent is
+// exact there and nowhere else. At the eigenstate, Sec. 6.2's
+//
+//   Q_uv  = 2 g . y_uv - g^T beta g + 2 (y_u - alpha_u g)^T D (y_v - alpha_v g)
+//         + 2 rho^T S_u P g_v - 2 rho^T S_v P A_u x + 2 rho^T S_v P S_u sigma
+//
+// with g_v = b_v - A_v x, i.e. in these blocks
+//
+//   R1 = 2 (G_u C g) . r_v - 2 g^T C G_u^T (H_v + Delta G_v) g
+//   R2 = -2 g^T C G_v^T (H_u + Delta G_u) g
+//   R3 = 2 g^T C G_v^T G_u y
+//
+// No eigenvector derivative and no second solve; the rotation terms carry S^+
+// (through C) and so scale with 1 / the smallest kept eigenvalue of S, not
+// with the gap PC_MIN_GAP checks (docs/pc-nevpt2.md, "What the cut drops, and
+// how it moves"). With nd = 0 every rotation term is zero and Q_u is
+// tangentSingle's own 2 g . ydot - g^T alpha g.
+
+// The (m, m) eigenbasis blocks, each row-major U^T sym(Xdot) U as tangentClass
+// builds it: along u, along v, and at (u, v) (empty when only the first
+// derivatives are wanted).
+struct PcHessianBlocks {
+  std::vector<double> mKu, nSu, mKv, nSv, mKuv, nSuv;
+};
+
+// The rotation terms' blocks, assembled once per class by pcRotationBlocks.
+// nd == 0: everything empty, every rotation term zero.
+struct PcRotationBlocks {
+  int64_t nd = 0;
+  std::vector<double> Zu, Zv;          // (m, m) C G_a^T H_0: the tangent's third term
+  std::vector<double> Ju;              // (nd, m) G_u C: R1's row term
+  std::vector<double> A1, B1, A2, B2;  // (m, m) C G_u^T H_v, C G_u^T G_v, C G_v^T H_u, C G_v^T G_u
+};
+
+// Row-major (r, k) x (k, c).
+std::vector<double> pcMatMul(const std::vector<double>& a, const std::vector<double>& b,
+                             int64_t r, int64_t k, int64_t c) {
+  check(std::ssize(a) == r * k && std::ssize(b) == k * c, "pcMatMul: the shapes disagree");
+  std::vector<double> out(narrowTo<std::size_t>(r * c), 0.0);
+  for (int64_t i = 0; i < r; ++i)
+    for (int64_t l = 0; l < k; ++l) {
+      const double ail = a[narrowTo<std::size_t>(i * k + l)];
+      if (ail == 0.0) continue;
+      for (int64_t j = 0; j < c; ++j)
+        out[narrowTo<std::size_t>(i * c + j)] += ail * b[narrowTo<std::size_t>(l * c + j)];
+    }
+  return out;
+}
+
+// Row-major (k, r)^T x (k, c) = (r, c).
+std::vector<double> pcMatTMul(const std::vector<double>& a, const std::vector<double>& b,
+                              int64_t k, int64_t r, int64_t c) {
+  check(std::ssize(a) == k * r && std::ssize(b) == k * c, "pcMatTMul: the shapes disagree");
+  std::vector<double> out(narrowTo<std::size_t>(r * c), 0.0);
+  for (int64_t l = 0; l < k; ++l)
+    for (int64_t i = 0; i < r; ++i) {
+      const double ali = a[narrowTo<std::size_t>(l * r + i)];
+      if (ali == 0.0) continue;
+      for (int64_t j = 0; j < c; ++j)
+        out[narrowTo<std::size_t>(i * c + j)] += ali * b[narrowTo<std::size_t>(l * c + j)];
+    }
+  return out;
+}
+
+// The blocks above from C = U^T U (m, m) and the (nd, m) G_u, H_u, G_v, H_v,
+// H_0. `second` false: only Zu and Zv (the first derivatives' third term).
+PcRotationBlocks pcRotationBlocks(int64_t m, int64_t nd, const std::vector<double>& C,
+                                  const std::vector<double>& Gu, const std::vector<double>& Hu,
+                                  const std::vector<double>& Gv, const std::vector<double>& Hv,
+                                  const std::vector<double>& H0, bool second) {
+  PcRotationBlocks rot;
+  rot.nd = nd;
+  if (nd == 0) return rot;
+  const auto cOf = [&](const std::vector<double>& x) { return pcMatMul(C, x, m, m, m); };
+  rot.Zu = cOf(pcMatTMul(Gu, H0, nd, m, m));
+  rot.Zv = cOf(pcMatTMul(Gv, H0, nd, m, m));
+  if (!second) return rot;
+  rot.Ju = pcMatMul(Gu, C, nd, m, m);
+  rot.A1 = cOf(pcMatTMul(Gu, Hv, nd, m, m));
+  rot.B1 = cOf(pcMatTMul(Gu, Gv, nd, m, m));
+  rot.A2 = cOf(pcMatTMul(Gv, Hu, nd, m, m));
+  rot.B2 = cOf(pcMatTMul(Gv, Gu, nd, m, m));
+  return rot;
+}
+
+// || P (S_ab - S_a S^+ S_b - S_b S^+ S_a) P ||_F (Sec. 6.2's L_ab), from
+// Vn S_ab Vn^T (nd, nd) and G_a, G_b (nd, m): S_a S^+ S_b restricted is
+// G_a G_b^T. Zero when the rank is constant through second order along
+// (a, b); the caller divides by s_max and refuses above a tolerance.
+double pcLiftNorm(int64_t nd, int64_t m, const std::vector<double>& pSabP,
+                  const std::vector<double>& Ga, const std::vector<double>& Gb) {
+  check(std::ssize(pSabP) == nd * nd && std::ssize(Ga) == nd * m && std::ssize(Gb) == nd * m,
+        "pcLiftNorm: the shapes disagree");
+  double s = 0.0;
+  for (int64_t i = 0; i < nd; ++i)
+    for (int64_t j = 0; j < nd; ++j) {
+      double l = pSabP[narrowTo<std::size_t>(i * nd + j)];
+      for (int64_t k = 0; k < m; ++k) {
+        const double gai = Ga[narrowTo<std::size_t>(i * m + k)];
+        const double gbi = Gb[narrowTo<std::size_t>(i * m + k)];
+        l -= gai * Gb[narrowTo<std::size_t>(j * m + k)] +
+             gbi * Ga[narrowTo<std::size_t>(j * m + k)];
+      }
+      s += l * l;
+    }
+  return std::sqrt(s);
+}
+
+// One tuple's rows: the four slab einsums' (against T, Tdot_u, Tdot_v,
+// Tdot_uv; m long) and r_v = Vn b_v (nd long). `yuv` and `rv` are empty when
+// only the first derivatives are wanted.
+struct PcHessianRow {
+  std::span<const double> y, yu, yv, yuv, rv;
+};
+
+// Q and its derivatives.
+struct PcQuadDerivatives {
+  double f = 0.0, fu = 0.0, fv = 0.0, fuv = 0.0;
+};
+
+// The four sums every class accumulates over its tuples.
+struct PcHessianSums {
+  double energy = 0.0, edotU = 0.0, edotV = 0.0, eddot = 0.0;
+};
+
+// Q(r), Q_u, Q_v and -- when `second` -- Q_uv for one tuple of Delta `delta`,
+// above. `minDen` is tracked exactly as pcCoefficients does. Every length
+// comes from one solve, so a mismatch is our bug and aborts.
+PcQuadDerivatives pcQuadSecond(const PcHessianRow& r, const std::vector<double>& lambda,
+                               double delta, const PcHessianBlocks& blk,
+                               const PcRotationBlocks& rot, bool second, double& minDen) {
+  const std::size_t m = lambda.size();
+  const std::size_t nd = narrowTo<std::size_t>(rot.nd);
+  check(r.y.size() == m && r.yu.size() == m && r.yv.size() == m,
+        "pcQuadSecond: a row is not the solve's kept-mode count long");
+  check(!second || (r.yuv.size() == m && r.rv.size() == nd),
+        "pcQuadSecond: the second derivative needs y_uv and r_v rows");
+  std::vector<double> den(m);
+  for (std::size_t k = 0; k < m; ++k) {
+    den[k] = lambda[k] + delta;
+    minDen = std::min(minDen, den[k]);
+  }
+  const auto dot = [](std::span<const double> a, std::span<const double> b) {
+    double s = 0.0;
+    for (std::size_t k = 0; k < a.size(); ++k) s += a[k] * b[k];
+    return s;
+  };
+  // (X + delta Y) x, both (m, m); Y may be empty (then X x).
+  const auto apply = [&](const std::vector<double>& x0, const std::vector<double>& y0,
+                         std::span<const double> x) {
+    std::vector<double> out(m, 0.0);
+    for (std::size_t k = 0; k < m; ++k) {
+      double s = 0.0;
+      for (std::size_t l = 0; l < m; ++l)
+        s += (x0[k * m + l] + (y0.empty() ? 0.0 : delta * y0[k * m + l])) * x[l];
+      out[k] = s;
+    }
+    return out;
+  };
+  std::vector<double> g(m);
+  for (std::size_t k = 0; k < m; ++k) g[k] = r.y[k] / den[k];
+  const std::vector<double> au = apply(blk.mKu, blk.nSu, g), av = apply(blk.mKv, blk.nSv, g);
+
+  PcQuadDerivatives q;
+  q.f = dot(g, r.y);
+  q.fu = 2.0 * dot(g, r.yu) - dot(g, au);
+  q.fv = 2.0 * dot(g, r.yv) - dot(g, av);
+  if (nd > 0) {
+    q.fu -= 2.0 * dot(g, apply(rot.Zu, {}, g));
+    q.fv -= 2.0 * dot(g, apply(rot.Zv, {}, g));
+  }
+  if (!second) return q;
+
+  // Sec. 6.1's terms.
+  double cross = 0.0;
+  for (std::size_t k = 0; k < m; ++k) cross += (r.yu[k] - au[k]) * (r.yv[k] - av[k]) / den[k];
+  q.fuv = 2.0 * dot(g, r.yuv) - dot(g, apply(blk.mKuv, blk.nSuv, g)) + 2.0 * cross;
+  if (nd == 0) return q;
+  // The rotation, R1 + R2 + R3.
+  std::vector<double> jg(nd, 0.0);
+  for (std::size_t i = 0; i < nd; ++i)
+    for (std::size_t k = 0; k < m; ++k) jg[i] += rot.Ju[i * m + k] * g[k];
+  q.fuv += 2.0 * dot(jg, r.rv) - 2.0 * dot(g, apply(rot.A1, rot.B1, g)) -
+           2.0 * dot(g, apply(rot.A2, rot.B2, g)) + 2.0 * dot(g, apply(rot.B2, {}, r.y));
+  return q;
+}
+
+// One slab's rows for the single-coupling classes (Sr, Si, Srs, Sij, Sir),
+// each (nt, m) -- `rv` (nt, nd) -- and `yuv` / `rv` null when only the first
+// derivatives are wanted.
+struct PcHessianSlab {
+  const Tensor* y = nullptr;
+  const Tensor* yu = nullptr;
+  const Tensor* yv = nullptr;
+  const Tensor* yuv = nullptr;
+  const Tensor* rv = nullptr;
+};
+
+// Tuple t's rows of `s`, m (and nd) long.
+PcHessianRow pcHessianRowAt(const PcHessianSlab& s, int64_t t, int64_t m, int64_t nd) {
+  const auto at = [](const Tensor* x, int64_t off, int64_t len) {
+    if (x == nullptr) return std::span<const double>();
+    return std::span<const double>(x->data().data() + off, narrowTo<std::size_t>(len));
+  };
+  return {at(s.y, t * m, m), at(s.yu, t * m, m), at(s.yv, t * m, m), at(s.yuv, t * m, m),
+          at(s.rv, t * nd, nd)};
+}
+
+// The single-coupling classes' four sums over one slab: E_t = -factor Q(t).
+void hessianSingle(const PcHessianSlab& s, const std::vector<double>& lambda,
+                   const std::vector<double>& delta, const PcHessianBlocks& blk,
+                   const PcRotationBlocks& rot, double factor, PcHessianSums& acc,
+                   double& minDen) {
+  const int64_t nt = std::ssize(delta), m = std::ssize(lambda);
+  const bool second = s.yuv != nullptr;
+  check(s.y->size() == nt * m && s.yu->size() == nt * m && s.yv->size() == nt * m &&
+            (!second || (s.yuv->size() == nt * m && s.rv != nullptr &&
+                         s.rv->size() == nt * rot.nd)),
+        "hessianSingle: the slabs must be (tuples, m) and (tuples, nd)");
+  for (int64_t t = 0; t < nt; ++t) {
+    const PcQuadDerivatives d = pcQuadSecond(pcHessianRowAt(s, t, m, rot.nd), lambda,
+                                             delta[narrowTo<std::size_t>(t)], blk, rot, second,
+                                             minDen);
+    acc.energy -= factor * d.f;
+    acc.edotU -= factor * d.fu;
+    acc.edotV -= factor * d.fv;
+    acc.eddot -= factor * d.fuv;
+  }
+}
+
+// The two-coupling finish (Sijr, Srsi) for one tuple: E_t = -(2 F(a, a) -
+// F(a, b)) with F(a, b) = [Q(a + b) - Q(a - b)] / 4, a the direct row and b
+// the exchange row at the same Delta.
+void hessianPair(const PcHessianRow& a, const PcHessianRow& b, const std::vector<double>& lambda,
+                 double delta, const PcHessianBlocks& blk, const PcRotationBlocks& rot,
+                 bool second, PcHessianSums& acc, double& minDen) {
+  const auto combine = [](std::span<const double> x, std::span<const double> y, double sign) {
+    std::vector<double> out(x.size());
+    for (std::size_t k = 0; k < x.size(); ++k) out[k] = x[k] + sign * y[k];
+    return out;
+  };
+  const auto rowOf = [&](double sign, std::array<std::vector<double>, 5>& store) {
+    store = {combine(a.y, b.y, sign), combine(a.yu, b.yu, sign), combine(a.yv, b.yv, sign),
+             combine(a.yuv, b.yuv, sign), combine(a.rv, b.rv, sign)};
+    return PcHessianRow{store[0], store[1], store[2], store[3], store[4]};
+  };
+  std::array<std::vector<double>, 5> plusStore, minusStore;
+  const PcQuadDerivatives aa = pcQuadSecond(a, lambda, delta, blk, rot, second, minDen);
+  const PcQuadDerivatives p = pcQuadSecond(rowOf(1.0, plusStore), lambda, delta, blk, rot,
+                                           second, minDen);
+  const PcQuadDerivatives n = pcQuadSecond(rowOf(-1.0, minusStore), lambda, delta, blk, rot,
+                                           second, minDen);
+  const auto pair = [](double qa, double qp, double qn) { return 2.0 * qa - 0.25 * (qp - qn); };
+  acc.energy -= pair(aa.f, p.f, n.f);
+  acc.edotU -= pair(aa.fu, p.fu, n.fu);
+  acc.edotV -= pair(aa.fv, p.fv, n.fv);
+  acc.eddot -= pair(aa.fuv, p.fuv, n.fuv);
 }
 
 // --- PC: the ADJOINT's per-tuple arithmetic (#74) -----------------------------

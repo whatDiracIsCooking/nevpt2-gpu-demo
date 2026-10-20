@@ -102,6 +102,15 @@
 //                          host-level duality
 //   PcDeltaTangentTests    pcDeltaTangentSingle (the PC CI tangent's
 //                          orbital-energy term) is sum_t R_t Deltadot_t
+//   PcQuadSecondTests      the PC second derivative's per-tuple arithmetic
+//                          (#152, docs/hessian-theory.md Sec. 6.2):
+//                          pcQuadSecond against an independent rank-bound Gram
+//                          metric whose null space TURNS, the energy re-solved
+//                          by a full eigendecomposition at every point and
+//                          differenced (and Sec. 6.1's terms alone shown to
+//                          miss); with nothing dropped it is tangentSingle's
+//                          finish; hessianPair's polarisation is the direct
+//                          pair form; pcLiftNorm on a hand case
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
 // textual std #include before any import.
@@ -1431,6 +1440,349 @@ TEST(PcDeltaTangentTests, IsTheAdjointsROnDeltadot) {
     EXPECT_NEAR(pcDeltaTangentSingle(rows(c.y, 3, 3), c.lambda, c.delta, deltaDot, f),
                 frob(a.r, deltaDot), 1e-15);
   }
+}
+
+// --- the PC second derivative (#152) ----------------------------------------------------
+//
+// An INDEPENDENT reference for docs/hessian-theory.md, Sec. 6.2: a rank-bound
+// Gram metric S = Phi^T Phi of constant rank r, whose null space TURNS as Phi
+// moves -- the CAS(4,4) Sr case in miniature (GramModel below). K is a Gram
+// part plus a commutator part that vanishes at the base point, so P A = 0
+// there (the eigenstate's property) but P K_u Q is not zero; S_1 = Phi^T psi
+// keeps b in S's range, and the energy
+// is the device's: E = -b^T M b with M = Q (Q^T A Q)^-1 Q^T, Q S's kept
+// eigenvectors -- from a full Jacobi eigendecomposition at every point, so
+// the reference rotates its kept space itself and differentiates nothing.
+
+// Symmetric (n, n) row-major `a`: eigenvalues ascending in `w`, eigenvectors
+// as the COLUMNS of `v` (row-major), by cyclic Jacobi.
+void jacobiEigen(std::vector<double> a, std::size_t n, std::vector<double>& w,
+                 std::vector<double>& v) {
+  v.assign(n * n, 0.0);
+  for (std::size_t i = 0; i < n; ++i) v[i * n + i] = 1.0;
+  for (int sweep = 0; sweep < 100; ++sweep) {
+    double off = 0.0;
+    for (std::size_t p = 0; p < n; ++p)
+      for (std::size_t q = p + 1; q < n; ++q) off += a[p * n + q] * a[p * n + q];
+    if (off < 1e-34) break;
+    for (std::size_t p = 0; p < n; ++p)
+      for (std::size_t q = p + 1; q < n; ++q) {
+        if (std::fabs(a[p * n + q]) < 1e-300) continue;
+        const double theta = (a[q * n + q] - a[p * n + p]) / (2.0 * a[p * n + q]);
+        const double t = (theta >= 0 ? 1.0 : -1.0) /
+                         (std::fabs(theta) + std::sqrt(theta * theta + 1.0));
+        const double c = 1.0 / std::sqrt(t * t + 1.0), s = t * c;
+        for (std::size_t k = 0; k < n; ++k) {
+          const double akp = a[k * n + p], akq = a[k * n + q];
+          a[k * n + p] = c * akp - s * akq;
+          a[k * n + q] = s * akp + c * akq;
+        }
+        for (std::size_t k = 0; k < n; ++k) {
+          const double apk = a[p * n + k], aqk = a[q * n + k];
+          a[p * n + k] = c * apk - s * aqk;
+          a[q * n + k] = s * apk + c * aqk;
+        }
+        for (std::size_t k = 0; k < n; ++k) {
+          const double vkp = v[k * n + p], vkq = v[k * n + q];
+          v[k * n + p] = c * vkp - s * vkq;
+          v[k * n + q] = s * vkp + c * vkq;
+        }
+      }
+  }
+  std::vector<std::size_t> order(n);
+  std::iota(order.begin(), order.end(), 0);
+  std::ranges::sort(order,
+                    [&](std::size_t i, std::size_t j) { return a[i * n + i] < a[j * n + j]; });
+  std::vector<double> vs(n * n);
+  w.resize(n);
+  for (std::size_t c = 0; c < n; ++c) {
+    w[c] = a[order[c] * n + order[c]];
+    for (std::size_t k = 0; k < n; ++k) vs[k * n + c] = v[k * n + order[c]];
+  }
+  v = vs;
+}
+
+// Row-major helpers: (r, k) x (k, c), and the transpose of (r, c).
+std::vector<double> mm(const std::vector<double>& a, const std::vector<double>& b, std::size_t r,
+                       std::size_t k, std::size_t c) {
+  std::vector<double> out(r * c, 0.0);
+  for (std::size_t i = 0; i < r; ++i)
+    for (std::size_t l = 0; l < k; ++l)
+      for (std::size_t j = 0; j < c; ++j) out[i * c + j] += a[i * k + l] * b[l * c + j];
+  return out;
+}
+std::vector<double> tr(const std::vector<double>& a, std::size_t r, std::size_t c) {
+  std::vector<double> out(r * c);
+  for (std::size_t i = 0; i < r; ++i)
+    for (std::size_t j = 0; j < c; ++j) out[j * r + i] = a[i * c + j];
+  return out;
+}
+
+// Phi(s, t) = Psi(s, t) Xi(s, t), Psi (p, r) and Xi (r, d) each affine in
+// (s, t), with r < p and r < d: S = Phi^T Phi has rank r at every point, and
+// its range -- range(Xi^T) -- and Phi's own, range(Psi) in R^p, both move. That
+// second motion is what makes the energy depend on the kept space turning
+// (with p = r the energy collapses to -w^T (kappa + Delta)^-1 w, independent
+// of Q, and the rotation terms cancel).
+struct GramModel {
+  static constexpr std::size_t p = 3, r = 2, d = 4, m = 2, nd = 2;
+  std::vector<double> psi0, psiU, psiV, xi0, xiU, xiV, kappa, psiVec, x;
+  // K's commutator part: K = Phi^T kappa Phi - (Gamma^T Phi + Phi^T Gamma) / 2
+  // with Gamma(s, t) = s Gamma_u + t Gamma_v + s t Gamma_uv (p, d) -- zero at
+  // (0, 0), as <Phi_mu|O_nu (H_D - E_0)|c> is at an eigenstate. So P K = 0
+  // and P K_u P = 0 there, but P K_u Q is not: the H_u blocks the rotation
+  // terms carry.
+  std::vector<double> gamU, gamV, gamUV;
+  double h1 = 0.7, delta = 1.1;
+
+  std::vector<double> gamma(double s, double t) const {
+    std::vector<double> out(gamU.size());
+    for (std::size_t i = 0; i < out.size(); ++i)
+      out[i] = s * gamU[i] + t * gamV[i] + s * t * gamUV[i];
+    return out;
+  }
+
+  std::vector<double> lin(const std::vector<double>& a0, const std::vector<double>& au,
+                          const std::vector<double>& av, double s, double t) const {
+    std::vector<double> out(a0.size());
+    for (std::size_t i = 0; i < a0.size(); ++i) out[i] = a0[i] + s * au[i] + t * av[i];
+    return out;
+  }
+  // Phi and its Taylor coefficients at (0, 0): Phi_u, Phi_v, Phi_uv.
+  std::vector<double> phi(double s, double t) const {
+    return mm(lin(psi0, psiU, psiV, s, t), lin(xi0, xiU, xiV, s, t), p, r, d);
+  }
+  std::vector<double> phiU() const { return add(mm(psiU, xi0, p, r, d), mm(psi0, xiU, p, r, d)); }
+  std::vector<double> phiV() const { return add(mm(psiV, xi0, p, r, d), mm(psi0, xiV, p, r, d)); }
+  std::vector<double> phiUV() const {
+    return add(mm(psiU, xiV, p, r, d), mm(psiV, xiU, p, r, d));
+  }
+  static std::vector<double> add(std::vector<double> a, const std::vector<double>& b) {
+    for (std::size_t i = 0; i < a.size(); ++i) a[i] += b[i];
+    return a;
+  }
+  // A^T X B + B^T X A (A, B (p, d), X (p, p)).
+  std::vector<double> gram(const std::vector<double>& a, const std::vector<double>& xm,
+                           const std::vector<double>& b) const {
+    const std::vector<double> ab = mm(mm(tr(a, p, d), xm, d, p, p), b, d, p, d);
+    std::vector<double> out(d * d);
+    for (std::size_t i = 0; i < d; ++i)
+      for (std::size_t j = 0; j < d; ++j) out[i * d + j] = ab[i * d + j] + ab[j * d + i];
+    return out;
+  }
+  std::vector<double> eye() const {
+    std::vector<double> e(p * p, 0.0);
+    for (std::size_t i = 0; i < p; ++i) e[i * p + i] = 1.0;
+    return e;
+  }
+  // S_1 = Phi^T psi, as a column.
+  std::vector<double> s1(const std::vector<double>& ph) const {
+    return mm(tr(ph, p, d), psiVec, d, p, 1);
+  }
+  // b = S x + S_1 h1.
+  std::vector<double> bOf(const std::vector<double>& S, const std::vector<double>& ph) const {
+    std::vector<double> b = mm(S, x, d, d, 1);
+    const std::vector<double> c = s1(ph);
+    for (std::size_t i = 0; i < d; ++i) b[i] += c[i] * h1;
+    return b;
+  }
+
+  // The device's energy at Phi(s, t): the cut is S's r largest modes.
+  double energy(double s, double t) const {
+    const std::vector<double> ph = phi(s, t);
+    std::vector<double> S = gram(ph, eye(), ph), K = gram(ph, kappa, ph);
+    const std::vector<double> J = gram(gamma(s, t), eye(), ph);
+    for (double& z : S) z *= 0.5;
+    for (std::size_t i = 0; i < K.size(); ++i) K[i] = 0.5 * (K[i] - J[i]);
+    std::vector<double> w, V;
+    jacobiEigen(S, d, w, V);
+    std::vector<double> Q(d * m);
+    for (std::size_t i = 0; i < d; ++i)
+      for (std::size_t k = 0; k < m; ++k) Q[i * m + k] = V[i * d + nd + k];
+    std::vector<double> A(d * d);
+    for (std::size_t i = 0; i < d * d; ++i) A[i] = K[i] + delta * S[i];
+    const std::vector<double> b = bOf(S, ph);
+    const std::vector<double> qaq = mm(mm(tr(Q, d, m), A, m, d, d), Q, m, d, m);
+    const std::vector<double> qb = mm(tr(Q, d, m), b, m, d, 1);
+    const std::vector<double> z = solveDense(qaq, qb, m);
+    return -frob(qb, z);
+  }
+};
+
+GramModel gramModel(std::uint64_t seed) {
+  std::mt19937_64 gen(seed);
+  std::uniform_real_distribution<double> u(-1.0, 1.0);
+  GramModel g;
+  const auto fill = [&](std::size_t n) {
+    std::vector<double> v(n);
+    for (double& z : v) z = u(gen);
+    return v;
+  };
+  g.psi0 = fill(g.p * g.r);
+  g.psiU = fill(g.p * g.r);
+  g.psiV = fill(g.p * g.r);
+  g.xi0 = fill(g.r * g.d);
+  g.xiU = fill(g.r * g.d);
+  g.xiV = fill(g.r * g.d);
+  g.kappa = {0.6, 0.1, 0.0, 0.1, 0.9, 0.2, 0.0, 0.2, 0.7};
+  g.psiVec = fill(g.p);
+  g.x = fill(g.d);
+  g.gamU = fill(g.p * g.d);
+  g.gamV = fill(g.p * g.d);
+  g.gamUV = fill(g.p * g.d);
+  return g;
+}
+
+// The analytic side, built the way the device builds it: the solve's
+// eigenbasis at (0, 0), the tangents projected into it and onto S's dropped
+// space, then pcQuadSecond. Returns E's (Q, Q_u, Q_v, Q_uv) with E = -Q.
+PcQuadDerivatives gramAnalytic(const GramModel& g, bool withRotation) {
+  constexpr std::size_t d = GramModel::d, m = GramModel::m, nd = GramModel::nd;
+  const std::vector<double> I = g.eye();
+  const std::vector<double> f = g.phi(0.0, 0.0), fu = g.phiU(), fv = g.phiV(), fuv = g.phiUV();
+  std::vector<double> S = g.gram(f, I, f), K = g.gram(f, g.kappa, f);
+  for (double& z : S) z *= 0.5;
+  for (double& z : K) z *= 0.5;
+  // The Taylor coefficients of Phi^T X Phi: (.)_u = gram(Phi, X, Phi_u),
+  // (.)_uv = gram(Phi_uv, X, Phi) + gram(Phi_u, X, Phi_v).
+  const auto second = [&](const std::vector<double>& xm) {
+    return GramModel::add(g.gram(fuv, xm, f), g.gram(fu, xm, fv));
+  };
+  const std::vector<double> Su = g.gram(f, I, fu), Sv = g.gram(f, I, fv), Suv = second(I);
+  // K's commutator part, -gram(Gamma, 1, Phi) / 2, with Gamma(0, 0) = 0.
+  const auto halfJ = [&](std::vector<double> k, const std::vector<double>& j) {
+    for (std::size_t i = 0; i < k.size(); ++i) k[i] -= 0.5 * j[i];
+    return k;
+  };
+  const std::vector<double> Ku = halfJ(g.gram(f, g.kappa, fu), g.gram(g.gamU, I, f));
+  const std::vector<double> Kv = halfJ(g.gram(f, g.kappa, fv), g.gram(g.gamV, I, f));
+  const std::vector<double> Kuv =
+      halfJ(second(g.kappa), GramModel::add(GramModel::add(g.gram(g.gamUV, I, f),
+                                                           g.gram(g.gamU, I, fv)),
+                                            g.gram(g.gamV, I, fu)));
+  // b and its derivatives; S_1 = Phi^T psi is linear in Phi.
+  const std::vector<double> b = g.bOf(S, f);
+  std::vector<double> bu = mm(Su, g.x, d, d, 1), bv = mm(Sv, g.x, d, d, 1);
+  std::vector<double> buv = mm(Suv, g.x, d, d, 1);
+  const std::vector<double> s1u = g.s1(fu), s1v = g.s1(fv), s1uv = g.s1(fuv);
+  for (std::size_t i = 0; i < d; ++i) {
+    bu[i] += s1u[i] * g.h1;
+    bv[i] += s1v[i] * g.h1;
+    buv[i] += s1uv[i] * g.h1;
+  }
+  std::vector<double> w, V;
+  jacobiEigen(S, d, w, V);
+  std::vector<double> X(d * m), Vn(nd * d);
+  for (std::size_t i = 0; i < d; ++i) {
+    for (std::size_t k = 0; k < m; ++k) X[i * m + k] = V[i * d + nd + k] / std::sqrt(w[nd + k]);
+    for (std::size_t k = 0; k < nd; ++k) Vn[k * d + i] = V[i * d + k];
+  }
+  std::vector<double> lam, W;
+  jacobiEigen(mm(mm(tr(X, d, m), K, m, d, d), X, m, d, m), m, lam, W);
+  const std::vector<double> U = mm(X, W, d, m, m), Ut = tr(U, d, m);
+  const auto proj = [&](const std::vector<double>& M) {
+    return mm(mm(Ut, M, m, d, d), U, m, d, m);
+  };
+  const auto drop = [&](const std::vector<double>& M) {
+    return mm(mm(Vn, M, nd, d, d), U, nd, d, m);
+  };
+
+  PcHessianBlocks blk{proj(Ku), proj(Su), proj(Kv), proj(Sv), proj(Kuv), proj(Suv)};
+  const std::vector<double> y = mm(Ut, b, m, d, 1), yu = mm(Ut, bu, m, d, 1);
+  const std::vector<double> yv = mm(Ut, bv, m, d, 1), yuv = mm(Ut, buv, m, d, 1);
+  const std::vector<double> rv = mm(Vn, bv, nd, d, 1);
+  PcRotationBlocks rot;
+  if (withRotation)
+    rot = pcRotationBlocks(m, nd, mm(Ut, U, m, d, m), drop(Su), drop(Ku), drop(Sv), drop(Kv),
+                           drop(K), /*second=*/true);
+  const std::span<const double> none;
+  const PcHessianRow row{y, yu, yv, yuv, withRotation ? std::span<const double>(rv) : none};
+  double minDen = std::numeric_limits<double>::infinity();
+  const PcQuadDerivatives q = pcQuadSecond(row, lam, g.delta, blk, rot, /*second=*/true, minDen);
+  EXPECT_GT(minDen, 0.0);
+  return q;
+}
+
+TEST(PcQuadSecondTests, MatchesTheRestrictedInversesDifferencesOnATurningNullSpace) {
+  for (const std::uint64_t seed : {0x1520u, 0x1521u, 0x1522u}) {
+    SCOPED_TRACE(seed);
+    const GramModel g = gramModel(seed);
+    const PcQuadDerivatives q = gramAnalytic(g, /*withRotation=*/true);
+    EXPECT_NEAR(-q.f, g.energy(0.0, 0.0), 1e-12);
+    const double eu = richardson([&](double h) { return g.energy(h, 0.0); }, 1e-3);
+    const double ev = richardson([&](double h) { return g.energy(0.0, h); }, 1e-3);
+    EXPECT_NEAR(-q.fu, eu, 1e-9 * std::max(1.0, std::fabs(eu)));
+    EXPECT_NEAR(-q.fv, ev, 1e-9 * std::max(1.0, std::fabs(ev)));
+    // The mixed central difference, Richardson-combined over h and h/2.
+    const auto mixed = [&](double h) {
+      return (g.energy(h, h) - g.energy(h, -h) - g.energy(-h, h) + g.energy(-h, -h)) /
+             (4.0 * h * h);
+    };
+    const double euv = (4.0 * mixed(5e-4) - mixed(1e-3)) / 3.0;
+    EXPECT_NEAR(-q.fuv, euv, 1e-6 * std::max(1.0, std::fabs(euv)));
+    // And the test has teeth: the null space really turns here, so Sec. 6.1's
+    // terms alone miss.
+    const PcQuadDerivatives bare = gramAnalytic(g, /*withRotation=*/false);
+    EXPECT_GT(std::fabs(-bare.fuv - euv), 1e-4 * std::max(1.0, std::fabs(euv)));
+  }
+}
+
+TEST(PcQuadSecondTests, WithNothingDroppedItIsTheTangentsFinish) {
+  const PcCase c = pcCase(1, 3, 0x1523u);
+  std::vector<double> yd(3), mK(9), nS(9);
+  for (std::size_t k = 0; k < 3; ++k) yd[k] = 0.1 * static_cast<double>(k + 1);
+  for (std::size_t k = 0; k < 9; ++k) {
+    mK[k] = c.mm[k];
+    nS[k] = 0.5 * c.mm[8 - k];
+  }
+  double e = 0.0, edot = 0.0, minDen = std::numeric_limits<double>::infinity();
+  tangentSingle(rows(c.y, 1, 3), rows(yd, 1, 3), c.lambda, c.delta, mK, nS, e, edot, minDen);
+  const PcHessianBlocks blk{mK, nS, mK, nS, {}, {}};
+  const PcHessianRow row{c.y, yd, yd, {}, {}};
+  const PcQuadDerivatives q =
+      pcQuadSecond(row, c.lambda, c.delta[0], blk, PcRotationBlocks{}, false, minDen);
+  EXPECT_NEAR(-q.f, e, 1e-15);
+  EXPECT_NEAR(-q.fu, edot, 1e-15);
+  EXPECT_NEAR(-q.fv, edot, 1e-15);
+  EXPECT_EQ(q.fuv, 0.0);
+}
+
+TEST(PcQuadSecondTests, ThePairFormIsThePolarisation) {
+  // hessianPair's -(2 F(a, a) - F(a, b)) with F the polarisation of Q,
+  // against the tangent's own direct bilinear form (pcDot* in
+  // energy_pc_tangent.cppm), with nothing dropped.
+  const PcCase c = pcCase(2, 3, 0x1524u);
+  const std::vector<double> ya(c.y.begin(), c.y.begin() + 3), yb(c.y.begin() + 3, c.y.end());
+  const std::vector<double> yda{0.2, -0.1, 0.4}, ydb{-0.3, 0.5, 0.1};
+  std::vector<double> mK(9), nS(9);
+  for (std::size_t k = 0; k < 9; ++k) {
+    mK[k] = c.mm[k];
+    nS[k] = 0.3 * c.mm[k];
+  }
+  const PcHessianBlocks blk{mK, nS, mK, nS, {}, {}};
+  PcHessianSums acc;
+  double minDen = std::numeric_limits<double>::infinity();
+  hessianPair({ya, yda, yda, {}, {}}, {yb, ydb, ydb, {}, {}}, c.lambda, c.delta[0], blk,
+              PcRotationBlocks{}, false, acc, minDen);
+  std::vector<double> ga, gb;
+  pcCoefficients(ya, c.lambda, c.delta[0], ga, minDen);
+  pcCoefficients(yb, c.lambda, c.delta[0], gb, minDen);
+  const double uu = frob(ga, ya), uv = frob(ga, yb);
+  const double duu = frob(ga, yda), duv = frob(ga, ydb), dvu = frob(gb, yda);
+  const double qUU = pcQuadForm(ga, ga, mK, nS, c.delta[0]);
+  const double qUV = pcQuadForm(ga, gb, mK, nS, c.delta[0]);
+  EXPECT_NEAR(acc.energy, -(2.0 * uu - uv), 1e-14);
+  EXPECT_NEAR(acc.edotU, -(2.0 * (2.0 * duu - qUU) - (duv + dvu - qUV)), 1e-13);
+}
+
+TEST(PcQuadSecondTests, TheLiftIsTheSchurBlockOnTheDroppedSpace) {
+  // nd = 1, m = 2: L = pSp - 2 G_a G_b^T symmetrised, by hand.
+  const std::vector<double> pSp{0.5}, Ga{1.0, 2.0}, Gb{0.5, -1.0};
+  // G_a G_b^T = 0.5 - 2 = -1.5, twice that -3; L = 0.5 + 3 = 3.5.
+  EXPECT_NEAR(pcLiftNorm(1, 2, pSp, Ga, Gb), 3.5, 1e-15);
+  EXPECT_NEAR(pcLiftNorm(1, 2, {2.0 * (1.0 + 4.0)}, Ga, Ga), 0.0, 1e-15);
+  EXPECT_LT(PC_LIFT_TOL, 1.1e-2);
+  EXPECT_GT(PC_LIFT_TOL, 3.4e-8);
 }
 
 }  // namespace nevpt2::test::energy_finish

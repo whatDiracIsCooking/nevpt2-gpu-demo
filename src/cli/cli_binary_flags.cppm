@@ -66,6 +66,11 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   too, but half a dump is not one.
 //                   --source-oracle is its too, for the same reason: it
 //                   compares the dump's two terms with a committed oracle.
+//                   --pc-hessian is nevpt2_pc_tangent's (#152): PC's second
+//                   directional derivative, checked by a finite difference of
+//                   the PC tangent that binary already owns. Like the rest of
+//                   that binary it runs the emitted or the native-fp64 BLAS
+//                   digest only, which the table refuses the others for.
 //   --gradgold      nevpt2_sc_pseudodensity (--kappa-full, --dump-source-terms,
 //                   --source-oracle)
 //                   and nevpt2_demo (--gradient-source, whose y_I and forward
@@ -103,6 +108,7 @@ constexpr std::array kFlagTable{
     FlagSpec{"--source-oracle", "path", kScPd},
     FlagSpec{"--fd-steps", "N", kPcTangent},
     FlagSpec{"--fd-start-pow", "N", kPcTangent},
+    FlagSpec{"--pc-hessian", "", kPcTangent},
 };
 
 // The usage line for `b`, without usage()'s trailing newline (an Error's
@@ -171,6 +177,8 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
     const Result<int> v = parseInteger<int>(a, args[++i]);
     if (!v) return std::unexpected(v.error());
     opt.fdStartPow = *v;
+  } else if (a == "--pc-hessian") {
+    opt.pcHessian = true;
   } else {
     // In the table, and neither parser takes it: our bug, not the user's.
     check(false, "nevpt2.cli: a flagTable() row that neither parser handles");

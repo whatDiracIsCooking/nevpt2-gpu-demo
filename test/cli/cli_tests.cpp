@@ -24,7 +24,7 @@
 //   CliScPseudodensityFlagTests  --kappa-act / --kappa-full / --gradgold /
 //                                --dump-source-terms / --source-oracle /
 //                                --sc-hessian-kc
-//   CliPcTangentFlagTests        --fd-steps / --fd-start-pow
+//   CliPcTangentFlagTests        --fd-steps / --fd-start-pow / --pc-hessian
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
 // textual std #include before any import.
@@ -404,7 +404,7 @@ constexpr std::array kExpectedMatrix{
     MatrixRow{"--kappa-full", "S"},         MatrixRow{"--sc-hessian-kc", "S"},
     MatrixRow{"--gradgold", "DS"},          MatrixRow{"--dump-source-terms", "S"},
     MatrixRow{"--source-oracle", "S"},      MatrixRow{"--fd-steps", "P"},
-    MatrixRow{"--fd-start-pow", "P"},
+    MatrixRow{"--fd-start-pow", "P"},       MatrixRow{"--pc-hessian", "P"},
 };
 
 char letterOf(const Binary b) {
@@ -639,6 +639,7 @@ TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
       {Binary::ScPseudodensity, {"--tiles", "3", "--sc-hessian-kc"}},
       {Binary::PcTangent, {"--tiles", "3"}},
       {Binary::PcTangent, {"--tiles", "40", "--fd-steps", "3"}},
+      {Binary::PcTangent, {"--tiles", "3", "--pc-hessian"}},
   };
   for (const Entry& e : entries) {
     if (e.cublas && !kHaveCublasEmul) continue;  // a HIP build registers none of these
@@ -1264,6 +1265,24 @@ TEST(CliPcTangentFlagTests, FdStartPowIsOneToThirty) {
     ASSERT_FALSE(r.has_value()) << pow;
     EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
     EXPECT_EQ(r.error().message, "--fd-start-pow must be in 1..30");
+  }
+}
+
+TEST(CliPcTangentFlagTests, PcHessianIsAPlainSwitchWithTheLadderFlags) {
+  const Result<Options> off = parse(Binary::PcTangent, {});
+  ASSERT_TRUE(off.has_value()) << off.error().message;
+  EXPECT_FALSE(off->pcHessian);
+  const Result<Options> on =
+      parse(Binary::PcTangent, {"--pc-hessian", "--fd-steps", "5", "--fd-start-pow", "13"});
+  ASSERT_TRUE(on.has_value()) << on.error().message;
+  EXPECT_TRUE(on->pcHessian);
+  EXPECT_EQ(on->fdSteps, 5);
+  EXPECT_EQ(on->fdStartPow, 13);
+  // Like the rest of the binary, it runs no approximate digest.
+  for (const std::string_view flag : {"--cublas", "--ozaki", "--fused-digest"}) {
+    const Result<Options> r = parse(Binary::PcTangent, {"--pc-hessian", flag});
+    ASSERT_FALSE(r.has_value()) << flag;
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << flag;
   }
 }
 

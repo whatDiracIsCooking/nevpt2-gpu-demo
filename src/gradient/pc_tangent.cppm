@@ -175,4 +175,90 @@ Result<PcTangentCheck> pcTangentFdCheck(const RdmBuildOptions& rdmOpt,
 // the analytic tangent.
 bool printPcTangentReport(const PcTangentCheck& c, double atol, double idtol, double ratioTol);
 
+// --- the second derivative, Eddot(u, v) (#152; pc_hessian.cpp) -----------------
+//
+// The check of nevpt2.energy's pcHessianDevice, at the golden's FIXED orbital
+// energies, along two directions built exactly as the tangent's
+// (`pcTangentDirection`: spin-free generators over the state's symmetry
+// mask, projected against the state and normalized) -- directions along
+// which S's dropped space TURNS but does not lift (docs/pc-nevpt2.md, "What
+// the cut drops, and how it moves"), so the rotation terms of
+// docs/hessian-theory.md, Sec. 6.2 are exercised:
+//
+//   1. THE TRANSCRIPTION. pcHessianDevice's own class energies against
+//      pcEnergiesDevice's, and its three-term Edot(u) / Edot(v) against
+//      pcTangentsDevice's two-term one at the same RDM sets -- equal at the
+//      eigenstate, to its convergence (the third term carries P K).
+//   2. EULER AT SECOND ORDER, exact (Sec. 4.3): a class homogeneous of degree
+//      2 has H c = grad E, so Eddot(c, u) == Edot(u) on the five classes
+//      kPcHomogeneousInCi marks. It costs no RDM build: the first-order set
+//      along c, and the (c, c) set, are 2 dm, and the second-order set at
+//      (c, u) is the tangent along u itself. It holds only at fixed orbital
+//      energies, which is the only mode there is.
+//   3. ONE CENTRAL DIFFERENCE OF THE THREE-TERM Edot, Richardson-verified:
+//      pcHessianDevice's first-order Edot(v) -- exact at ANY CI vector --
+//      at c(+-h) = (c +- h u) / ||c +- h u||, the tangent check's own
+//      unit-sphere path, so (Edot_v(c(h)) - Edot_v(c(-h))) / 2h -> Eddot(u, v)
+//      as O(h^2). Not pcTangentsDevice's two-term Edot: off the eigenstate it
+//      lacks -2 rho^T S_v P A x, and a difference of it converges to
+//      something else (Sec. 6.2). The path's second derivative does not
+//      enter: d/dh of Edot_v at h = 0 is v^T H c'(0) = v^T H u. The same
+//      direction and path constraints as the tangent's (pc_tangent.cpp,
+//      `pcTangentDirection` / `pcTangentStep`). Each step is two displaced
+//      states, each a plain and a tangent RDM build.
+//   4. A NEGATIVE CONTROL: the pair (u, w) with w a random vector of
+//      amplitudes, which breaks the state's symmetry, so S's dropped modes
+//      lift and the class must be REFUSED (PC_LIFT_TOL), never answered.
+//
+// A class refused by the gap or denominator check -- or for a lift along
+// (u, v) -- is REFUSED here too, and fails the gate; a refusal at a displaced
+// state is a Numerical Error naming the step, as the tangent's.
+struct PcHessianCheck {
+  // pcHessianDevice at (u, v): the energies, both first derivatives and the
+  // second, per class.
+  std::array<PcClassHessian, 8> classes{};
+  std::array<double, 8> energyRef{};  // pcEnergiesDevice's class energies
+  std::array<double, 8> edotURef{};   // pcTangentsDevice's Edot(u)
+  std::array<double, 8> edotVRef{};   // pcTangentsDevice's Edot(v)
+  // pcHessianDevice at (c, u): Eddot(c, u), per class, which must be
+  // edotURef on the homogeneous classes.
+  std::array<double, 8> eulerEddot{};
+  // pcHessianDevice at (u, w), the negative control.
+  std::array<PcClassHessian, 8> control{};
+  double eddotTotal = 0.0;  // sum of classes[].eddot
+  bool allDone = false;     // every class computed (none refused)
+  // The difference of Edot(v) along the path; fdClass / fdTotal are its
+  // quotients, err |fdTotal - eddotTotal|.
+  std::vector<PcFdStep> steps;
+  double richardson = 0.0;  // (4 fd(h) - fd(2h)) / 3 over the two finest steps
+  double richardsonErr = 0.0;
+  double seconds = 0.0;
+};
+
+// Runs the check on one state: as pcTangentFdCheck, with a second seed for v
+// (`seedU` draws u, the direction of the difference; `seedV` draws v, the
+// direction of the differenced tangent) and a third for the control's w.
+Result<PcHessianCheck> pcHessianFdCheck(const RdmBuildOptions& rdmOpt,
+                                        const NevptIntegralsDevice& ints, const Tensor& ci,
+                                        int64_t norb, int64_t nelecA, int64_t nelecB,
+                                        const Tensor& h2e, std::span<const double> steps,
+                                        std::uint64_t seedU, std::uint64_t seedV,
+                                        std::uint64_t seedControl, const DeviceResources& res);
+
+// Prints the per-class table (with each class's smallest kept S eigenvalue,
+// gap and lift), the control and the Richardson table, and the gate line
+// the `nevpt2_pc_hessian_*` ctest entries match: "PASS: the PC-NEVPT2
+// Hessian Eddot(u, v) matches Euler and the central difference of Edot ..."
+// or "FAIL: ...", naming the orbital-energy mode and the smallest kept s and
+// gap. Returns true -- and prints PASS -- only when all eight classes were
+// computed; each energy is within `idtol` of pcEnergiesDevice's and each
+// Edot within `edotTol` (relative, floor 1) of pcTangentsDevice's; Euler
+// holds to `idtol` relative on every homogeneous class; the control refused
+// at least one class for its lift and none otherwise; every ratio is within
+// `ratioTol` of 4 and they make a run of at least kPcMinFourfoldRun; every
+// displaced state carries a gap of at least PC_MIN_GAP; and the
+// extrapolation is within `atol` of Eddot(u, v).
+bool printPcHessianReport(const PcHessianCheck& c, double atol, double idtol, double edotTol,
+                          double ratioTol);
+
 }  // namespace nevpt2
