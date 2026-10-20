@@ -139,6 +139,12 @@ void gradientSr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
     mw.emplace(mixedWalkOf(*mix));
     mw->wDigest.push_back(
         ScGDot{&a16, make_a16(z1, z2, dm3, *w.f3acDot, *w.f3caDot, norb, dr)});
+    // The orbital pair (#158): v's digest-only build, the same at rot.dirs[1].
+    if (mix->pairForward) {
+      const ScRotationDir& v = rot.dirs[1];
+      mw->vDigest.push_back(
+          ScGDot{&a16, make_a16(z1, z2, dm3, *v.f3acDot, *v.f3caDot, norb, dr)});
+    }
     if (mix->forward) {
       const RdmTensors& t = *mix->dotU;
       mw->uDots = ciBlocks(t);
@@ -282,6 +288,11 @@ void gradientSi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
     mw.emplace(mixedWalkOf(*mix));
     mw->wDigest.push_back(
         ScGDot{&a22, make_a22(z1, z2, dm2, dm3, *w.f3acDot, *w.f3caDot, norb, dr)});
+    if (mix->pairForward) {  // the orbital pair (#158), as Sr's
+      const ScRotationDir& v = rot.dirs[1];
+      mw->vDigest.push_back(
+          ScGDot{&a22, make_a22(z1, z2, dm2, dm3, *v.f3acDot, *v.f3caDot, norb, dr)});
+    }
     if (mix->forward) {
       const RdmTensors& t = *mix->dotU;
       mw->uDots = ciBlocks(t);
@@ -474,6 +485,69 @@ void gradientSijrs(IntegralSource& src, int64_t batch, const Tensor& hostECore,
       const ScSlabMultiplierTangents t =
           plainMultiplierTangents(hostNorm, zeroT, delta, normDotW, zeroT, diffDotW);
       deltaAdjointInto(deltaOf, t.r, acc.dEdCoreDot, acc.dEdVirtDot);
+    }
+
+    // THE ORBITAL PAIR (#158), u = w and v = rot.dirs[1]: H_t is zero, so of
+    // K3-K5 only K3 (the 3x3 between (Ndot, 0, Ddot)[u] and [v]) and K4
+    // (N^{uv} = g'[u] theta'[v] + g'[v] theta'[u], theta linear in g) are here.
+    // Reverse, D's tangent along v -- D is linear in g at fixed P, so it is
+    // D's own formula at Pdot plus the same at g'[v] -- paired with g'[u].
+    if (!mix->pairForward && !mix->pairReverse) return;
+    const ScRotationDir& v = rot.dirs[1];
+    const ScSlabDots dotsU = slabDots({&slab}, {RotBlock::Sijrs}, w, rot.gen, dr);
+    const ScSlabDots dotsV = slabDots({&slab}, {RotBlock::Sijrs}, v, rot.gen, dr);
+    const DeviceTensor zeroSlab = DeviceTensor::zeros(slab.dims, dr);
+    const DeviceTensor& gu = dotsU.ptr[0] != nullptr ? *dotsU.ptr[0] : zeroSlab;
+    const DeviceTensor& gv = dotsV.ptr[0] != nullptr ? *dotsV.ptr[0] : zeroSlab;
+    const auto thetaOf = [&](const DeviceTensor& x) {
+      DeviceTensor t = deviceTransposeNew(x, {0, 3, 2, 1}, -1.0, dr);
+      deviceEinsumAccum("iajb->iajb", {&x}, t, 2.0, s);
+      return t;
+    };
+    const DeviceTensor thetaU = thetaOf(gu);
+    const DeviceTensor thetaV = thetaOf(gv);
+    const DeviceTensor nDotV = deviceEinsumNew("iajb,iajb->iajb", {&gv, &theta}, 1.0, dr);
+    deviceEinsumAccum("iajb,iajb->iajb", {&slab, &thetaV}, nDotV, 1.0, s);
+    const Tensor normDotV = downloadTensor(nDotV, s);
+    const std::vector<double> diffDotV = deltaOf(v.epsCoreDot, v.epsVirtDot);
+    acc.pairEdotV += dotHost(m.p, normDotV.data()) + dotHost(m.r, diffDotV);
+    if (mix->pairForward) {
+      const DeviceTensor nUV = deviceEinsumNew("iajb,iajb->iajb", {&gu, &thetaV}, 1.0, dr);
+      deviceEinsumAccum("iajb,iajb->iajb", {&gv, &thetaU}, nUV, 1.0, s);
+      const Tensor hostUV = downloadTensor(nUV, s);
+      ScPairTables pt{hostNorm, zeroT, normDotW, zeroT, zeroT, normDotV, zeroT,
+                      zeroT,    hostUV,   zeroT, zeroT, zeroT,
+                      zeroT,    zeroT};
+      // The guarded tuples (#158's temporary refusal): a tuple reads
+      // g[i,a,j,b] and, through theta, g[i,b,j,a].
+      {
+        const Tensor hg = downloadTensor(slab, s);
+        Tensor xMax(hg.dims());
+        for (int64_t i = 0; i < hg.dim(0); ++i)
+          for (int64_t a = 0; a < hg.dim(1); ++a)
+            for (int64_t j = 0; j < hg.dim(2); ++j)
+              for (int64_t bb = 0; bb < hg.dim(3); ++bb)
+                xMax(i, a, j, bb) = std::max(std::fabs(hg(i, a, j, bb)), std::fabs(hg(i, bb, j, a)));
+        acc.guarded += guardedCensus(hostNorm, xMax, hostUV);
+      }
+      acc.pair += pairTermsVia(
+          [&](const ScMixedTables& t, const std::vector<double>& dw,
+              const std::vector<double>& du, const std::vector<double>& dwu) {
+            return plainMixedTerms(t, delta, dw, du, dwu);
+          },
+          pt, diffDotW, diffDotV);
+    }
+    if (mix->pairReverse) {
+      const ScSlabMultiplierTangents t =
+          plainMultiplierTangents(hostNorm, zeroT, delta, normDotV, zeroT, diffDotV);
+      const DeviceTensor pDot = uploadTensor(t.p, dr);
+      const DeviceTensor dDot = deviceEinsumNew("iajb,iajb->iajb", {&pDot, &theta}, 1.0, dr);
+      deviceEinsumAccum("iajb,iajb->iajb", {&pDot, &slab}, dDot, 2.0, s);
+      deviceEinsumAccum("ibja,ibja->iajb", {&pDot, &slab}, dDot, -1.0, s);
+      deviceEinsumAccum("iajb,iajb->iajb", {&p, &thetaV}, dDot, 1.0, s);
+      deviceEinsumAccum("iajb,iajb->iajb", {&p, &gv}, dDot, 2.0, s);
+      deviceEinsumAccum("ibja,ibja->iajb", {&p, &gv}, dDot, -1.0, s);
+      acc.pairReverse += dotTensors(dDot, gu, dr) + dotHost(t.r, diffDotW);
     }
   });
 }
@@ -683,6 +757,19 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
     hTWU.emplace(DeviceTensor::zeros(rawDims, dr));
     hTWUInt.emplace(DeviceTensor::zeros(rawDims, dr));
   }
+  // The orbital pair's forward raw tables (#158): K4's two-slot pieces and
+  // K5's two halves. v's own pair is normTDot[1] / hTDot[1] above; k27 reads
+  // no digest, so every digests' share is zero here.
+  const bool pairForward = mw && mw->pairForward;
+  const bool pairReverse = mw && mw->pairReverse;
+  std::optional<DeviceTensor> normTUV, hTUV, hTUBlockV, hTVBlockU;
+  Tensor xMaxT(pairForward ? rawDims : std::vector<int64_t>{0, 0, 0});
+  if (pairForward) {
+    normTUV.emplace(DeviceTensor::zeros(rawDims, dr));
+    hTUV.emplace(DeviceTensor::zeros(rawDims, dr));
+    hTUBlockV.emplace(DeviceTensor::zeros(rawDims, dr));
+    hTVBlockU.emplace(DeviceTensor::zeros(rawDims, dr));
+  }
   forBatches(src.extent(ExtBlock::Srsi), batch, [&](int64_t b0, int64_t b1) {
     const DeviceTensor slab = src.slab(ExtBlock::Srsi, b0, b1, dr);
     const DeviceTensor slabT = src.slab(ExtBlock::SrsiT, b0, b1, dr);
@@ -712,6 +799,22 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
                      s);
       evalTermsTangent(srsiTerms(ga, gb, k27), none, mw->wuInt,
                        sliceAxis(*hTWUInt, 0, b0, b1), s);
+    }
+    if (pairForward) {
+      // The guarded tuples' integrals (#158's temporary refusal), this slab's rows.
+      const std::vector<ScTerm> terms = srsiTerms(ga, gb, dm1);
+      const Tensor rows = tupleIntegralMax({&terms}, {b1 - b0, nvirt, ncore}, s);
+      for (int64_t r = 0; r < b1 - b0; ++r)
+        for (int64_t q = 0; q < nvirt; ++q)
+          for (int64_t i = 0; i < ncore; ++i) xMaxT(b0 + r, q, i) = rows(r, q, i);
+      const ScSlabDots du = slabDots({&slab, &slabT}, kinds, rot.dirs[0], rot.gen, dr);
+      const ScSlabDots dv = slabDots({&slab, &slabT}, kinds, rot.dirs[1], rot.gen, dr);
+      evalTermsCross(srsiTerms(ga, gb, dm1), du.ptr, dv.ptr, sliceAxis(*normTUV, 0, b0, b1), s);
+      evalTermsCross(srsiTerms(ga, gb, k27), du.ptr, dv.ptr, sliceAxis(*hTUV, 0, b0, b1), s);
+      evalTermsMixed(srsiTerms(ga, gb, k27), du.ptr, gDots[1],
+                     sliceAxis(*hTUBlockV, 0, b0, b1), s);
+      evalTermsMixed(srsiTerms(ga, gb, k27), dv.ptr, gDots[0],
+                     sliceAxis(*hTVBlockU, 0, b0, b1), s);
     }
     if (cw) {
       // A CI direction moves neither slab: the active blocks' tangents alone.
@@ -807,6 +910,52 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
       if (mw->epsCi) deltaAdjointInto(deltaOf, t.r, acc.dEdCoreDot, acc.dEdVirtDot);
     }
   }
+  // The orbital pair (#158), over the same raw tables and the same triangle:
+  // v's pair is the tangent tables of direction 1. Reverse, its multiplier
+  // tangents are what pass 2 differentiates the pseudodensities with, and
+  // Rdot meets Ddot[u] here, once for the class.
+  std::optional<DeviceTensor> mpDotV, mqDotV;
+  if (pairForward || pairReverse) {
+    const ScRotationDir& u = rot.dirs[0];
+    const ScRotationDir& v = rot.dirs[1];
+    const Tensor zeroT(rawDims);
+    const Tensor normDotV = downloadTensor(normTDot[1], s);
+    const Tensor hDotV = downloadTensor(hTDot[1], s);
+    const std::vector<double> diffDotU = deltaOf(u.epsCoreDot, u.epsVirtDot);
+    const std::vector<double> diffDotV = deltaOf(v.epsCoreDot, v.epsVirtDot);
+    acc.pairEdotV += dotHost(m.p.data(), normDotV.data()) + dotHost(m.q.data(), hDotV.data()) +
+                     dotHost(m.r, diffDotV);
+    if (pairForward) {
+      acc.guarded += guardedCensus(hostNormT, xMaxT, downloadTensor(*normTUV, s));
+      const ScPairTables pt{hostNormT,
+                            hostHT,
+                            downloadTensor(normTDot[0], s),
+                            downloadTensor(hTDot[0], s),
+                            zeroT,
+                            normDotV,
+                            hDotV,
+                            zeroT,
+                            downloadTensor(*normTUV, s),
+                            downloadTensor(*hTUV, s),
+                            downloadTensor(*hTUBlockV, s),
+                            zeroT,
+                            downloadTensor(*hTVBlockU, s),
+                            zeroT};
+      acc.pair += pairTermsVia(
+          [&](const ScMixedTables& t, const std::vector<double>& dw,
+              const std::vector<double>& du, const std::vector<double>& dwu) {
+            return srsiMixedTerms(t, dw, du, dwu, hostECore, hostEVirt);
+          },
+          pt, diffDotU, diffDotV);
+    }
+    if (pairReverse) {
+      const ScSlabMultiplierTangents t = srsiMultiplierTangents(
+          hostNormT, hostHT, normDotV, hDotV, diffDotV, hostECore, hostEVirt);
+      mpDotV.emplace(uploadTensor(t.p, dr));
+      mqDotV.emplace(uploadTensor(t.q, dr));
+      acc.pairReverse += dotHost(t.r, diffDotU);
+    }
+  }
 
   // Pass 2: the pseudodensities, now that the multipliers exist. The M / E
   // accumulators are class-wide (shaped like dm1 and k27), so they are built
@@ -838,6 +987,21 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
       accumActiveDerivatives(hTerms, sliceAxis(*mqDotW, 0, b0, b1), mw->dActive, dr);
       accumActiveDerivativesAlong(normTerms, pRows, dots.ptr, mw->dActive, dr);
       accumActiveDerivativesAlong(hTerms, qRows, dots.ptr, mw->dActive, dr);
+    }
+    if (pairReverse) {
+      // The orbital pair (#158): this slab's share of D's and M_G's tangents
+      // along v, paired with u's dotted slabs and tangent block.
+      const ScSlabDots du = slabDots({&slab, &slabT}, kinds, rot.dirs[0], rot.gen, dr);
+      const ScSlabDots dv = slabDots({&slab, &slabT}, kinds, rot.dirs[1], rot.gen, dr);
+      std::vector<DeviceTensor> dDot;
+      dDot.push_back(DeviceTensor::zeros(slab.dims, dr));
+      dDot.push_back(DeviceTensor::zeros(slabT.dims, dr));
+      std::vector<ScActiveAccum> mDot;
+      accumDerivatives(normTerms, sliceAxis(*mpDotV, 0, b0, b1), dDot, mDot, dr);
+      accumDerivatives(hTerms, sliceAxis(*mqDotV, 0, b0, b1), dDot, mDot, dr);
+      accumDerivativesAlongAll(normTerms, pRows, dv.ptr, gDots[1], dDot, mDot, dr);
+      accumDerivativesAlongAll(hTerms, qRows, dv.ptr, gDots[1], dDot, mDot, dr);
+      acc.pairReverse += pairSlabDots(du, dDot, dr) + pairActiveAccums(mDot, gDots[0], dr);
     }
     ext += dotTensors(slab, dBlocks[0], dr) + dotTensors(slabT, dBlocks[1], dr);
     // The external half of the pairing, now that this slab's D exists.

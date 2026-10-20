@@ -52,6 +52,15 @@
 // computed in three-index form on a density-fitted one; the partition
 // :hessian_kk_check is where that lives, with its own PASS line.
 //
+// WITH --sc-hessian-kk IT CHECKS THE WHOLE ORBITAL BLOCK (#158): the second
+// term, the energy's own curvature in its inputs I'^T Ehat'' I' = K3 + K4 +
+// K5, forward against reverse, its intra-space exact zeros and its digests'
+// curvature against the energy stage's at the plain digest path's tangents --
+// and Eddot_kk(u, v) = <Ehat', I''> + the sandwich against Richardson-verified
+// ladders of the SC total itself along exp(s u + t v), out of the sidecar
+// (required); the partition :hessian_kk_sandwich_check, with its own PASS
+// line.
+//
 // A DENSITY-FITTED golden (`generate_golden.py --df`) runs here too (#165),
 // with no flag of its own: it carries its fitted four-index blocks beside the
 // B blocks, so the identities and --kappa-act read it as they read any
@@ -108,6 +117,9 @@ export import :hessian_kc_check;
 // --sc-hessian-kk-int: the orbital Hessian block's integral curvature
 // <Ehat', I''> = K1 + K2 (#154). Its own PASS line.
 export import :hessian_kk_check;
+// --sc-hessian-kk: the orbital Hessian block's sandwich and the whole block
+// Eddot_kk (#158). Its own PASS line.
+export import :hessian_kk_sandwich_check;
 
 import std;
 // nevpt2.cli: every flag this binary takes, and the ones it refuses.
@@ -394,6 +406,25 @@ int main(int argc, char** argv) {
     const nevpt2::GradGoldFile gg = *std::move(sidecar);
     const nevpt2::Result<bool> ok =
         checkScHessianKkIntegral(g, gg, dInts, dDm1, dDm2, rdm, opt.rdm, *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
+
+  // --sc-hessian-kk (#158): the orbital Hessian block's sandwich and the
+  // whole block (:hessian_kk_sandwich_check). The sidecar is required, as
+  // --sc-hessian-kk-int's is.
+  if (parsedOpts.scHessianKk) {
+    nevpt2::Result<nevpt2::GradGoldFile> sidecar = loadSidecar();
+    if (!sidecar) {
+      nevpt2::report(sidecar.error());
+      return 1;
+    }
+    const nevpt2::GradGoldFile gg = *std::move(sidecar);
+    const nevpt2::Result<bool> ok = checkScHessianKk(g, gg, dInts, dDm1, dDm2, rdm, opt.rdm, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

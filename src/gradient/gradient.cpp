@@ -1167,7 +1167,8 @@ Result<std::vector<ScOrbitalCurvatureResult>> scOrbitalCurvatureDevice(
   if (anyTangent && s.ci != nullptr)
     check(!s.opt.cublas && !s.opt.ozaki && !s.opt.fusedDigest,
           "scOrbitalCurvatureDevice: the digests' forward term runs the emitted or the native-fp64 "
-          "BLAS digest (cli refuses --cublas / --ozaki / --fused-digest with --sc-hessian-kk-int)");
+          "BLAS digest (cli refuses --cublas / --ozaki / --fused-digest with --sc-hessian-kk-int "
+          "and --sc-hessian-kk)");
 
   // The zero RDM tangents the digests' forward term reads, allocated once.
   std::optional<DeviceTensor> dm1Zero, dm2Zero, dm3Zero;
@@ -1336,6 +1337,151 @@ Result<double> scRestoredTracePairingDevice(const NevptIntegralsDevice& ints,
   const ScFullRotationResult r =
       pairDottedSets(ints, rdm, /*hbar=*/nullptr, {&traced}, {false}, res);
   return r.dirs[0].adjoint;
+}
+
+// --- the orbital block's sandwich, I'^T Ehat'' I' (#158) -----------------------
+
+Result<std::vector<ScOrbitalSandwichResult>> scOrbitalSandwichDevice(
+    const ScOrbitalSandwichSetup& s, const std::vector<ScOrbitalSandwichRequest>& pairs,
+    const DeviceResources& res) {
+  // A tangent built from an approximate digest is not the derivative of
+  // anything the energy stage computed; nevpt2.cli refuses the combination.
+  check(!s.opt.cublas && !s.opt.ozaki && !s.opt.fusedDigest,
+        "scOrbitalSandwichDevice runs the emitted or the native-fp64 BLAS digest (cli refuses "
+        "--cublas / --ozaki / --fused-digest with --sc-hessian-kk)");
+  NEVPT2_TRY(checkGeneralShapes(s.ints, s.gen));
+  const int64_t nmo = s.gen.nmo();
+  // Every pair is checked before any device work.
+  for (std::size_t q = 0; q < pairs.size(); ++q) {
+    NEVPT2_TRY(checkCurvatureDirection(pairs[q].u, nmo, q, "u"));
+    NEVPT2_TRY(checkCurvatureDirection(pairs[q].v, nmo, q, "v"));
+  }
+  if (s.ci.rank() != 2)
+    return err_config("scOrbitalSandwichDevice: the state is not an (nstringsA, nstringsB) CI vector");
+
+  FullBlockSource src(s.ints);
+  const ActiveIntegralsDevice ai = activeViewOf(s.ints);
+  const int64_t nc = s.gen.ncore, nv = s.gen.nvirt;
+  // The integrals the digest-only blocks are built at (:sc_classes' vDigest /
+  // wDigest), and the zero RDM sets the digests' reference walk reads.
+  const DeviceTensor zeroH1e = DeviceTensor::zeros(s.ints.h1e.dims, res);
+  const DeviceTensor zeroH2e = DeviceTensor::zeros(s.ints.h2e.dims, res);
+  std::optional<DeviceTensor> z1, z2, z3, zac, zca;
+  for (const ScOrbitalSandwichRequest& r : pairs)
+    if (r.digestReference && !z1) {
+      z1.emplace(DeviceTensor::zeros(s.rdm.dm1.dims, res));
+      z2.emplace(DeviceTensor::zeros(s.rdm.dm2.dims, res));
+      z3.emplace(DeviceTensor::zeros(s.rdm.dm3.dims, res));
+      zac.emplace(DeviceTensor::zeros(s.rdm.f3ac.dims, res));
+      zca.emplace(DeviceTensor::zeros(s.rdm.f3ca.dims, res));
+    }
+
+  std::vector<ScOrbitalSandwichResult> out;
+  out.reserve(pairs.size());
+  for (const ScOrbitalSandwichRequest& r : pairs) {
+    // u and v as the walk's two tangent directions, each with its digests'
+    // tangent attached (the RDM build at its own h2e'), so every tuple's Hdot
+    // carries the digests' share before the 3x3 meets it.
+    ScRotation rot = NEVPT2_TRY(makeGeneralRotation(
+        {ScRotationRequest{r.u, /*tangent=*/true}, ScRotationRequest{r.v, /*tangent=*/true}},
+        ai.h1e, ai.h2e, s.gen, s.rdm.dm1, res));
+    const std::vector<RdmBuildResult> digests =
+        attachDigestTangents(rot, s.opt, s.ci, s.nelecA, s.nelecB, res);
+
+    ScMixedDirection mix;
+    mix.epsKappa = true;
+    mix.pairForward = true;
+    mix.pairReverse = r.reverse;
+    mix.zeroH1e = &zeroH1e;
+    mix.zeroH2e = &zeroH2e;
+    // The CI side's orbital-energy tangents, which the walk state points at
+    // and the orbital pair never reads.
+    mix.epsCoreU = Tensor({nc});
+    mix.epsVirtU = Tensor({nv});
+    mix.epsCoreWU = Tensor({nc});
+    mix.epsVirtWU = Tensor({nv});
+    const ScGradientResult g =
+        assembleClasses(ai, src, /*batch=*/0, s.rdm.dm1, s.rdm.dm2, s.rdm.dm3, s.rdm.f3ac,
+                        s.rdm.f3ca, rot, /*adj=*/nullptr, /*epsAdjoint=*/false, /*ci=*/nullptr,
+                        &mix, res);
+
+    // #158's temporary refusal (Sec. 5.6; #190 replaces it with K6 and the
+    // proportionality test): no number for a (class, pair) whose guarded
+    // tuples carry a second-order contribution these terms do not.
+    std::string refused;
+    for (std::size_t c = 0; c < 8; ++c) {
+      const ScGuardedCensus& gc = g.classes[c].guarded;
+      if (!gc.refused()) continue;
+      refused += std::format("{}{} ({} of {} empty tuples populated by both directions, |N^uv| "
+                             "{:.2e} to {:.2e}, the rest <= {:.2e}; {} empty by the state)",
+                             refused.empty() ? "" : ", ", CLASSES[c], gc.populated, gc.empty,
+                             gc.populatedMin, gc.crossMax, gc.unpopulatedMax, gc.emptyByState);
+    }
+    if (!refused.empty())
+      return err_numerical(std::format(
+          "pair {}: the orbital Hessian along this pair has a guarded (empty) perturber both "
+          "directions populate -- {} -- whose second-order term K6, or the absence of any "
+          "Hessian along the pair, is not in K3-K5 (docs/hessian-theory.md, Sec. 5.6). Refused "
+          "rather than answered without it; the term is #190",
+          out.size(), refused));
+
+    ScOrbitalSandwichResult o;
+    for (std::size_t c = 0; c < 8; ++c) {
+      o.guarded[c] = g.classes[c].guarded;
+      o.classes[c] = g.classes[c].pair;
+      o.total += g.classes[c].pair;
+      o.edotU[c] = g.classes[c].mixedEdotW;
+      o.edotV[c] = g.classes[c].pairEdotV;
+      o.edotUTotal += o.edotU[c];
+      o.edotVTotal += o.edotV[c];
+      o.reverseClasses[c] = g.classes[c].pairReverse;
+      if (r.reverse) o.reverse += o.reverseClasses[c];
+    }
+    o.forward = o.total.total();
+    o.hasReverse = r.reverse;
+    o.h2eDotMaxU = maxAbsDevice(rot.dirs[0].h2eDot, res);
+    o.h2eDotMaxV = maxAbsDevice(rot.dirs[1].h2eDot, res);
+    o.f3DotMaxU = std::max(maxAbsDevice(digests[0].f3ac, res), maxAbsDevice(digests[0].f3ca, res));
+    o.f3DotMaxV = std::max(maxAbsDevice(digests[1].f3ac, res), maxAbsDevice(digests[1].f3ca, res));
+    if (r.digestReference) {
+      // The energy stage's own second derivative along the digests' tangents
+      // alone -- f3 enters only the H side, linearly, so this is the 3x3
+      // between the two digest-only triples, off the plain digest path's
+      // f3'[u], f3'[v] and the energy's own Hessian walk.
+      const RdmTensors zeroSet{*z1, *z2, *z3, *zac, *zca};
+      const RdmTensors dotU{*z1, *z2, *z3, digests[0].f3ac, digests[0].f3ca};
+      const RdmTensors dotV{*z1, *z2, *z3, digests[1].f3ac, digests[1].f3ca};
+      const EnergyHessianResult e =
+          energiesHessianDevice(ai, src, /*batch=*/0, s.rdm, dotU, dotV, zeroSet, res);
+      o.hasDigestReference = true;
+      o.digestReference = e.totalDDot;
+    }
+    out.push_back(o);
+  }
+  return out;
+}
+
+Result<std::vector<ScOrbitalHessianResult>> scOrbitalHessianDevice(
+    const ScOrbitalCurvatureSetup& s, const std::vector<ScOrbitalCurvatureRequest>& pairs,
+    const DeviceResources& res) {
+  if (s.ci == nullptr)
+    return err_config(
+        "scOrbitalHessianDevice: the sandwich's digests' tangents need the state (setup.ci)");
+  // The curvature settles every pair -- and refuses -- before its device work.
+  const std::vector<ScOrbitalCurvatureResult> curv =
+      NEVPT2_TRY(scOrbitalCurvatureDevice(s, pairs, res));
+  const ScOrbitalSandwichSetup ss{s.ints, s.gen, s.rdm, *s.ci, s.nelecA, s.nelecB, s.opt};
+  std::vector<ScOrbitalSandwichRequest> reqs;
+  reqs.reserve(pairs.size());
+  for (const ScOrbitalCurvatureRequest& p : pairs)
+    reqs.push_back(ScOrbitalSandwichRequest{p.u, p.v, p.tangent, false});
+  const std::vector<ScOrbitalSandwichResult> sand =
+      NEVPT2_TRY(scOrbitalSandwichDevice(ss, reqs, res));
+  std::vector<ScOrbitalHessianResult> out;
+  out.reserve(pairs.size());
+  for (std::size_t q = 0; q < pairs.size(); ++q)
+    out.push_back(ScOrbitalHessianResult{curv[q], sand[q]});
+  return out;
 }
 
 // --- PC-NEVPT2's reverse mode (#74) -------------------------------------------
