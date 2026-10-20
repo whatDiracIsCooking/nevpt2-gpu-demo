@@ -27,6 +27,10 @@
 //                                --sc-hessian-kk
 //   CliPcTangentFlagTests        --fd-steps / --fd-start-pow / --pc-hessian /
 //                                --pc-hessian-vector
+//   CliHessianRefusalTests       every Hessian flag of every binary at once
+//                                (#157): one binary each, refused by the
+//                                others naming it, every approximate digest
+//                                Unsupported beside it, the exact ones taken
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
 // textual std #include before any import.
@@ -382,6 +386,17 @@ Result<Options> parse(const Binary b, const std::vector<std::string_view>& extra
   std::vector<std::string_view> args{"--golden", "g.nevpt2gold"};
   args.insert(args.end(), extra.begin(), extra.end());
   return parseArgs(b, args);
+}
+
+// The Unsupported message any Hessian flag gets beside an approximate digest
+// (#157; docs/hessian-theory.md, Sec. 9.1), `digest` the one it names.
+std::string hessianDigestMessage(const std::string_view hessian, const std::string_view digest) {
+  return std::format(
+      "{} with {}: a second derivative built from an approximate digest is not the derivative "
+      "of anything the energy stage computed, so every Hessian runs the emitted digest or "
+      "--blas-digest alone; not --cublas, --ozaki or --fused-digest (docs/hessian-theory.md, "
+      "Sec. 9.1)",
+      hessian, digest);
 }
 
 // The matrix, written out by hand: the contract README.md ("Which binary
@@ -773,10 +788,8 @@ TEST(CliDemoFlagTests, ScHessianRefusesWhatTheTangentRefuses) {
     args.insert(args.end(), digest.begin(), digest.end());
     const Result<Options> r = parse(Binary::Demo, args);
     ASSERT_FALSE(r.has_value());
-    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
-    EXPECT_EQ(r.error().message,
-              "--sc-hessian runs the tangent RDM build, which is the emitted digest or "
-              "--blas-digest; not --cublas, --ozaki or --fused-digest");
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported);
+    EXPECT_EQ(r.error().message, hessianDigestMessage("--sc-hessian", digest.back()));
   }
   const Result<Options> pc = parse(Binary::Demo, {"--sc-hessian", "--pc"});
   ASSERT_FALSE(pc.has_value());
@@ -820,10 +833,8 @@ TEST(CliDemoFlagTests, ScHessianVectorRefusesWhatTheHessianRefuses) {
     args.insert(args.end(), digest.begin(), digest.end());
     const Result<Options> r = parse(Binary::Demo, args);
     ASSERT_FALSE(r.has_value());
-    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
-    EXPECT_EQ(r.error().message,
-              "--sc-hessian-vector runs the tangent RDM build, which is the emitted digest or "
-              "--blas-digest; not --cublas, --ozaki or --fused-digest");
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported);
+    EXPECT_EQ(r.error().message, hessianDigestMessage("--sc-hessian-vector", digest.back()));
   }
   const Result<Options> pc = parse(Binary::Demo, {"--sc-hessian-vector", "--pc"});
   ASSERT_FALSE(pc.has_value());
@@ -1141,10 +1152,8 @@ TEST(CliScPseudodensityFlagTests, ScHessianKcRefusesPcAndTheApproximateDigests) 
     args.insert(args.end(), digest.begin(), digest.end());
     const Result<Options> r = parse(Binary::ScPseudodensity, args);
     ASSERT_FALSE(r.has_value()) << digest.front();
-    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig) << digest.front();
-    EXPECT_EQ(r.error().message,
-              "--sc-hessian-kc runs the tangent RDM build and the digests' tangent, which are "
-              "the emitted digest or --blas-digest; not --cublas, --ozaki or --fused-digest");
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << digest.front();
+    EXPECT_EQ(r.error().message, hessianDigestMessage("--sc-hessian-kc", digest.front()));
   }
 }
 
@@ -1197,11 +1206,8 @@ TEST(CliScPseudodensityFlagTests, ScHessianKkIntRefusesPcAndTheApproximateDigest
     args.insert(args.end(), digest.begin(), digest.end());
     const Result<Options> r = parse(Binary::ScPseudodensity, args);
     ASSERT_FALSE(r.has_value()) << digest.front();
-    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig) << digest.front();
-    EXPECT_EQ(r.error().message,
-              "--sc-hessian-kk-int builds the digests' tangent at the second-order integrals, "
-              "which is the emitted digest or --blas-digest; not --cublas, --ozaki or "
-              "--fused-digest");
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << digest.front();
+    EXPECT_EQ(r.error().message, hessianDigestMessage("--sc-hessian-kk-int", digest.front()));
   }
 }
 
@@ -1253,11 +1259,8 @@ TEST(CliScPseudodensityFlagTests, ScHessianKkRefusesPcAndTheApproximateDigests) 
     args.insert(args.end(), digest.begin(), digest.end());
     const Result<Options> r = parse(Binary::ScPseudodensity, args);
     ASSERT_FALSE(r.has_value()) << digest.front();
-    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig) << digest.front();
-    EXPECT_EQ(r.error().message,
-              "--sc-hessian-kk builds the digests' tangents along each direction and at the "
-              "second-order integrals, which is the emitted digest or --blas-digest; not "
-              "--cublas, --ozaki or --fused-digest");
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << digest.front();
+    EXPECT_EQ(r.error().message, hessianDigestMessage("--sc-hessian-kk", digest.front()));
   }
 }
 
@@ -1458,6 +1461,106 @@ TEST(CliPcTangentFlagTests, ABadValueIsAConfigErrorNamingTheFlag) {
     ASSERT_FALSE(r.has_value()) << flag;
     EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
     EXPECT_EQ(r.error().message, std::format("{} takes an integer, not \"4.5\"", flag));
+  }
+}
+
+// --- CliHessianRefusalTests ---------------------------------------------------
+//
+// docs/hessian-theory.md, Sec. 9.1's flag-parsing rows, across every binary
+// and every Hessian flag at once (#157). The per-flag suites above hold each
+// flag's own combinations; these hold the matrix.
+
+// Every Hessian flag in the tree, and the one binary that implements it.
+struct HessianFlag {
+  std::string_view flag;
+  Binary binary;
+};
+constexpr std::array kHessianFlags{
+    HessianFlag{"--sc-hessian", Binary::Demo},
+    HessianFlag{"--sc-hessian-vector", Binary::Demo},
+    HessianFlag{"--sc-hessian-kc", Binary::ScPseudodensity},
+    HessianFlag{"--sc-hessian-kk-int", Binary::ScPseudodensity},
+    HessianFlag{"--sc-hessian-kk", Binary::ScPseudodensity},
+    HessianFlag{"--pc-hessian", Binary::PcTangent},
+    HessianFlag{"--pc-hessian-vector", Binary::PcTangent},
+};
+
+TEST(CliHessianRefusalTests, EachHessianFlagIsOneBinarysAlone) {
+  for (const HessianFlag& h : kHessianFlags)
+    for (const Binary b : kBinaries)
+      EXPECT_EQ(implements(b, h.flag), b == h.binary) << binaryName(b) << " " << h.flag;
+}
+
+// A Hessian flag on a binary that lacks it: Unsupported, naming the one that
+// has it -- never parsed and ignored.
+TEST(CliHessianRefusalTests, ABinaryThatLacksAHessianFlagRefusesItNamingTheOneThatHasIt) {
+  for (const HessianFlag& h : kHessianFlags) {
+    for (const Binary b : kBinaries) {
+      if (b == h.binary) continue;
+      const Result<Options> r = parse(b, {h.flag});
+      ASSERT_FALSE(r.has_value()) << binaryName(b) << " accepted " << h.flag;
+      EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << binaryName(b) << " " << h.flag;
+      EXPECT_TRUE(r.error().message.starts_with(std::format(
+          "{} does not implement {} (only {})", binaryName(b), h.flag, binaryName(h.binary))))
+          << r.error().message;
+    }
+  }
+}
+
+// Every approximate digest, alone and with the flags that ride on it, beside
+// every Hessian flag on its own binary: Unsupported, whatever finalize() would
+// have said of the digest flags (--fused-digest alone has no GEMM digest to
+// fuse; --cublas is refused outright on HIP) and whichever order they come in.
+// nevpt2_pc_tangent implements none of these, so it refuses the digest flag
+// itself -- Unsupported too, naming the binaries that take it.
+TEST(CliHessianRefusalTests, EveryHessianFlagRefusesEveryApproximateDigestAsUnsupported) {
+  struct Digest {
+    std::vector<std::string_view> args;
+    std::string_view named;  // the digest the message names
+  };
+  const std::vector<Digest> digests{
+      {{"--cublas"}, "--cublas"},
+      {{"--cublas", "--mantissa-bits", "40"}, "--cublas"},
+      {{"--cublas", "--fused-digest"}, "--cublas"},
+      {{"--ozaki"}, "--ozaki"},
+      {{"--ozaki", "--ozaki-pairs", "5"}, "--ozaki"},
+      {{"--ozaki", "--fused-digest"}, "--ozaki"},
+      {{"--fused-digest"}, "--fused-digest"},
+      {{"--fused-digest", "--blas-digest"}, "--fused-digest"},
+  };
+  for (const HessianFlag& h : kHessianFlags) {
+    for (const Digest& d : digests) {
+      for (const bool flagFirst : {true, false}) {
+        std::vector<std::string_view> args;
+        if (flagFirst) args.push_back(h.flag);
+        args.insert(args.end(), d.args.begin(), d.args.end());
+        if (!flagFirst) args.push_back(h.flag);
+        const Result<Options> r = parse(h.binary, args);
+        ASSERT_FALSE(r.has_value()) << h.flag << " " << d.args.front();
+        EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << h.flag << " " << d.args.front();
+        if (h.binary == Binary::PcTangent)
+          EXPECT_TRUE(r.error().message.starts_with(
+              std::format("nevpt2_pc_tangent does not implement {}", d.args.front())))
+              << r.error().message;
+        else
+          EXPECT_EQ(r.error().message, hessianDigestMessage(h.flag, d.named));
+      }
+    }
+  }
+}
+
+// And the exact digests are every Hessian flag's to run.
+TEST(CliHessianRefusalTests, EveryHessianFlagTakesTheExactDigests) {
+  for (const HessianFlag& h : kHessianFlags) {
+    for (const std::vector<std::string_view>& digest :
+         {std::vector<std::string_view>{}, std::vector<std::string_view>{"--blas-digest"},
+          std::vector<std::string_view>{"--digest-emitted"},
+          std::vector<std::string_view>{"--consume-emitted"}}) {
+      std::vector<std::string_view> args{h.flag};
+      args.insert(args.end(), digest.begin(), digest.end());
+      const Result<Options> r = parse(h.binary, args);
+      EXPECT_TRUE(r.has_value()) << h.flag << ": " << r.error().message;
+    }
   }
 }
 

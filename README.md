@@ -276,18 +276,19 @@ ignores it. `test/cli/` holds this matrix against the table:
 |---|:-:|:-:|:-:|:-:|
 | `--golden`, `--tiles`, `--pool-threshold` | ✓ | ✓ | ✓ | ✓ |
 | `--blas-digest`, `--digest-emitted`, `--consume-emitted` | ✓ | ✓ | ✓ | ✓ |
-| `--cublas`, `--mantissa-bits`, `--ozaki`, `--ozaki-pairs`, `--ozaki-check`, `--fused-digest` | ✓ | ✓ | ✓ | refused |
+| `--cublas`, `--mantissa-bits`, `--ozaki`, `--ozaki-pairs`, `--ozaki-check`, `--fused-digest` | ✓ (never with a Hessian flag) | ✓ | ✓ (never with a Hessian flag) | refused |
 | `--pc` | ✓ | ✓ | ✓ (`--dump-source-terms`, `--source-oracle`) | refused |
 | `--profile` | ✓ | ✓ | refused | refused |
 | `--rdm-tangent` | ✓ | ✓ | refused | refused |
 | `--sc-tangent`, `--gradient-source` | ✓ | ✓ | refused | refused |
-| `--sc-hessian`, `--sc-hessian-vector` | ✓ | refused | refused | refused |
+| `--sc-hessian`, `--sc-hessian-vector` | ✓ (exact digests) | refused | refused | refused |
 | `--batch`, `--check-blocks` | refused | ✓ | refused | refused |
-| `--kappa-act`, `--kappa-full`, `--sc-hessian-kc`, `--sc-hessian-kk-int`, `--sc-hessian-kk` | refused | refused | ✓ | refused |
+| `--kappa-act`, `--kappa-full` | refused | refused | ✓ | refused |
+| `--sc-hessian-kc`, `--sc-hessian-kk-int`, `--sc-hessian-kk` | refused | refused | ✓ (exact digests) | refused |
 | `--gradgold` | ✓ | refused | ✓ | refused |
 | `--dump-source-terms`, `--source-oracle` | refused | refused | ✓ | refused |
 | `--fd-steps`, `--fd-start-pow` | refused | refused | refused | ✓ |
-| `--pc-hessian`, `--pc-hessian-vector` | refused | refused | refused | ✓ |
+| `--pc-hessian`, `--pc-hessian-vector` | refused | refused | refused | ✓ (exact digests) |
 
 There is no `--df` row, on purpose (#165): a density-fitted case is a
 `*_df` golden, and the orbital-source-term flags (`--kappa-act`,
@@ -318,11 +319,9 @@ cannot run is an *invalid configuration* error (`--sc-tangent` with `--ozaki`,
 digest has no path for,
 `--kappa-act` with `--kappa-full`, `--dump-source-terms` with either,
 `--source-oracle` with any of the three, `--sc-hessian-kc` with any of the
-four or with `--pc`, `--cublas`, `--ozaki` or `--fused-digest` (#184),
-`--sc-hessian-kk-int` with any of the five or with `--pc`, `--cublas`,
-`--ozaki` or `--fused-digest` (#154),
-`--sc-hessian-kk` with any of the six or with `--pc`, `--cublas`, `--ozaki`
-or `--fused-digest` (#158),
+four or with `--pc` (#184),
+`--sc-hessian-kk-int` with any of the five or with `--pc` (#154),
+`--sc-hessian-kk` with any of the six or with `--pc` (#158),
 `--gradgold` without `--kappa-full`, `--sc-hessian-kc`, `--sc-hessian-kk-int`,
 `--sc-hessian-kk`, `--dump-source-terms` or `--source-oracle`, or in
 `nevpt2_demo` without `--gradient-source`, `--check-blocks` with
@@ -335,6 +334,17 @@ or `--fused-digest` (#158),
 with `--profile` is
 refused as *unsupported*, since none prints the tables, as is `nevpt2_df_demo
 --gradient-source --pc` (the PC source term has no density-fitted slab path).
+
+**The Hessian flags** (`--sc-hessian`, `--sc-hessian-vector`,
+`--sc-hessian-kc`, `--sc-hessian-kk-int`, `--sc-hessian-kk`, `--pc-hessian`,
+`--pc-hessian-vector`) are each one binary's, as the table says, and refuse
+`--cublas`, `--ozaki` and `--fused-digest` — with or without the flags that
+ride on them, in any order, on either backend — as *unsupported*, before any
+other check on the digest flags: a second derivative of an approximate digest
+is not the derivative of anything the energy stage computed (#157). They take
+a CASSCF-orbital golden as readily as a CASCI one, and every one has an entry
+on `n2_ccpvdz_cas44_casscf`. What else a Hessian refuses, and what it only
+reports, is [`docs/hessian-theory.md`](docs/hessian-theory.md), §9.1.
 
 ### The gradient checks
 
@@ -370,7 +380,8 @@ of an approximate digest is not the derivative of what the energy stage
 computed. `nevpt2_sc_pseudodensity` builds no tangent RDMs and takes any
 digest, except with `--kappa-full`, `--dump-source-terms`,
 `--sc-hessian-kc`, `--sc-hessian-kk-int` and `--sc-hessian-kk`, which build the digests' tangent
-(and `--sc-hessian-kc` the tangent RDM build) and refuse them too. `--sc-tangent` and `--gradient-source` run on both demos and refuse
+(and `--sc-hessian-kc` the tangent RDM build) and refuse them too — the first
+two as an invalid combination, the three Hessian flags as *unsupported*. `--sc-tangent` and `--gradient-source` run on both demos and refuse
 each other; `--gradient-source` has a `--pc` path (#74) on the integral-direct
 demo only, `--sc-tangent` none (the PC tangent's own check is
 `nevpt2_pc_tangent`).

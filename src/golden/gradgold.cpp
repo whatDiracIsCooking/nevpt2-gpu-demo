@@ -22,6 +22,28 @@ Status GradGoldFile::require(const std::initializer_list<std::string_view> names
   return {};
 }
 
+std::span<const std::string_view> GradGoldFile::generalInventoryNames() const {
+  static constexpr std::array<std::string_view, 21> kConventional{
+      "h",       "heff",    "f",       "g_xa_aa", "g_xv_aa",   "g_xc_aa",   "g_xa_va",
+      "g_xv_va", "g_xc_va", "g_xa_ca", "g_xv_ca", "g_xc_ca",   "g_xa_cv",   "g_xv_cv",
+      "g_xc_cv", "g_xa_cc", "g_xv_cc", "g_xc_cc_j", "g_xc_cc_k", "g_xa_vv", "g_xc_vv"};
+  static constexpr std::array<std::string_view, 9> kFitted{
+      "h", "heff", "f", "B_cc", "B_vv", "g_xa_cc", "g_xc_ca", "g_xa_vv", "g_xv_va"};
+  if (densityFitted()) return kFitted;
+  return kConventional;
+}
+
+Status GradGoldFile::requireGeneralInventory() const {
+  for (const std::string_view name : generalInventoryNames()) {
+    if (!arrays.contains(std::string(name)))
+      return err_io(std::format(
+          "gradient sidecar: missing required array '{}' of its general-range inventory; a "
+          "sidecar missing any of it is refused whole, never read in part",
+          name));
+  }
+  return {};
+}
+
 Status GradGoldFile::checkAgainst(const GoldenFile& golden) const {
   if (nact != golden.ncas || ncore != golden.ncore)
     return err_io(std::format(

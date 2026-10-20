@@ -131,9 +131,24 @@ int main(int argc, char** argv) {
     nevpt2::report(st.error());
     return 1;
   }
+  // --pc-hessian / --pc-hessian-vector (#157): level 1 differentiates the
+  // energy functional, which does not know how its orbitals were made, so a
+  // Hessian sits behind the SOURCE-TERM gate -- which takes a CASSCF golden as
+  // readily as a CASCI one -- and never behind the CASCI-only Lagrangian gate
+  // (docs/hessian-theory.md, Sec. 9.1). Before DeviceResources::create, so the
+  // gate touches no card.
+  if (parsedOpts.pcHessian || parsedOpts.pcHessianVector) {
+    if (const nevpt2::Status st = g.requireSourceTermReference(
+            parsedOpts.pcHessian ? "--pc-hessian" : "--pc-hessian-vector");
+        !st) {
+      nevpt2::report(st.error());
+      return 1;
+    }
+  }
 
-  std::print("=== PC-NEVPT2 CI tangent ({}/C++): CAS({},{})  ncore={}  n_det={} ===\n",
-             nevpt2::kGpuBackendName, norb, g.nelecA + g.nelecB, g.ncore, ndet);
+  std::print("=== PC-NEVPT2 CI tangent ({}/C++): CAS({},{})  ncore={}  n_det={}  reference={} ===\n",
+             nevpt2::kGpuBackendName, norb, g.nelecA + g.nelecB, g.ncore, ndet,
+             nevpt2::referenceKindName(g.reference));
   std::printf("golden reference: %s\n", opt.goldenPath.c_str());
 
   std::vector<double> steps;

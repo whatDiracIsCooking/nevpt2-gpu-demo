@@ -680,6 +680,7 @@ bool printPcHessianReport(const PcHessianCheck& c, double atol, double idtol, do
   double maxEnergyDelta = 0.0, maxEdotDelta = 0.0, maxEulerDelta = 0.0;
   double minKept = std::numeric_limits<double>::infinity();
   double minGap = std::numeric_limits<double>::infinity();
+  std::string_view minKeptClass = "-";
   const bool haveFd = !c.steps.empty();
   for (int i = 0; i < 8; ++i) {
     const PcClassHessian& k = c.classes[i];
@@ -712,7 +713,10 @@ bool printPcHessianReport(const PcHessianCheck& c, double atol, double idtol, do
     }
     std::string kept = "-", gap = "-";
     if (k.result.hasSpectrum) {
-      minKept = std::min(minKept, k.result.spectrum.smallestKept);
+      if (k.result.spectrum.smallestKept < minKept) {
+        minKept = k.result.spectrum.smallestKept;
+        minKeptClass = CLASSES[i];
+      }
       minGap = std::min(minGap, k.result.spectrum.gap);
       kept = std::format("{:.1e}", k.result.spectrum.smallestKept);
       gap = std::format("{:.1e}", k.result.spectrum.gap);
@@ -769,9 +773,11 @@ bool printPcHessianReport(const PcHessianCheck& c, double atol, double idtol, do
   // and 9.1), and the conditioning the rotation terms carry beside the gap
   // (Sec. 6.2).
   std::printf("\n%s: the PC-NEVPT2 Hessian Eddot(u, v) matches Euler and the central difference "
-              "of Edot (orbital energies held fixed; smallest kept s/s_max %.1e, smallest gap "
-              "%.1e; Richardson to %.0e, every ratio 4 +- %.1f, a run of %d)\n",
-              ok ? "PASS" : "FAIL", minKept, minGap, atol, ratioTol, kPcMinFourfoldRun);
+              "of Edot (orbital energies held fixed; smallest kept s/s_max %.1e (%s), smallest "
+              "gap %.1e against PC_MIN_GAP %.0e; Richardson to %.0e, every ratio 4 +- %.1f, a "
+              "run of %d)\n",
+              ok ? "PASS" : "FAIL", minKept, std::string(minKeptClass).c_str(), minGap,
+              PC_MIN_GAP, atol, ratioTol, kPcMinFourfoldRun);
   return ok;
 }
 
@@ -1033,22 +1039,27 @@ bool printPcHessianVectorReport(const PcHessianVectorCheck& c, double idtol, dou
       "  |H_cc u|     the class's share of the vector\n"
       "  Euler        ||H_cc c - y|| / ||y||, exact (0) only where the class is homogeneous of\n"
       "               degree 2; Sijr / Sij print theirs in brackets, Sijrs has y = 0\n"
+      "  kept s       the smallest kept eigenvalue of S over s_max: S^+ in the rotation terms\n"
+      "               scales as its inverse (the gap, PC_MIN_GAP's, does not bound it)\n"
+      "  gap          smallest kept / largest dropped, the ratio PC_MIN_GAP guards\n"
       "  lift         the dropped modes' lift along (u, u) over s_max (refused above "
       "PC_LIFT_TOL)\n");
-  std::printf("%-6s %18s %9s %14s %10s %9s %9s\n", "class", "walk Edot (Ha)", "|d Edot|",
-              "|H_cc u|", "Euler", "kept s", "lift");
+  std::printf("%-6s %18s %9s %14s %10s %9s %9s %9s\n", "class", "walk Edot (Ha)", "|d Edot|",
+              "|H_cc u|", "Euler", "kept s", "gap", "lift");
   bool ok = true;
   int computed = 0;
   double minKept = std::numeric_limits<double>::infinity();
+  double minGap = std::numeric_limits<double>::infinity();
+  std::string_view minKeptClass = "-";
   for (int i = 0; i < 8; ++i) {
     const std::size_t k = static_cast<std::size_t>(i);
     const PcClassResult& r = c.result[k];
     const char* name = CLASSES[k].c_str();
     if (r.status != PcStatus::Done) {
       ok = false;
-      std::printf("%-6s %18s %9s %14s %10s %9s %9.1e  (%s)\n", name,
+      std::printf("%-6s %18s %9s %14s %10s %9s %9s %9.1e  (%s)\n", name,
                   r.status == PcStatus::Refused ? "REFUSED" : "not yet", "-", "-", "-", "-",
-                  c.lift[k], r.why.empty() ? "not computed" : r.why.c_str());
+                  "-", c.lift[k], r.why.empty() ? "not computed" : r.why.c_str());
       continue;
     }
     ++computed;
@@ -1060,11 +1071,18 @@ bool printPcHessianVectorReport(const PcHessianVectorCheck& c, double idtol, dou
       ok = ok && c.euler[k] < idtol;
       euler = std::format("{:.2e}", c.euler[k]);
     }
-    const std::string kept =
-        r.hasSpectrum ? std::format("{:.1e}", r.spectrum.smallestKept) : std::string("-");
-    if (r.hasSpectrum) minKept = std::min(minKept, r.spectrum.smallestKept);
-    std::printf("%-6s %18.10f %9.2e %14.10f %10s %9s %9.1e\n", name, c.walkEdot[k], dEdot,
-                c.huNorm[k], euler.c_str(), kept.c_str(), c.lift[k]);
+    std::string kept = "-", gap = "-";
+    if (r.hasSpectrum) {
+      kept = std::format("{:.1e}", r.spectrum.smallestKept);
+      gap = std::format("{:.1e}", r.spectrum.gap);
+      if (r.spectrum.smallestKept < minKept) {
+        minKept = r.spectrum.smallestKept;
+        minKeptClass = CLASSES[k];
+      }
+      minGap = std::min(minGap, r.spectrum.gap);
+    }
+    std::printf("%-6s %18.10f %9.2e %14.10f %10s %9s %9s %9.1e\n", name, c.walkEdot[k], dEdot,
+                c.huNorm[k], euler.c_str(), kept.c_str(), gap.c_str(), c.lift[k]);
   }
   ok = ok && computed == 8 && c.allDone;
   if (!c.allDone) {
@@ -1190,9 +1208,10 @@ bool printPcHessianVectorReport(const PcHessianVectorCheck& c, double idtol, dou
 
   std::printf("\n%s: the PC-NEVPT2 Hessian-vector product H_cc u matches Eddot(u, v) by duality "
               "to %.0e and the finite difference of the three-term y per class (orbital energies "
-              "held fixed; smallest kept s/s_max %.1e; Richardson to %.0e, every ratio 4 +- %.1f, "
-              "a run of %d)\n",
-              ok ? "PASS" : "FAIL", dualTol, minKept, fdTol, ratioTol, kPcMinFourfoldRun);
+              "held fixed; smallest kept s/s_max %.1e (%s), smallest gap %.1e against "
+              "PC_MIN_GAP %.0e; Richardson to %.0e, every ratio 4 +- %.1f, a run of %d)\n",
+              ok ? "PASS" : "FAIL", dualTol, minKept, std::string(minKeptClass).c_str(), minGap,
+              PC_MIN_GAP, fdTol, ratioTol, kPcMinFourfoldRun);
   return ok;
 }
 

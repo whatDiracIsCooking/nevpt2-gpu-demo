@@ -251,8 +251,10 @@ Result<PcHessianCheck> pcHessianFdCheck(const RdmBuildOptions& rdmOpt,
 // gap and lift), the control and the Richardson table, and the gate line
 // the `nevpt2_pc_hessian_*` ctest entries match: "PASS: the PC-NEVPT2
 // Hessian Eddot(u, v) matches Euler and the central difference of Edot ..."
-// or "FAIL: ...", naming the orbital-energy mode and the smallest kept s and
-// gap. Returns true -- and prints PASS -- only when all eight classes were
+// or "FAIL: ...", naming the orbital-energy mode, the smallest kept s (and
+// its class) and the smallest gap beside PC_MIN_GAP -- printed, not refused
+// (docs/hessian-theory.md, Sec. 9.1; #194 owns the conditioning itself).
+// Returns true -- and prints PASS -- only when all eight classes were
 // computed; each energy is within `idtol` of pcEnergiesDevice's and each
 // Edot within `edotTol` (relative, floor 1) of pcTangentsDevice's; Euler
 // holds to `idtol` relative on every homogeneous class; the control refused
@@ -356,7 +358,10 @@ Result<PcHessianVectorCheck> pcHessianVectorCheck(const RdmBuildOptions& rdmOpt,
 
 // Prints the tables and the gate line the `nevpt2_pc_hessian_vector_*` ctest
 // entries match: "PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches
-// ..." or "FAIL: ...". True only when all eight classes were computed; the
+// ..." or "FAIL: ...", naming the orbital-energy mode, the smallest kept s
+// (and its class) and the smallest gap beside PC_MIN_GAP, printed rather than
+// refused (docs/hessian-theory.md, Sec. 9.1; #194 owns the conditioning
+// itself). True only when all eight classes were computed; the
 // walk's Edot(u) and <u, y> are within `idtol` of pcHessianDevice's
 // (relative, floor 1); every duality row, per class and summed, within
 // `dualTol` (relative, floor 1), and the symmetry likewise; Euler within

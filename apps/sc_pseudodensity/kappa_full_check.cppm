@@ -203,12 +203,11 @@ constexpr double kPcZeroTol = 1e-10;
 
 // The sidecar's arrays the source term reads -- `require`d before any of them
 // is get()'d, so a sidecar from an older generator is an IO Error naming the
-// missing array rather than an abort.
+// missing array rather than an abort, and the Hessian checks that read the
+// same inventory get the whole of it or nothing (nevpt2.golden's
+// requireGeneralInventory, which holds the list).
 nevpt2::Status requireGradientArrays(const nevpt2::GradGoldFile& gg) {
-  return gg.require({"h", "heff", "f", "g_xa_aa", "g_xv_aa", "g_xc_aa", "g_xa_va", "g_xv_va",
-                     "g_xc_va", "g_xa_ca", "g_xv_ca", "g_xc_ca", "g_xa_cv", "g_xv_cv",
-                     "g_xc_cv", "g_xa_cc", "g_xv_cc", "g_xc_cc_j", "g_xc_cc_k", "g_xa_vv",
-                     "g_xc_vv"});
+  return gg.requireGeneralInventory();
 }
 
 // The sidecar, uploaded. Everything it allocates is owned by the returned
@@ -252,8 +251,7 @@ nevpt2::GeneralIntegralsDevice uploadGeneral(const nevpt2::GradGoldFile& gg,
 nevpt2::Status requireDfGradientArrays(const nevpt2::GoldenFile& g,
                                        const nevpt2::GradGoldFile& gg) {
   NEVPT2_TRY(g.require({"B_aa", "B_ca", "B_va", "B_cv"}));
-  return gg.require(
-      {"h", "heff", "f", "B_cc", "B_vv", "g_xa_cc", "g_xc_ca", "g_xa_vv", "g_xv_va"});
+  return gg.requireGeneralInventory();
 }
 
 // The general-range inventory for either flavour of sidecar: uploaded as it

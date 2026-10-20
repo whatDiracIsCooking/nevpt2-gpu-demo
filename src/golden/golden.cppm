@@ -179,6 +179,19 @@ struct GradGoldFile {
   // GoldenFile::require's contract, on the sidecar's arrays.
   [[nodiscard]] Status require(std::initializer_list<std::string_view> names) const;
 
+  // The arrays the general-range inventory is built from -- what the orbital
+  // source term, H_kc and H_kk read: docs/gradient-theory.md, §3.3's
+  // four-index inventory and the three full-range matrices for a
+  // conventional sidecar; §3.8's B_cc / B_vv, the matrices and the four tied
+  // orbital-energy arrays for a density-fitted one.
+  [[nodiscard]] std::span<const std::string_view> generalInventoryNames() const;
+  // require(generalInventoryNames()): an IO Error naming the first one this
+  // sidecar lacks. Every reader of the inventory calls it before uploading
+  // any of it, so a sidecar missing one array is refused whole -- never a
+  // partial H_kk, which every identity pairing the two modes would miss
+  // alike (docs/hessian-theory.md, Sec. 9.1).
+  [[nodiscard]] Status requireGeneralInventory() const;
+
   // An IO Error unless this sidecar's orbital-space partition is the one
   // `golden` was written with: the same active space and the same core. A
   // sidecar is a SEPARATE file beside a golden and is found by name, so

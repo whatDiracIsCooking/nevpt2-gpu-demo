@@ -215,7 +215,9 @@ struct Options {
 // valued flag with no value: err_config, the message carrying the usage line.
 // A flag `b` does not implement: err_unsupported, naming the binaries that
 // do. A bad value or combination: err_config (err_unsupported for --cublas on
-// a build without it, and for --profile where nothing would print it).
+// a build without it, for --profile where nothing would print it, and for any
+// Hessian flag with --cublas, --ozaki or --fused-digest, which is checked
+// before the digest flags themselves; docs/hessian-theory.md, Sec. 9.1).
 Result<Options> parseArgs(Binary b, std::span<const std::string_view> args);
 
 // The usage line for `b`: its name and golden file, then every other flag it

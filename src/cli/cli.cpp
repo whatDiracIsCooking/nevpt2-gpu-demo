@@ -166,6 +166,10 @@ Result<Options> parseArgs(const Binary b, const std::span<const std::string_view
     if (*used) continue;
     if (Status st = parseOwnFlag(args, i, opt); !st) return std::unexpected(st.error());
   }
+  // Before finalize(), so a Hessian flag with an approximate digest is
+  // Unsupported whatever else finalize() would have said of the digest flags
+  // (--fused-digest with no GEMM digest, say, or --cublas on HIP).
+  if (Status st = checkHessianDigests(opt); !st) return std::unexpected(st.error());
   if (Status st = finalize(opt.common, goldenHint(b)); !st) return std::unexpected(st.error());
   if (Status st = checkOwnFlags(b, opt); !st) return std::unexpected(st.error());
   return opt;

@@ -1724,9 +1724,13 @@ code because two of its entries are not obvious.
 
 | situation | what must happen | why |
 |---|---|---|
-| `--cublas`, `--ozaki` or `--fused-digest` with any Hessian | **refuse**, `err_unsupported` at flag parsing, as the tangent flags already are ([`gradients.md`](gradients.md), §8) | a second derivative built from an approximate digest is not the derivative of anything the energy stage computed — the same argument as for a tangent, with the same force |
+| `--cublas`, `--ozaki` or `--fused-digest` with any Hessian | **refuse**, `err_unsupported` at flag parsing, before any other check on the digest flags (the tangent flags refuse the same digests as an invalid combination, [`gradients.md`](gradients.md), §8) | a second derivative built from an approximate digest is not the derivative of anything the energy stage computed — the same argument as for a tangent, with the same force |
+| a Hessian flag on a binary that does not implement it | **refuse**, `err_unsupported`, naming the binary that does | a flag parsed and then ignored answers a question nobody asked, under the name of the one they did |
 | a PC class the gap or denominator check refuses | **refuse** that class, `err_numerical` naming it, through the same status the energy, tangent and adjoint use | §6.2's licence is the structural cut. A refused class has no valid second derivative, and a zero would be a wrong answer rather than a missing one |
+| a PC (class, direction pair) along which the dropped modes lift: the Schur lift `L_uv = P (S_uv − S_u S⁺ S_v − S_v S⁺ S_u) P`, or `L_uu`, or `L_vv` (or, to first order, `P S_u P`), above round-off | **refuse** that (class, pair), `err_numerical` | along a direction that breaks the state's spatial symmetry the cut's dropped modes genuinely lift at `h²`, so the PC energy is not twice differentiable there (§6.2). A number would be the derivative of an energy whose rank changes under it |
+| a PC class whose kept `S` is ill-conditioned — a small smallest kept `s / s_max` — with its gap above `PC_MIN_GAP` | **not** a refusal: **print** it | `PC_MIN_GAP` guards the rank, not the `S⁺` conditioning §6.2's rotation terms carry; the derivative is still the energy's. Saying it on the PASS line is what keeps it visible |
 | a conventional case whose sidecar lacks the full MO-integral tensor K2 reads (§5.4), for a direction pair with neither member active–active | **refuse** `H_kk` | a partial `H_kk` is not a Hessian, and the omission would be invisible in every identity that pairs the two modes (both would omit it) — exactly how the §6 digest gap survived until #89 |
+| a sidecar missing any array of the inventory it is read for | **refuse** the whole sidecar | the same argument: a partial inventory is a partial `H_kk` (or `H_kc`) that no pairing of the two modes would notice |
 | a guarded tuple (`\|N_t\| <= NUMERICAL_ZERO`) that is **small**, a real perturber under the guard | **not** a refusal: contribute zero | the guard holds its energy at zero on a neighbourhood of the state, so zero is the derivative of the energy the code computes (§5.6) |
 | a guarded tuple **empty by the integrals**, populated by at most one direction of the pair, or by both with proportional tables (`rho_t` at round-off) | **not** a refusal: contribute §5.6's K6, which is K4 at the ray-limit multipliers | `E_t` is a quadratic form along the pair. A zero here was the earlier version of this row, and #158's ladders measured it as wrong. Sijrs always falls in this row and simply takes `P = -1/Delta` (§5.6) |
 | a guarded tuple **empty by the integrals** that both directions populate with non-proportional tables (`rho_t` above tolerance) | **refuse** that (class, pair), `err_numerical`, naming the class, the tuple count and the worst `rho_t` | the energy is not twice differentiable along the pair: the directional second derivatives exist but their polarisation is not bilinear (§5.6). A number here, even the one a ladder converges to, is not a Hessian element |
@@ -1739,16 +1743,25 @@ mode must stay available with a weaker check, and one reference kind must
 **not** inherit a refusal that the first-derivative path has for reasons that
 do not apply here.
 
-*As built* (#190), the four guarded-tuple rows are `scOrbitalSandwichDevice`'s
-(`nevpt2.gradient_plan`'s `emptyTermPacked`). A small tuple contributes zero
-and is never scored. An integral-empty tuple both directions populate adds
-K6 at the ray-limit multipliers. Sijrs takes its own `P = -1/Delta` on every
-guarded tuple, through an unguarded finish at every order (`sijrsMultipliers`),
-so its first-order terms are exact too. A (class, pair) whose worst `rho_t`
-exceeds `kRhoTol` is refused as `err_numerical`, naming the class, the tuple
-count and the worst `rho_t`, and so is any tuple empty by the state. The
-thresholds and the device's separations are in
-[`testing.md`](testing.md), "The orbital block's sandwich".
+**As built** (#157 tabulates it; the flags are #152–#158, #184 and #190).
+Seven Hessian flags exist: `nevpt2_demo --sc-hessian` / `--sc-hessian-vector`
+(`H_cc`), `nevpt2_sc_pseudodensity --sc-hessian-kc` / `--sc-hessian-kk-int` /
+`--sc-hessian-kk` (`H_kc`, `H_kk`'s two terms and the whole block) and
+`nevpt2_pc_tangent --pc-hessian` / `--pc-hessian-vector` (PC's `H_cc`). Each
+row above, as the tree has it:
+
+| row | as built | held by |
+|---|---|---|
+| approximate digest with any Hessian | `nevpt2.cli`'s `checkHessianDigests`, run in `parseArgs` **before** `finalize()`, so the kind is `err_unsupported` whatever else the digest flags would have drawn (`--fused-digest` with no GEMM digest, `--cublas` on HIP). `nevpt2_pc_tangent` implements none of the three, so it refuses the digest flag itself — `err_unsupported` too | `test/cli`'s `CliHessianRefusalTests`, every flag × every digest, both orders |
+| a Hessian flag on the wrong binary | the binary/flag table (`nevpt2.cli:binary_flags`; README.md, "Which binary takes which flag"): `err_unsupported`, "only `<binary>`" | `CliHessianRefusalTests`, `CliMatrixTests` |
+| a PC class the gap or denominator check refuses | the class comes back `PcStatus::Refused` with its reason, through the status the energy, tangent and adjoint use; the run FAILs | the PC Hessian entries' own tables |
+| the PC Schur lift above round-off | `pcHessianDevice` (`P S_u P`, `P S_v P`, `L_uv`, `L_uu`, `L_vv`) and `pcCiHessianVectorDevice` (`P S_u P` and `L_uu`), relative to `s_max` against `PC_LIFT_TOL`, `err_numerical` through the class's status (#152, #155). Each check's negative control — a symmetry-breaking direction — must be refused for its lift, or the run FAILs. The separation the threshold sits in is [`pc-nevpt2.md`](pc-nevpt2.md), "What the cut drops, and how it moves" | `nevpt2_pc_hessian_cas44`, `nevpt2_pc_hessian_vector_cas44` and their `_casscf` twins |
+| PC conditioning | printed, never refused: each PC Hessian table has a `kept s` and a `gap` column, and each PASS line names the smallest kept `s / s_max`, its class, and the smallest gap against `PC_MIN_GAP`. What that conditioning costs is #194's | the PC Hessian entries' regexes ([`testing.md`](testing.md), "The Hessian on CASSCF orbitals") |
+| K2 with neither direction active–active, conventional | `scOrbitalCurvatureDevice` refuses the pair as `err_unsupported`, never K1 alone (#154; a fitted case takes the three-index route instead; widening it is #180). `Eddot_kk` keeps the refusal | `--sc-hessian-kk-int`'s refusal checks |
+| a sidecar missing an array | `GradGoldFile::requireGeneralInventory` (`nevpt2.golden`), which every reader of the general-range inventory — `--kappa-full`, `--source-oracle`, all three orbital Hessian flags — calls before uploading any of it: `err_io` naming the array, the whole sidecar refused | `test/golden`'s `GradGoldCas44Tests` / `GradGoldDfCas44Tests`: the committed sidecars with each array erased in turn |
+| the four guarded-tuple rows | `scOrbitalSandwichDevice` (`nevpt2.gradient_plan`'s `emptyTermPacked`, #190). A small tuple contributes zero and is never scored. An integral-empty tuple both directions populate adds K6 at the ray-limit multipliers. Sijrs takes its own `P = -1/Delta` on every guarded tuple, through an unguarded finish at every order (`sijrsMultipliers`), so its first-order terms are exact too. A (class, pair) whose worst `rho_t` exceeds `kRhoTol` is refused as `err_numerical`, naming the class, the tuple count and the worst `rho_t`, and so is any tuple empty by the state | `--sc-hessian-kk`'s entries, whose PASS line counts the refused pairs; the thresholds and separations are [`testing.md`](testing.md), "The orbital block's sandwich" |
+| Euler with the orbital-energy response on | the one block with a responding mode is `H_kc`: `--sc-hessian-kc` runs its FULL mode (the orbital energies responding to `kappa` and to `c`), prints that Euler is **skipped** there and why, and gates Euler in its EULER mode (held fixed in `c`); its PASS line names both. The `H_cc` flags run at fixed orbital energies only and say so on their PASS lines; `--gradgold` beside them is an invalid configuration, because nothing would read it — `H_cc`'s responding mode is not built | `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kc`'s regex |
+| a `casscf`-kind golden | every Hessian flag passes `requireSourceTermReference`, which accepts both kinds, before any card is touched; `requireLagrangianReference` still has no call site in `src/` | one entry per flag on `n2_ccpvdz_cas44_casscf` ([`testing.md`](testing.md), "The Hessian on CASSCF orbitals") |
 
 ## 10. What this settles, and what it does not
 
