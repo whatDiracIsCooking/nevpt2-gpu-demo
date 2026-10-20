@@ -103,18 +103,25 @@ add_cxx_module_library(
 # tangent: it drives nevpt2.energy's pcTangentsDevice at one state and its
 # pcEnergiesDevice at the displaced states c +- h u -- and, for --pc-hessian
 # (#152), the check of the second derivative pcHessianDevice, which
-# differences pcTangentsDevice itself at those states. It links the RDM build
+# differences its own three-term Edot at those states, and for
+# --pc-hessian-vector (#155) of PC's H_cc u (below), which differences the
+# three-term y. It links the RDM build
 # AND the energy stage (as nevpt2.gradient now does, for the digests' orbital
 # response), because that is what a displaced state costs: nevpt2::rdm_host_dm rebuilds its dm1/dm2 on the host
 # (the golden file's arrays are only the state's own) and nevpt2::rdm_build
 # its dm3/f3ac/f3ca on the device. nevpt2::gradient_plan (host-only) is for
 # longestFourfoldRun, the step-ladder rule its report gates on.
 # apps/pc_tangent/ is the only binary that links it.
+#
+# nevpt2::gradient is PRIVATE (#155): --pc-hessian-vector checks its
+# pcCiHessianVectorDevice, PC's H_cc u, and differences its three-term y --
+# the implementation unit's business; the interface names none of its types.
 add_cxx_module_library(
   NAME nevpt2.pc_tangent
   PRIMARY_INTERFACE pc_tangent.cppm
   IMPLEMENTATION pc_tangent.cpp
   LINK_PUBLIC nevpt2::energy nevpt2::rdm_build nevpt2::rdm_host_dm nevpt2::gradient_plan
+  LINK_PRIVATE nevpt2::gradient
 )
 
 # nevpt2.ci_checks -- the two checks of the energy's CI-vector derivative the

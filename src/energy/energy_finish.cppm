@@ -9,7 +9,8 @@
 // finish (pcRankCut, finishSingle, checkDenominator), the PC TANGENT's per-tuple
 // arithmetic (pcCoefficients, pcQuadForm, tangentSingle) and its SECOND
 // derivative's (pcQuadSecond, pcRotationBlocks, hessianSingle, hessianPair,
-// pcLiftNorm -- #152), with the PC result
+// pcLiftNorm -- #152) and that derivative's reverse in v, the per-tuple bars
+// of PC's H_cc u and the three-term y (pcAdjointSecond* -- #155), with the PC result
 // types they all fill. No device, no BLAS, no solver: nevpt2.energy
 // re-exports this module, and its partitions (:sc_finish, :sc_tangent,
 // :pc_solve, :pc_tangent, the class files) do the device work and call these.
@@ -396,6 +397,16 @@ struct PcClassHessian {
 // real h^2 lift is at least 1.1e-2. 1e-5 sits between them with almost three
 // decades of margin either way.
 inline constexpr double PC_LIFT_TOL = 1e-5;
+
+// The refusal's `why` for a relative lift above PC_LIFT_TOL: one wording for
+// pcHessianDevice (#152) and the PC Hessian-vector product (#155), which
+// refuse the same (class, direction) for the same reason.
+std::string pcLiftRefusalWhy(double lift) {
+  return std::format(
+      "S's dropped modes lift along this direction pair (|P S P|, |L| / s_max = {:.1e} > "
+      "PC_LIFT_TOL {:.0e}): the energy is not twice differentiable here",
+      lift, PC_LIFT_TOL);
+}
 
 // The cut and the gap check, on S's eigenvalues `s` in ASCENDING order (as
 // syevd returns them), so the dropped modes are a prefix: every s_k <=
@@ -1047,6 +1058,237 @@ double pcRotationTangentPair(const Tensor& y, const Tensor* x, const Tensor& ydo
     edot -= 2.0 * (2.0 * duu - qUU) - (duv + dvu - qUV);
   }
   return edot;
+}
+
+// --- PC: the adjoint's third term and its tangent along a CI direction (#155) --
+//
+// Reverse mode of pcQuadSecond, in v. The PC CI source term y is the gradient
+// of Edot(v) with respect to everything v enters -- the rows y_v = U^T b_v
+// and r_v = Vn b_v, the (m, m) block alpha_v = mK_v + Delta nS_v and the
+// (nd, m) blocks G_v = Vn S_v U, H_v = Vn K_v U (docs/hessian-theory.md,
+// Sec. 6.2; pcQuadSecond's header has the notation) -- and H_cc u is the
+// gradient, in the same objects, of Eddot(u, v)'s part that is bilinear in
+// the two first-order sets (the part linear in the second-order set is
+// <y's adjoint, X_uv>, which is the second sigma call's). Per quadratic form
+// Q of weight w (E = sum_rows w Q):
+//
+//   THE THIRD TERM (y at any CI vector): Q_v carries -2 g^T C G_v^T H_0 g, so
+//     dE/dG_v += -2 w (H_0 g)(C g)^T                               (gbar3)
+//   pcAdjointSingle / pcAdjointPair carry the other two (ybar, mgg).
+//
+//   ALONG u, with e = D (y_u - alpha_u g), the solve of the tangent's
+//   residual, and Cg = C g, Gc = G_u C g:
+//     dE/dy_v     += 2 w e                                         (ybarDot)
+//     dE/dalpha_v += -2 w e g^T                                    (mggDot; Delta-weighted:
+//                                                                   mggDotDelta)
+//     dE/dr_v     += 2 w Gc                                        (rbarDot)
+//     dE/dH_v     += -2 w Gc g^T                                   (hbarDot)
+//     dE/dG_v     += -2 w Delta Gc g^T - 2 w ((H_u + Delta G_u) g)(Cg)^T
+//                    + 2 w (G_u y)(Cg)^T                           (gbarDot)
+//
+// read off Q_uv's 6.1 cross term 2 (y_u - alpha_u g)^T D (y_v - alpha_v g)
+// and its rotation R1 + R2 + R3. The pair classes are polarised exactly as
+// hessianPair does it -- rows a (weight -2), a + b (+1/4), a - b (-1/4) -- and
+// each row's bars flow back onto a and b. The caller (nevpt2.gradient's
+// :pc_classes) takes these through T_v = S_v U, N_v = S_v Vn^T, t1_v, n1_v
+// and U / Vn sandwiches onto dE/dS, dE/dK, dE/dS_1, then the class's own
+// sweep. Separate code from pcQuadSecond, so the duality <v, H_cc u> ==
+// Eddot(u, v) against it compares two computations (test/energy_finish's
+// PcAdjointSecondTests holds the two to each other on the host).
+
+// One class's blocks: `C` = U^T U (m, m) and `H0` = Vn sym(K) U (nd, m) for
+// the third term (both empty when nd = 0); with `direction`, the tangent
+// set's mK_u / nS_u (m, m) and G_u / H_u (nd, m; empty when nd = 0).
+struct PcAdjointBlocks {
+  int64_t m = 0, nd = 0;
+  std::vector<double> C, H0;
+  bool direction = false;
+  std::vector<double> mKu, nSu, Gu, Hu;
+};
+
+// The per-class accumulators, (re)sized by pcAdjointSecondZeros.
+struct PcAdjointSecond {
+  std::vector<double> gbar3;                // (nd, m)
+  std::vector<double> mggDot, mggDotDelta;  // (m, m), row-major, not symmetrised
+  std::vector<double> gbarDot, hbarDot;     // (nd, m)
+  double edotU = 0.0;  // the three-term Edot(u) over the rows seen: a free check
+};
+
+PcAdjointSecond pcAdjointSecondZeros(const PcAdjointBlocks& b) {
+  const std::size_t mm = narrowTo<std::size_t>(b.m * b.m), nm = narrowTo<std::size_t>(b.nd * b.m);
+  PcAdjointSecond a;
+  a.gbar3.assign(nm, 0.0);
+  if (b.direction) {
+    a.mggDot.assign(mm, 0.0);
+    a.mggDotDelta.assign(mm, 0.0);
+    a.gbarDot.assign(nm, 0.0);
+    a.hbarDot.assign(nm, 0.0);
+  }
+  return a;
+}
+
+// One slab's bars on its rows: target 0's (`ybarDot` (nt, m), `rbarDot`
+// (nt, nd)) and, for a two-tensor pair, target 1's (`xbarDot`, `rxbarDot`);
+// all empty without a direction.
+struct PcSlabAdjointSecond {
+  std::vector<double> ybarDot, xbarDot, rbarDot, rxbarDot;
+};
+
+// One quadratic form of weight `w`: its row y (m) and, with a direction, y_u
+// (m). The bars on this row are ADDED to `ybarDot` (m) / `rbarDot` (nd).
+void pcAdjointSecondRow(std::span<const double> y, std::span<const double> yu,
+                        const std::vector<double>& lambda, double delta, double w,
+                        const PcAdjointBlocks& b, PcAdjointSecond& acc, std::span<double> ybarDot,
+                        std::span<double> rbarDot) {
+  const std::size_t m = narrowTo<std::size_t>(b.m), nd = narrowTo<std::size_t>(b.nd);
+  check(y.size() == m && lambda.size() == m, "pcAdjointSecondRow: a row is not m long");
+  check(!b.direction || (yu.size() == m && ybarDot.size() == m && rbarDot.size() == nd),
+        "pcAdjointSecondRow: the direction's row or bars are the wrong length");
+  std::vector<double> g(m), cg(m, 0.0), h0g(nd, 0.0);
+  for (std::size_t k = 0; k < m; ++k) g[k] = y[k] / (lambda[k] + delta);
+  if (nd > 0) {
+    for (std::size_t k = 0; k < m; ++k)
+      for (std::size_t l = 0; l < m; ++l) cg[k] += b.C[k * m + l] * g[l];
+    for (std::size_t i = 0; i < nd; ++i)
+      for (std::size_t l = 0; l < m; ++l) h0g[i] += b.H0[i * m + l] * g[l];
+    for (std::size_t i = 0; i < nd; ++i)
+      for (std::size_t k = 0; k < m; ++k) acc.gbar3[i * m + k] += -2.0 * w * h0g[i] * cg[k];
+  }
+  if (!b.direction) return;
+
+  std::vector<double> au(m, 0.0), e(m);
+  double gyu = 0.0, gau = 0.0;
+  for (std::size_t k = 0; k < m; ++k) {
+    for (std::size_t l = 0; l < m; ++l) au[k] += (b.mKu[k * m + l] + delta * b.nSu[k * m + l]) * g[l];
+    e[k] = (yu[k] - au[k]) / (lambda[k] + delta);
+    gyu += g[k] * yu[k];
+    gau += g[k] * au[k];
+    ybarDot[k] += 2.0 * w * e[k];
+  }
+  for (std::size_t k = 0; k < m; ++k)
+    for (std::size_t l = 0; l < m; ++l) {
+      const double c = -2.0 * w * e[k] * g[l];
+      acc.mggDot[k * m + l] += c;
+      acc.mggDotDelta[k * m + l] += delta * c;
+    }
+  double third = 0.0;
+  if (nd > 0) {
+    std::vector<double> gc(nd, 0.0), z(nd, 0.0), guy(nd, 0.0);
+    for (std::size_t i = 0; i < nd; ++i)
+      for (std::size_t k = 0; k < m; ++k) {
+        const double gu = b.Gu[i * m + k];
+        gc[i] += gu * cg[k];
+        z[i] += (b.Hu[i * m + k] + delta * gu) * g[k];
+        guy[i] += gu * y[k];
+      }
+    for (std::size_t i = 0; i < nd; ++i) {
+      third += gc[i] * h0g[i];
+      rbarDot[i] += 2.0 * w * gc[i];
+      for (std::size_t k = 0; k < m; ++k) {
+        acc.hbarDot[i * m + k] += -2.0 * w * gc[i] * g[k];
+        acc.gbarDot[i * m + k] += -2.0 * w * delta * gc[i] * g[k] - 2.0 * w * z[i] * cg[k] +
+                                  2.0 * w * guy[i] * cg[k];
+      }
+    }
+  }
+  acc.edotU += w * (2.0 * gyu - gau - 2.0 * third);
+}
+
+// The single-coupling classes (Sr, Si, Srs, Sij, Sir), E_t = -factor Q(t):
+// `y` (nt, m) and, with a direction, `yu` (nt, m), else null.
+PcSlabAdjointSecond pcAdjointSecondSingle(const Tensor& y, const Tensor* yu,
+                                          const std::vector<double>& lambda,
+                                          const std::vector<double>& delta, double factor,
+                                          const PcAdjointBlocks& b, PcAdjointSecond& acc) {
+  const int64_t nt = std::ssize(delta), m = b.m, nd = b.nd;
+  check(y.size() == nt * m && (!b.direction || (yu != nullptr && yu->size() == nt * m)),
+        "pcAdjointSecondSingle: the rows must be (tuples, m)");
+  PcSlabAdjointSecond out;
+  if (b.direction) {
+    out.ybarDot.assign(narrowTo<std::size_t>(nt * m), 0.0);
+    out.rbarDot.assign(narrowTo<std::size_t>(nt * nd), 0.0);
+  }
+  const auto rowOf = [&](const Tensor* x, int64_t t) {
+    if (x == nullptr || !b.direction) return std::span<const double>();
+    return std::span<const double>(x->data().data() + t * m, narrowTo<std::size_t>(m));
+  };
+  for (int64_t t = 0; t < nt; ++t) {
+    std::span<double> yb, rb;
+    if (b.direction) {
+      yb = std::span<double>(out.ybarDot.data() + t * m, narrowTo<std::size_t>(m));
+      rb = std::span<double>(out.rbarDot.data() + t * nd, narrowTo<std::size_t>(nd));
+    }
+    pcAdjointSecondRow(std::span<const double>(y.data().data() + t * m, narrowTo<std::size_t>(m)),
+                       rowOf(yu, t), lambda, delta[narrowTo<std::size_t>(t)], -factor, b, acc, yb,
+                       rb);
+  }
+  return out;
+}
+
+// The two-coupling classes (Sijr, Srsi), pcAdjointPair's two layouts: the
+// exchange row is `x`'s (with `xu` along the direction) or, with `x` null,
+// row partner[t] of `y` itself, its bars folded back onto that row.
+PcSlabAdjointSecond pcAdjointSecondPair(const Tensor& y, const Tensor* x, const Tensor* yu,
+                                        const Tensor* xu, std::span<const int64_t> partner,
+                                        const std::vector<double>& lambda,
+                                        const std::vector<double>& delta, const PcAdjointBlocks& b,
+                                        PcAdjointSecond& acc) {
+  const int64_t nt = std::ssize(delta), m = b.m, nd = b.nd;
+  check(y.size() == nt * m && (x != nullptr ? x->size() == nt * m : std::ssize(partner) == nt),
+        "pcAdjointSecondPair: the exchange rows are a second (tuples, m) tensor or a partner map");
+  check(!b.direction || (yu != nullptr && yu->size() == nt * m &&
+                         (x == nullptr || (xu != nullptr && xu->size() == nt * m))),
+        "pcAdjointSecondPair: the direction's rows must be shaped like the rows");
+  PcSlabAdjointSecond out;
+  if (b.direction) {
+    out.ybarDot.assign(narrowTo<std::size_t>(nt * m), 0.0);
+    out.rbarDot.assign(narrowTo<std::size_t>(nt * nd), 0.0);
+    if (x != nullptr) {
+      out.xbarDot.assign(narrowTo<std::size_t>(nt * m), 0.0);
+      out.rxbarDot.assign(narrowTo<std::size_t>(nt * nd), 0.0);
+    }
+  }
+  const std::size_t um = narrowTo<std::size_t>(m), und = narrowTo<std::size_t>(nd);
+  std::vector<double> row(um), rowU(um), ybs(um), rbs(und);
+  for (int64_t t = 0; t < nt; ++t) {
+    const int64_t pt = x != nullptr ? t : partner[narrowTo<std::size_t>(t)];
+    check(pt >= 0 && pt < nt, "pcAdjointSecondPair: a partner outside the slab");
+    const double* ya = y.data().data() + t * m;
+    const double* yb = (x != nullptr ? *x : y).data().data() + pt * m;
+    const double* ua = b.direction ? yu->data().data() + t * m : nullptr;
+    const double* ub = b.direction ? (x != nullptr ? *xu : *yu).data().data() + pt * m : nullptr;
+    double* barA = b.direction ? out.ybarDot.data() + t * m : nullptr;
+    double* rA = b.direction ? out.rbarDot.data() + t * nd : nullptr;
+    double* barB = !b.direction ? nullptr
+                   : x != nullptr ? out.xbarDot.data() + t * m
+                                  : out.ybarDot.data() + pt * m;
+    double* rB = !b.direction ? nullptr
+                 : x != nullptr ? out.rxbarDot.data() + t * nd
+                                : out.rbarDot.data() + pt * nd;
+    // (sign of b in the row, weight): a, a + b, a - b.
+    for (const auto [sb, w] : {std::pair{0.0, -2.0}, std::pair{1.0, 0.25}, std::pair{-1.0, -0.25}}) {
+      for (std::size_t k = 0; k < um; ++k) {
+        row[k] = ya[k] + sb * yb[k];
+        if (b.direction) rowU[k] = ua[k] + sb * ub[k];
+      }
+      std::fill(ybs.begin(), ybs.end(), 0.0);
+      std::fill(rbs.begin(), rbs.end(), 0.0);
+      pcAdjointSecondRow(row, b.direction ? std::span<const double>(rowU) : std::span<const double>(),
+                         lambda, delta[narrowTo<std::size_t>(t)], w, b, acc,
+                         b.direction ? std::span<double>(ybs) : std::span<double>(),
+                         b.direction ? std::span<double>(rbs) : std::span<double>());
+      if (!b.direction) continue;
+      for (std::size_t k = 0; k < um; ++k) {
+        barA[k] += ybs[k];
+        barB[k] += sb * ybs[k];
+      }
+      for (std::size_t i = 0; i < und; ++i) {
+        rA[i] += rbs[i];
+        rB[i] += sb * rbs[i];
+      }
+    }
+  }
+  return out;
 }
 
 }  // namespace nevpt2

@@ -76,6 +76,9 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   the PC tangent that binary already owns. Like the rest of
 //                   that binary it runs the emitted or the native-fp64 BLAS
 //                   digest only, which the table refuses the others for.
+//                   --pc-hessian-vector is its too (#155): PC's H_cc u,
+//                   gated against --pc-hessian's Eddot by duality, with the
+//                   same ladder flags; the two are one check at a time.
 //   --gradgold      nevpt2_sc_pseudodensity (--kappa-full, --dump-source-terms,
 //                   --source-oracle)
 //                   and nevpt2_demo (--gradient-source, whose y_I and forward
@@ -115,6 +118,7 @@ constexpr std::array kFlagTable{
     FlagSpec{"--fd-steps", "N", kPcTangent},
     FlagSpec{"--fd-start-pow", "N", kPcTangent},
     FlagSpec{"--pc-hessian", "", kPcTangent},
+    FlagSpec{"--pc-hessian-vector", "", kPcTangent},
 };
 
 // The usage line for `b`, without usage()'s trailing newline (an Error's
@@ -187,6 +191,8 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
     opt.fdStartPow = *v;
   } else if (a == "--pc-hessian") {
     opt.pcHessian = true;
+  } else if (a == "--pc-hessian-vector") {
+    opt.pcHessianVector = true;
   } else {
     // In the table, and neither parser takes it: our bug, not the user's.
     check(false, "nevpt2.cli: a flagTable() row that neither parser handles");
@@ -368,6 +374,10 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
       if (opt.fdStartPow < kMinFdStartPow || opt.fdStartPow > kMaxFdStartPow)
         return err_config(
             std::format("--fd-start-pow must be in {}..{}", kMinFdStartPow, kMaxFdStartPow));
+      if (opt.pcHessian && opt.pcHessianVector)
+        return err_config(
+            "--pc-hessian and --pc-hessian-vector are two different checks of the PC energy's "
+            "second derivative; run one at a time");
       return {};
   }
   check(false, "checkOwnFlags: not a Binary");

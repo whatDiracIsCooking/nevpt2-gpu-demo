@@ -33,6 +33,13 @@
 // Edot(v) along u -- the Hessian's one finite difference
 // (docs/hessian-theory.md, Sec. 6 and 9).
 //
+// With --pc-hessian-vector (#155) it checks the VECTOR H_cc u instead,
+// nevpt2.gradient's pcCiHessianVectorDevice, per class: the duality
+// <v, H_cc u> == Eddot(u, v) against --pc-hessian's pcHessianDevice, the
+// symmetry, Euler as a vector, the same negative control, and one
+// Richardson-verified difference of the GPU's own three-term y
+// (docs/hessian-theory.md, Sec. 4.2 and 6.2).
+//
 // It is the only caller of nevpt2.pc_tangent; the demos do not link it.
 
 // A module unit, so each binary is apps/<app>/{main.cppm,CMakeLists.txt}.
@@ -204,6 +211,46 @@ int main(int argc, char** argv) {
     }
     const bool ok = nevpt2::printPcHessianReport(*hess, kHessAtol, kHessIdTol, kHessEdotTol,
                                                  kHessRatioTol);
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return ok ? 0 : 1;
+  }
+
+  // --pc-hessian-vector (#155): the VECTOR H_cc u by reverse over forward
+  // (nevpt2.pc_tangent's pcHessianVectorCheck), against --pc-hessian's
+  // Eddot(u, v) by duality and a per-class central difference of the GPU's
+  // own three-term y along u. u is --pc-hessian's (kSeed), and its first v
+  // is too, so the duality's first row is that entry's Eddot.
+  if (parsedOpts.pcHessianVector) {
+    constexpr std::array<std::uint64_t, 3> kSeedsV = {0x5eed'0152u, 0x5eed'1155u, 0x5eed'2155u};
+    constexpr std::uint64_t kSeedControl = 0x5eed'c155u;
+    // The tolerances, each with its reason (the measured residuals are in
+    // docs/pc-nevpt2.md, "The Hessian-vector product, H_cc u"):
+    //   kHvIdTol    the walk's own Edot(u) / <u, y> against pcHessianDevice's,
+    //               and Euler -- algebra, so rounding only;
+    //   kHvDualTol  the duality and the symmetry: two computations of the
+    //               same algebra that share only the per-class blocks;
+    //   kHvFdTol    the per-class Richardson extrapolation of the difference
+    //               of y against H_cc u, relative;
+    //   the ratio band, as the other two checks'.
+    constexpr double kHvIdTol = 1e-9;
+    constexpr double kHvDualTol = 1e-9;
+    constexpr double kHvFdTol = 1e-8;
+    constexpr double kHvRatioTol = 0.5;
+    std::printf("duality directions v: seeds 0x%llx, 0x%llx, 0x%llx and the state; negative "
+                "control seed=0x%llx\n",
+                static_cast<unsigned long long>(kSeedsV[0]),
+                static_cast<unsigned long long>(kSeedsV[1]),
+                static_cast<unsigned long long>(kSeedsV[2]),
+                static_cast<unsigned long long>(kSeedControl));
+    const nevpt2::Result<nevpt2::PcHessianVectorCheck> hv = nevpt2::pcHessianVectorCheck(
+        opt.rdm, dInts, g.get("ci"), norb, g.nelecA, g.nelecB, g.get("h2e"), steps, kSeed,
+        kSeedsV, kSeedControl, *res);
+    if (!hv) {
+      nevpt2::report(hv.error());
+      return 1;
+    }
+    const bool ok =
+        nevpt2::printPcHessianVectorReport(*hv, kHvIdTol, kHvDualTol, kHvFdTol, kHvRatioTol);
     nevpt2::printPoolHighWater("for the whole run", *res);
     return ok ? 0 : 1;
   }

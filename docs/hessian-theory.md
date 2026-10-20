@@ -1205,6 +1205,32 @@ below the first real mode. A cut raised to drop physics
 genuinely non-null modes into `P` and make the energy depend on the cut at
 first order already.
 
+**The vector, `H_cc u`.** §4.2 carries over unchanged: `H_cc u = sigma(gdot[u],
+c) + sigma(g, u)`, with `g` PC's adjoint. `F_uv` above is bilinear in the two
+first-order sets `(S_u, K_u, S_1u)` and `(S_v, K_v, S_1v)`, apart from its
+linear part `2 b_uv^T x - x^T A_uv x`, which is `g` paired with the
+second-order set (the second sigma call). So `gdot[u]` is the gradient of that
+bilinear part with respect to the `v` set, at fixed `u` — §6.2's formula read
+in reverse in `v`, rotation terms included, through `y_v = U^T b_v`,
+`r_v = Vn b_v`, `alpha_v` and the dropped blocks `Vn S_v U`, `Vn K_v U` —
+and then the class's own RDM sweep, which is linear in its accumulators. No
+eigenvector derivative appears here either. The `g` beside it is the
+**three-term** one: its first-order part carries `-2 rho^T S_v P A x`, so
+`y = sigma(g, c)` is the energy's gradient at any CI vector. That is the
+function a finite difference of `y` at displaced states differences. The two
+forms agree at an exact eigenstate.
+
+In the tree (#155) this is `nevpt2.gradient`'s `pcCiHessianVectorDevice`, with
+`pcCiSourceThreeTermDevice` for the three-term `y` alone. It reuses
+`pcHessianDevice`'s own per-class blocks (`nevpt2.energy`'s
+`pcClassDirection`), applies the same refusals (gap, denominator, and the
+lift along `(u, u)`), and holds the orbital energies fixed. Its gate is
+`nevpt2_pc_tangent --pc-hessian-vector` ([`testing.md`](testing.md), "The PC
+Hessian-vector product's checks"). That gate runs the duality against
+`pcHessianDevice`, and a per-class difference of the three-term `y`. The
+difference is the only check that sees the rotation terms: the duality would
+still pass if both sides omitted them.
+
 ### 6.3 Why PC gains relative to SC here
 
 PC's first derivative is the harder of the two — it differentiates a solve and
@@ -1412,7 +1438,10 @@ holds the vector against the reverse walk's own `y` directly, independent of
 `Eddot`. #184's adds the mixed block's, §5.5's one difference of the gated
 `y` along `kappa`, run along each of the directions `--kappa-full` and
 `--kappa-act` displace: unlike `H_cc u`'s it is not redundant, being the one
-check that sees C5.
+check that sees C5. PC's `H_cc u` (#155) has the same kind of ladder, of the
+three-term `y`, per class, and for PC it is not redundant either: the duality
+against `pcHessianDevice` cannot see §6.2's rotation terms, because both sides
+share the blocks they are built from.
 
 ### 9.1 What a second derivative must refuse, and what it must merely say
 

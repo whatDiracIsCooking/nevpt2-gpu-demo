@@ -221,7 +221,8 @@ In dependency order:
                                             build rerun at the dotted h2e),
                                             and H_cc u, the walk behind y_I
                                             differentiated along a CI
-                                            direction (#156);
+                                            direction, SC's (#156) and PC's
+                                            (#155);
                                             re-exports the amplitudes and the
                                             plan. A LEAF: nothing in src/
                                             imports it
@@ -229,11 +230,12 @@ In dependency order:
                      nevpt2.pc_tangent      the PC CI-tangent check: the
                                             analytic tangent against a finite
                                             difference of the displaced
-                                            states. A LEAF; with
+                                            states, and the checks of PC's
+                                            Eddot and H_cc u. A LEAF; with
                                             nevpt2.gradient, one of the two
                                             modules that link the RDM build
                                             and the energy stage both
-                     (energy, rdm_build, rdm_host_dm)
+                     (energy, rdm_build, rdm_host_dm; gradient privately)
   cli .............. nevpt2.cli             every golden-reading binary's flags,
                                             and the binary/flag table
                                             (:binary_flags)              (no GPU)

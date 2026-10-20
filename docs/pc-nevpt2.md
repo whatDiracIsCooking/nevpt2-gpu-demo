@@ -1009,6 +1009,70 @@ the golden's CI residual (4.3e-7, above), and `S^+` amplifies that by up to
 against 7e-16 at CAS(4,4). Meeting a 1e-8 gate at that conditioning would need
 a tighter CI vector, not a different step.
 
+### The Hessian-vector product, H_cc u
+
+`pcCiHessianVectorDevice` (`src/gradient/gradient.cpp`, over the
+`:pc_classes` partition, #155) is PC's reverse mode at second order. It takes
+the PC adjoint's walk and differentiates it along `u`, then makes two sigma
+calls, `H_cc u = sigma(gdot[u], c) + sigma(g, u)`
+([`hessian-theory.md`](hessian-theory.md), §4.2). `gdot[u]` comes from the
+same per-class blocks `pcHessianDevice` builds (`pcClassDirection` wraps that
+path's `tangentClass` and `rotationTangent`). Those blocks are taken in
+reverse in `v` (`pcAdjointSecond*`, the reverse of `pcQuadSecond`), with §6.2's
+rotation terms, and then through the class's own RDM sweep. The `y` it makes
+is the **three-term** one: the device adjoint plus `-2 rho^T S_v P A x`. That
+`y` is the gradient at any CI vector, and `pcCiSourceThreeTermDevice` returns
+it alone. `pcCiSourceDevice`'s two-term `y` is unchanged.
+
+`nevpt2_pc_tangent --pc-hessian-vector` checks it ([`testing.md`](testing.md),
+"The PC Hessian-vector product's checks", has the gates). `u` and the first
+`v` are `--pc-hessian`'s seeds; the other two `v` are `0x5eed1155` and
+`0x5eed2155`, and the control `w` is `0x5eedc155`. RTX 3080, CUDA, `default`
+preset, emitted digest, `--tiles 3`, steps halving from `2^-12`, five runs
+(2026-10-20; the RDM build's `atomicAdd`s reassociate, so the residuals move
+run to run):
+
+| `n2_ccpvdz_cas44` | value |
+|---|---|
+| `‖H_cc u‖`, Sr / Sir (Sijrs and Si: exactly 0) | 0.3266513567 / 5.0565814852 |
+| `<v, H_cc u>` against `Eddot(u, v)`, worst over classes, four `v` | 3.0e-13 relative (≤5.3e-14 in four of the five runs) |
+| `<v, H_cc u>` against `<u, H_cc v>` | ≤8.9e-14 (on 5.3056290740 Eh) |
+| the walk's own `Edot(u)` / `<u, y>` against `pcHessianDevice`'s | ≤6.4e-16 / ≤7.4e-16 |
+| Euler `‖H_cc c - y‖ / ‖y‖`, worst of the five homogeneous classes | 4.9e-14 (Sir) |
+| ratios of the four-step ladder, every class and the total | 3.988 – 4.018 |
+| Richardson against `H_cc u`, relative: Sr / Sir / worst class (Sij) / total | ≤1.3e-11 / ≤2.0e-11 / ≤1.8e-10 / ≤1.2e-10 |
+| the same, projected on the first `v` (`--pc-hessian`'s difference of `Edot(v)`, read through `y`) | 2.6e-11 – 3.4e-11 Eh |
+| lift along `(u, u)`, Sr / Si / Sir | ≤3.4e-15 / 1.4e-14 / ≤7.2e-16 |
+| lift along the control `w`, Sr / Si / Sir (refused) | 0.43 / 0.40 / 0.098 |
+| wall | 0.9 s |
+
+**With either piece removed, the difference fails.** These are two diagnostic
+runs, each with one term switched off by a temporary edit that is not in the
+tree. Both used the same card, flags and seeds.
+
+- **Difference the two-term `y` instead.** Sr's error stays at 0.94 of
+  `‖H_cc u‖` at every step (ratio 1.000). Sir's ratios fall from 3.92 to
+  3.16 and then 1.51, and its Richardson value misses by 1.3e-6 relative.
+  The duality still passes, because neither of its two sides moved.
+- **Drop the rotation terms from `gdot[u]`.** The duality fails against
+  `pcHessianDevice`: Sr by 4.9e-2 – 5.4e-2 relative, Sir by 1.5e-6. The
+  difference plateaus: Sr at 1.9 relative, and Sir's Richardson value misses
+  by 3.5e-6.
+
+**Why there is no CAS(8,8) entry.** `n2_ccpvdz_cas88` fails the same way, and
+for the same reason, as "The second derivative, Eddot(u, v)" above (three
+diagnostic runs, not a ctest entry, 51 s each). Its smallest kept
+`s / s_max` is 1.0e-10 (Sr), and `‖H_cc u‖` is 1.0e4 for Sr. The ladder is
+fourfold from `2^-12` for every class but Srs, whose last ratio is 2.48 at
+its kept `s` of 5.6e-7. Sr's Richardson value is 4.2e-6 relative off `H_cc u`.
+From `2^-16` the difference stays 4.3e-6 – 5.0e-6 off: it has converged.
+Projected on the first `v`, the offset is 5.7e-6 Eh. That is
+`--pc-hessian`'s own 5.5e-6 Eh above, the same quantity read a second way.
+The duality's worst class is ≤3.4e-9 relative, the symmetry ≤1.7e-7 Eh on
+30.19 Eh, and Euler 1.1e-7 (Sr). The formula is §6.2's at the eigenstate,
+which holds only to the golden's CI residual (4.3e-7), and `S^+` amplifies
+that by up to `1e10`. The fix would be a tighter CI vector, not a looser gate.
+
 ## The source terms by reverse mode
 
 #74 gives PC what SC has had since #73–#89: `y_I = dE_pc/dc_I` and

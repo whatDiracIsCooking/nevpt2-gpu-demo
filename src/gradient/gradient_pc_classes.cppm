@@ -46,7 +46,11 @@
 // vanishes). (It is why the
 // PC CI step must be small in a finite difference -- the lifted modes are
 // SECOND order -- and not a term of the derivative: docs/testing.md, "The PC
-// CI source term's step is a first-order trap".)
+// CI source term's step is a first-order trap".) Off the eigenstate the term
+// does not vanish, and a y without it is not the gradient there: the CI walk
+// below (PcCiWalk, #155) carries it -- the three-term y a finite difference
+// at displaced states needs -- and differentiates the whole walk along a CI
+// direction for H_cc u.
 //
 // FROM THAT IDENTITY, everything the two source terms need, per class:
 //
@@ -219,6 +223,56 @@ std::array<DeviceTensor, 2> evalTargets(const PcClassWalk& w,
   return out;
 }
 
+// THE CI WALK (#155): what a class's reverse walk adds for PC's H_cc u
+// (docs/hessian-theory.md, Sec. 4.2 and 6.2), at the golden's fixed orbital
+// energies. Null in pcClassAdjoint: the plain adjoint (#74), whose y carries
+// the first derivative's two terms -- exact at the eigenstate, where it is
+// evaluated.
+//
+// `threeTerm`: y carries the third, -2 rho^T S_v P A x, so it is the gradient
+// of the energy at ANY CI vector -- what a finite difference of y at
+// displaced states must difference (Sec. 6.2: it vanishes only where P K = 0).
+// Its adjoint is one (nd, m) block, gbar3, taken onto dE/dS through the
+// solve's own dropped eigenvectors.
+//
+// `sumU` non-null (implies threeTerm): the RDMs plus their tangent along u.
+// The walk then also runs the class's slab einsum against T_u (the class's
+// matrices' tangent along u, through pcClassDirection: the same tangentClass
+// / rotationTangent pcHessianDevice uses), takes nevpt2.energy_finish's
+// pcAdjointSecond* -- the reverse, in v, of pcQuadSecond's bilinear part --
+// down to dE_dot/dS, dE_dot/dK, dE_dot/dS_1 through T_v = S_v U,
+// N_v = S_v Vn^T, alpha_v and the dropped blocks G_v, H_v, and sweeps them
+// into `adjDot` with the class's own sweep: gdot[u]. `sumUU` (the RDMs plus
+// the second-order set at (u, u)) is the lift test's, as pcHessianDevice's
+// along the pair (u, u): a class whose dropped modes leave zero at first
+// order (|P S_u P|) or second (L_uu) above PC_LIFT_TOL relative to s_max is
+// REFUSED, never zeroed.
+struct PcCiWalk {
+  bool threeTerm = false;
+  const PcRdms* sumU = nullptr;
+  const PcRdms* sumUU = nullptr;
+  ScRdmAdjoint* adjDot = nullptr;
+};
+
+// ||x||_F of a host block.
+double frobeniusHost(const std::vector<double>& x) {
+  double s = 0.0;
+  for (const double v : x) s += v * v;
+  return std::sqrt(s);
+}
+
+// target += sym(Vn^T X U^T), X (nd, m) on the host, Vn (nd, d), Ut (m, d):
+// a dropped-kept block's adjoint taken onto a (d, d) matrix gradient.
+void addSymDroppedKept(const DeviceTensor& vn, const std::vector<double>& x, int64_t nd,
+                       int64_t m, const DeviceTensor& ut, const DeviceTensor& target,
+                       const DeviceResources& res) {
+  const DeviceTensor dx = uploadTensor(Tensor::fromFlat({nd, m}, x), res);
+  const DeviceTensor xu = deviceEinsumNew("kl,lq->kq", {&dx, &ut}, 1.0, res);   // (nd, d)
+  const DeviceTensor full = deviceEinsumNew("kp,kq->pq", {&vn, &xu}, 0.5, res); // (d, d)
+  addTensorInto(full, target, res.stream());
+  deviceTransposeAccum(full, {1, 0}, target, 1.0, res.stream());
+}
+
 // One class, in reverse: the solve, the slab walk (energy, dE/dT, dE/dt1,
 // mgg, R, and per direction the external pairing and the forward tangent),
 // then dE/dK paired with every direction's Kdot and -- with `adj` -- dE/dS,
@@ -227,26 +281,83 @@ std::array<DeviceTensor, 2> evalTargets(const PcClassWalk& w,
 // `zeroF3` is the RDM bundle with zero digests: what a rotation's Kdot is
 // built from (the f3 addends of a16 / a22 carry no integral). A class the
 // solve or the denominator check refuses comes back with that status and
-// nothing accumulated that anyone may read.
+// nothing accumulated that anyone may read. `ci` non-null: PcCiWalk's
+// additions (it needs `adj` and no rotation).
 Status pcClassAdjoint(const PcClassWalk& w, const ActiveIntegralsDevice& ai, IntegralSource& src,
                       int64_t batch, const Tensor& hostEC, const Tensor& hostEV,
                       const PcRdms& rdm, const PcRdms& zeroF3, const ScRotation& rot,
-                      PcClassGradient& acc, ScRdmAdjoint* adj, const DeviceResources& dr) {
+                      PcClassGradient& acc, ScRdmAdjoint* adj, const PcCiWalk* ci,
+                      const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const char* name = CLASSES[static_cast<std::size_t>(w.cls)].c_str();
+  const bool direction = ci != nullptr && ci->sumU != nullptr;
+  const bool threeTerm = ci != nullptr && (ci->threeTerm || direction);
+  check(ci == nullptr || (adj != nullptr && rot.empty() &&
+                          (!direction || (ci->sumUU != nullptr && ci->adjDot != nullptr))),
+        "pcClassAdjoint: the CI walk needs the RDM coefficients, no rotation, and with a "
+        "direction its (u, u) set and its own accumulators");
   PcClassSolve cs;
   int64_t d = 0, n1 = 0;
   bool hasS1 = false;
+  PcAdjointBlocks blk;
+  PcClassDirection du;
   {
     const PcMatrices mx = pcClassMatrices(w.cls, ai.h1e, ai.h2e, rdm, dr);
     d = mx.d;
     n1 = mx.n1;
     hasS1 = mx.hasS1;
-    cs = NEVPT2_TRY(pcSolveClass(mx, name, dr));
+    cs = NEVPT2_TRY(pcSolveClass(mx, name, dr, /*keepDropped=*/threeTerm));
+    if (threeTerm && cs.result.status == PcStatus::Done) {
+      blk.m = std::ssize(cs.lambda);
+      blk.nd = cs.Vn.rank() == 2 ? cs.Vn.dims[0] : 0;
+      PcDroppedBase base = pcDroppedBase(cs, mx, dr);
+      blk.C = std::move(base.C);
+      blk.H0 = std::move(base.H0);
+      if (direction) {
+        PcMatrices dot = pcClassMatrices(w.cls, ai.h1e, ai.h2e, *ci->sumU, dr);
+        du = pcClassDirection(cs, dot, mx, /*full=*/true, dr);
+        blk.direction = true;
+        blk.mKu = du.mK;
+        blk.nSu = du.nS;
+        blk.Gu = du.G;
+        blk.Hu = du.H;
+        if (blk.nd > 0) {
+          // The lift test along (u, u), pcHessianDevice's: the first-order
+          // P S_u P and the second-order L_uu, relative to s_max.
+          PcMatrices dotUU = pcClassMatrices(w.cls, ai.h1e, ai.h2e, *ci->sumUU, dr);
+          const PcClassDirection duu = pcClassDirection(cs, dotUU, mx, /*full=*/false, dr);
+          acc.lift = std::max(frobeniusHost(du.pSp),
+                              pcLiftNorm(blk.nd, blk.m, duu.pSp, du.G, du.G)) /
+                     cs.sMax;
+          if (!(acc.lift <= PC_LIFT_TOL)) {
+            cs.result.status = PcStatus::Refused;
+            cs.result.why = pcLiftRefusalWhy(acc.lift);
+          }
+        }
+      }
+    }
   }
   acc.result = cs.result;
   if (cs.result.status != PcStatus::Done) return {};
   const int64_t m = std::ssize(cs.lambda);
+  const int64_t nd = blk.nd;
+  PcAdjointSecond second = pcAdjointSecondZeros(blk);
+  // The direction's adjoint accumulators: dE_dot/dT_v, dE_dot/dt1_v through
+  // the same basis views, and their dropped-space twins dE_dot/dN_v,
+  // dE_dot/dn1_v (N_v = sym(S_v) Vn^T, (d, nd)).
+  DeviceTensor gTd, gt1d, gN, gn1;
+  std::vector<DeviceTensor> basisU, gBasisD, gBasisN;
+  if (direction) {
+    gTd = DeviceTensor::zeros({d, m}, dr);
+    if (hasS1) gt1d = DeviceTensor::zeros({n1, m}, dr);
+    basisU = w.basis(du.Tdot, du.t1dot);
+    gBasisD = w.basis(gTd, gt1d);
+    if (nd > 0) {
+      gN = DeviceTensor::zeros({d, nd}, dr);
+      if (hasS1) gn1 = DeviceTensor::zeros({n1, nd}, dr);
+      gBasisN = w.basis(gN, gn1);
+    }
+  }
 
   // dE/dT and dE/dt_1, accumulated through the basis views of zeroed buffers.
   const DeviceTensor gT = DeviceTensor::zeros({d, m}, dr);
@@ -300,6 +411,47 @@ Status pcClassAdjoint(const PcClassWalk& w, const ActiveIntegralsDevice& ai, Int
                         {&ext, &bar[static_cast<std::size_t>(t.target)]},
                         gBasis[static_cast<std::size_t>(t.basis)], 1.0, s);
     }
+    if (threeTerm) {
+      // The third term, and along u the rows' tangent and their bars
+      // (PcCiWalk). The direction's rows are the same einsum against T_u.
+      Tensor yu, xu;
+      if (direction) {
+        const std::array<DeviceTensor, 2> yd =
+            evalTargets(w, extPtr, basisU, {yy[0].dims, two ? yy[1].dims : yy[0].dims}, dr);
+        yu = downloadTensor(yd[0], s);
+        if (two) xu = downloadTensor(yd[1], s);
+      }
+      const PcSlabAdjointSecond sec =
+          w.pattern == PcPattern::Single
+              ? pcAdjointSecondSingle(y, direction ? &yu : nullptr, cs.lambda, delta, w.factor, blk,
+                                      second)
+              : pcAdjointSecondPair(y, two ? &x : nullptr, direction ? &yu : nullptr,
+                                    direction && two ? &xu : nullptr, partner, cs.lambda, delta,
+                                    blk, second);
+      if (direction) {
+        std::array<DeviceTensor, 2> barD, barN;
+        barD[0] = uploadTensor(Tensor::fromFlat(y.dims(), sec.ybarDot), dr);
+        if (two) barD[1] = uploadTensor(Tensor::fromFlat(x.dims(), sec.xbarDot), dr);
+        // The r_v rows are (tuples, nd): y's leading extents with nd last.
+        const auto rowsOf = [nd](const Tensor& t) {
+          std::vector<int64_t> dims = t.dims();
+          dims.back() = nd;
+          return dims;
+        };
+        if (nd > 0) {
+          barN[0] = uploadTensor(Tensor::fromFlat(rowsOf(y), sec.rbarDot), dr);
+          if (two) barN[1] = uploadTensor(Tensor::fromFlat(rowsOf(x), sec.rxbarDot), dr);
+        }
+        for (const PcYTerm& t : w.terms) {
+          const DeviceTensor& ext = ops.ext[static_cast<std::size_t>(t.ext)];
+          const std::string subs = derivativeSubscripts(t.subs, 1);
+          const std::size_t tg = static_cast<std::size_t>(t.target);
+          const std::size_t bi = static_cast<std::size_t>(t.basis);
+          deviceEinsumAccum(subs, {&ext, &barD[tg]}, gBasisD[bi], 1.0, s);
+          if (nd > 0) deviceEinsumAccum(subs, {&ext, &barN[tg]}, gBasisN[bi], 1.0, s);
+        }
+      }
+    }
     if (rot.empty()) return;
 
     // dE/dslab: this slab's pseudodensity in each external operand.
@@ -348,7 +500,36 @@ Status pcClassAdjoint(const PcClassWalk& w, const ActiveIntegralsDevice& ai, Int
   deviceTransposeAccum(uGt, {1, 0}, gS, 1.0, s);
   const DeviceTensor gS1 =
       hasS1 ? deviceEinsumNew("kp,ak->pa", {&cs.Ut, &gt1}, 1.0, dr) : DeviceTensor();
+  // The third term's dE/dG_v = gbar3, through G_v = Vn sym(S_v) U.
+  if (threeTerm && nd > 0) addSymDroppedKept(cs.Vn, second.gbar3, nd, m, cs.Ut, gS, dr);
   w.sweep(gS, gK, gS1, *adj);
+  if (!direction) return {};
+
+  // gdot[u]: the same three matrix adjoints, of Eddot(u, v)'s bilinear part
+  // in v (energy_finish's pcAdjointSecond* header), then the same sweep.
+  acc.ciEdot = second.edotU;
+  // dE_dot/dK = U sym(mggDot) U^T + sym(Vn^T hbarDot U^T).
+  const DeviceTensor gKd = sandwich(cs.Ut, symHost(second.mggDot, m), m, dr);
+  // dE_dot/dS = sym(U (dE_dot/dT_v)^T) + U sym(mggDotDelta) U^T
+  //           + sym(Vn^T (dE_dot/dN_v)^T) + sym(Vn^T gbarDot U^T).
+  const DeviceTensor gSd = sandwich(cs.Ut, symHost(second.mggDotDelta, m), m, dr);
+  {
+    const DeviceTensor uGtd = deviceEinsumNew("kp,qk->pq", {&cs.Ut, &gTd}, 0.5, dr);
+    addTensorInto(uGtd, gSd, s);
+    deviceTransposeAccum(uGtd, {1, 0}, gSd, 1.0, s);
+  }
+  // dE_dot/dS_1 = U (dE_dot/dt1_v)^T + Vn^T (dE_dot/dn1_v)^T.
+  const DeviceTensor gS1d =
+      hasS1 ? deviceEinsumNew("kp,ak->pa", {&cs.Ut, &gt1d}, 1.0, dr) : DeviceTensor();
+  if (nd > 0) {
+    addSymDroppedKept(cs.Vn, second.hbarDot, nd, m, cs.Ut, gKd, dr);
+    addSymDroppedKept(cs.Vn, second.gbarDot, nd, m, cs.Ut, gSd, dr);
+    const DeviceTensor vGn = deviceEinsumNew("kp,qk->pq", {&cs.Vn, &gN}, 0.5, dr);
+    addTensorInto(vGn, gSd, s);
+    deviceTransposeAccum(vGn, {1, 0}, gSd, 1.0, s);
+    if (hasS1) deviceEinsumAccum("kp,ak->pa", {&cs.Vn, &gn1}, gS1d, 1.0, s);
+  }
+  w.sweep(gSd, gKd, gS1d, *ci->adjDot);
   return {};
 }
 
@@ -633,7 +814,8 @@ Result<PcGradientResult> assemblePcClasses(const ActiveIntegralsDevice& ai, Inte
     // energy path still SOLVES it, and so does this, so a refusal is the
     // same refusal either way.
     const PcClassWalk w = pcWalk(cls, ai, src, ncore, nvirt, dr);
-    NEVPT2_TRY(pcClassAdjoint(w, ai, src, batch, hostEC, hostEV, rdm, zeroF3, rot, c, adj, dr));
+    NEVPT2_TRY(pcClassAdjoint(w, ai, src, batch, hostEC, hostEV, rdm, zeroF3, rot, c, adj,
+                              /*ci=*/nullptr, dr));
   }
   {
     // Sijrs: SC's own class, its ScClassGradient copied across.
@@ -659,6 +841,45 @@ Result<PcGradientResult> assemblePcClasses(const ActiveIntegralsDevice& ai, Inte
       c.dEdCore = sc.dEdCore;
       c.dEdVirt = sc.dEdVirt;
     }
+  }
+  for (const PcClassGradient& c : r.classes) r.total += c.result.energy;
+  return r;
+}
+
+// The CI walk over all eight classes (#155): every RDM class through
+// pcClassAdjoint with a PcCiWalk, class `cls` sweeping into adj[cls] and --
+// along a direction -- adjDot[cls] (the caller may point several classes at
+// one accumulator, or give each its own for a per-class y and H_cc u). No
+// rotation and the orbital energies held fixed. Sijrs reads no RDM: its
+// energy is SC's, and it adds nothing to either accumulator (its y and its
+// H_cc u are exactly zero, as pcHessianDevice's Eddot of it is).
+Result<PcGradientResult> assemblePcCiClasses(const ActiveIntegralsDevice& ai, IntegralSource& src,
+                                             int64_t batch, const PcRdms& rdm,
+                                             const PcRdms* sumU, const PcRdms* sumUU,
+                                             const std::array<ScRdmAdjoint*, 8>& adj,
+                                             const std::array<ScRdmAdjoint*, 8>& adjDot,
+                                             const DeviceResources& dr) {
+  const wwrStream_t s = dr.stream();
+  const Tensor hostEC = downloadTensor(ai.e_core, s);
+  const Tensor hostEV = downloadTensor(ai.e_virt, s);
+  const int64_t ncore = hostEC.size(), nvirt = hostEV.size();
+  const DeviceTensor z3ac = DeviceTensor::zeros(rdm.f3ac->dims, dr);
+  const DeviceTensor z3ca = DeviceTensor::zeros(rdm.f3ca->dims, dr);
+  const PcRdms zeroF3{rdm.dm1, rdm.dm2, rdm.dm3, &z3ac, &z3ca};
+  const ScRotation none;
+  PcGradientResult r;
+  for (const int cls : {0, 1, 3, 4, 5, 6, 7}) {
+    const std::size_t k = static_cast<std::size_t>(cls);
+    const PcCiWalk ci{/*threeTerm=*/true, sumU, sumUU, adjDot[k]};
+    const PcClassWalk w = pcWalk(cls, ai, src, ncore, nvirt, dr);
+    NEVPT2_TRY(pcClassAdjoint(w, ai, src, batch, hostEC, hostEV, rdm, zeroF3, none, r.classes[k],
+                              adj[k], &ci, dr));
+  }
+  {
+    ScClassGradient sc;
+    gradientSijrs(src, batch, hostEC, hostEV, none, sc, /*mix=*/nullptr, dr);
+    r.classes[2].result.status = PcStatus::Done;
+    r.classes[2].result.energy = sc.energy;
   }
   for (const PcClassGradient& c : r.classes) r.total += c.result.energy;
   return r;

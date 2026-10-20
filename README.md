@@ -287,7 +287,7 @@ ignores it. `test/cli/` holds this matrix against the table:
 | `--gradgold` | ✓ | refused | ✓ | refused |
 | `--dump-source-terms`, `--source-oracle` | refused | refused | ✓ | refused |
 | `--fd-steps`, `--fd-start-pow` | refused | refused | refused | ✓ |
-| `--pc-hessian` | refused | refused | refused | ✓ |
+| `--pc-hessian`, `--pc-hessian-vector` | refused | refused | refused | ✓ |
 
 There is no `--df` row, on purpose (#165): a density-fitted case is a
 `*_df` golden, and the orbital-source-term flags (`--kappa-act`,
@@ -358,6 +358,7 @@ against the other. They read the same reference files, and each prints its own
 | `nevpt2_sc_pseudodensity --dump-source-terms PATH` | `[--gradgold PATH]`, `[--pc]` | writes the GPU's own `Y_xy` and `y_I` to a `.gradsrc` (a NumPy `.npz`) for `reference_data/nevpt2_grad.py --source dump` / `both`, and reads it back; what a nuclear gradient built from it comes out at is [`docs/testing.md`](docs/testing.md), "The GPU as the source-term provider". With `--pc`, PC-NEVPT2's, marked as such, with the PC adjoint held to the PC forward tangent along seeded rotations (#74; [`docs/pc-nevpt2.md`](docs/pc-nevpt2.md), "The source terms by reverse mode") |
 | `nevpt2_pc_tangent` | `--fd-steps N` (3..8, default 4), `--fd-start-pow N` (1..30, default 12: the first step is `2^-N`) | PC's derivative with respect to the CI vector, against a Richardson-verified finite difference |
 | `nevpt2_pc_tangent --pc-hessian` | the same two | PC's *second* directional derivative `Eddot(u, v)`, with the orbital energies held fixed and the rotation terms of S's turning null space ([`docs/hessian-theory.md`](docs/hessian-theory.md), §6.2), against Euler at second order, a symmetry-breaking negative control that must be refused, and a Richardson-verified difference of the three-term `Edot` (#152) |
+| `nevpt2_pc_tangent --pc-hessian-vector` | the same two | the vector `H_cc u` (the CI block of PC's Hessian, by reverse over forward), per class, against `--pc-hessian`'s `Eddot` by duality, its symmetry, Euler, the same negative control, and a Richardson-verified difference of the GPU's own three-term `y`, which every class must pass; the orbital energies held fixed. One of the two at a time (#155) |
 
 Everything that builds a *tangent* — the first four rows and
 `nevpt2_pc_tangent` — runs the emitted or the native-fp64 BLAS digest;

@@ -1199,6 +1199,12 @@ struct PcClassGradient {
   std::vector<double> rotEps{};      // sum_t R_t Deltadot_t, shared by both modes
   std::vector<double> dEdCore{};
   std::vector<double> dEdVirt{};
+  // The CI walk along u (pcCiHessianVectorDevice, #155): the walk's own
+  // three-term Edot(u) from the tangent rows it built, and the lift along
+  // (u, u) relative to s_max that the class was tested against (0 when
+  // nothing is dropped or there is no direction).
+  double ciEdot = 0.0;
+  double lift = 0.0;
 };
 
 struct PcGradientResult {
@@ -1241,6 +1247,74 @@ Result<PcCiSourceResult> pcCiSourceDevice(const NevptIntegralsDevice& ints, cons
                                           const SigmaVectorOptions& sigma,
                                           const OrbitalEnergyResponse* eps,
                                           const DeviceResources& res);
+
+// --- PC's CI Hessian-vector product, H_cc u (#155) -----------------------------
+//
+// docs/hessian-theory.md, Sec. 4.2 and 6.2: reverse over forward, PC's.
+// y = sigma(g, c) with g the PC adjoint's five RDM coefficient tensors, so
+// along a CI direction u
+//
+//   H_cc u  =  sigma(gdot[u], c)  +  sigma(g, u),
+//
+// gdot[u] the walk differentiated along u: each class's (S, K, S_1) adjoint
+// re-derived from Eddot(u, v)'s part bilinear in u's and v's first-order
+// sets -- Sec. 6.2's repaired formula, with its rotation terms through the
+// solve's own dropped eigenvectors and S^+ = U U^T, the very blocks
+// pcHessianDevice builds (nevpt2.energy's pcClassDirection) -- read in
+// reverse in v (nevpt2.energy_finish's pcAdjointSecond*), then the class's own
+// RDM sweep. No eigensolve beyond the energy's, no eigenvector derivative.
+//
+// The y here is the THREE-TERM one: the first derivative's -2 rho^T S_v P A x
+// included, so y is the energy's gradient at ANY CI vector, not only at the
+// eigenstate pcCiSourceDevice's two-term y is exact at -- which is what a
+// finite difference of y at displaced states must difference. H_cc u itself
+// is Sec. 6.2's at the eigenstate (P A = 0).
+//
+// REFUSALS, pcHessianDevice's: a class the gap or denominator check refuses,
+// or whose dropped modes lift along u (|P S_u P| or L_uu above PC_LIFT_TOL
+// relative to s_max), is refused through its PcClassResult and `ok` is false
+// -- no vector is formed, never one with a zero in it. A v along which the
+// modes lift is pcHessianDevice's to refuse for the pair (u, v).
+//
+// THE ORBITAL ENERGIES ARE HELD FIXED (Deltadot = Delta'' = 0), the
+// functional pcHessianDevice differentiates.
+//
+// `rdm` the state's five RDMs; `dotU` their tangent along u and `ddotUU` the
+// second-order set at (u, u) (the lift test's) -- nevpt2.rdm_host_dm's
+// dm12Dot and nevpt2.rdm_build's buildRdmTangentsDevice at (c, u) and (u, u).
+// `perClass`: each class sweeps into its own accumulators and gets its own
+// sigma calls, so `yClass` / `huClass` hold each class's share (the totals are
+// their sums); 2 x 7 coefficient sets of n^2 + n^4 + 3 n^6 doubles, so for
+// small active spaces -- the check's. Integral-direct, on res.stream(), every
+// tensor from res's pool. An eigensolve's devInfo != 0 is the Numerical Error
+// pcEnergiesDevice returns.
+struct PcCiHessianResult {
+  PcGradientResult walk;
+  bool ok = false;         // walk.allDone(): only then is anything below filled
+  Tensor hu;               // H_cc u, (nstringsA, nstringsB)
+  Tensor fromWalkTangent;  // sigma(gdot[u], c)
+  Tensor fromDirection;    // sigma(g, u)
+  Tensor y;                // the three-term y, from the same walk
+  std::array<Tensor, 8> yClass{}, huClass{};  // with perClass; Sijrs's zero
+};
+
+Result<PcCiHessianResult> pcCiHessianVectorDevice(const NevptIntegralsDevice& ints,
+                                                  const Tensor& ci, const Tensor& u,
+                                                  int64_t nelecA, int64_t nelecB,
+                                                  const RdmTensors& rdm, const RdmTensors& dotU,
+                                                  const RdmTensors& ddotUU, bool perClass,
+                                                  const SigmaVectorOptions& sigma,
+                                                  const DeviceResources& res);
+
+// The three-term y alone (no direction): what H_cc u's finite difference
+// differences at c +- h u. `perClass` as above, `ok`/`walk`/`y`/`yClass` filled
+// and nothing else.
+Result<PcCiHessianResult> pcCiSourceThreeTermDevice(const NevptIntegralsDevice& ints,
+                                                    const Tensor& ci, int64_t nelecA,
+                                                    int64_t nelecB, const RdmTensors& rdm,
+                                                    bool perClass,
+                                                    const SigmaVectorOptions& sigma,
+                                                    const DeviceResources& res);
 
 // One direction's PC answer over the full kappa space, summed over the eight
 // classes -- ScFullRotationPairing's fields, PC's numbers: `integral` and

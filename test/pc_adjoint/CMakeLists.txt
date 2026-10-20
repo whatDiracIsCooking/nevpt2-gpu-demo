@@ -3,7 +3,9 @@
 # non-positive denominator -- is refused by the adjoint too, class by class
 # and named, in the CI source term (no y is formed), the digests' adjoint and
 # the orbital source term's matrix (Numerical Errors), and the forward
-# tangent beside them; and that the golden's own state is accepted. Logic,
+# tangent beside them; and that the golden's own state is accepted. The same
+# for PC's H_cc u and its three-term y (#155), with the lift refusal along a
+# symmetry-breaking direction matched to pcHessianDevice's. Logic,
 # not an energy: the PC source terms' numbers are the golden tier's
 # (docs/testing.md, "The PC source terms on the device").
 #
