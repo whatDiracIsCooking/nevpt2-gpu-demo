@@ -209,14 +209,18 @@ measured"). What the two differ in is the constraint set, and so the
 Z-vector equations.
 
 **In the tree only the CASCI branch is implemented, and the restriction is
-enforced rather than assumed.** Every derivative path refuses a `casscf`
-golden: `nevpt2_demo`'s `--sc-tangent` and `--gradient-source` as an
-unsupported-request error, and `reference_data/nevpt2_numgrad.py`'s CASCI
-route before it computes an energy (its `--reference casscf` route
-re-optimises every displaced state instead); the one gradient sidecar written for one
+enforced rather than assumed.** What the tree computes is source terms and
+the energy's parameter Hessian, derivatives at fixed orbitals and CI vector
+that carry no reference-kind dependence, so those paths sit behind
+`nevpt2.golden`'s source-term gate and take a `casscf` golden. The Lagrangian
+gate, `requireLagrangianReference`, refuses one as an unsupported-request
+error and cites this section; no path in `src/` has a Lagrangian to put
+behind it yet. `reference_data/nevpt2_numgrad.py`'s CASCI route refuses one
+before it computes an energy (its `--reference casscf` route re-optimises
+every displaced state instead). The gradient sidecars written for one
 (`--mo-from --gradgold`, [`reference-data.md`](reference-data.md), "The
-CASSCF-reference gradient sidecar") is data that no derivative path reads yet.
-The refusal cites this section. The offline analytic gradient
+CASSCF-reference gradient sidecar") are read by the source-term path and the
+orbital Hessian flags, never by a Lagrangian. The offline analytic gradient
 (`reference_data/nevpt2_grad.py`) builds the CASCI branch on RHF orbitals by
 default and, with `--reference casscf`, the CASSCF one — §1.4 and §2.7's
 coupled CP-CASSCF system (§5); its numerical gradient re-optimises every

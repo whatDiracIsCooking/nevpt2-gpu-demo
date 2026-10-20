@@ -62,18 +62,22 @@ you try to run it on your own system.
   CASSCF-orbital references as well. The optimiser runs once, offline, into
   that sidecar; regenerating the golden from it is deterministic
   (docs/reference-data.md, "What "CASSCF input" means here, and why the golden state is CASCI").
-- **The gradient work stays CASCI-only.** Its derivation is the CASCI-on-RHF
-  Lagrangian, so every derivative path refuses a CASSCF-orbital golden rather
-  than differentiate a reference it does not cover. One gradient sidecar is
-  written for one, as data no derivative path reads yet
-  (docs/reference-data.md, "The CASSCF-reference gradient sidecar").
-- **On the GPU, the gradient work is source terms, not a nuclear gradient.**
-  The binaries differentiate the NEVPT2 energy with respect to the CI vector
-  and with respect to an orbital rotation (the active–active block, or the
-  whole orbital source term out of a `*.gradgold` sidecar), at one fixed
-  geometry. The Z-vector solve, the derivative integrals and any derivative
-  with respect to a nuclear coordinate are not implemented in `src/` or
-  `apps/`. A nuclear gradient exists only in offline Python:
+- **The derivative work on the GPU takes either kind of orbitals.** The
+  source terms and the parameter Hessian are derivatives at fixed orbitals
+  and CI vector, so they take a CASSCF-orbital golden as readily as a CASCI
+  one; only a Lagrangian depends on how the orbitals were made, and the
+  golden's Lagrangian gate refuses a CASSCF one. Gradient sidecars are
+  written for them, which the source-term path and the orbital Hessian flags
+  read (docs/reference-data.md, "The CASSCF-reference gradient sidecar").
+- **On the GPU, the derivative work is source terms and the parameter
+  Hessian, not a nuclear gradient.** The binaries differentiate the NEVPT2
+  energy with respect to the CI vector and with respect to an orbital
+  rotation (the active–active block, or the whole orbital source term out of
+  a `*.gradgold` sidecar), once or twice, at one fixed geometry; what the
+  second derivative covers and refuses is docs/gradients.md, §1.1. The
+  Z-vector solve, the derivative integrals and any derivative with respect
+  to a nuclear coordinate are not implemented in `src/` or `apps/`. A
+  nuclear gradient exists only in offline Python:
   `reference_data/nevpt2_grad.py` solves the Z-vector equations and builds
   an analytic one (from PySCF's source terms, or from the GPU's own, written
   out by `nevpt2_sc_pseudodensity --dump-source-terms`), and
