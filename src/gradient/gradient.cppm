@@ -179,8 +179,12 @@ struct ScClassGradient {
   ScPairTerms pair{};
   double pairReverse = 0.0;
   double pairEdotV = 0.0;
-  // The guarded tuples along the pair (#158's temporary refusal; Sec. 5.6).
+  // The guarded tuples along the pair (Sec. 5.6, #190): their census, and
+  // K6's reverse half on its own (in pairReverse too) -- the ray-limit
+  // multipliers' pseudodensity tangent along v paired with u's dotted slabs,
+  // which must be pair.k6.
   ScGuardedCensus guarded{};
+  double pairReverseK6 = 0.0;
 };
 
 struct ScGradientResult {
@@ -1182,13 +1186,13 @@ Result<double> scRestoredTracePairingDevice(const NevptIntegralsDevice& ints,
                                             const RdmTensors& rdm, const Tensor& m,
                                             const DeviceResources& res);
 
-// --- the orbital block's sandwich, I'^T Ehat'' I' (#158) ---------------------
+// --- the orbital block's sandwich, I'^T Ehat'' I' (#158, #190) ---------------
 //
 // docs/hessian-theory.md, Sec. 5.1's SECOND term, the energy's own curvature in
 // its inputs, along two orbital directions u and v (ordinary antisymmetric
 // (n_mo, n_mo) kappas):
 //
-//   I'[u]^T Ehat'' I'[v] = K3 + K4 + K5,
+//   I'[u]^T Ehat'' I'[v] = K3 + K4 + K5 + K6,
 //
 //   K3  the finish's curvature: per perturber, (Ndot, Hdot, Ddot)[u] . Hess f .
 //       (Ndot, Hdot, Ddot)[v] -- Sec. 2's 3x3 between the two first-order
@@ -1198,13 +1202,16 @@ Result<double> scRestoredTracePairingDevice(const NevptIntegralsDevice& ints,
 //       Dyall block undotted;
 //   K5  one external slot along one direction against the Dyall block's
 //       tangent along the other -- Q H with x'[u] and K'[v], plus u <-> v --
-//       K' carrying the digests' own tangent f3' (the RDM build at h2e').
+//       K' carrying the digests' own tangent f3' (the RDM build at h2e');
+//   K6  the guarded tuples' share (Sec. 5.6): K4's tables on the tuples the
+//       vanishing-norm guard skips, at the ray-limit multipliers -- on an H
+//       class the empty tuples both directions populate, -N^{uv}/(Delta +
+//       eta); on Sijrs every guarded tuple at its own exact P = -1/Delta.
 //
-// There is no sixth piece (Sec. 5.1): N_t reads no active integral, the Dyall
-// blocks are linear in (h1e, h2e, f3) and f3 in h2e (Sec. 5.2 -- no
-// second-order digest kernel), and Delta_t is linear in the orbital energies.
-// Every input's own second derivative is the first term's,
-// scOrbitalCurvatureDevice, so
+// Nothing else: N_t reads no active integral, the Dyall blocks are linear in
+// (h1e, h2e, f3) and f3 in h2e (Sec. 5.2 -- no second-order digest kernel),
+// and Delta_t is linear in the orbital energies. Every input's own second
+// derivative is the first term's, scOrbitalCurvatureDevice, so
 //
 //   Eddot_kk(u, v) = ScOrbitalCurvatureResult::value() + this term's total
 //
@@ -1214,14 +1221,16 @@ Result<double> scRestoredTracePairingDevice(const NevptIntegralsDevice& ints,
 // u and v as its two tangent directions and finishes each perturber's tables
 // (the pieces above). REVERSE differentiates the walk's pseudodensities along
 // v -- D, M_G and R, each through the 3x3's multiplier tangents and the
-// product rule at fixed multipliers -- and pairs them with u's dotted inputs:
+// product rule at fixed multipliers, plus the guarded tuples' ray-limit
+// multipliers -- and pairs them with u's dotted inputs:
 //
-//   <Ddot[v], X'[u]> + <Mdot_G[v], G'[u]> + Rdot[v] . Deltadot[u]  ==  K3 + K4 + K5
+//   <Ddot[v], X'[u]> + <Mdot_G[v], G'[u]> + Rdot[v] . Deltadot[u]  ==  K3 + ... + K6
 //
 // to round-off, with no step size: the second-order partner of the first-order
 // duality <D, X'> + <M_G, G'> == P.Ndot + Q.Hdot. It shares the operand
 // tangents and the 3x3 with forward, and no evaluator: the derivative
-// subscripts against the product rule, as at first order.
+// subscripts against the product rule, as at first order. K6's reverse half
+// is also reported on its own (`reverseK6`).
 //
 // DATA. First-order dotted inputs only -- the sidecar's arrays, both
 // directions' digests' tangents -- so unlike K2 it is formed for ANY pair on
@@ -1233,20 +1242,25 @@ Result<double> scRestoredTracePairingDevice(const NevptIntegralsDevice& ints,
 // res's pool. Per pair: one walk, and one plain RDM build per direction for
 // its digests' tangent at `opt.nTiles` -- the plain build's floors
 // (docs/performance.md, "Tile floors"). Exact digests only (`opt`; cli
-// refuses the rest). A malformed direction or a sidecar that does not fit
-// the integrals is the caller's input: an Error, before any device work.
+// refuses the rest). A malformed or zero direction or a sidecar that does
+// not fit the integrals is the caller's input: an Error, before any device
+// work.
 //
-// THE GUARDED TUPLES (docs/hessian-theory.md, Sec. 5.6; a TEMPORARY refusal
-// until #190). A tuple the vanishing-norm guard skips whose integrals are
-// zero by symmetry contributes at second order when both directions
-// populate it -- the sixth term K6, or no Hessian along the pair at all --
-// and K3-K5 carry neither. So any (class, pair) with such a tuple, or with a
-// guarded tuple empty by the state, is REFUSED as a Numerical Error naming
-// the classes and their tuple counts, never answered without the term. A
-// small guarded tuple (a real perturber under the guard) is not a reason to
-// refuse. The test runs on the walk's own K4 tables, so the refusal comes
-// after that pair's walk; the thresholds are nevpt2.gradient_plan's
-// guardedCensus.
+// THE PAIRS WITH NO HESSIAN (docs/hessian-theory.md, Sec. 5.6 and Sec. 9.1).
+// An H class's empty tuple both directions populate is a quadratic form
+// along the pair only when its H tables are proportional to its N tables;
+// otherwise the energy is not twice differentiable along the pair, and a
+// ladder converges to the polarisation of the directional second
+// derivatives, which is not a Hessian element. Each such tuple is scored by
+// the scale-free rho_t, and a (class, pair) whose worst rho_t exceeds
+// kRhoTol is REFUSED as a Numerical Error naming the class, the tuple count
+// and the worst rho_t -- never answered with a zero, or with that
+// polarisation. So is a guarded tuple empty by the state (x_t != 0, N_t
+// round-off), which Sec. 5.6 does not derive. A small guarded tuple (a real
+// perturber under the guard) contributes zero and is never scored. The test
+// runs on the walk's own cross tables, so the refusal comes after that
+// pair's walk; the thresholds are nevpt2.gradient_plan's (kEmptyIntegralTol,
+// kPopulatedTol, kRhoTol, kEmptyStateRel).
 struct ScOrbitalSandwichRequest {
   Tensor u;  // (n_mo, n_mo), antisymmetric
   Tensor v;  // (n_mo, n_mo), antisymmetric
@@ -1266,6 +1280,10 @@ struct ScOrbitalSandwichResult {
   bool hasReverse = false;
   std::array<double, 8> reverseClasses{};
   double reverse = 0.0;
+  // K6's reverse half on its own (in `reverse` too), per class and summed:
+  // the duality on the guarded tuples' term, against total.k6 / classes[c].k6.
+  std::array<double, 8> reverseK6Classes{};
+  double reverseK6 = 0.0;
   // The walk's own first-order pairs, P.Ndot + Q.Hdot + R.Ddot with the
   // digests' share merged: Edot(u) and Edot(v), which must be the first-order
   // <u, Y> / <v, Y> with the digests' term (scFullRotationDevice's adjoint
@@ -1279,8 +1297,8 @@ struct ScOrbitalSandwichResult {
   // energiesHessianDevice's Eddot at the digests' tangents alone (when asked).
   bool hasDigestReference = false;
   double digestReference = 0.0;
-  // The guarded tuples per class along the pair (a returned pair has none
-  // populated by both directions and none empty by the state; see below).
+  // The guarded tuples per class along the pair (a returned pair has no
+  // rho_t above kRhoTol and none empty by the state; see above).
   std::array<ScGuardedCensus, 8> guarded{};
 };
 

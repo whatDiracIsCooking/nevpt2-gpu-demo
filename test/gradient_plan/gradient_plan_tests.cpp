@@ -59,8 +59,14 @@
 //                             central difference of the class energy, plain
 //                             and through Sijr's packing; the exchanged
 //                             finish and the digests' shares
-//   GuardedCensusTests        guardedCensus, #158's temporary refusal: each
-//                             of Sec. 5.6's kinds of guarded tuple by hand
+//   GuardedCensusTests        emptyTermPacked (#190): each of Sec. 5.6's
+//                             kinds of guarded tuple by hand; K6 against the
+//                             tuple's own energy along the plane; rho's
+//                             scale invariance; Sijrs's exemption; Sijr's
+//                             packing scattered back
+//   SijrsFinishTests          Sijrs's exact, unguarded finish (#190) against
+//                             the guarded one off the guard and a mixed
+//                             central difference on it
 //   CiSourceHostTests        ciSourceAddInto / ciSourceSymmetrized /
 //                             ciSourceFolded's basic shape
 //   CiSourceFoldTests         the fold against an UNFOLDED host reference
@@ -1189,34 +1195,272 @@ TEST(PairTermsTests, SymmetrizedClassIsItsEnergysMixedDerivative) {
 }
 
 // ---------------------------------------------------------------------------
-// GuardedCensusTests (#158): the temporary refusal's tuple classes
+// GuardedCensusTests (#190): K6 and the rho_t refusal on the guarded tuples
 // ---------------------------------------------------------------------------
 //
-// docs/hessian-theory.md, Sec. 5.6's three kinds of guarded tuple, one per
-// row, beside an unguarded one: only an empty tuple both directions populate,
-// and one empty by the state, are reasons to refuse.
+// docs/hessian-theory.md, Sec. 5.6: the kinds of guarded tuple, one per row,
+// beside an unguarded one; the sixth term on a proportional tuple both
+// directions populate against the tuple's own energy along the plane; rho's
+// scale invariance; and Sijrs, which takes its own P = -1/Delta on every
+// guarded tuple with no score.
+
+// One tuple's tables along a pair whose perturbers are psi_u = a e1 and
+// psi_v = b (cos th e1 + sin th e2) in a two-function space with metric 1 and
+// Dyall matrix K: N^{ww'} = 2 <psi_w|psi_w'>, H^{ww'} = 2 <psi_w|K|psi_w'>.
+struct EmptyTuple {
+  double nuu, nvv, nuv, huu, hvv, huv;
+};
+
+EmptyTuple emptyTuple(double a, double b, double th, double k11, double k12, double k22) {
+  const double c = std::cos(th), s = std::sin(th);
+  return {2.0 * a * a,
+          2.0 * b * b,
+          2.0 * a * b * c,
+          2.0 * a * a * k11,
+          2.0 * b * b * (c * c * k11 + 2.0 * c * s * k12 + s * s * k22),
+          2.0 * a * b * (c * k11 + s * k12)};
+}
+
+// The tuple's energy along (s, t) from its quadratic tables, Sec. 5.6's F_t.
+double emptyEnergy(const EmptyTuple& e, double delta, double s, double t) {
+  const double qn = 0.5 * (s * s * e.nuu + 2.0 * s * t * e.nuv + t * t * e.nvv);
+  const double qh = 0.5 * (s * s * e.huu + 2.0 * s * t * e.huv + t * t * e.hvv);
+  return -qn * qn / (qn * delta + qh);
+}
+
+ScEmptyPacked emptyOf(const std::vector<EmptyTuple>& ts, const std::vector<double>& norm,
+                      const std::vector<double>& xMax, const std::vector<double>& delta,
+                      double scaleU = 1.0, double scaleV = 1.0, bool hZero = false) {
+  std::vector<double> nuu, nvv, nuv, huu, hvv, huv;
+  for (const EmptyTuple& e : ts) {
+    nuu.push_back(e.nuu);
+    nvv.push_back(e.nvv);
+    nuv.push_back(e.nuv);
+    huu.push_back(e.huu);
+    hvv.push_back(e.hvv);
+    huv.push_back(e.huv);
+  }
+  return emptyTermPacked(norm, xMax, delta, nuu, nvv, nuv, huu, hvv, huv, scaleU, scaleV, hZero);
+}
+
 TEST(GuardedCensusTests, ClassifiesEachKind) {
-  //            unguarded  empty, Nuv round-off  empty, populated  small      empty by the state
-  const Tensor norm = vec({1.0, 0.0, 0.0, 1e-19, 1e-30});
-  const Tensor xMax = vec({0.5, 1e-15, 2e-15, 1e-9, 1e-6});
-  const Tensor nuv = vec({3.0, 1e-20, 1e-6, 5.0, 0.0});
-  const ScGuardedCensus c = guardedCensus(norm, xMax, nuv);
-  EXPECT_EQ(c.guarded, 4);
-  EXPECT_EQ(c.empty, 2);
-  EXPECT_EQ(c.populated, 1);
+  const EmptyTuple real = emptyTuple(0.3, 0.4, 0.7, 0.5, 0.2, 0.9);
+  const EmptyTuple prop = emptyTuple(0.3, 0.4, 0.7, 0.5, 0.0, 0.5);  // K = eta: proportional
+  const EmptyTuple uOnly = emptyTuple(0.3, 1e-17, 0.7, 0.5, 0.2, 0.9);
+  const EmptyTuple none = emptyTuple(1e-17, 1e-17, 0.7, 0.5, 0.2, 0.9);
+  //   unguarded  empty, unpopulated  empty, u only  empty, proportional  empty, not  small  by state
+  const std::vector<EmptyTuple> ts{real, none, uOnly, prop, real, real, real};
+  const std::vector<double> norm{1.0, 0.0, 0.0, 0.0, 0.0, 1e-19, 1e-30};
+  const std::vector<double> xMax{0.5, 1e-15, 1e-15, 2e-15, 1e-15, 1e-9, 1e-6};
+  const std::vector<double> delta(ts.size(), 2.0);
+  const ScEmptyPacked e = emptyOf(ts, norm, xMax, delta);
+  const ScGuardedCensus& c = e.census;
+  EXPECT_EQ(c.guarded, 6);
+  EXPECT_EQ(c.empty, 4);
+  EXPECT_EQ(c.populatedU, 3);
+  EXPECT_EQ(c.populatedV, 2);
+  EXPECT_EQ(c.populated, 2);
+  EXPECT_EQ(c.rhoAbove, 1);
   EXPECT_EQ(c.emptyByState, 1);
-  EXPECT_EQ(c.crossMax, 1e-6);
-  EXPECT_EQ(c.populatedMin, 1e-6);
-  EXPECT_EQ(c.unpopulatedMax, 1e-20);
   EXPECT_TRUE(c.refused());
-  // The small tuple alone, and the round-off one, refuse nothing.
-  const ScGuardedCensus ok =
-      guardedCensus(vec({0.0, 1e-19}), vec({1e-15, 1e-9}), vec({1e-20, 5.0}));
-  EXPECT_FALSE(ok.refused());
-  ScGuardedCensus sum = ok;
+  EXPECT_GT(c.rhoMax, 1e-2);
+  // Only the two tuples both directions populate carry a multiplier; the
+  // unguarded, the small and the singly-populated ones none.
+  for (const std::size_t k : {0u, 1u, 2u, 5u, 6u}) {
+    EXPECT_EQ(e.pBar[k], 0.0) << k;
+    EXPECT_EQ(e.qBar[k], 0.0) << k;
+  }
+  // The proportional one's K6 is -N^{uv} / (Delta + eta).
+  const double want = -prop.nuv / (2.0 + 0.5);
+  EXPECT_NEAR(e.pBar[3] * prop.nuv + e.qBar[3] * prop.huv, want, 1e-15);
+  // Without the non-proportional tuple and the one empty by the state, the
+  // census refuses nothing.
+  const ScEmptyPacked ok = emptyOf({real, none, uOnly, prop, real}, {1.0, 0.0, 0.0, 0.0, 1e-19},
+                                   {0.5, 1e-15, 1e-15, 2e-15, 1e-9}, std::vector<double>(5, 2.0));
+  EXPECT_FALSE(ok.census.refused());
+  EXPECT_LT(ok.census.rhoMax, 1e-15);
+  EXPECT_NEAR(ok.k6, want, 1e-15);
+  ScGuardedCensus sum = ok.census;
   sum += c;
-  EXPECT_EQ(sum.populated, 1);
-  EXPECT_EQ(sum.guarded, 6);
+  EXPECT_EQ(sum.populated, 3);
+  EXPECT_EQ(sum.guarded, 10);
+  EXPECT_EQ(sum.rhoMax, c.rhoMax);
+}
+
+// K6 is the tuple's own mixed second derivative along the plane when it is a
+// quadratic form: the four-point stencil of F_t is then exact at any step.
+// Where the tables are not proportional the stencil still converges -- to a
+// number that is not bilinear (the parallelogram defect), which is why rho
+// refuses it rather than K6 answering it.
+TEST(GuardedCensusTests, SixthTermIsTheTuplesMixedDerivative) {
+  const double delta = 1.75;
+  const auto stencil = [&](const EmptyTuple& e, double h) {
+    return (emptyEnergy(e, delta, h, h) - emptyEnergy(e, delta, h, -h) -
+            emptyEnergy(e, delta, -h, h) + emptyEnergy(e, delta, -h, -h)) /
+           (4.0 * h * h);
+  };
+  for (const double th : {0.0, 0.4, 1.5707963267948966}) {
+    const EmptyTuple prop = emptyTuple(0.6, 0.35, th, 0.8, 0.0, 0.8);
+    const ScEmptyPacked e = emptyOf({prop}, {0.0}, {0.0}, {delta});
+    EXPECT_FALSE(e.census.refused()) << th;
+    EXPECT_NEAR(e.k6, stencil(prop, 0.25), 1e-14) << th;
+    EXPECT_NEAR(e.k6, stencil(prop, 1e-3), 1e-9) << th;
+  }
+  // Parallel perturbers (th = 0) are proportional whatever K is.
+  const EmptyTuple parallel = emptyTuple(0.6, -0.35, 0.0, 0.8, 0.3, 1.9);
+  const ScEmptyPacked p = emptyOf({parallel}, {0.0}, {0.0}, {delta});
+  EXPECT_LT(p.census.rhoMax, 1e-15);
+  EXPECT_NEAR(p.k6, stencil(parallel, 0.25), 1e-14);
+  // Not proportional: refused, and the stencil is not bilinear.
+  const EmptyTuple real = emptyTuple(0.6, 0.35, 0.9, 0.8, 0.3, 1.9);
+  const ScEmptyPacked r = emptyOf({real}, {0.0}, {0.0}, {delta});
+  EXPECT_TRUE(r.census.refused());
+  const auto d2 = [&](const EmptyTuple& e, double a, double b) {
+    return 2.0 * emptyEnergy(e, delta, a, b);  // F is homogeneous of degree 2
+  };
+  const double parallelogram =
+      d2(real, 1, 1) + d2(real, 1, -1) - 2.0 * d2(real, 1, 0) - 2.0 * d2(real, 0, 1);
+  EXPECT_GT(std::fabs(parallelogram), 1e-6);
+}
+
+// rho is invariant under rescaling either direction, and so (given |w|^2) is
+// the population test; K6 scales with the direction.
+TEST(GuardedCensusTests, RhoIsScaleFree) {
+  const double lam = -37.0;
+  const EmptyTuple a = emptyTuple(0.6, 0.35, 0.9, 0.8, 0.3, 1.9);
+  EmptyTuple b = a;
+  b.nvv *= lam * lam;
+  b.hvv *= lam * lam;
+  b.nuv *= lam;
+  b.huv *= lam;
+  const ScEmptyPacked ea = emptyOf({a}, {0.0}, {0.0}, {1.25});
+  const ScEmptyPacked eb = emptyOf({b}, {0.0}, {0.0}, {1.25}, 1.0, lam * lam);
+  EXPECT_NEAR(eb.census.rhoMax, ea.census.rhoMax, 1e-14 * ea.census.rhoMax);
+  EXPECT_NEAR(eb.k6, lam * ea.k6, 1e-13 * std::fabs(lam * ea.k6));
+  // A direction scaled far down still populates (the floor is on N^{ww}/|w|^2).
+  const double tiny = 1e-9;
+  EmptyTuple c = emptyTuple(0.3, 0.4, 0.0, 0.5, 0.2, 0.9);
+  c.nvv *= tiny * tiny;
+  c.hvv *= tiny * tiny;
+  c.nuv *= tiny;
+  c.huv *= tiny;
+  const ScEmptyPacked ec = emptyOf({c}, {0.0}, {0.0}, {1.25}, 1.0, tiny * tiny);
+  EXPECT_EQ(ec.census.populated, 1);
+}
+
+// Sijrs (hZero): every guarded tuple, small ones too, at -1/Delta; no score.
+TEST(GuardedCensusTests, SijrsTakesItsOwnMultiplier) {
+  const EmptyTuple t{0.4, 0.9, -0.3, 0.0, 0.0, 0.0};
+  const ScEmptyPacked e =
+      emptyOf({t, t, t}, {1.0, 0.0, 1e-16}, {0.5, 1e-15, 1e-9}, {2.0, 4.0, 8.0}, 1.0, 1.0, true);
+  EXPECT_EQ(e.pBar[0], 0.0);
+  EXPECT_EQ(e.pBar[1], -0.25);
+  EXPECT_EQ(e.pBar[2], -0.125);
+  EXPECT_EQ(e.census.rhoMax, 0.0);
+  EXPECT_FALSE(e.census.refused());
+  EXPECT_NEAR(e.k6, 0.3 * (0.25 + 0.125), 1e-15);
+}
+
+// Through Sijr's packing, the scattered multipliers against the RAW cross
+// table are the packed K6 -- the identity the reverse pairing rests on.
+TEST(GuardedCensusTests, PackedMultipliersScatterBack) {
+  const Tensor ec = vec({-1.0, -2.0}), ev = vec({5.0});
+  ScEmptyTables t;
+  const std::vector<int64_t> dims{1, 2, 2};
+  t.norm = Tensor(dims);
+  t.xMax = Tensor(dims);
+  const EmptyTuple a = emptyTuple(0.3, 0.4, 0.0, 0.5, 0.2, 0.9);  // parallel: proportional
+  const auto fill = [&](double x, double y) {
+    Tensor r(dims);
+    r(0, 0, 0) = x;
+    r(0, 0, 1) = 0.25 * y;
+    r(0, 1, 0) = 0.75 * y;
+    r(0, 1, 1) = x;
+    return r;
+  };
+  t.normUU = fill(a.nuu, a.nuu);
+  t.normVV = fill(a.nvv, a.nvv);
+  t.normUV = fill(a.nuv, a.nuv);
+  t.hUU = fill(a.huu, a.huu);
+  t.hVV = fill(a.hvv, a.hvv);
+  t.hUV = fill(a.huv, a.huv);
+  const ScEmptySlab s = sijrEmptyTerm(t, 0, ec, ev);
+  EXPECT_TRUE(s.any);
+  EXPECT_EQ(s.census.populated, 3);
+  double raw = 0.0;
+  for (int64_t k = 0; k < t.normUV.size(); ++k)
+    raw += s.pBar.flat(k) * t.normUV.flat(k) + s.qBar.flat(k) * t.hUV.flat(k);
+  EXPECT_NEAR(raw, s.k6, 1e-15);
+  EXPECT_LT(s.k6, 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// SijrsFinishTests (#190): Sijrs's exact, unguarded finish
+// ---------------------------------------------------------------------------
+//
+// E_t = -N_t/Delta_t. Its multipliers, their tangents and the mixed finish
+// against scMultipliers / normToEnergyMultiplierTangent where those do not
+// guard, against a central difference of the class energy where they would,
+// and -1/Delta on a guarded tuple.
+TEST(SijrsFinishTests, MatchesTheGuardedFinishOffTheGuard) {
+  const std::vector<double> norm{0.7, -0.2, 1.3}, delta{1.5, 2.25, 0.8};
+  const ScMultipliers a = sijrsMultipliers(norm, delta);
+  const ScMultipliers b = scMultipliers(norm, std::vector<double>(3, 0.0), delta);
+  for (std::size_t k = 0; k < 3; ++k) {
+    EXPECT_NEAR(a.p[k], b.p[k], 1e-15);
+    EXPECT_NEAR(a.q[k], b.q[k], 1e-15);
+    EXPECT_NEAR(a.r[k], b.r[k], 1e-15);
+  }
+  EXPECT_NEAR(a.energy, b.energy, 1e-15);
+  const std::vector<double> nd{0.3, 0.1, -0.4}, dd{0.2, -0.5, 0.05};
+  const ScSlabMultiplierTangents ta = sijrsMultiplierTangents(vec(norm), delta, vec(nd), dd);
+  const ClassMultiplierTangents tb = normToEnergyMultiplierTangent(
+      norm, std::vector<double>(3, 0.0), delta, nd, std::vector<double>(3, 0.0), dd);
+  for (std::size_t k = 0; k < 3; ++k) {
+    EXPECT_NEAR(ta.p.flat(static_cast<int64_t>(k)), tb.p[k], 1e-14);
+    EXPECT_NEAR(ta.q.flat(static_cast<int64_t>(k)), tb.q[k], 1e-14);
+    EXPECT_NEAR(ta.r[k], tb.r[k], 1e-14);
+  }
+  // On a guarded tuple: the class's own multiplier, not the guard's zero.
+  const ScMultipliers g = sijrsMultipliers({0.0, 1e-20}, {2.0, 4.0});
+  EXPECT_EQ(g.p[0], -0.5);
+  EXPECT_EQ(g.p[1], -0.25);
+}
+
+TEST(SijrsFinishTests, MixedTermsAreTheEnergysMixedDerivative) {
+  ScMixedTables t;
+  t.norm = vec({0.7, 0.0, 1e-16});  // one unguarded, one empty, one small
+  t.h = Tensor({3});
+  t.normDotW = vec({0.3, 0.0, 2e-9});
+  t.hDotW = Tensor({3});
+  t.hDotWDigest = Tensor({3});
+  t.normDotU = vec({-0.2, 0.0, 1e-9});
+  t.hDotU = Tensor({3});
+  t.normWU = vec({0.45, 0.6, 0.15});
+  t.hWU = Tensor({3});
+  t.hWUInt = Tensor({3});
+  t.hWUDigest = Tensor({3});
+  const std::vector<double> delta{1.5, 2.25, 0.8}, dW{0.2, -0.5, 0.05}, dU{-0.1, 0.3, 0.4},
+      dWU{0.07, 0.0, -0.2};
+  const ScMixedTerms m = sijrsMixedTerms(t, delta, dW, dU, dWU);
+  const auto energyAt = [&](double s, double u) {
+    double e = 0.0;
+    for (int64_t k = 0; k < 3; ++k) {
+      const std::size_t i = static_cast<std::size_t>(k);
+      const double n = t.norm.flat(k) + s * t.normDotW.flat(k) + u * t.normDotU.flat(k) +
+                       s * u * t.normWU.flat(k);
+      const double d = delta[i] + s * dW[i] + u * dU[i] + s * u * dWU[i];
+      e += -n / d;
+    }
+    return e;
+  };
+  const double h = std::ldexp(1.0, -12);
+  const double fd =
+      (energyAt(h, h) - energyAt(h, -h) - energyAt(-h, h) + energyAt(-h, -h)) / (4.0 * h * h);
+  EXPECT_NEAR(m.total(), fd, 1e-6);
+  EXPECT_EQ(m.c1Digest, 0.0);
+  EXPECT_EQ(m.c3, 0.0);
+  EXPECT_EQ(m.c4, 0.0);
 }
 
 // ---------------------------------------------------------------------------

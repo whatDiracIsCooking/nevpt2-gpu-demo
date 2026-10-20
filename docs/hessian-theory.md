@@ -1739,10 +1739,16 @@ mode must stay available with a weaker check, and one reference kind must
 **not** inherit a refusal that the first-derivative path has for reasons that
 do not apply here.
 
-*As built* (#158), the empty-tuple K6 row is not yet in the tree: until #190
-lands K6 and the `rho_t` test, `scOrbitalSandwichDevice` refuses every
-(class, pair) with an integral-empty guarded tuple that both directions
-populate, proportional or not, as `err_numerical`.
+*As built* (#190), the four guarded-tuple rows are `scOrbitalSandwichDevice`'s
+(`nevpt2.gradient_plan`'s `emptyTermPacked`). A small tuple contributes zero
+and is never scored. An integral-empty tuple both directions populate adds
+K6 at the ray-limit multipliers. Sijrs takes its own `P = -1/Delta` on every
+guarded tuple, through an unguarded finish at every order (`sijrsMultipliers`),
+so its first-order terms are exact too. A (class, pair) whose worst `rho_t`
+exceeds `kRhoTol` is refused as `err_numerical`, naming the class, the tuple
+count and the worst `rho_t`, and so is any tuple empty by the state. The
+thresholds and the device's separations are in
+[`testing.md`](testing.md), "The orbital block's sandwich".
 
 ## 10. What this settles, and what it does not
 
@@ -1845,11 +1851,10 @@ populate, proportional or not, as `err_numerical`.
   lifted by carrying the affine part explicitly, which would recover an
   identity in the sidecar-fed mode rather than leaving that mode checked only
   by duality.
-- The device's thresholds for §5.6's refusal: the population floor, `rho`'s
-  tolerance, and the integral-noise floor that separates empty tuples from
-  small ones. The host's separations are measured; the device's
-  reassociation is not, and `PC_LIFT_TOL` is the precedent for taking a
-  threshold from the card.
+- The device's thresholds for §5.6's refusal are measured on the N2 cases
+  #190 runs ([`testing.md`](testing.md), "The orbital block's sandwich"),
+  the way `PC_LIFT_TOL` was. A case with small H-class tuples, or a smaller
+  real population than N2's, has not been run on the card.
 - A tuple empty by the state (§5.6): its term in `H_cc` and `H_kc` is not
   derived here, and no committed golden in the census exercises it. Until a
   case has one, it is refused.

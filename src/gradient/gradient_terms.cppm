@@ -262,6 +262,10 @@ struct ScMixedWalk {
   bool pairForward = false;
   bool pairReverse = false;
   std::vector<ScGDot> vDigest;
+  // |u|^2 and |v|^2 (Frobenius): the guarded term's population floor is on
+  // N^{ww} / |w|^2, so it does not depend on how a direction is scaled (#190).
+  double pairScaleU = 1.0;
+  double pairScaleV = 1.0;
 };
 
 // The SECOND-ORDER cross terms of a term list: every term with one EXTERNAL
@@ -390,6 +394,35 @@ void accumDerivativesAlongAll(const std::vector<ScTerm>& terms, const DeviceTens
                 ? activeAccumFor(dActive, term.ops[k].t, res)
                 : dBlocks[static_cast<std::size_t>(term.ops[k].block)];
         deviceEinsumAccum(subs, ops, out, term.coef, stream);
+      }
+    }
+  }
+}
+
+// The guarded term's reverse half (#190, K6): accumDerivativesAlongAll with
+// BOTH slots external -- the derivative with respect to each external
+// operand k, ANOTHER external operand j at its tangent along v, the active
+// block undotted -- weighted by `mult` (the ray-limit multipliers) into
+// dBlocks. Paired with u's dotted slabs it is sum_t Pbar_t N_t^{uv} (or the
+// H side's), the same ordered slot pairs evalTermsCross sums: K6 by duality.
+void accumExternalDerivativesAlong(const std::vector<ScTerm>& terms, const DeviceTensor& mult,
+                                   const std::vector<const DeviceTensor*>& blockDotsV,
+                                   std::vector<DeviceTensor>& dBlocks, wwrStream_t stream) {
+  for (const ScTerm& term : terms) {
+    for (std::size_t k = 0; k < term.ops.size(); ++k) {
+      if (term.ops[k].block == kScActive) continue;
+      const std::string subs = derivativeSubscripts(term.subs, static_cast<int>(k));
+      for (std::size_t j = 0; j < term.ops.size(); ++j) {
+        if (j == k || term.ops[j].block == kScActive) continue;
+        const DeviceTensor* dot = blockDotsV[static_cast<std::size_t>(term.ops[j].block)];
+        if (dot == nullptr) continue;
+        std::vector<const DeviceTensor*> ops;
+        ops.reserve(term.ops.size());
+        for (std::size_t i = 0; i < term.ops.size(); ++i)
+          if (i != k) ops.push_back(i == j ? dot : term.ops[i].t);
+        ops.push_back(&mult);
+        deviceEinsumAccum(subs, ops, dBlocks[static_cast<std::size_t>(term.ops[k].block)],
+                          term.coef, stream);
       }
     }
   }
@@ -659,7 +692,14 @@ double pairSlabDots(const ScSlabDots& dots, const std::vector<DeviceTensor>& dBl
 // with the orbital energies responding to the CI vector, Rdot into
 // acc.dEdCoreDot / dEdVirtDot. Null runs none of it, and `mixedFn` is never
 // called.
-template <class MultiplierFn, class DeltaFn, class MultiplierDotFn, class MixedFn>
+//
+// The orbital pair (mix->pairForward, #158) also finishes the slab's GUARDED
+// tuples (#190, docs/hessian-theory.md Sec. 5.6) with `emptyFn(tables)` --
+// plainEmptyTerm or the class's packed one -- into acc.guarded and
+// acc.pair.k6, and its reverse pairs the ray-limit multipliers' share into
+// acc.pairReverse (and acc.pairReverseK6 on its own).
+template <class MultiplierFn, class DeltaFn, class MultiplierDotFn, class MixedFn,
+          class EmptyFn>
 void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm>& hTerms,
                   const std::vector<int64_t>& tupleDims,
                   const std::vector<const DeviceTensor*>& blocks,
@@ -668,7 +708,7 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
                   const std::vector<RotBlock>& kinds,
                   const std::vector<std::vector<ScGDot>>& gDots, ScCiWalk* ci,
                   MultiplierDotFn&& multiplierDotFn, ScMixedWalk* mix, MixedFn&& mixedFn,
-                  ScClassGradient& acc, const DeviceResources& res) {
+                  EmptyFn&& emptyFn, ScClassGradient& acc, const DeviceResources& res) {
   const wwrStream_t stream = res.stream();
 
   // The with-active halves kept apart, so actReference can exclude the terms
@@ -744,6 +784,9 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
               (!pair || (rot.dirs[1].tangent && mix->epsKappa)),
           "assembleSlab: the mixed direction is rot.dirs[0] (and the orbital pair's second "
           "rot.dirs[1]), with its tangent blocks");
+    check(!mix->pairReverse || mix->pairForward,
+          "assembleSlab: the orbital pair's reverse reads the forward finish's guarded-tuple "
+          "multipliers");
     const ScRotationDir& w = rot.dirs[0];
     const ScSlabDots dots = slabDots(blocks, kinds, w, rot.gen, res);
     const std::vector<const DeviceTensor*> none(blocks.size(), nullptr);
@@ -797,6 +840,7 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
       const std::vector<double> diffDotV = deltaOf(v.epsCoreDot, v.epsVirtDot);
       acc.pairEdotV += dotHost(m.p.data(), pt.normDotV.data()) +
                        dotHost(m.q.data(), pt.hDotV.data()) + dotHost(m.r, diffDotV);
+      std::optional<ScEmptySlab> empty;
       if (mix->pairForward) {
         pt.hDotVDigest = tangentTable(hTerms, none, mix->vDigest, tupleDims, res);
         pt.normUV = crossTable(normTerms, dots.ptr, dotsV.ptr, tupleDims, res);
@@ -808,9 +852,33 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
         pt.hUBlockVDigest = mixedTable(hTerms, dots.ptr, mix->vDigest, tupleDims, res);
         pt.hVBlockU = mixedTable(hTerms, dotsV.ptr, gDots[0], tupleDims, res);
         pt.hVBlockUDigest = mixedTable(hTerms, dotsV.ptr, mix->wDigest, tupleDims, res);
-        acc.pair += pairTermsVia(mixedFn, pt, diffDotW, diffDotV);
-        acc.guarded += guardedCensus(
-            hostNorm, tupleIntegralMax({&normTerms, &hTerms}, tupleDims, stream), pt.normUV);
+        ScPairTerms terms = pairTermsVia(mixedFn, pt, diffDotW, diffDotV);
+        // The guarded tuples (#190): the (u, u) and (v, v) cross tables are
+        // only formed where this slab has a guarded tuple empty by the
+        // integrals -- elsewhere they would be read by nothing.
+        ScEmptyTables et;
+        et.norm = hostNorm;
+        et.xMax = tupleIntegralMax({&normTerms, &hTerms}, tupleDims, stream);
+        et.normUV = pt.normUV;
+        et.hUV = pt.hUV;
+        et.scaleU = mix->pairScaleU;
+        et.scaleV = mix->pairScaleV;
+        bool anyEmpty = false;
+        for (int64_t q = 0; q < hostNorm.size() && !anyEmpty; ++q)
+          anyEmpty = !(std::fabs(hostNorm.flat(q)) > NUMERICAL_ZERO) &&
+                     et.xMax.flat(q) <= kEmptyIntegralTol;
+        if (anyEmpty) {
+          et.normUU = crossTable(normTerms, dots.ptr, dots.ptr, tupleDims, res);
+          et.normVV = crossTable(normTerms, dotsV.ptr, dotsV.ptr, tupleDims, res);
+          et.hUU = crossTable(hTerms, dots.ptr, dots.ptr, tupleDims, res);
+          et.hVV = crossTable(hTerms, dotsV.ptr, dotsV.ptr, tupleDims, res);
+        } else {
+          et.normUU = et.normVV = et.hUU = et.hVV = Tensor(tupleDims);
+        }
+        empty.emplace(emptyFn(et));
+        acc.guarded += empty->census;
+        terms.k6 = empty->k6;
+        acc.pair += terms;
       }
       if (mix->pairReverse) {
         // The pseudodensities' tangent along v, this slab's share: the
@@ -833,6 +901,21 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
         accumDerivativesAlongAll(hTerms, mq, dotsV.ptr, gDots[1], dDot, mDot, res);
         acc.pairReverse += pairSlabDots(dots, dDot, res) + pairActiveAccums(mDot, gDots[0], res) +
                            dotHost(t.r, diffDotW);
+        // K6's reverse half (#190): the ray-limit multipliers against every
+        // term with two external slots, the other one dotted along v, paired
+        // with u's dotted slabs.
+        if (empty && empty->any) {
+          const DeviceTensor pBar = uploadTensor(empty->pBar, res);
+          const DeviceTensor qBar = uploadTensor(empty->qBar, res);
+          std::vector<DeviceTensor> d6;
+          d6.reserve(blocks.size());
+          for (const DeviceTensor* b : blocks) d6.push_back(DeviceTensor::zeros(b->dims, res));
+          accumExternalDerivativesAlong(normTerms, pBar, dotsV.ptr, d6, stream);
+          accumExternalDerivativesAlong(hTerms, qBar, dotsV.ptr, d6, stream);
+          const double k6 = pairSlabDots(dots, d6, res);
+          acc.pairReverse += k6;
+          acc.pairReverseK6 += k6;
+        }
       }
     }
   }
