@@ -637,6 +637,19 @@ integral-free part). At the ctest entries' `--tiles 3` the pool's used
 high-water for the whole run was 2.6 MB (CAS(4,4)) and 133.0 MB (CAS(8,8)),
 on the RTX 3080 (CUDA, `default` preset), 2026-10-20.
 
+**`--sc-hessian-kk-int` (#154) has no floors of its own measured.** Its only
+RDM work is the plain build — once for the state, once per term per pair for
+the digests' forward term at `h2e''` — plus #89's transpose, so the plain
+build's floors and the transpose's rows above are its floors. Beside them it
+holds, per pair, up to four dotted input sets (whole blocks, one copy of
+every array the energy reads each) and the generators' intermediates — on a
+fitted case three `(n_aux, n_mo, n_mo)` jets of `B` beside `B` itself, which
+`GeneralIntegralsDevice` now keeps — none of which scales with `--tiles`. At
+the ctest entries' `--tiles 3` the pool's used high-water for the whole run
+was 4.9 MB (CAS(4,4)), 72.6 MB (CAS(8,8), the RDM build's own figure) and
+7.3 MB (CAS(4,4) density-fitted), on the RTX 3080 (CUDA, `default` preset),
+2026-10-20.
+
 **The digests' transpose (#89) has the plain build's per-tile working set.**
 `buildDigestAdjointDevice` (`nevpt2.rdm_build`'s `:adjoint` partition) holds
 the plain build's `R` and `L2` per tile and one `n^2`-by-width `Wbar` in

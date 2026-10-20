@@ -407,6 +407,14 @@ struct GeneralIntegralsDevice {
   DeviceTensor g_xa_cc, g_xv_cc;
   DeviceTensor g_xc_cc_j, g_xc_cc_k;  // (x i | j j) and (x j | j i)
   DeviceTensor g_xa_vv, g_xc_vv;      // (x t | r r) and (x i | r r)
+
+  // A DENSITY-FITTED case's whole three-index tensor B[L, p, q] (n_aux, n_mo,
+  // n_mo), kept by dfGeneralIntegralsDevice after the arrays above are
+  // contracted out of it; EMPTY for a conventional sidecar. What the orbital
+  // block's cross-slot curvature reads in three-index form (#154; the
+  // `ThreeIndex` route below), and what says a case is fitted on the device.
+  DeviceTensor b;
+  bool densityFitted() const { return b.rank() == 3; }
 };
 
 // --- the density-fitted inventory (#165) -------------------------------------
@@ -995,6 +1003,170 @@ Result<ScMixedHessianVectorResult> scMixedHessianVectorDevice(const ScMixedHessi
                                                               const Tensor& w,
                                                               const SigmaVectorOptions& sigma,
                                                               const DeviceResources& res);
+
+// --- the orbital block's integral curvature, <Ehat', I''> (#154) -------------
+//
+// docs/hessian-theory.md, Sec. 5.1 and Sec. 5.4. Along U = exp(s u + t v) --
+// u and v orbital directions, ordinary antisymmetric (n_mo, n_mo) kappas --
+// the orbital block of the energy's parameter Hessian is
+//
+//   Eddot_kk(u, v) = <Ehat', I''[u, v]> + I'[u]^T Ehat'' I'[v]
+//
+// and THIS is the first term: the energy's first derivative in its inputs
+// (the pseudodensities Y is built from, the digests' transpose hbar among
+// them) against the inputs' SECOND derivative along the two directions,
+//
+//   I''[u, v] = I'[W] + I^x[u, v],    W = (u v + v u) / 2,
+//
+// so that the term is the sum of two pairings, each the first-order pairing
+// scFullRotationDevice already runs, at a new input:
+//
+//   K1 = <Ehat', I'[W]>      the same-slot curvature: every slot promoted once
+//                            by the SYMMETRIC W -- the first-order rule at a
+//                            matrix that is not a kappa, with the three
+//                            traced-pair promotions an antisymmetric kappa
+//                            cancels restored (the :curvature partition);
+//   K2 = <Ehat', I^x[u, v]>  the cross-slot curvature: two different slots,
+//                            one by u and one by v.
+//
+// Both are reported in BOTH modes, as the first-order source term is: the
+// ADJOINT pairing (ext + act against the pseudodensities, eps against R_t,
+// and with `digestAdjoint` the digests' <hbar, h2e''>) and the forward
+// TANGENT (the class terms' product rule at the same inputs, P.Ndot + Q.Hdot,
+// plus eps, plus -- with the state handed in -- the digests' own tangent, the
+// RDM build at h2e''). Their duality is exact, with no step size.
+//
+// WHERE K2's DATA IS (Sec. 5.4). Two general indices: on a conventional case
+// that is the whole MO-integral tensor, which no sidecar carries -- EXCEPT
+// when one of u, v is active-active, where every array collapses to a sidecar
+// row (the `Sidecar` route: the active direction's rule applied to the other's
+// first-order inputs, less the first-order rule at their product; :curvature
+// has the derivation). On a density-fitted case the golden and its NEVPT2F1
+// sidecar carry the whole B[L, p, q], and K2 for ANY pair is a three-index
+// product jet (the `ThreeIndex` route; GeneralIntegralsDevice::b). A
+// conventional pair with neither member active-active is REFUSED, as
+// Unsupported, before any device work -- never answered with K1 alone
+// (Sec. 9.1: an omitted K2 is invisible to the duality, which would omit it in
+// both modes). Lifting that refusal is #180's full-tensor K2.
+//
+// THE TRACED PAIRS' ZERO (Sec. 5.1). h1e_v_Sr's subtracted trace and v2tr
+// depend on the orbitals through the rotated active projector U P U^T, whose
+// second order (W P + P W) - (u P v + v P u) is K1's traced terms plus K2's
+// and vanishes when both u and v are active-active. For such a pair the
+// result carries both shares (`k1Traced`, `k2Traced`: the restored terms'
+// pairing at W and, with K2's minus sign, at v u), and their sum must be zero
+// to round-off while neither is.
+//
+// For #158 (K3-K5, the finish's and the energy's own curvature in the
+// integrals): Eddot_kk(u, v) = ScOrbitalCurvatureResult::value() + those
+// terms. This call owns the I'' half and nothing else.
+enum class ScCurvatureRoute {
+  Auto,        // K1: Sidecar. K2: ThreeIndex on a fitted case, else Sidecar, else refused
+  Sidecar,     // K1: the promotion rule at W. K2: the composition (one of u, v active-active)
+  ThreeIndex,  // the product jets of B -- density-fitted only (K1's an independent check)
+};
+
+const char* scCurvatureRouteName(ScCurvatureRoute r);
+
+struct ScOrbitalCurvatureRequest {
+  Tensor u;  // (n_mo, n_mo), antisymmetric
+  Tensor v;  // (n_mo, n_mo), antisymmetric
+  bool tangent = false;  // also take both terms' forward tangent (the duality)
+  ScCurvatureRoute k1 = ScCurvatureRoute::Auto;
+  ScCurvatureRoute k2 = ScCurvatureRoute::Auto;
+};
+
+// One term's pairing, both modes -- ScFullRotationPairing's fields, at a
+// second-order input, plus the digests' forward term.
+struct ScCurvatureTerm {
+  double ext = 0.0;              // sum_blocks <D, X''>
+  double act = 0.0;              // sum_G <M_G, G(h1e'', h2e'')>
+  double integral = 0.0;         // ext + act
+  double eps = 0.0;              // sum_t R_t Delta_t(eps'')
+  double digest = 0.0;           // <hbar, h2e''>, reverse (with digestAdjoint)
+  double adjoint = 0.0;          // integral + eps + digest
+  double tangentIntegral = 0.0;  // P.Ndot + Q.Hdot at the same inputs, digests frozen
+  double digestForward = 0.0;    // the RDM build at h2e'', through the H side
+  double tangent = 0.0;          // tangentIntegral + eps + digestForward
+  bool hasTangent = false;
+  bool hasDigest = false;
+  double h1eMax = 0.0;  // max |h1e''|, max |h2e''|: did the input move the active
+  double h2eMax = 0.0;  // integrals at all (an intra-space pair's h2e'' is EXACTLY 0)
+};
+
+struct ScOrbitalCurvatureResult {
+  ScCurvatureTerm k1, k2;
+  ScCurvatureRoute k1Route = ScCurvatureRoute::Sidecar;  // which ran
+  ScCurvatureRoute k2Route = ScCurvatureRoute::Sidecar;
+  // Both u and v active-active: the traced pairs' share of each term.
+  bool hasTraced = false;
+  double k1Traced = 0.0;
+  double k2Traced = 0.0;
+  double value() const { return k1.adjoint + k2.adjoint; }    // <Ehat', I''[u, v]>
+  double valueTangent() const { return k1.tangent + k2.tangent; }
+};
+
+// The state, for the digests' forward term; `ci` null skips it (and then
+// `tangent` is the frozen-digest one, `digestForward` zero).
+struct ScOrbitalCurvatureSetup {
+  const NevptIntegralsDevice& ints;
+  const GeneralIntegralsDevice& gen;     // the sidecar: required (K1 reads it)
+  const RdmTensors& rdm;                 // the state's five RDMs
+  const DeviceTensor* digestAdjoint = nullptr;  // hbar (scDigestAdjointDevice), or null
+  const Tensor* ci = nullptr;            // (nstringsA, nstringsB), or null
+  int64_t nelecA = 0;
+  int64_t nelecB = 0;
+  const RdmBuildOptions& opt;            // exact digests only, at opt.nTiles
+};
+
+// Both terms along each pair. A malformed direction (shape, antisymmetry), a
+// sidecar that does not fit the integrals, a route the data cannot serve
+// (`ThreeIndex` on a conventional case), or a conventional pair with neither
+// member active-active is the caller's input: an Error, Unsupported for the
+// last two, before any walk. Integral-direct, one slab per block; one walk per
+// pair (K1, K2 and the traced shares as four dotted directions), plus one
+// plain RDM build per term per tangent pair, at `opt.nTiles` -- the plain
+// build's floors (docs/performance.md, "Tile floors").
+Result<std::vector<ScOrbitalCurvatureResult>> scOrbitalCurvatureDevice(
+    const ScOrbitalCurvatureSetup& setup, const std::vector<ScOrbitalCurvatureRequest>& pairs,
+    const DeviceResources& res);
+
+// K1's machinery on its own: the first-order pairing <Ehat', I'[M]> at ANY
+// (n_mo, n_mo) matrix M -- symmetric, antisymmetric or neither -- with the
+// traced pairs restored. At an antisymmetric M it is scFullRotationDevice's
+// pairing (the restored terms vanish there, to round-off); at W it is K1. The
+// result's fields are ScFullRotationDevice's; `digest` with `digestAdjoint`.
+// Same refusals and costs as scFullRotationDevice, less the antisymmetry one.
+Result<ScFullRotationResult> scMatrixRotationDevice(const NevptIntegralsDevice& ints,
+                                                    const GeneralIntegralsDevice& gen,
+                                                    const RdmTensors& rdm,
+                                                    const DeviceTensor* digestAdjoint,
+                                                    const std::vector<ScRotationRequest>& dirs,
+                                                    const DeviceResources& res);
+
+// The pairing at caller-supplied DOTTED INPUTS: each `dotted` entry holds, in
+// every NevptIntegralsDevice field, an increment of that input (shaped as
+// `ints`' own), and the answer is the energy's first derivative against it --
+// ext + act + eps (+ <hbar, h2e increment> with `digestAdjoint`), and the
+// forward tangent's integral half when `tangent`. v2tr's increment is taken as
+// the trace of h2e_v2_Sir's, which it is for any increment of a consistent
+// integral set. What a finite difference of the PAIRING runs on: the
+// second-order difference of displaced integrals, fed whole, is the term
+// above's own ladder (apps/sc_pseudodensity/'s --sc-hessian-kk-int). A field
+// shaped unlike `ints`' is the caller's input: an Error.
+Result<ScFullRotationResult> scDottedPairingDevice(
+    const NevptIntegralsDevice& ints, const RdmTensors& rdm, const DeviceTensor* digestAdjoint,
+    const std::vector<const NevptIntegralsDevice*>& dotted, bool tangent,
+    const DeviceResources& res);
+
+// The restored traced-pair terms alone, paired: what scMatrixRotationDevice
+// adds to the first-order machinery at M (h1e_v_Sr's x-in-active rows and
+// v2tr's intra-active trace). Zero to round-off at an antisymmetric M -- the
+// reason the first-order path may drop them -- and K1's traced share at W.
+Result<double> scRestoredTracePairingDevice(const NevptIntegralsDevice& ints,
+                                            const GeneralIntegralsDevice& gen,
+                                            const RdmTensors& rdm, const Tensor& m,
+                                            const DeviceResources& res);
 
 // --- PC-NEVPT2's reverse mode (#74) -------------------------------------------
 //

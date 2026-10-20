@@ -42,6 +42,16 @@
 // there is none; the partition :hessian_kc_check is where that lives, with its
 // own PASS line. Not on a density-fitted case.
 //
+// WITH --sc-hessian-kk-int IT CHECKS THE ORBITAL BLOCK'S FIRST TERM (#154):
+// the integrals' own curvature <Ehat', I''[u, v]> = K1 + K2 of the orbital
+// Hessian (docs/hessian-theory.md, Sec. 5.1 and Sec. 5.4), each term's adjoint
+// pairing against its forward tangent, the traced pairs' and the intra-space
+// exact zeros, and Richardson-verified ladders of the fixed-pseudodensity
+// pairing along exp(s u + t v), out of the sidecar (required). K2 for a pair
+// with neither direction active-active is refused on a conventional case and
+// computed in three-index form on a density-fitted one; the partition
+// :hessian_kk_check is where that lives, with its own PASS line.
+//
 // A DENSITY-FITTED golden (`generate_golden.py --df`) runs here too (#165),
 // with no flag of its own: it carries its fitted four-index blocks beside the
 // B blocks, so the identities and --kappa-act read it as they read any
@@ -95,6 +105,9 @@ export import :source_oracle;
 // --sc-hessian-kc: the energy's mixed orbital-CI Hessian block H_kc, its two
 // orientations against each other (#184). Its own PASS line.
 export import :hessian_kc_check;
+// --sc-hessian-kk-int: the orbital Hessian block's integral curvature
+// <Ehat', I''> = K1 + K2 (#154). Its own PASS line.
+export import :hessian_kk_check;
 
 import std;
 // nevpt2.cli: every flag this binary takes, and the ones it refuses.
@@ -361,6 +374,26 @@ int main(int argc, char** argv) {
     }
     const nevpt2::Result<bool> ok = checkScHessianKc(g, gg ? &*gg : nullptr, dInts, dDm1, dDm2,
                                                      rdm, opt.rdm, *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
+
+  // --sc-hessian-kk-int (#154): the orbital Hessian block's integral curvature
+  // <Ehat', I''> (:hessian_kk_check). K1 reads the sidecar's arrays at a
+  // symmetric argument, so the sidecar is required, as --kappa-full's is.
+  if (parsedOpts.scHessianKkInt) {
+    nevpt2::Result<nevpt2::GradGoldFile> sidecar = loadSidecar();
+    if (!sidecar) {
+      nevpt2::report(sidecar.error());
+      return 1;
+    }
+    const nevpt2::GradGoldFile gg = *std::move(sidecar);
+    const nevpt2::Result<bool> ok =
+        checkScHessianKkIntegral(g, gg, dInts, dDm1, dDm2, rdm, opt.rdm, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

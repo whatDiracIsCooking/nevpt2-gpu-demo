@@ -109,6 +109,48 @@ DeviceTensor kappaActionDevice(const DeviceTensor& x, const std::vector<int>& ax
   return out;
 }
 
+// A DOTTED INPUT SET handed in whole (#154): every array the class energies
+// read, already differentiated -- the field of `d` for each stored block, h1e,
+// h2e and the two orbital-energy vectors, shaped as the integrals' own -- and
+// the hoisted trace v2tr's dot beside them, which no NevptIntegralsDevice
+// field holds. A direction carrying one (ScRotationDir::dotted) is paired, and
+// differentiated forward, at exactly these inputs, with no promotion rule run
+// at all: what the second-order inputs of the orbital block's <Ehat', I''>
+// term need (nevpt2.gradient, "The orbital block's integral curvature"),
+// whose generators (:curvature) are not a kappa action, and what a finite
+// difference of the pairing feeds. Integral-direct only: every field is a
+// WHOLE block, so the walk must run one slab per block.
+struct ScDotted {
+  NevptIntegralsDevice d;
+  DeviceTensor v2tr;  // (nv, nc): sum_a d.h2e_v2_Sir[r, a, a, i] unless a builder says otherwise
+};
+
+// The field of `d` a block's dot lives in. SrsiT is h2e_v_Srsi again (the
+// whole block when the walk runs one slab per block); V2tr is not a field and
+// is the caller's (ScDotted::v2tr).
+const DeviceTensor& dottedField(const NevptIntegralsDevice& d, RotBlock b) {
+  switch (b) {
+    case RotBlock::Sr: return d.h2e_v_Sr;
+    case RotBlock::Si: return d.h2e_v_Si;
+    case RotBlock::Sijrs: return d.cvcv;
+    case RotBlock::Sijr: return d.h2e_v_Sijr;
+    case RotBlock::Srsi:
+    case RotBlock::SrsiT: return d.h2e_v_Srsi;
+    case RotBlock::Srs: return d.h2e_v_Srs;
+    case RotBlock::Sij: return d.h2e_v_Sij;
+    case RotBlock::Sir1: return d.h2e_v1_Sir;
+    case RotBlock::Sir2: return d.h2e_v2_Sir;
+    case RotBlock::H1eSr: return d.h1e_v_Sr;
+    case RotBlock::H1eSi: return d.h1e_v_Si;
+    case RotBlock::H1eSir: return d.h1e_v_Sir;
+    case RotBlock::V2tr: break;  // not a field: ScDotted::v2tr
+    case RotBlock::H1e: return d.h1e;
+    case RotBlock::H2e: return d.h2e;
+  }
+  check(false, "dottedField: v2tr is not a NevptIntegralsDevice field (ScDotted::v2tr is)");
+  return d.h1e;
+}
+
 // One direction, device-resident: the antisymmetric kappa itself and its
 // action on the two active-space integral blocks (which every Dyall block is
 // built from, and which no slab walk re-derives). `tangent` asks for the
@@ -151,6 +193,12 @@ struct ScRotationDir {
   // (#158). Borrowed: the owner outlives every walk the direction enters.
   const DeviceTensor* f3acDot = nullptr;
   const DeviceTensor* f3caDot = nullptr;
+
+  // A DOTTED INPUT SET in place of a kappa (#154, makeDottedRotation): set,
+  // every slab's dots are its fields (slabDots), h1eDot / h2eDot view its h1e
+  // / h2e, the orbital energies' Deltadot reads its e_core / e_virt, and the
+  // kappa fields above stay empty. Borrowed: the owner outlives every walk.
+  const ScDotted* dotted = nullptr;
 
   // The column block a slot over `s` contracts with. Only ever called on a
   // general direction (the active-only path never reaches :general).
@@ -233,10 +281,22 @@ Tensor kappaColumnBlock(const Tensor& k, int64_t lo, int64_t hi, int64_t actLo, 
 //
 // A kappa that is not an antisymmetric (n_mo, n_mo), or a sidecar whose
 // active space is not the integrals', is the CALLER's input: an Error.
+//
+// `anyMatrix` drops the antisymmetry refusal, and nothing else (#154): the
+// promotion rules are the product rule and hold for ANY matrix in kappa's
+// place (docs/hessian-theory.md, Sec. 5.1) -- every einsum here and in
+// :general keeps its general index over the whole MO range or partitions it
+// with the intra-active half, so none assumes kappa^T = -kappa. What does is
+// the THREE traced pairs whose promotions this machinery leaves out because
+// they cancel against an antisymmetric kappa (h1e_v_Sr's subtracted trace,
+// the hoisted v2tr): a direction built this way is only ever read through
+// :curvature's dottedAtMatrix, which restores them. The orbital-energy
+// response is already the full rule for any matrix.
 Result<ScRotation> makeGeneralRotation(const std::vector<ScRotationRequest>& reqs,
                                        const DeviceTensor& h1e, const DeviceTensor& h2e,
                                        const GeneralIntegralsDevice& gen,
-                                       const DeviceTensor& dm1, const DeviceResources& res) {
+                                       const DeviceTensor& dm1, const DeviceResources& res,
+                                       bool anyMatrix = false) {
   const int64_t nmo = gen.nmo();
   const int64_t actLo = gen.ncore, actHi = gen.ncore + gen.nact;
   if (h1e.dims[0] != gen.nact)
@@ -252,7 +312,7 @@ Result<ScRotation> makeGeneralRotation(const std::vector<ScRotationRequest>& req
       return err_config(
           std::format("direction {}: kappa is not a {} x {} matrix", d, nmo, nmo));
     const double anti = kappaAntisymmetry(k);
-    if (anti > 1e-14)
+    if (!anyMatrix && anti > 1e-14)
       return err_config(std::format(
           "direction {}: kappa is not antisymmetric (max |k + k^T| = {:.3e})", d, anti));
 
@@ -290,6 +350,40 @@ Result<ScRotation> makeGeneralRotation(const std::vector<ScRotationRequest>& req
         generalEpsResponse(gen, dm1, dir.kCore, dir.kActFull, dir.kVirt, res);
     dir.epsCoreDot = eps.core;
     dir.epsVirtDot = eps.virt;
+    rot.dirs.push_back(std::move(dir));
+  }
+  return rot;
+}
+
+// Directions that carry DOTTED INPUT SETS (#154): one per set, `tangent[d]`
+// asking for the forward tangent at set d as well as the pairing. The sets
+// are borrowed, and must outlive the returned ScRotation and every walk it
+// enters; their shapes are the caller's to have checked (:curvature builds
+// them from the integrals, and scDottedPairingDevice checks a caller's). The
+// direction is `general` so every class pairs the orbital-energy half -- R_t
+// against the set's own e_core / e_virt -- and reads its Sijrs block; its
+// kappa fields are empty and nothing reads them (slabDots answers from the
+// set before any promotion is looked at).
+ScRotation makeDottedRotation(const std::vector<const ScDotted*>& sets,
+                              const std::vector<bool>& tangent, const DeviceResources& res) {
+  check(sets.size() == tangent.size(), "makeDottedRotation: one tangent flag per set");
+  ScRotation rot;
+  rot.dirs.reserve(sets.size());
+  for (std::size_t d = 0; d < sets.size(); ++d) {
+    ScRotationDir dir;
+    dir.dotted = sets[d];
+    dir.general = true;
+    dir.tangent = tangent[d];
+    dir.h1eDot = sets[d]->d.h1e.view();
+    dir.h2eDot = sets[d]->d.h2e.view();
+    // downloadTensor synchronizes the stream, so whatever wrote the set is
+    // complete; each class assembles its Delta vector on the host.
+    // A partition with no core (or no virtual) orbital has an empty vector.
+    const auto host = [&](const DeviceTensor& e) {
+      return e.size() > 0 ? downloadTensor(e, res.stream()) : Tensor({0});
+    };
+    dir.epsCoreDot = host(sets[d]->d.e_core);
+    dir.epsVirtDot = host(sets[d]->d.e_virt);
     rot.dirs.push_back(std::move(dir));
   }
   return rot;

@@ -68,7 +68,7 @@ Result<GeneralIntegralsDevice> dfGeneralIntegralsDevice(
   put(bCA, c0, a0, true);
   put(bVA, v0, a0, true);
   put(bCV, c0, v0, true);
-  const DeviceTensor dB = uploadTensor(b, res);
+  DeviceTensor dB = uploadTensor(b, res);
 
   // [lo, hi) of each space along an MO axis.
   enum Sp { C, A, V };
@@ -121,9 +121,11 @@ Result<GeneralIntegralsDevice> dfGeneralIntegralsDevice(
   // g_xa_vv[x, t, r] = (x t | r r); g_xc_vv[x, i, r] = (x i | r r).
   g.g_xa_vv = deviceEinsumNew("Lxt,Lr->xtr", {&sA, &diagV}, 1.0, res);
   g.g_xc_vv = deviceEinsumNew("Lxi,Lr->xir", {&sC, &diagV}, 1.0, res);
-  // dB and every view of it go out of scope here, with the contractions that
-  // read them still queued: the free is stream-ordered (wwrFreeAsync on
-  // res.stream()), behind them.
+  // The whole B stays with the inventory (#154: the cross-slot curvature's
+  // three-index route reads it). Moving the owner moves the handle, not the
+  // device memory, so the contractions above -- queued against views of it --
+  // still read live memory; the views themselves go out of scope here.
+  g.b = std::move(dB);
   return g;
 }
 

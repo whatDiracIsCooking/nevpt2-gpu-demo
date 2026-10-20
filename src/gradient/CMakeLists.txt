@@ -55,13 +55,16 @@ add_cxx_module_library(
 # IntegralSource, and build the metric / Dyall-Hamiltonian blocks with its own
 # exported make_* functions), and runs entirely through nevpt2.einsum's
 # generic contraction kernel, which nevpt2.energy re-exports -- so there is no
-# device library of its own here. The SIX internal partitions, which no
+# device library of its own here. The internal partitions, which no
 # importer sees, are nevpt2.gradient:general (gradient_general.cppm -- the
 # promotion table, from nevpt2.gradient_plan, read against the sidecar's
 # device arrays, and the general-range action a core/virtual/mixed
 # rotation needs, which :rotation builds on), :rotation
 # (gradient_rotation.cppm, the rotation machinery), :terms (the generic
-# term/derivative machinery), :sc_classes (the eight classes), :rdm_adjoint
+# term/derivative machinery), :curvature (the orbital Hessian's second-order
+# input generators, #154: the first-order rule at a matrix with the traced
+# pairs restored, and the cross-slot term from the sidecar or, fitted, from
+# the three-index B), :sc_classes (the eight classes), :rdm_adjoint
 # (the chain rule from the metric / Dyall blocks down to the five RDMs),
 # :ci_source (Park Eq. 48's sigma assembly) and :pc_classes (PC-NEVPT2's
 # reverse mode, #74: the PC solve's adjoint over SC's own rotation machinery
@@ -86,8 +89,8 @@ add_cxx_module_library(
   NAME nevpt2.gradient
   PRIMARY_INTERFACE gradient.cppm
   PARTITIONS gradient_general.cppm gradient_rotation.cppm gradient_terms.cppm
-             gradient_sc_classes.cppm gradient_rdm_adjoint.cppm gradient_ci_source.cppm
-             gradient_pc_classes.cppm
+             gradient_curvature.cppm gradient_sc_classes.cppm gradient_rdm_adjoint.cppm
+             gradient_ci_source.cppm gradient_pc_classes.cppm
   IMPLEMENTATION gradient.cpp gradient_df.cpp
   LINK_PUBLIC nevpt2::energy nevpt2::sc_amplitudes nevpt2::gradient_plan
               nevpt2::sigma_vector nevpt2::rdm_build
