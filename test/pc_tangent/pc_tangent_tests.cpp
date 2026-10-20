@@ -21,6 +21,14 @@
 //                         single halving fails; and the PC conditioning guard
 //                         must have run, and passed, at every displaced state
 //                         -- a state with no gap recorded fails (#70)
+//   PcHessianReportTests  the --pc-hessian gate (#152): a clean check passes;
+//                         a class refused along (u, v) -- gap, denominator or
+//                         lift -- fails it; Euler is gated on the homogeneous
+//                         classes only; the three-term tangent must match the
+//                         two-term one; a negative control that answers
+//                         instead of refusing, or refuses for another reason,
+//                         fails; the ladder and the extrapolation as the
+//                         tangent's
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
 // textual std #include before any import.
@@ -199,6 +207,105 @@ TEST(PcTangentLadderTests, ADisplacedGapBelowTheFloorFails) {
   PcTangentCheck ok = cleanCheck();
   ok.steps[2].displacedGap[1] = PC_MIN_GAP;
   EXPECT_TRUE(gate(ok));
+}
+
+// --- PcHessianReportTests (#152) --------------------------------------------------
+
+// A Hessian check that passes: every class computed, the transcription and
+// Euler exact, the control refusing Sr, Si and Sir for their lift, and the
+// tangent check's own clean ladder, re-centred on Eddot.
+PcHessianCheck cleanHessian() {
+  PcHessianCheck c;
+  const PcTangentCheck t = cleanCheck();
+  for (std::size_t i = 0; i < 8; ++i) {
+    PcClassHessian& k = c.classes[i];
+    k.result = t.classes[i].result;
+    k.result.spectrum.smallestKept = 1e-3;
+    k.result.spectrum.gap = 1e9;
+    k.edotU = 0.002 * static_cast<double>(i + 1);
+    k.edotV = -0.001 * static_cast<double>(i + 1);
+    k.eddot = t.classes[i].edot;
+    c.energyRef[i] = k.result.energy;
+    c.edotURef[i] = k.edotU;
+    c.edotVRef[i] = k.edotV;
+    c.eulerEddot[i] = k.edotU;
+    c.eddotTotal += k.eddot;
+    PcClassHessian& w = c.control[i];
+    w.result.status = PcStatus::Done;
+    if (i == 0 || i == 1 || i == 7) {
+      w.result.status = PcStatus::Refused;
+      w.result.why = "S's dropped modes lift along this direction pair";
+      w.lift = 0.4;
+    }
+  }
+  c.steps = t.steps;
+  c.richardson = t.richardson;
+  c.richardsonErr = t.richardsonErr;
+  c.allDone = true;
+  return c;
+}
+
+bool hessGate(const PcHessianCheck& c) {
+  return printPcHessianReport(c, kAtol, kIdTol, kIdTol, kRatioTol);
+}
+
+TEST(PcHessianReportTests, ACleanCheckPasses) { EXPECT_TRUE(hessGate(cleanHessian())); }
+
+TEST(PcHessianReportTests, ARefusedClassFailsTheGate) {
+  // A gap, denominator or lift refusal along (u, v) is the answer: the gate
+  // fails rather than reading the class's (meaningless) Eddot as zero.
+  for (const char* why : {"S's gap 7.9e-01 < PC_MIN_GAP 1e+03",
+                          "S's dropped modes lift along this direction pair"})
+    for (std::size_t i = 0; i < 8; ++i) {
+      PcHessianCheck c = cleanHessian();
+      c.classes[i].result.status = PcStatus::Refused;
+      c.classes[i].result.why = why;
+      c.classes[i].eddot = 0.0;
+      c.allDone = false;
+      EXPECT_FALSE(hessGate(c)) << "class index " << i << ": " << why;
+    }
+}
+
+TEST(PcHessianReportTests, EulerIsGatedOnTheHomogeneousClassesOnly) {
+  for (std::size_t i = 0; i < 8; ++i) {
+    PcHessianCheck c = cleanHessian();
+    c.eulerEddot[i] += 0.5;
+    EXPECT_EQ(hessGate(c), !kPcHomogeneousInCi[i]) << "class index " << i;
+  }
+}
+
+TEST(PcHessianReportTests, AThreeTermTangentAwayFromTheTwoTermOneFails) {
+  PcHessianCheck c = cleanHessian();
+  c.edotVRef[4] += 1e-6;
+  EXPECT_FALSE(hessGate(c));
+}
+
+TEST(PcHessianReportTests, AControlThatAnswersInsteadOfRefusingFails) {
+  // Nothing refused along the symmetry-breaking direction: the lift test is
+  // off, or not reaching the classes it must.
+  PcHessianCheck none = cleanHessian();
+  for (PcClassHessian& w : none.control) {
+    w.result.status = PcStatus::Done;
+    w.lift = 0.0;
+  }
+  EXPECT_FALSE(hessGate(none));
+  // A control refused for some OTHER reason is not the lift test working.
+  PcHessianCheck other = cleanHessian();
+  other.control[3].result.status = PcStatus::Refused;
+  other.control[3].lift = 0.0;
+  EXPECT_FALSE(hessGate(other));
+}
+
+TEST(PcHessianReportTests, TheLadderAndTheExtrapolationAreGatedAsTheTangents) {
+  PcHessianCheck ratio = cleanHessian();
+  ratio.steps.back().ratio = 1.0;  // the plateau #152's first ladder showed
+  EXPECT_FALSE(hessGate(ratio));
+  PcHessianCheck far = cleanHessian();
+  far.richardsonErr = 1e-6;
+  EXPECT_FALSE(hessGate(far));
+  PcHessianCheck unguarded = cleanHessian();
+  unguarded.steps[1].displacedGap[0] = 0.0;
+  EXPECT_FALSE(hessGate(unguarded));
 }
 
 }  // namespace nevpt2::test::pc_tangent

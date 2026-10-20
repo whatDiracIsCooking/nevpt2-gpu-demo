@@ -108,6 +108,12 @@ struct ClassSolve {
   // path does not, and holding a second (d, m) matrix through its slab walk
   // would raise its peak for no reader, so it is opt-in.
   DeviceTensor Ut;
+  // (nd, d) the DROPPED eigenvectors of S_sym, row k one of them, only when
+  // solveClass was asked to keep them (`keepDropped`) and something was
+  // dropped: the second derivative's rotation terms (energy_pc_hessian.cppm)
+  // need the dropped-space projector P = Vn^T Vn. Empty otherwise.
+  DeviceTensor Vn;
+  double sMax = 0.0;  // S_sym's largest eigenvalue, what the cut is relative to
 };
 
 // `S1` (d, n1), optional: the metric column(s) the one-body part of V|Psi_0>
@@ -117,7 +123,7 @@ struct ClassSolve {
 // (gap, no positive eigenvalue) is a value, cs.result.status.
 Result<ClassSolve> solveClass(const DeviceTensor& S, const DeviceTensor& K, const char* name,
                               const DeviceResources& dr, const DeviceTensor* S1 = nullptr,
-                              bool keepUt = false) {
+                              bool keepUt = false, bool keepDropped = false) {
   const wwrStream_t s = dr.stream();
   const int64_t d = S.dims[0];
   ClassSolve cs;  // cs.result is filled by pcRankCut, step 2
@@ -139,6 +145,12 @@ Result<ClassSolve> solveClass(const DeviceTensor& S, const DeviceTensor& K, cons
   if (cs.result.status == PcStatus::Refused) return cs;
   const int64_t nd = cs.result.spectrum.dropped;
   const int64_t m = d - nd;
+  cs.sMax = sh.flat(d - 1);
+  // A copy, not a view: Vt is freed when this returns.
+  if (keepDropped && nd > 0) {
+    const DeviceTensor VtDrop = sliceAxis(Vt, 0, 0, nd);
+    cs.Vn = deviceEinsumNew("ij->ij", {&VtDrop}, 1.0, dr);
+  }
 
   // X^T = s_kept^-1/2 V_kept^T, (m, d): the kept rows of Vt, each scaled.
   Tensor sInvHalf({m});
@@ -178,16 +190,18 @@ Result<ClassSolve> solveClass(const DeviceTensor& S, const DeviceTensor& K, cons
 //   Edot_t = -c * (2 x_vec^T bdot_t - x_vec^T Adot_t x_vec),
 //
 // which names NO eigenvector derivative: the solve already performed is all
-// of it. Getting there from dA^+ = -A^+ Adot A^+ needs A^+ to BE
-// differentiable -- A's rank locally constant -- and the two extra terms of
-// the general pseudo-inverse derivative, A^+ A^+ Adot (I - A A^+) and its
-// transpose, to drop, which they do because b_t lies in the kept range
-// (I - A A^+ annihilates it). Both hold exactly where pcEnergiesDevice
-// already accepts a class: PC_MIN_GAP separates S's structural null modes --
-// null for every CI vector, being linear dependencies among the operator
-// strings -- from the smallest kept mode by three decades, so the cut cannot
-// move under a small change of the state
-// (docs/pc-nevpt2.md, "The singular-metric convention"). Where that gap is
+// of it. The solve is not A^+ but S's cut restricted inverse
+// M = Q (Q^T A Q)^-1 Q^T, differentiable where S's rank is locally constant
+// -- PC_MIN_GAP's three decades between the dropped modes and the smallest
+// kept one (docs/pc-nevpt2.md, "The singular-metric convention"). Its
+// derivative (docs/hessian-theory.md, Sec. 6.2) is -M Adot M plus terms in
+// P Sdot (P the dropped-space projector), because the dropped space is null
+// for THIS state's metric and turns with the state, not null for every CI
+// vector (docs/pc-nevpt2.md, "What the cut drops, and how it moves").
+// Sandwiched on b_t (in S's range) those leave one term, -2 rho^T Sdot P A x
+// with rho = S^+ x, and it vanishes where P A = 0: at the eigenstate, which
+// is where this tangent is taken. The second derivative carries it
+// (energy_pc_hessian.cppm). Where the gap is
 // absent the class is refused, and the tangent is refused with it through the
 // same PcStatus::Refused, rather than handing back a number whose rank
 // assumption nobody checked.

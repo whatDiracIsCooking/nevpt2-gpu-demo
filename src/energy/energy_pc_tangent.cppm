@@ -14,13 +14,15 @@
 //
 // with A_t = K + Delta_t S and b_t = S x_t + S_1 h1_t -- only the solve
 // pcEnergiesDevice already ran, no dU/dh and no dlambda/dh, so no degeneracy
-// case to handle. A^+ is a pseudo-inverse and is differentiable only where
-// the rank is locally constant, which is exactly what PC_MIN_GAP enforces
-// (docs/pc-nevpt2.md, "The singular-metric convention"): the dropped modes
-// are STRUCTURAL -- linear dependencies among the class's operator strings,
-// null for every CI vector -- and three decades separate them from the
-// smallest kept mode, so the cut cannot move under a small change of the
-// state. The tangent is therefore valid precisely on the states
+// case to handle. The solve is S's cut restricted inverse, differentiable only
+// where S's rank is locally constant, which is what PC_MIN_GAP enforces
+// (docs/pc-nevpt2.md, "The singular-metric convention"): three decades
+// separate the dropped modes from the smallest kept one, so the cut cannot
+// move under a small change of the state. The dropped space does TURN with
+// the state (it is null for this state, not for every CI vector), and that
+// adds a term -2 rho^T Sdot P A x which vanishes at the eigenstate this
+// tangent is taken at (docs/hessian-theory.md, Sec. 6.2; pcHessianDevice
+// carries it). The tangent is therefore valid precisely on the states
 // pcEnergiesDevice accepts, and on no others: a class refused by the gap or
 // denominator check comes back Refused here too (PcClassTangent's `result`
 // carries that status and the reason), never as a silent zero. The full

@@ -956,6 +956,59 @@ device RDM build and PC stage; the three sizes above run 10, 10 and 8 of
 them. At CAS(10,12) that is the 318s, nearly all of it RDM builds, which is
 why that entry is `slow` and takes `--fd-steps 3`.
 
+### The second derivative, Eddot(u, v)
+
+`pcHessianDevice` (`src/energy/energy_pc.cpp`, over the `:pc_hessian`
+partition, #152) is the PC energy's second directional derivative with
+respect to the CI vector at fixed orbital energies:
+[`hessian-theory.md`](hessian-theory.md), §6.2's repaired formula — §6.1's
+terms plus the three rotation terms in `S^+ = U U^T` and the dropped-space
+projector `P` — evaluated in the solve's eigenbasis with the solve's own
+dropped eigenvectors. Beside it, the same walk returns the **three-term**
+`Edot` (the device tangent plus `-2 rho^T S_u P A x`), exact at any CI vector.
+`nevpt2_pc_tangent --pc-hessian` checks it. The check runs Euler at second
+order on the five homogeneous classes, then a negative control along a random
+amplitude vector `w`, then a Richardson-verified central difference of the
+three-term `Edot(v)` along `u` on the unit sphere. Its `u` is the tangent
+check's own direction (seed `0x5eed0033`) and its `v` is seed `0x5eed0152`,
+the pair "What the cut drops, and how it moves" reproduces offline. A
+(class, direction pair) whose dropped modes lift is refused. The test is the
+first-order block `P S_a P`, or §6.2's `L_ab`, above `PC_LIFT_TOL = 1e-5`
+relative to `s_max`, a threshold that sits between that section's measured
+noise and its smallest real lift.
+
+RTX 3080, CUDA, `default` preset, emitted digest, `--tiles 3`, steps halving
+from `2^-12` (2026-10-20):
+
+| `n2_ccpvdz_cas44` | value |
+|---|---|
+| `Eddot(u, v)`, Sr / Sir / total | 0.1752129067 / 4.0340380951 / 5.3056290740 Eh |
+| Sr / Sir against the offline probe's second derivative (above) | equal to all ten printed digits |
+| ratios of the four-step ladder | 4.001, 4.000, 3.999 |
+| \|Richardson − `Eddot`\| | 2.6e-11 – 6.2e-11 (two runs; the RDM build's `atomicAdd`s reassociate) |
+| Euler, worst of the five | 1.5e-15 |
+| \|E − `pcEnergiesDevice`\| / \|three-term − two-term `Edot`\| | ≤2.8e-17 / ≤7.1e-16 |
+| lift along `(u, v)`, Sr / Si / Sir | 1.2e-14 / 1.5e-14 / 8.6e-15 |
+| lift along the control `(u, w)`, Sr / Si / Sir (refused) | 0.42 / 0.40 / 0.078 |
+| smallest kept `s / s_max` (Sir) | 1.6e-5 |
+| wall | 0.3 s |
+
+Without the rotation terms the same run printed 0.1265035562 (Sr) and
+4.0340320600 (Sir). A difference of the device's two-term `Edot` plateaued at
+0.1508600520 (Sr), which is #152's first ladder.
+
+**Why there is no CAS(8,8) entry.** The same run on `n2_ccpvdz_cas88`
+(diagnostic, not a ctest entry) has smallest kept `s / s_max` 1.0e-10 (Sr)
+and `Eddot` 30.19 Eh. Its ladder is fourfold from `2^-12` (4.009, 4.002,
+4.003), but the Richardson value stands 5.5e-6 Eh (1.8e-7 relative) off the
+analytic one, both from `2^-12` and from `2^-16`. The two Richardson values
+agree with each other to 1.1e-6 Eh, so the difference has converged. What is
+left is the analytic formula's eigenstate assumption: `P A = 0` holds only to
+the golden's CI residual (4.3e-7, above), and `S^+` amplifies that by up to
+`1e10`. The three-term `Edot` differs from the two-term one by 1.3e-11 there,
+against 7e-16 at CAS(4,4). Meeting a 1e-8 gate at that conditioning would need
+a tighter CI vector, not a different step.
+
 ## The source terms by reverse mode
 
 #74 gives PC what SC has had since #73–#89: `y_I = dE_pc/dc_I` and

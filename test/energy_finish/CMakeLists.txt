@@ -28,7 +28,8 @@ add_gtest_suite_tests(
          NormToEnergyDerivativeTests NormToEnergyTangentTests NormToEnergyDeltaTests
          PcCoefficientsTests PcQuadFormTests TangentSingleTests PcAdjointTests
          PcRotationTangentTests PcDeltaTangentTests NormToEnergyHessianTests
-         NormToEnergyMultiplierTangentTests NormToEnergyHessianSandwichTests)
+         NormToEnergyMultiplierTangentTests NormToEnergyHessianSandwichTests
+         PcQuadSecondTests)
 
 # The abort tier: normToEnergyTangent's five vectors (and the Delta and
 # multiplier tangents' four and six, the Hessian sandwich's nine) must be one class's, so differing lengths

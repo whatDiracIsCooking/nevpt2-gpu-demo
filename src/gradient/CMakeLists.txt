@@ -98,7 +98,9 @@ add_cxx_module_library(
 
 # nevpt2.pc_tangent -- the finite-difference check of PC-NEVPT2's CI-vector
 # tangent: it drives nevpt2.energy's pcTangentsDevice at one state and its
-# pcEnergiesDevice at the displaced states c +- h u. It links the RDM build
+# pcEnergiesDevice at the displaced states c +- h u -- and, for --pc-hessian
+# (#152), the check of the second derivative pcHessianDevice, which
+# differences pcTangentsDevice itself at those states. It links the RDM build
 # AND the energy stage (as nevpt2.gradient now does, for the digests' orbital
 # response), because that is what a displaced state costs: nevpt2::rdm_host_dm rebuilds its dm1/dm2 on the host
 # (the golden file's arrays are only the state's own) and nevpt2::rdm_build

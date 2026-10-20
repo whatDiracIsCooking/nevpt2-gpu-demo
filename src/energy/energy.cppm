@@ -72,19 +72,21 @@
 //   Edot_t = -c * (2 x_vec^T bdot_t - x_vec^T Adot_t x_vec).
 //
 // No eigenvector derivative appears, so there is no degenerate-eigenvalue
-// case to handle. WHY THAT IS LEGITIMATE, and where it stops being so: A^+ is
-// a PSEUDO-inverse, and a pseudo-inverse is differentiable only where the
-// rank is locally constant -- otherwise dA^+ does not exist and the line
-// above is meaningless. Local rank constancy is exactly what PC_MIN_GAP
-// already enforces: the modes the cut drops are STRUCTURAL -- linear
-// dependencies among the class's active-space operator strings, null for
-// every CI vector, measured at <=1.2e-15 of s_max -- and PC_MIN_GAP = 1e3
-// demands three decades between them and the smallest kept mode, so no mode
-// can cross the cut under a small change of the state
-// (docs/pc-nevpt2.md, "The singular-metric convention"). The two extra terms
-// of the general pseudo-inverse derivative, A^+ A^+ Adot (I - A A^+) and its
-// transpose, drop because b_t lies in the kept range. So the tangent is valid
-// precisely on the states pcEnergiesDevice already accepts -- and ONLY there:
+// case to handle. WHY THAT IS LEGITIMATE, and where it stops being so: the
+// solve is the S-cut restricted inverse M = Q (Q^T A Q)^-1 Q^T (Q the kept
+// eigenvectors of S), differentiable only where S's rank is locally
+// constant. PC_MIN_GAP = 1e3 demands three decades between the dropped
+// modes and the smallest kept one, so no mode can cross the cut under a
+// small change of the state (docs/pc-nevpt2.md, "The singular-metric
+// convention"). The dropped modes are exact null modes of THIS state's
+// metric, not of every CI vector: they turn with the state
+// (docs/pc-nevpt2.md, "What the cut drops, and how it moves"), which adds a
+// third term, -2 rho^T Sdot P A x with rho = S^+ x and P the dropped-space
+// projector, to dM's sandwich on b_t. It vanishes where P A = 0 -- at the
+// eigenstate, the only state this tangent is evaluated at
+// (docs/hessian-theory.md, Sec. 6.2) -- so the two terms above are exact
+// there; the second derivative (pcHessianDevice) carries all three. So the
+// tangent is valid precisely on the states pcEnergiesDevice already accepts -- and ONLY there:
 // a class the gap or denominator check refuses is refused in the tangent too,
 // through the same PcStatus::Refused (PcClassTangent carries that class's own
 // PcClassResult), never reported as a zero derivative. The per-class algebra
@@ -609,5 +611,69 @@ struct PcClassSolve {
 // Numerical Error pcEnergiesDevice returns for it.
 Result<PcClassSolve> pcSolveClass(const PcMatrices& mx, const char* name,
                                   const DeviceResources& res);
+
+// --- PC-NEVPT2's second directional derivative (#152) -------------------------
+//
+// Eddot(u, v), the PC class energies' second derivative with respect to the
+// CI vector along two directions, at the golden's FIXED orbital energies --
+// the solve differentiated twice (docs/hessian-theory.md, Sec. 6;
+// energy_pc_hessian.cppm has the derivation, nevpt2.energy_finish's
+// pcQuadSecond the per-tuple algebra). The (S, K, S_1) of every class are
+// built by the same pcMatrices* builders as the tangent's, from the RDM sets
+// in `sets`: `rdm` the RDMs themselves, `dotU` / `dotV` their first-order
+// tangents along u / v (nevpt2.rdm_host_dm's dm12Dot and nevpt2.rdm_build's
+// tangent build at (c, u) and (c, v)), and `ddot` the second-order set
+// d^2(dm)/dc^2 [u, v] -- the same two builders at (u, v), which is the RDMs'
+// exact second derivative (#151) -- with `ddotUU` / `ddotVV` the same at
+// (u, u) / (v, v) for the lift test below. No eigensolve beyond the energy's
+// own and no eigenvector derivative; S's dropped space turns with the state,
+// so the derivative carries the rotation terms of Sec. 6.2, built from the
+// solve's own dropped eigenvectors.
+//
+// `ddot` null: only E and the first derivatives Edot(u), Edot(v), with all
+// three of Sec. 6.2's first-order terms -- exact at ANY CI vector, unlike
+// pcTangentsDevice's two, which are exact at the eigenstate only. That is
+// what a finite difference of Edot at displaced states must difference. With
+// `ddot`, the second derivative is Sec. 6.2's at the eigenstate (P A = 0).
+//
+// Each class's PcClassHessian carries its own PcClassResult from the same
+// solve beside Edot(u), Edot(v) and Eddot(u, v): a class the gap or
+// denominator check refuses is refused here too, never given a zero second
+// derivative -- and so, per direction pair, is a class whose dropped modes
+// lift along it (first-order P S_a P or Sec. 6.2's L_ab above PC_LIFT_TOL
+// relative to s_max), where the energy is not twice differentiable. Sijrs
+// reads no RDM, so at fixed orbital energies every derivative of it is
+// exactly zero (status Done).
+//
+// THE ORBITAL ENERGIES ARE HELD FIXED: Deltadot = Delta'' = 0. That is the
+// functional in which Euler's identity Eddot(c, u) == Edot(u) holds for the
+// five homogeneous classes (Sec. 4.3), and the only one implemented.
+//
+// One stream (res.stream()), every intermediate from res's pool and freed
+// when its class returns, the one eigensolve per class on res.solver() and
+// the d x d products on res.blas(), every read-back a downloadTensor, so all
+// work is complete when this returns. `batch` bounds every slab as in
+// energiesDevice. An eigensolve that reports devInfo != 0 is a Numerical
+// Error -- the first one stops the stage.
+struct PcHessianResult {
+  std::array<PcClassHessian, 8> classes;  // CLASSES order
+};
+
+// The RDM sets pcHessianDevice reads; every pointer non-owning. `ddotUU` and
+// `ddotVV` are required with `ddot` and ignored without it.
+struct PcHessianSets {
+  PcRdms rdm, dotU, dotV;
+  const PcRdms* ddot = nullptr;
+  const PcRdms* ddotUU = nullptr;
+  const PcRdms* ddotVV = nullptr;
+};
+
+Result<PcHessianResult> pcHessianDevice(const ActiveIntegralsDevice& active,
+                                        IntegralSource& source, int64_t batch,
+                                        const PcHessianSets& sets, const DeviceResources& res);
+
+// The integral-direct entry point: full blocks, one slab each.
+Result<PcHessianResult> pcHessianDevice(const NevptIntegralsDevice& ints,
+                                        const PcHessianSets& sets, const DeviceResources& res);
 
 }  // namespace nevpt2

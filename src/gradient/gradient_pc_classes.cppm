@@ -34,12 +34,16 @@
 // solve's own verdict, and every entry point above this partition reports it.
 // No eigenvector or eigenvalue derivative appears anywhere below.
 //
-// One further structural fact keeps that true along a direction that does
-// NOT stay in the state's symmetry sector (the determinant axes the CI source
-// term is read on): S's dropped modes are linear dependencies among the
-// class's operator strings, so K annihilates them too (K v = <Phi|H_D - E_0|
-// sum_nu v_nu Phi_nu> = 0), and the first-order rotation of S's kept range
-// that such a direction causes therefore contributes nothing. (It is why the
+// One further fact keeps that true along a direction that does NOT stay in
+// the state's symmetry sector (the determinant axes the CI source term is
+// read on): S's dropped modes are null modes of THIS state's metric -- they
+// turn with the state, they are not null for every CI vector
+// (docs/pc-nevpt2.md, "What the cut drops, and how it moves") -- and at the
+// eigenstate K annihilates them too (K v = <Phi|H_D - E_0| sum_nu v_nu
+// Phi_nu> = 0 there), so P A = 0 and the first-order rotation of S's kept
+// range that such a direction causes contributes nothing at first order
+// (the -2 rho^T Sdot P A x term of docs/hessian-theory.md, Sec. 6.2,
+// vanishes). (It is why the
 // PC CI step must be small in a finite difference -- the lifted modes are
 // SECOND order -- and not a term of the derivative: docs/testing.md, "The PC
 // CI source term's step is a first-order trap".)
