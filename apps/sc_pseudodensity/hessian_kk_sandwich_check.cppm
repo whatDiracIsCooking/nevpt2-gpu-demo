@@ -1,7 +1,8 @@
 // nevpt2.app.sc_pseudodensity:hessian_kk_sandwich_check -- --sc-hessian-kk:
 // the second of the orbital Hessian block's two terms, the energy's own
-// curvature in its inputs I'[u]^T Ehat'' I'[v] = K3 + K4 + K5
-// (docs/hessian-theory.md, Sec. 5.1; #158), checked by duality, and the whole
+// curvature in its inputs I'[u]^T Ehat'' I'[v] = K3 + K4 + K5 + K6
+// (docs/hessian-theory.md, Sec. 5.1 and Sec. 5.6; #158, #190), checked by
+// duality, and the whole
 // block Eddot_kk(u, v) = <Ehat', I''> + the sandwich checked against ladders
 // of the SC total itself along exp(s u + t v).
 // An interface partition that exports nothing, as :hessian_kk_check is.
@@ -17,23 +18,29 @@
 //
 // THE CHECKS, in the order they print:
 //
-//   0  THE GUARDED TUPLES (docs/hessian-theory.md, Sec. 5.6): a pair whose
-//      two directions both populate a tuple the vanishing-norm guard skips
-//      and the integrals leave empty is REFUSED, Numerical -- the sixth term
-//      K6, or the absence of any Hessian along the pair, is #190's -- and
-//      printed as a refusal; every computed pair's empty tuples carry N^{uv}
-//      at round-off. On N2 the refused pairs are the symmetry-breaking full
-//      x full, core x core, core x virtual and virtual x virtual ones; every
-//      pair with an active member is computed.
+//   0  THE GUARDED TUPLES (docs/hessian-theory.md, Sec. 5.6; #190): the
+//      tuples the vanishing-norm guard skips and the integrals leave empty
+//      add K6 where both directions populate them. Sijrs (H = 0) always
+//      does, at its own P = -1/Delta, which is what closes core x core and
+//      core x virtual. An H class does where its tables are proportional
+//      (rho_t at round-off): `virtual x (2 virtual + core)`, whose core part
+//      populates no H class's empty tuple, is the proportional pair, and its
+//      H-class K6 must be nonzero. Where they are not, there is no Hessian
+//      along the pair and it is REFUSED, Numerical, naming the class, the
+//      tuple count and the worst rho_t: on N2 exactly full x full and
+//      virtual x virtual. Printed: each computed pair's K6 per class, the
+//      worst rho_t and the population floor's separation over the computed
+//      pairs, and each refusal's message.
 //   1  THE MERGE: the walk's own Edot(u), Edot(v) -- every tuple's Hdot
 //      carrying the digests' share -- against the first-order <u, Y>, <v, Y>
 //      with the digests' term (--kappa-full's gated adjoint, hbar in), for
 //      every direction the pairs use.
-//   2  THE DUALITY: the forward finish K3 + K4 + K5 against the reverse
+//   2  THE DUALITY: the forward finish K3 + ... + K6 against the reverse
 //      pairing <Ddot[v], X'[u]> + <Mdot_G[v], G'[u]> + Rdot[v] . Ddot[u],
-//      along active x full and its swap, full x full, and every
-//      block-diagonal pair -- exact arithmetic, the tree's 1e-7 -- and the
-//      swap against its original (the walk with u and v exchanged).
+//      along active x full and its swap and every computed block-diagonal
+//      pair -- exact arithmetic, the tree's 1e-7 -- K6 against its own
+//      reverse half on its own, and the swap against its original (the walk
+//      with u and v exchanged).
 //   3  THE INTRA-SPACE ZEROS: along a core-core or virtual-virtual direction
 //      no active integral moves, so h2e' and the digests' tangent f3' are
 //      exactly-zero tensors and the digests' shares of K3 and of K5 with
@@ -51,8 +58,9 @@
 //   5  THE LADDERS: E(U) along exp(s u + t v), the four corners (+-h, +-h)
 //      each its own energy (the digests rebuilt per corner), against Eddot_kk,
 //      and E(U) - L(U) against the sandwich alone, along every computed
-//      block-diagonal pair. Each is verified by the raw differences' run of
-//      fourfold halvings and gated on its Richardson extrapolation
+//      block-diagonal pair. Each is verified by the raw differences' halvings
+//      above the round-off floor (the shape rule below) and gated on its
+//      Richardson extrapolation
 //      (4 D(h/2) - D(h)) / 3 at the tree's 1e-6 relative: the raw ladder of a
 //      total energy reaches its round-off floor, ~ eps |E| / h^2, before its
 //      O(h^2) error is that small when Eddot is small against |E|.
@@ -94,6 +102,42 @@ constexpr double kSwZeroTol = 1e-13;
 // Seeds, fixed so a run is reproducible, distinct from every other check's.
 constexpr std::uint64_t kSwSeedBase = 0x5eed'0158u;
 
+// THE LADDERS' SHAPE RULE (#190): FLOOR-AWARE. The value gate is #158's,
+// unchanged: the Richardson value's best error relative to max(|target|,
+// |<u, Y>|, |<v, Y>|) under kKkFdTol (1e-6). The shape check that verifies
+// it differs from --sc-hessian-kk-int's ladders, measured on the pairs K6
+// closes (docs/testing.md, "The orbital block's sandwich"):
+//
+//   * Each rung's round-off floor is eps * max_c |E_c| / h^2, E_c the four
+//     corner SC totals that rung differences (energiesDevice(...).total --
+//     the energies actually differenced; L is paired from the corners'
+//     integral combination, formed before the pairing, so it adds no
+//     cancellation of its own). A rung whose error is within kSwFloorMargin
+//     (10x) of its floor is EXCLUDED from the ratio test: a ratio measured
+//     there is noise -- the k = 11 ratio of core x virtual on CAS(4,4) came
+//     out anywhere from 3.07 to 4.41 run to run, which made a fixed-length
+//     run flaky.
+//   * Above the floor, kSwFdRun (2) consecutive halvings must each cut the
+//     error by at least kFourfoldLow (3.2), with NO upper bound. The lower
+//     bound is what catches the failure this check exists for: a ladder
+//     converging to a different number from its target sits flat (ratio
+//     1.00 per halving -- #158's first run of core x core, the polarisation
+//     of a pair with no Hessian). A ratio ABOVE 4 while the error falls to
+//     the target is a large h^4 term in the energy along the pair, not a
+//     bug: core x core on N2 CAS(4,4) halves by 5.9, 8.7, 10.0 on its way to
+//     1.6e-9 of the target.
+//   * The steps start at h = 2^-2 rather than 2^-4, for every pair: a pair
+//     whose truncation error is tiny -- the proportional virtual x (2
+//     virtual + core) on CAS(8,8), 8e-6 already at 2^-4 -- otherwise reaches
+//     the floor before it shows any halvings. 2^-2 is still a small rotation
+//     of a unit-norm kappa (an angle a quarter of a radian at most), and the
+//     finest step stays 2^-16.
+constexpr int kSwFdFirstExp = 2;
+constexpr std::size_t kSwFdSteps = kKkFdLastExp - kSwFdFirstExp + 1;
+constexpr double kSwFourfoldHigh = std::numeric_limits<double>::infinity();
+constexpr double kSwFloorMargin = 10.0;
+constexpr int kSwFdRun = 2;
+
 // One direction with its name, and its first-order pairing.
 struct SwDir {
   std::string name;
@@ -125,13 +169,13 @@ nevpt2::Result<bool> swLadders(const nevpt2::GoldenFile& g, const KkFockParts& f
                                const nevpt2::RdmBuildOptions& opt, std::int64_t nc,
                                std::int64_t na, std::int64_t nv,
                                const nevpt2::DeviceResources& res) {
-  std::array<double, kKkFdSteps> step{}, second{};
+  std::array<double, kSwFdSteps> step{}, second{}, floor{};
   std::vector<nevpt2::NevptIntegralsDevice> combos;
-  for (std::size_t i = 0; i < kKkFdSteps; ++i) {
-    const double h = std::ldexp(1.0, -(kKkFdFirstExp + static_cast<int>(i)));
+  for (std::size_t i = 0; i < kSwFdSteps; ++i) {
+    const double h = std::ldexp(1.0, -(kSwFdFirstExp + static_cast<int>(i)));
     step[i] = h;
     std::vector<KkHostInts> corners;
-    double e = 0.0;
+    double e = 0.0, eMax = 0.0;
     const std::array<std::pair<double, double>, 4> at{{{h, h}, {h, -h}, {-h, h}, {-h, -h}}};
     const std::array<double, 4> sign{1.0, -1.0, -1.0, 1.0};
     for (std::size_t c = 0; c < at.size(); ++c) {
@@ -145,10 +189,14 @@ nevpt2::Result<bool> swLadders(const nevpt2::GoldenFile& g, const KkFockParts& f
       nevpt2::check(h2e != nullptr, "swLadders: the displaced set carries h2e");
       const nevpt2::RdmBuildResult b =
           nevpt2::buildRdmsDevice(opt, g.get("ci"), g.ncas, g.nelecA, g.nelecB, *h2e, res);
-      e += sign[c] * nevpt2::energiesDevice(d, rdm.dm1, rdm.dm2, rdm.dm3, b.f3ac, b.f3ca, res).total;
+      const double ec =
+          nevpt2::energiesDevice(d, rdm.dm1, rdm.dm2, rdm.dm3, b.f3ac, b.f3ca, res).total;
+      e += sign[c] * ec;
+      eMax = std::max(eMax, std::fabs(ec));
       corners.push_back(std::move(ic));
     }
     second[i] = e / (4.0 * h * h);
+    floor[i] = std::numeric_limits<double>::epsilon() * eMax / (h * h);
     combos.push_back(kkUploadCombination(corners, {1.0, -1.0, -1.0, 1.0}, res));
   }
   std::vector<const nevpt2::NevptIntegralsDevice*> ptr;
@@ -162,14 +210,14 @@ nevpt2::Result<bool> swLadders(const nevpt2::GoldenFile& g, const KkFockParts& f
   // what the 1e-6 relative gate holds: the raw ladder of a total energy
   // bottoms out at its round-off floor, ~ eps |E| / h^2, before its O(h^2)
   // error is that small for a pair whose Eddot is small against |E|.
-  std::array<double, kKkFdSteps> dE{}, dS{};
-  for (std::size_t i = 0; i < kKkFdSteps; ++i) {
+  std::array<double, kSwFdSteps> dE{}, dS{};
+  for (std::size_t i = 0; i < kSwFdSteps; ++i) {
     dE[i] = second[i];
     dS[i] = second[i] - paired.dirs[i].adjoint / (4.0 * step[i] * step[i]);
   }
   struct Gate {
     const char* label;
-    const std::array<double, kKkFdSteps>* d;
+    const std::array<double, kSwFdSteps>* d;
     double target;
   };
   std::vector<Gate> gates;
@@ -177,38 +225,47 @@ nevpt2::Result<bool> swLadders(const nevpt2::GoldenFile& g, const KkFockParts& f
   gates.push_back(Gate{"E - L against the sandwich", &dS, wantSandwich});
   bool ok = true;
   for (const Gate& gt : gates) {
-    std::array<double, kKkFdSteps> err{};
-    for (std::size_t i = 0; i < kKkFdSteps; ++i) err[i] = std::fabs((*gt.d)[i] - gt.target);
+    std::array<double, kSwFdSteps> err{};
+    for (std::size_t i = 0; i < kSwFdSteps; ++i) err[i] = std::fabs((*gt.d)[i] - gt.target);
     std::printf("  %s (%.14e):\n", gt.label, gt.target);
-    std::printf("  %5s %12s %22s %10s %6s %22s %10s\n", "k", "h = 2^-k", "second diff / 4h^2",
-                "|err|", "ratio", "Richardson (4D(h/2)-D(h))/3", "rel err");
+    // The ratio test's errors: a rung within kSwFloorMargin of its floor
+    // reads as 0, which longestFourfoldRun never counts (no ratio across it).
+    std::array<double, kSwFdSteps> above{};
+    for (std::size_t i = 0; i < kSwFdSteps; ++i)
+      above[i] = err[i] > kSwFloorMargin * floor[i] ? err[i] : 0.0;
+    std::printf("  %5s %12s %22s %10s %6s %22s %10s %10s\n", "k", "h = 2^-k",
+                "second diff / 4h^2", "|err|", "ratio", "Richardson (4D(h/2)-D(h))/3", "rel err",
+                "floor");
     double bestRel = std::numeric_limits<double>::infinity();
     std::size_t bestAt = 0;
-    for (std::size_t i = 0; i < kKkFdSteps; ++i) {
-      const int k = kKkFdFirstExp + static_cast<int>(i);
+    for (std::size_t i = 0; i < kSwFdSteps; ++i) {
+      const int k = kSwFdFirstExp + static_cast<int>(i);
       const std::string ratio =
           i == 0 ? std::string("-") : std::format("{:.2f}", err[i] > 0.0 ? err[i - 1] / err[i] : 0.0);
-      if (i + 1 < kKkFdSteps) {
+      if (i + 1 < kSwFdSteps) {
         const double r = (4.0 * (*gt.d)[i + 1] - (*gt.d)[i]) / 3.0;
         const double rel = std::fabs(r - gt.target) / std::max(1e-30, scale);
         if (rel < bestRel) {
           bestRel = rel;
           bestAt = i;
         }
-        std::printf("  %5d %12.3e %22.14e %10.3e %6s %22.14e %10.3e\n", k, step[i], (*gt.d)[i],
-                    err[i], ratio.c_str(), r, rel);
+        std::printf("  %5d %12.3e %22.14e %10.3e %6s %22.14e %10.3e %10.3e%s\n", k, step[i],
+                    (*gt.d)[i], err[i], ratio.c_str(), r, rel, floor[i],
+                    above[i] > 0.0 ? "" : " (at the floor)");
       } else {
-        std::printf("  %5d %12.3e %22.14e %10.3e %6s\n", k, step[i], (*gt.d)[i], err[i],
-                    ratio.c_str());
+        std::printf("  %5d %12.3e %22.14e %10.3e %6s %22s %10s %10.3e%s\n", k, step[i],
+                    (*gt.d)[i], err[i], ratio.c_str(), "", "", floor[i],
+                    above[i] > 0.0 ? "" : " (at the floor)");
       }
     }
-    const nevpt2::FourfoldRun run = nevpt2::longestFourfoldRun(err);
-    const bool good = bestRel < kKkFdTol && run.length >= kKkFdRun;
+    const nevpt2::FourfoldRun run =
+        nevpt2::longestFourfoldRun(above, nevpt2::kFourfoldLow, kSwFourfoldHigh);
+    const bool good = bestRel < kKkFdTol && run.length >= kSwFdRun;
     ok = ok && good;
-    std::printf("  extrapolated: best relative error %.3e (against %.3e) from h = %.3e; raw: %d "
-                "fourfold halvings ending at h = %.3e -- %s\n",
-                bestRel, scale, step[bestAt], run.length, step[run.end],
-                good ? "ok" : "NOT CONVERGED");
+    std::printf("  extrapolated: best relative error %.3e (against %.3e) from h = %.3e; raw, above "
+                "%.0fx the floor: %d halvings by >= %.1f ending at h = %.3e -- %s\n",
+                bestRel, scale, step[bestAt], kSwFloorMargin, run.length, nevpt2::kFourfoldLow,
+                step[run.end], good ? "ok" : "NOT CONVERGED");
   }
   return ok;
 }
@@ -216,8 +273,9 @@ nevpt2::Result<bool> swLadders(const nevpt2::GoldenFile& g, const KkFockParts& f
 // One pair's sandwich, as a table row.
 void swPrintPair(const std::string& name, const nevpt2::ScOrbitalSandwichResult& r) {
   const nevpt2::ScPairTerms& t = r.total;
-  std::printf("    %-24s %22.14e %22.14e %9.2e %12.4e %12.4e %12.4e %12.4e\n", name.c_str(),
-              r.forward, r.reverse, std::fabs(r.forward - r.reverse), t.k3, t.k4, t.k5uv, t.k5vu);
+  std::printf("    %-30s %22.14e %22.14e %9.2e %12.4e %12.4e %12.4e %12.4e %12.4e %9.2e\n",
+              name.c_str(), r.forward, r.reverse, std::fabs(r.forward - r.reverse), t.k3, t.k4,
+              t.k5uv, t.k5vu, t.k6, std::fabs(t.k6 - r.reverseK6));
 }
 
 nevpt2::Result<bool> checkScHessianKk(const nevpt2::GoldenFile& g, const nevpt2::GradGoldFile& gg,
@@ -268,6 +326,18 @@ nevpt2::Result<bool> checkScHessianKk(const nevpt2::GoldenFile& g, const nevpt2:
     dirs.push_back(
         {"virtual'", embedBlock(nevpt2::antisymmetricKappa(nv, kSwSeedBase + 8), nc + na, nmo)});
   }
+  // The proportional pair's second member (#190): 2 virtual + core. On every
+  // empty tuple of an H class its first-order perturber is twice virtual's
+  // -- a core rotation populates none of them (Sec. 5.6's census: core x core
+  // populates Sijrs alone) -- so its tables are proportional to virtual's and
+  // rho_t is round-off, while it is not a multiple of virtual.
+  std::optional<std::size_t> iProp;
+  if (iCore && iVirt) {
+    nevpt2::Tensor k = dirs[*iCore].k;
+    for (std::int64_t i = 0; i < k.size(); ++i) k.flatRef(i) += 2.0 * dirs[*iVirt].k.flat(i);
+    iProp = dirs.size();
+    dirs.push_back({"2 virtual + core", std::move(k)});
+  }
   {
     std::vector<nevpt2::ScRotationRequest> req;
     for (const SwDir& d : dirs) req.push_back(nevpt2::ScRotationRequest{d.k, false});
@@ -287,11 +357,13 @@ nevpt2::Result<bool> checkScHessianKk(const nevpt2::GoldenFile& g, const nevpt2:
   if (iCore && iVirt) pairs.push_back({"core x virtual", *iCore, *iVirt, true, false, true, true});
   if (iCore) pairs.push_back({"core x core", *iCore, *iCore2, true, false, true, true});
   if (iVirt) pairs.push_back({"virtual x virtual", *iVirt, *iVirt2, true, false, true, true});
+  if (iProp)
+    pairs.push_back({"virtual x (2 virtual + core)", *iVirt, *iProp, true, false, true, true});
 
   // The sandwich along every pair, one call each, both modes, the digests'
-  // reference where both directions move h2e. A pair whose two directions
-  // both populate a guarded empty tuple is refused (Sec. 5.6, #190), as a
-  // Numerical Error; every other error is the caller's and propagates.
+  // reference where both directions move h2e. A pair along which the energy
+  // has no Hessian (Sec. 5.6, #190) is refused as a Numerical Error; every
+  // other error is the caller's and propagates.
   const std::vector<SwPair> candidates = pairs;
   pairs.clear();
   std::vector<nevpt2::ScOrbitalSandwichResult> sand;
@@ -315,27 +387,71 @@ nevpt2::Result<bool> checkScHessianKk(const nevpt2::GoldenFile& g, const nevpt2:
 
   // --- 0. the guarded tuples ------------------------------------------------------
   {
-    std::printf("\n  [0] the guarded tuples (docs/hessian-theory.md, Sec. 5.6; the temporary "
-                "refusal until #190)\n");
-    double worstAccepted = 0.0;
+    std::printf("\n  [0] the guarded tuples (docs/hessian-theory.md, Sec. 5.6): K6, and the "
+                "pairs with no Hessian\n");
+    // CLASSES order: Sijrs is the one class with H = 0, exempt from rho.
+    std::size_t iSijrs = 0;
+    for (std::size_t c = 0; c < 8; ++c)
+      if (nevpt2::CLASSES[c] == "Sijrs") iSijrs = c;
+    double worstRho = 0.0, popNoise = 0.0;
+    double popMin = std::numeric_limits<double>::infinity();
+    bool computedRight = true;
+    std::optional<double> propK6H, coreK6;
     for (std::size_t k = 0; k < pairs.size(); ++k) {
-      std::int64_t empty = 0;
-      for (const nevpt2::ScGuardedCensus& c : sand[k].guarded) {
-        worstAccepted = std::max(worstAccepted, c.crossMax);
-        empty += c.empty;
+      const nevpt2::ScOrbitalSandwichResult& r = sand[k];
+      std::string row;
+      double k6H = 0.0;
+      for (std::size_t c = 0; c < 8; ++c) {
+        const nevpt2::ScGuardedCensus& g = r.guarded[c];
+        worstRho = std::max(worstRho, g.rhoMax);
+        // The floor decides only for the H classes (Sijrs is exempt, and its
+        // sign-indefinite N^{ww} can sit anywhere near zero).
+        if (c != iSijrs) {
+          popNoise = std::max(popNoise, g.unpopulatedMax);
+          popMin = std::min(popMin, g.populatedMin);
+        }
+        computedRight = computedRight && !g.refused();
+        if (c != iSijrs) k6H += r.classes[c].k6;
+        if (g.populated == 0 && r.classes[c].k6 == 0.0) continue;
+        row += std::format("\n      {:<6} {:5d} of {:5d} empty tuples populated by both "
+                           "(u {:5d}, v {:5d}), max rho_t {:.2e}, K6 {:+.10e}",
+                           nevpt2::CLASSES[c], g.populated, g.empty, g.populatedU, g.populatedV,
+                           g.rhoMax, r.classes[c].k6);
       }
-      std::printf("    %-24s computed: %lld empty guarded tuples, none populated by both "
-                  "directions\n",
-                  pairs[k].name.c_str(), static_cast<long long>(empty));
+      if (pairs[k].name.starts_with("virtual x (2 virtual")) propK6H = k6H;
+      if (pairs[k].name == "core x core") coreK6 = r.classes[iSijrs].k6;
+      std::printf("    %-30s computed, K6 %+.10e (the H classes' %+.10e)%s\n",
+                  pairs[k].name.c_str(), r.total.k6, k6H,
+                  row.empty() ? " -- no guarded tuple populated" : row.c_str());
     }
-    for (const auto& [name, why] : refusedPairs)
-      std::printf("    %-24s refused, Numerical: %s\n", name.c_str(), why.c_str());
-    const bool good = worstAccepted <= nevpt2::kGuardedCrossTol && pairs.size() >= 2 &&
+    std::vector<std::string> refusedNames;
+    for (const auto& [name, why] : refusedPairs) {
+      std::printf("    %-30s refused, Numerical: %s\n", name.c_str(), why.c_str());
+      refusedNames.push_back(name);
+    }
+    // On N2 the two pairs with no Hessian are exactly the ones whose two
+    // directions both carry a random virtual rotation (Sec. 5.6's census);
+    // every other pair is computed, the proportional one included, and its
+    // H-class K6 is far from zero. Sijrs closes core x core.
+    std::vector<std::string> wantRefused;
+    if (iVirt) wantRefused = {"full x full", "virtual x virtual"};
+    else wantRefused = {"full x full"};
+    const bool refusedRight = refusedNames == wantRefused;
+    const bool propRight = !iProp || (propK6H && std::fabs(*propK6H) > 1e3 * kSwZeroTol);
+    const bool coreRight = !iCore || (coreK6 && std::fabs(*coreK6) > 1e3 * kSwZeroTol);
+    const bool good = computedRight && refusedRight && propRight && coreRight &&
+                      worstRho <= nevpt2::kRhoTol && pairs.size() >= 2 &&
                       pairs[0].name == "active x full" && pairs[1].name.starts_with("full x active");
     ok = ok && good;
-    std::printf("  max |N^uv| on an empty tuple over the computed pairs %.2e (<= %.0e), %zu pairs "
-                "refused: %s\n",
-                worstAccepted, nevpt2::kGuardedCrossTol, refusedPairs.size(),
+    std::printf("  over the computed pairs: worst rho_t %.2e (<= %.0e); the H classes' population "
+                "N^ww/|w|^2 on an empty tuple <= %.2e unpopulated, >= %.2e populated (floor "
+                "%.0e); the "
+                "proportional pair's H-class K6 %s; Sijrs's K6 on core x core %s; %zu pairs "
+                "refused (%s): %s\n",
+                worstRho, nevpt2::kRhoTol, popNoise, popMin, nevpt2::kPopulatedTol,
+                propK6H ? std::format("{:+.6e}", *propK6H).c_str() : "-",
+                coreK6 ? std::format("{:+.6e}", *coreK6).c_str() : "-", refusedPairs.size(),
+                refusedRight ? "the expected ones" : "NOT the expected ones",
                 good ? "ok" : "FAILED");
   }
 
@@ -348,7 +464,7 @@ nevpt2::Result<bool> checkScHessianKk(const nevpt2::GoldenFile& g, const nevpt2:
       const double du = std::fabs(sand[k].edotUTotal - dirs[pairs[k].u].y);
       const double dv = std::fabs(sand[k].edotVTotal - dirs[pairs[k].v].y);
       worst = std::max({worst, du, dv});
-      std::printf("    %-24s Edot(u) %22.14e |delta| %.2e   Edot(v) %22.14e |delta| %.2e\n",
+      std::printf("    %-30s Edot(u) %22.14e |delta| %.2e   Edot(v) %22.14e |delta| %.2e\n",
                   pairs[k].name.c_str(), sand[k].edotUTotal, du, sand[k].edotVTotal, dv);
     }
     ok = ok && worst < kSwTol;
@@ -358,24 +474,27 @@ nevpt2::Result<bool> checkScHessianKk(const nevpt2::GoldenFile& g, const nevpt2:
 
   // --- 2. the duality -------------------------------------------------------------
   {
-    std::printf("\n  [2] the duality (%zu pairs in %.2fs): forward K3 + K4 + K5 against the "
-                "reverse pairing\n",
+    std::printf("\n  [2] the duality (%zu pairs in %.2fs): forward K3 + K4 + K5 + K6 against "
+                "the reverse pairing, and K6 against its own reverse half\n",
                 pairs.size(), sandSeconds);
-    std::printf("    %-24s %22s %22s %9s %12s %12s %12s %12s\n", "pair", "forward", "reverse",
-                "|delta|", "K3", "K4", "K5 (u, K'v)", "K5 (v, K'u)");
-    double worst = 0.0, worstSelf = 0.0;
+    std::printf("    %-30s %22s %22s %9s %12s %12s %12s %12s %12s %9s\n", "pair", "forward",
+                "reverse", "|delta|", "K3", "K4", "K5 (u, K'v)", "K5 (v, K'u)", "K6",
+                "K6 |delta|");
+    double worst = 0.0, worstSelf = 0.0, worstK6 = 0.0;
     for (std::size_t k = 0; k < pairs.size(); ++k) {
       swPrintPair(pairs[k].name, sand[k]);
       worst = std::max(worst, std::fabs(sand[k].forward - sand[k].reverse));
+      worstK6 = std::max(worstK6, std::fabs(sand[k].total.k6 - sand[k].reverseK6));
       worstSelf = std::max({worstSelf, std::fabs(sand[k].total.k3 - sand[k].total.k3Swap),
                             std::fabs(sand[k].total.k4 - sand[k].total.k4Swap)});
     }
     const double swap = std::fabs(sand[0].forward - sand[1].forward);
-    const bool good = worst < kSwTol && swap < kSwTol && worstSelf < kSwTol;
+    const bool good = worst < kSwTol && swap < kSwTol && worstSelf < kSwTol && worstK6 < kSwTol;
     ok = ok && good;
-    std::printf("  duality, worst |delta| = %.2e; the swap against its original |delta| = %.2e; "
-                "K3 and K4 from the exchanged finish |delta| = %.2e (all < %.0e: %s)\n",
-                worst, swap, worstSelf, kSwTol, good ? "ok" : "FAILED");
+    std::printf("  duality, worst |delta| = %.2e; K6 against its reverse half, worst |delta| = "
+                "%.2e; the swap against its original |delta| = %.2e; K3 and K4 from the "
+                "exchanged finish |delta| = %.2e (all < %.0e: %s)\n",
+                worst, worstK6, swap, worstSelf, kSwTol, good ? "ok" : "FAILED");
   }
 
   // --- 3. the intra-space zeros ---------------------------------------------------
@@ -408,7 +527,7 @@ nevpt2::Result<bool> checkScHessianKk(const nevpt2::GoldenFile& g, const nevpt2:
       const bool alive =
           std::fabs(t.k4) > 1e3 * kSwZeroTol && std::fabs(otherHalf) > 1e3 * kSwZeroTol;
       good = good && zeros && alive;
-      std::printf("    %-24s max|h2e'| %.1e / %.1e, max|f3'| %.1e / %.1e; K3's digests' shares "
+      std::printf("    %-30s max|h2e'| %.1e / %.1e, max|f3'| %.1e / %.1e; K3's digests' shares "
                   "%.1e / %.1e,\n      K5's %.1e / %.1e; |K5 (u, K'v)| %.1e, |K5 (v, K'u)| %.1e "
                   "(the intra-space halves < %.0e); K3 %.6e, K4 %.6e: %s\n",
                   p.name.c_str(), r.h2eDotMaxU, r.h2eDotMaxV, r.f3DotMaxU, r.f3DotMaxV,
@@ -445,7 +564,7 @@ nevpt2::Result<bool> checkScHessianKk(const nevpt2::GoldenFile& g, const nevpt2:
   {
     std::printf("\n  [4] the digests alone: the operator's shares against the energy stage at the "
                 "plain digest path's builds\n");
-    std::printf("    %-24s %22s %22s %9s %22s %22s %9s\n", "pair", "K3 digest x digest",
+    std::printf("    %-30s %22s %22s %9s %22s %22s %9s\n", "pair", "K3 digest x digest",
                 "energy stage", "|delta|", "digests alone, operator", "energy stage", "|delta|");
     double worst = 0.0;
     std::size_t seen = 0;
@@ -459,7 +578,7 @@ nevpt2::Result<bool> checkScHessianKk(const nevpt2::GoldenFile& g, const nevpt2:
       const double plain = r.digestReference + k.k1.digestForward + k.k2.digestForward;
       const double d2 = std::fabs(walk - plain);
       worst = std::max({worst, d1, d2});
-      std::printf("    %-24s %22.14e %22.14e %9.2e %22.14e %22.14e %9.2e\n",
+      std::printf("    %-30s %22.14e %22.14e %9.2e %22.14e %22.14e %9.2e\n",
                   pairs[cwhich[c]].name.c_str(), r.total.k3DigestDigest, r.digestReference, d1,
                   walk, plain, d2);
     }
@@ -472,7 +591,7 @@ nevpt2::Result<bool> checkScHessianKk(const nevpt2::GoldenFile& g, const nevpt2:
   const KkFockParts fock = kkFockParts(gen, g.get("dm1"), res);
   std::printf("\n  Eddot_kk(u, v) = <Ehat', I''> + the sandwich, where the curvature is formed:\n");
   for (std::size_t c = 0; c < cwhich.size(); ++c)
-    std::printf("    %-24s %22.14e = %22.14e + %22.14e\n", pairs[cwhich[c]].name.c_str(),
+    std::printf("    %-30s %22.14e = %22.14e + %22.14e\n", pairs[cwhich[c]].name.c_str(),
                 curv[c].value() + sand[cwhich[c]].forward, curv[c].value(),
                 sand[cwhich[c]].forward);
   {
@@ -531,11 +650,11 @@ nevpt2::Result<bool> checkScHessianKk(const nevpt2::GoldenFile& g, const nevpt2:
                 fitted ? "density-fitted" : "conventional", what.c_str(), good ? "ok" : "FAILED");
   }
 
-  std::printf("\n%s: the SC orbital Hessian's sandwich I'^T Ehat'' I' = K3 + K4 + K5 agrees with "
-              "itself by duality to %.0e, its digests' share is the first-order term's and its "
-              "curvature the energy stage's, the intra-space zeros hold, and the ladders of the SC "
-              "total along exp(s u + t v) converge to Eddot_kk = <Ehat', I''> + the sandwich; "
-              "%zu pairs refused on their guarded empty tuples (#190)%s\n",
+  std::printf("\n%s: the SC orbital Hessian's sandwich I'^T Ehat'' I' = K3 + K4 + K5 + K6 agrees "
+              "with itself by duality to %.0e, its digests' share is the first-order term's and "
+              "its curvature the energy stage's, the intra-space zeros hold, and the ladders of "
+              "the SC total along exp(s u + t v) converge to Eddot_kk = <Ehat', I''> + the "
+              "sandwich; %zu pairs refused, with no Hessian along them (rho_t, Sec. 5.6)%s\n",
               ok ? "PASS" : "FAIL", kSwTol, refusedPairs.size(),
               fitted ? " (density-fitted)" : "");
   return ok;

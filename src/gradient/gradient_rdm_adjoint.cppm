@@ -130,9 +130,14 @@ struct ScMixedDirection {
   // orbital block's sandwich K3-K5 (:terms' ScMixedWalk says what each mode
   // forms). Both directions carry their tangent blocks with the digests'
   // share merged, and the orbital energies respond to kappa (`epsKappa`).
-  // `forward` / `reverse` stay false: nothing CI-side runs.
+  // `forward` / `reverse` stay false: nothing CI-side runs. The reverse
+  // pairing reads the guarded term's multipliers the forward finish forms
+  // (#190), so `pairReverse` needs `pairForward`. `pairScaleU` / `V` are
+  // |u|^2, |v|^2, the guarded term's population floor's scale.
   bool pairForward = false;
   bool pairReverse = false;
+  double pairScaleU = 1.0;
+  double pairScaleV = 1.0;
 };
 
 // A class's walk state for `d`, its flags and borrowed vectors set; the class
@@ -149,6 +154,8 @@ ScMixedWalk mixedWalkOf(const ScMixedDirection& d) {
   w.epsVirtWU = &d.epsVirtWU;
   w.pairForward = d.pairForward;
   w.pairReverse = d.pairReverse;
+  w.pairScaleU = d.pairScaleU;
+  w.pairScaleV = d.pairScaleV;
   return w;
 }
 

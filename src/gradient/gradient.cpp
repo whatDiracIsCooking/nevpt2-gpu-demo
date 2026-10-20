@@ -1392,6 +1392,17 @@ Result<std::vector<ScOrbitalSandwichResult>> scOrbitalSandwichDevice(
     mix.epsKappa = true;
     mix.pairForward = true;
     mix.pairReverse = r.reverse;
+    // |u|^2, |v|^2: the guarded tuples' population floor is relative to them.
+    const auto norm2 = [](const Tensor& k) {
+      double n = 0.0;
+      for (int64_t i = 0; i < k.size(); ++i) n += k.flat(i) * k.flat(i);
+      return n;
+    };
+    mix.pairScaleU = norm2(r.u);
+    mix.pairScaleV = norm2(r.v);
+    if (!(mix.pairScaleU > 0.0) || !(mix.pairScaleV > 0.0))
+      return err_config(std::format("scOrbitalSandwichDevice: pair {} has a zero direction",
+                                    out.size()));
     mix.zeroH1e = &zeroH1e;
     mix.zeroH2e = &zeroH2e;
     // The CI side's orbital-energy tangents, which the walk state points at
@@ -1405,25 +1416,37 @@ Result<std::vector<ScOrbitalSandwichResult>> scOrbitalSandwichDevice(
                         s.rdm.f3ca, rot, /*adj=*/nullptr, /*epsAdjoint=*/false, /*ci=*/nullptr,
                         &mix, res);
 
-    // #158's temporary refusal (Sec. 5.6; #190 replaces it with K6 and the
-    // proportionality test): no number for a (class, pair) whose guarded
-    // tuples carry a second-order contribution these terms do not.
-    std::string refused;
+    // The guarded tuples (docs/hessian-theory.md, Sec. 5.6 and Sec. 9.1;
+    // #190): K6 is in the walk's totals wherever the energy is a quadratic
+    // form along the pair. Where an H class's empty tuples both directions
+    // populate carry non-proportional tables (rho_t above kRhoTol) the energy
+    // is not twice differentiable along the pair -- there is no Hessian
+    // element to return -- and a guarded tuple empty by the state is not
+    // derived; either refuses the pair, never answered with a zero.
+    std::string noHessian, byState;
     for (std::size_t c = 0; c < 8; ++c) {
       const ScGuardedCensus& gc = g.classes[c].guarded;
-      if (!gc.refused()) continue;
-      refused += std::format("{}{} ({} of {} empty tuples populated by both directions, |N^uv| "
-                             "{:.2e} to {:.2e}, the rest <= {:.2e}; {} empty by the state)",
-                             refused.empty() ? "" : ", ", CLASSES[c], gc.populated, gc.empty,
-                             gc.populatedMin, gc.crossMax, gc.unpopulatedMax, gc.emptyByState);
+      if (gc.rhoAbove > 0)
+        noHessian += std::format(
+            "{}{}: {} empty tuples both directions populate, {} of them with rho_t above {:.0e}, "
+            "the worst {:.3e}",
+            noHessian.empty() ? "" : "; ", CLASSES[c], gc.populated, gc.rhoAbove, kRhoTol,
+            gc.rhoMax);
+      if (gc.emptyByState > 0)
+        byState += std::format("{}{}: {} guarded tuples empty by the state",
+                               byState.empty() ? "" : "; ", CLASSES[c], gc.emptyByState);
     }
-    if (!refused.empty())
+    if (!noHessian.empty())
       return err_numerical(std::format(
-          "pair {}: the orbital Hessian along this pair has a guarded (empty) perturber both "
-          "directions populate -- {} -- whose second-order term K6, or the absence of any "
-          "Hessian along the pair, is not in K3-K5 (docs/hessian-theory.md, Sec. 5.6). Refused "
-          "rather than answered without it; the term is #190",
-          out.size(), refused));
+          "pair {}: the SC energy is not twice differentiable along this pair -- {} -- so its "
+          "empty perturbers' energy is not a quadratic form on the plane and the orbital "
+          "Hessian has no element here (docs/hessian-theory.md, Sec. 5.6); refused",
+          out.size(), noHessian));
+    if (!byState.empty())
+      return err_numerical(std::format(
+          "pair {}: {} -- a guarded perturber empty by the state, whose second-order term "
+          "docs/hessian-theory.md, Sec. 5.6 does not derive; refused",
+          out.size(), byState));
 
     ScOrbitalSandwichResult o;
     for (std::size_t c = 0; c < 8; ++c) {
@@ -1436,6 +1459,8 @@ Result<std::vector<ScOrbitalSandwichResult>> scOrbitalSandwichDevice(
       o.edotVTotal += o.edotV[c];
       o.reverseClasses[c] = g.classes[c].pairReverse;
       if (r.reverse) o.reverse += o.reverseClasses[c];
+      o.reverseK6Classes[c] = g.classes[c].pairReverseK6;
+      if (r.reverse) o.reverseK6 += o.reverseK6Classes[c];
     }
     o.forward = o.total.total();
     o.hasReverse = r.reverse;

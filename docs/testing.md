@@ -968,28 +968,31 @@ it) and 2 s on the fitted CAS(4,4).
 `nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk` (`gpu`; the two CAS(4,4)
 ones `small`) run `nevpt2_sc_pseudodensity --golden <case> --tiles 3
 --sc-hessian-kk`. They match `PASS: the SC orbital Hessian's sandwich I'^T
-Ehat'' I' = K3 + K4 + K5 agrees with itself by duality ... 4 pairs refused on
-their guarded empty tuples (#190)`, and the fitted one ends `(density-fitted)`
-(#158). They check `nevpt2.gradient`'s `scOrbitalSandwichDevice`, the second
+Ehat'' I' = K3 + K4 + K5 + K6 agrees with itself by duality ... 2 pairs
+refused, with no Hessian along them (rho_t, Sec. 5.6)`, and the fitted one
+ends `(density-fitted)` (#158, #190). They check `nevpt2.gradient`'s `scOrbitalSandwichDevice`, the second
 of the orbital Hessian block's two terms, and `scOrbitalHessianDevice`, the
 whole `Eddot_kk(u, v) = <Ehat', I''> + I'^T Ehat'' I'`
 ([`hessian-theory.md`](hessian-theory.md), §5.1 and §5.6;
 `apps/sc_pseudodensity/hessian_kk_sandwich_check.cppm` has the checks). The
 directions are seeded (base `0x5eed0158`): two active–active, two fully
-mixed, and two each inside the core and the virtual space. The pairs are
-`active x full` and its swap, `full x full`, `active x active`, `active x
-core`, `active x virtual`, `core x virtual`, `core x core` and `virtual x
-virtual`. RTX 3080 (CUDA, `default` preset), the worst of three runs at each
-case (two at `--tiles 3`, one at `--tiles 1`), 2026-10-20:
+mixed, two each inside the core and the virtual space, and `2 virtual +
+core` (#190). The pairs are `active x full` and its swap, `full x full`,
+`active x active`, `active x core`, `active x virtual`, `core x virtual`,
+`core x core`, `virtual x virtual` and `virtual x (2 virtual + core)`. RTX
+3080 (CUDA, `default` preset), the worst of thirteen runs at each CAS(4,4)
+flavour (twelve at `--tiles 3`, one at `--tiles 1`) and of two at CAS(8,8)
+(one at each), 2026-10-20:
 
 | exact check | CAS(4,4) | CAS(8,8) | CAS(4,4) DF | gate |
 |---|---|---|---|---|
-| the merge: the walk's own `Edot(u)`, `Edot(v)` (the digests' share in every tuple's `Hdot`) against `--kappa-full`'s `<k, Y>` with `hbar` | 2.1e-14 | 6.8e-15 | 2.1e-14 | 1e-7 |
-| the duality, forward K3 + K4 + K5 against the reverse pairing `<Ddot[v], X'[u]> + <Mdot_G[v], G'[u]> + Rdot[v] . Ddot[u]`, worst pair | 2.2e-16 | 7.5e-16 | 1.9e-16 | 1e-7 |
-| the swap, `(full, active)` against `(active, full)`: the sandwich / `Eddot_kk` | 1.9e-14 / 1.8e-14 | 6.9e-16 / 4.0e-15 | 3.4e-15 / 1.9e-14 | 1e-7 |
-| K3 and K4 from the exchanged finish | 6.2e-32 | 2.0e-19 | 7.4e-32 | 1e-7 |
-| the digests alone: K3's digest x digest share against `energiesHessianDevice` at `f3'[u]`, `f3'[v]`, and with the curvature's reverse digests' term against its forward one at `h2e''`, worst | 1.3e-13 | 2.8e-14 | 1.3e-13 | 1e-7 |
-| the intra-space directions' K5 half (`h1e'`'s round-off) | 4.6e-19 | 4.6e-19 | 4.6e-19 | 1e-13 |
+| the merge: the walk's own `Edot(u)`, `Edot(v)` (the digests' share in every tuple's `Hdot`) against `--kappa-full`'s `<k, Y>` with `hbar` | 5.2e-14 | 1.2e-14 | 3.6e-14 | 1e-7 |
+| the duality, forward K3 + K4 + K5 + K6 against the reverse pairing `<Ddot[v], X'[u]> + <Mdot_G[v], G'[u]> + Rdot[v] . Ddot[u]`, worst pair | 3.9e-16 | 7.1e-16 | 4.4e-16 | 1e-7 |
+| K6 against its own reverse half (the ray-limit multipliers' pseudodensity tangent paired with `u`'s dotted slabs), worst pair | 6.3e-17 | 2.6e-18 | 5.6e-17 | 1e-7 |
+| the swap, `(full, active)` against `(active, full)`: the sandwich / `Eddot_kk` | 1.3e-14 / 1.5e-14 | 4.8e-16 / 9.1e-16 | 1.4e-14 / 2.4e-14 | 1e-7 |
+| K3 and K4 from the exchanged finish | 2.0e-20 | 3.3e-19 | 2.5e-20 | 1e-7 |
+| the digests alone: K3's digest x digest share against `energiesHessianDevice` at `f3'[u]`, `f3'[v]`, and with the curvature's reverse digests' term against its forward one at `h2e''`, worst | 2.1e-13 | 2.7e-14 | 2.7e-13 | 1e-7 |
+| the intra-space directions' K5 half (`h1e'`'s round-off) | 6.1e-19 | 6.3e-19 | 2.1e-18 | 1e-13 |
 
 Exact in every run: along a core–core or virtual–virtual direction `h2e'`
 and the digests' tangent `f3'` are `0.0`, and so are the digests' shares of
@@ -999,21 +1002,39 @@ zero there; at CAS(4,4) it is 1e-16 or less, because an active direction
 that mixes N2's four π irreps leaves every tuple's first-order triple zero
 (the reason `<u, Y_aa>` vanishes there).
 
-**The guarded tuples, refused (§5.6; the temporary refusal until #190).**
-`full x full`, `core x virtual`, `core x core` and `virtual x virtual` are
-refused as Numerical on all three cases: their two directions both populate
-tuples the vanishing-norm guard skips and the integrals leave empty, whose
-second-order term K6 (or the absence of any Hessian along the pair) is not in
-K3–K5. On CAS(4,4) and its fitted twin every class with empty tuples is
-named, and on CAS(8,8) Sijrs (and, along `full x full` and `virtual x
-virtual`, Sijr and Srsi). The largest `|N^{uv}|` on an empty tuple, which
-decides: at most 4.2e-19 on every computed pair (`0.0` at CAS(4,4)), at least
-3.8e-5 on every refused one (CAS(8,8)'s `core x virtual`; most are 1e-4 to
-3.7). `kGuardedCrossTol` is 1e-12 between them. Inside a refused pair the
-tuple values run continuously through 1e-12 (Sijrs's, along two virtual
-rotations, from 3.0e-12 down to 5.3e-13 at CAS(4,4)), so the tuple counts the
-refusal prints are indicative. No guarded tuple was empty by the state on any
-case. `Eddot_kk` along `full x full` is refused as Unsupported on the
+**The guarded tuples: K6, and the pairs with no Hessian (§5.6, #190).** The
+tuples the vanishing-norm guard skips and the integrals leave empty add K6
+where both directions populate them. Sijrs takes its own `P = -1/Delta` on
+every guarded tuple. An H class adds K6 only where its tables are
+proportional, and is refused otherwise. K6 along the pairs that carry one, the
+same in every run:
+
+| pair | CAS(4,4) | CAS(8,8) | CAS(4,4) DF |
+|---|---|---|---|
+| `core x core` (Sijrs alone) | 1.1756706222e-2 | −1.2488140693e-3 | 1.1732463451e-2 |
+| `core x virtual` (Sijrs alone) | 3.2414869997e-4 | 2.3240140444e-5 | 3.2417719591e-4 |
+| `virtual x (2 virtual + core)`, all / the H classes' | −4.1957e-2 / −2.8694e-2 | −6.0450e-3 / −4.0215e-3 | −4.1979e-2 / −2.8729e-2 |
+
+The CAS(4,4) `core x core` value is #158's measured ladder gap, 1.1756707e-2
+("The empty-perturber term, offline"). The pair's sandwich is now
+3.45705779e-2, against that run's ladder 3.45705786e-2. In
+`virtual x (2 virtual + core)` the core part populates no H class's empty
+tuple, so every H class with empty tuples is populated by both directions with
+proportional tables: Sr, Sijr, Srsi, Srs and Sir at CAS(4,4) (Si's empty
+tuples are not populated by `virtual`), Sijr and Srsi at CAS(8,8).
+
+`full x full` and `virtual x virtual` are refused as Numerical on all three
+cases, every H class with populated empty tuples named. No other pair is
+refused. No guarded tuple was empty by the state on any case. The separations
+the thresholds sit in, worst over the runs above:
+
+| quantity | computed pairs | refused pairs | threshold |
+|---|---|---|---|
+| `rho_t`, H classes | ≤1.4e-13 (CAS(4,4)), ≤1.1e-13 (DF), ≤3.3e-16 (CAS(8,8)) | a (class, pair)'s worst ≥4.5e-2 (CAS(4,4), both flavours), ≥2.9e-2 (CAS(8,8)) | `kRhoTol` 1e-7 |
+| `N^{ww}/\|w\|^2` on an empty H-class tuple, unpopulated / populated | ≤1.9e-32 / ≥2.5e-7 (CAS(4,4) ≥2.5e-7, CAS(8,8) ≥3.7e-6) | — | `kPopulatedTol` 1e-14 |
+
+The host's are ≤2.3e-12 / ≥2.1e-2 for `rho_t` ("The empty-perturber term,
+offline"). `Eddot_kk` along `full x full` is refused as Unsupported on the
 conventional cases (#154's K2 refusal, before any device work) and as
 Numerical on the fitted one.
 
@@ -1023,31 +1044,64 @@ energies the rotated generalized Fock's diagonal, and the digests rebuilt at
 each corner's `h2e` (one plain RDM build and one `energiesDevice` per
 corner). Its second difference converges to `Eddot_kk`, and `E(U) - L(U)`,
 with `L` the fixed-pseudodensity pairing of "The orbital block's integral
-curvature", to the sandwich alone. The steps are those ladders' (`h = 2^-k`,
-`k = 4…16`). Each is verified by a run of at least three fourfold halvings of
-the raw differences' error and gated on its Richardson extrapolation `(4
-D(h/2) - D(h)) / 3`, whose best error relative to `max(|Eddot_kk|, |<u, Y>|,
-|<v, Y>|)` must be under 1e-6. The raw differences alone reach the total
-energy's round-off floor, about `eps |E| / h^2`, at 1.1e-6 to 1.5e-6 on the
-pairs with small `Eddot` (#158's first run); the extrapolation is what the
-gate reads. Worst extrapolated relative error (fewest raw halvings), `E` /
-`E - L`:
+curvature", to the sandwich alone. The steps are `h = 2^-k`, `k = 2…16`. The
+gate is the Richardson extrapolation `(4 D(h/2) - D(h)) / 3`, whose best
+error relative to `max(|Eddot_kk|, |<u, Y>|, |<v, Y>|)` must be under 1e-6.
+
+**The ladders' shape rule (#190), and why it differs from #158's.** The
+extrapolation is verified by the raw error's halvings, and that check is now
+floor-aware:
+
+- Each rung's round-off floor is `eps max_c |E_c| / h^2`, where the `E_c` are
+  the four corner SC totals that rung differences. A rung whose error is
+  within 10x its floor is left out of the ratio test.
+- Above the floor, two consecutive halvings must each cut the error by at
+  least 3.2. There is no upper bound.
+- The steps start at `2^-2` rather than `2^-4`, for every pair.
+
+The lower bound is what catches a ladder converging to the wrong number: it
+sits flat, at ratio 1.00 per halving, as #158's first run did along
+`core x core`. #158's rule (three halvings inside (3.2, 4.8), from `2^-4`)
+failed three ladders that K6 closes, each converging under the gate:
+
+- `core x core` at CAS(4,4) (both flavours). It halves by 5.9, 8.7 and 10.0 on
+  its way to within 1.6e-9 of the target. That is a large h^4 term along the
+  pair, not a wrong target.
+- `virtual x (2 virtual + core)` at CAS(8,8). Its truncation error is 8e-6
+  already at `2^-4` and meets the floor two halvings later; starting at `2^-2`
+  shows them.
+- `core x virtual` at CAS(4,4). The ratio that decided its third halving sat
+  near the floor, and came out anywhere from 3.07 to 4.41 run to run (failing
+  3 of 21 runs under the rule in between, which dropped the upper bound and
+  started at `2^-2`).
+
+Under the floor-aware rule, `core x virtual` passed 13 runs of 13 on each
+CAS(4,4) flavour (twelve at `--tiles 3`, one at `--tiles 1`). Every other
+ladder passed in the same runs and in CAS(8,8)'s two. Its two halvings are
+the coarse ones, `2^-2` to `2^-4` (4.34, 6.21), whose errors (1e-5 to 1e-6)
+are far above any rung's noise. Worst extrapolated relative error over those
+runs (fewest halvings above the floor), `E` / `E - L`:
 
 | pair | CAS(4,4) | CAS(8,8) | CAS(4,4) DF |
 |---|---|---|---|
-| active x active | 2.0e-8 / 1.9e-8 (7) | 1.8e-8 / 1.7e-8 (5) | 1.7e-8 / 1.7e-8 (7) |
-| active x core | 2.1e-7 / 2.1e-7 (3) | 9.2e-8 / 9.2e-8 (5) | 2.3e-7 / 2.3e-7 (3) |
-| active x virtual | 8.1e-8 / 8.1e-8 (6) | 6.6e-8 / 6.6e-8 (4) | 1.1e-7 / 1.0e-7 (6) |
+| active x active | 1.3e-8 / 1.1e-8 (9) | 1.2e-8 / 1.1e-8 (7) | 2.1e-8 / 2.1e-8 (9) |
+| active x core | 2.1e-7 / 2.1e-7 (4) | 5.8e-8 / 5.8e-8 (8) | 1.8e-7 / 1.8e-7 (3) |
+| active x virtual | 1.3e-7 / 1.3e-7 (6) | 8.5e-8 / 8.5e-8 (6) | 1.4e-7 / 1.4e-7 (6) |
+| core x virtual | — / 1.0e-7 (2) | — / 6.1e-8 (7) | 2.3e-7 / 2.3e-7 (2) |
+| core x core | — / 7.2e-8 (8) | — / 2.1e-8 (9) | 1.9e-8 / 1.9e-8 (8) |
+| virtual x (2 virtual + core) | — / 2.8e-9 (4) | — / 3.3e-8 (3) | 2.0e-8 / 2.0e-8 (4) |
 
-The refused pairs run no ladder. A run takes about 1.5 s at CAS(4,4) (either
-flavour) and 28 s at CAS(8,8), where the ladders' 156 corner energies, each
-with its RDM build, are most of it.
+A dash is `Eddot_kk` refused on a conventional case (K2). The refused pairs
+run no ladder. What a run costs is in [`performance.md`](performance.md),
+"Tile floors" (`--sc-hessian-kk`).
 
 The pair finish's assembly, card-free, is `test/gradient_plan/`'s
 `PairTermsTests` (K3 + K4 + K5 against a mixed central difference of the
-class energy, plain and through Sijr's packing) and `GuardedCensusTests`
-(§5.6's kinds of guarded tuple, by hand); the flag's refusals are
-`test/cli/`'s `CliScPseudodensityFlagTests`.
+class energy, plain and through Sijr's packing), `GuardedCensusTests`
+(§5.6's kinds of guarded tuple by hand, K6 against the tuple's own energy
+along the plane, `rho_t`'s scale invariance, Sijrs's exemption, Sijr's
+packing scattered back) and `SijrsFinishTests` (Sijrs's unguarded finish);
+the flag's refusals are `test/cli/`'s `CliScPseudodensityFlagTests`.
 
 ## The empty-perturber term, offline
 
@@ -1145,8 +1199,8 @@ The separations, worst over the six goldens:
 | the largest integral of a guarded tuple | ≤2.7e-15 (empty: symmetry noise) | ≥2.6e-9 (small: acrolein) |
 
 So the host's `RHO_TOL = 1e-7` sits more than four decades from either
-side. The device's own noise has to be measured before #190 picks its
-threshold.
+side. The device's own separations, which #190's thresholds are taken from,
+are in "The orbital block's sandwich".
 
 **First order.** The guard drops this much from `Edot` along the probe's
 core and virtual directions. Sijrs's `-Ndot/Delta`, summed over its guarded
@@ -1156,12 +1210,12 @@ largest `|Ndot|` on a guarded tuple is ≤5.8e-19 on N2 and LiF and 1.7e-11
 on acrolein (its small Sijr tuples). Each of these is far below every
 first-order gate.
 
-**What this means for #190's acceptance.** On N2 CAS(4,4), conventional and
-DF, the core × core and core × virtual pairs are Sijrs-only. K6 closes them,
-and on the card it closed core × core to the ladder's last digit. Every
+**What this meant for #190.** On N2 CAS(4,4), conventional and DF, the
+core × core and core × virtual pairs are Sijrs-only, and K6 closes them. Every
 random virtual × virtual pair, and `full x full`, is refused under §5.6's
-test. They are not closed by K6, because no Hessian exists along them. The
-proportional H-class path is exercised by pairs like `virt x virt+sym`.
+test, because no Hessian exists along them. The proportional H-class path is
+exercised by a pair like `virt x virt+sym`; the device runs `virtual x (2
+virtual + core)`. The device's results are in "The orbital block's sandwich".
 
 The pytest hand cases are `reference_data/tests/test_sc_empty_perturber_probe.py`
 ("The oracle's own tests").

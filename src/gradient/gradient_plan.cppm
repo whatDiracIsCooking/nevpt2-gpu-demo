@@ -942,8 +942,15 @@ struct ScPairTerms {
   double k5vuDigest = 0.0;      // the part of k5vu the digests' share of K'[u] carries
   double k3Swap = 0.0;          // k3 from the exchanged finish: equal by the 3x3's symmetry
   double k4Swap = 0.0;          // k4 likewise: the same table, the same sum
-  [[nodiscard]] double total() const { return k3 + k4 + k5uv + k5vu; }
+  // K6 (#190; docs/hessian-theory.md, Sec. 5.6): the guarded tuples' share,
+  // K4's tables there at the ray-limit multipliers -- on an H class the empty
+  // tuples both directions populate (emptyTermPacked below), on Sijrs every
+  // guarded tuple at its exact P = -1/Delta (k4 above is then the unguarded
+  // tuples' share alone, as for every other class).
+  double k6 = 0.0;
+  [[nodiscard]] double total() const { return k3 + k4 + k5uv + k5vu + k6; }
   ScPairTerms& operator+=(const ScPairTerms& o) {
+    k6 += o.k6;
     k3 += o.k3;
     k3DigestU += o.k3DigestU;
     k3DigestV += o.k3DigestV;
@@ -959,95 +966,350 @@ struct ScPairTerms {
   }
 };
 
-// --- the guarded tuples along the pair: #158's temporary refusal -------------
+// --- the guarded tuples along the pair: K6 and the rho_t refusal (#190) -------
 //
-// docs/hessian-theory.md, Sec. 5.6: a tuple the vanishing-norm guard skips
-// (|N_t| <= NUMERICAL_ZERO) and whose integrals are all zero by symmetry
-// ("empty by the integrals") contributes at second order when BOTH
-// directions populate it -- K6, or no Hessian along the pair at all -- and
-// K3-K5 carry neither. Until #190 adds K6 and its proportionality test, the
-// orbital pair REFUSES every (class, pair) with such a tuple, and any guarded
-// tuple empty by the state (x_t != 0, N_t round-off against |x_t|^2), which
-// Sec. 5.6 does not derive. A SMALL guarded tuple (a real perturber under the
-// guard) is held at zero by the guard on a neighbourhood of the state and is
-// not a reason to refuse.
+// docs/hessian-theory.md, Sec. 5.6 and Sec. 9.1. The energy stage skips every
+// perturber with |N_t| <= NUMERICAL_ZERO, and K3-K5 skip it with it. Three
+// kinds of guarded perturber, three answers:
 //
-// The three thresholds, from the measured separations:
-//   kEmptyIntegralTol  a tuple's largest integral. Empty ones measure <=
-//                      2.7e-15 on every committed golden, small ones >= 2.6e-9
-//                      (acrolein): docs/testing.md, "The empty-perturber term,
-//                      offline" -- the same 1e-12 as Sec. 5.6's census.
-//   kGuardedCrossTol   |N^{uv}| on an empty tuple. A direction that does not
-//                      populate the tuple leaves its dot exactly zero or at
-//                      the promotion's round-off, so N^{uv} is a product with a
-//                      round-off factor. The decision is per (class, pair), on
-//                      the pair's LARGEST such |N^{uv}|; measured on the card
-//                      (docs/testing.md, "The orbital block's sandwich"):
-//                      every computed pair's is <= 4.2e-19, every refused
-//                      pair's >= 3.8e-5 -- 1e-12 sits seven decades from
-//                      each. Within a refused pair the tuple values run
-//                      continuously through it (Sijrs's from 3e-12 down to
-//                      5e-13 along two virtual rotations), so the tuple count
-//                      a refusal prints is indicative, not a measurement.
+//   SMALL               a real perturber under the guard (x_t != 0): the
+//                       guard holds its energy at zero on a neighbourhood of
+//                       the state, so it contributes zero and is never scored.
+//   EMPTY BY THE        x_t = 0 by symmetry. Populated at first order by both
+//   INTEGRALS           directions (N^{uu}, N^{vv} above the population floor)
+//                       its energy along the plane is -Q_N^2 / (Q_N Delta +
+//                       Q_H), a quadratic form exactly when the H tables are
+//                       proportional to the N tables, H^{ww} = eta N^{ww}. It
+//                       is scored by the scale-free defect
+//                         rho_t = max(|eta_u - eta_v|, 2 |k - c eta|) / |Delta + eta|
+//                       (c = N^{uv}, k = H^{uv}, both over sqrt(N^{uu} N^{vv});
+//                       eta_w = H^{ww}/N^{ww}, eta their mean). At round-off
+//                       it adds K6 = -N^{uv}/(Delta + eta), which is K4 at
+//                       the ray-limit multipliers Pbar = 2T + Delta T^2,
+//                       Qbar = T^2, T = -1/(Delta + eta) -- the form computed,
+//                       since it is not 0/0 for orthogonal perturbers. Above
+//                       tolerance the (class, pair) has NO Hessian (the
+//                       directional second derivatives exist, their
+//                       polarisation is not bilinear) and is REFUSED, by the
+//                       caller, as err_numerical. Populated by one direction
+//                       or neither, it contributes nothing to the mixed term.
+//   EMPTY BY THE STATE  x_t != 0, N_t round-off against |x_t|^2: Sec. 5.6
+//                       does not derive it, so it is refused (no committed
+//                       golden has one).
+//
+// SIJRS IS EXEMPT (`hZero`): its H is identically zero and its energy,
+// -N_t/Delta_t, is linear in N_t with NO guard (energy_sijrs), so every
+// guarded tuple -- small ones too -- takes the class's own P = -1/Delta,
+// with no score. Its walk finishes with that exact multiplier throughout
+// (sijrsMultipliers below), so its K6 is the guarded tuples' share of K4.
+//
+// The four thresholds, from the measured separations:
+//   kEmptyIntegralTol  a perturber's largest integral (for a symmetrized
+//                      perturber the sum of its two tuples' -- an upper bound
+//                      on the largest within a factor two). Empty ones
+//                      measure <= 2.7e-15 on every committed golden, small
+//                      ones >= 2.6e-9 (acrolein): docs/testing.md, "The
+//                      empty-perturber term, offline" -- Sec. 5.6's census's
+//                      1e-12.
+//   kPopulatedTol      the population floor, on N^{ww} / |w|^2 (|w| the
+//                      direction's Frobenius norm, so the test is
+//                      scale-free) on an empty tuple. A direction that does
+//                      not populate the tuple leaves its dot at the
+//                      integrals' symmetry noise, ~1e-15, and N^{ww} at its
+//                      square; a real population is >= 1.0e-10 on the host
+//                      (LiF; >= 4.5e-8 on N2). The card's own, N2 CAS(4,4),
+//                      its DF twin and CAS(8,8) (docs/testing.md, "The
+//                      orbital block's sandwich"), over the H classes (Sijrs
+//                      is exempt, so its floor decides nothing): <= 1.9e-32
+//                      below, >= 2.5e-7 above. NUMERICAL_ZERO's 1e-14, the
+//                      host probe's choice, sits more than six decades from
+//                      either side.
+//   kRhoTol            rho_t's tolerance. Measured on the card (the same
+//                      cases): <= 1.4e-13 on every computed pair, the
+//                      proportional `virtual x (2 virtual + core)` included,
+//                      and a (class, pair)'s worst >= 2.9e-2 on every refused
+//                      one; the host's separation is <= 2.3e-12 / >= 2.1e-2.
+//                      1e-7 -- the host probe's RHO_TOL -- sits more than five
+//                      decades from either side, as PC_LIFT_TOL sits between
+//                      its round-off and its real lifts.
 //   kEmptyStateRel     N_t / max|x_t|^2 on a guarded tuple that is not empty
 //                      by the integrals: acrolein's small tuples measure
 //                      >= 1e-1 (N_t 4.5e-16 against |x_t| 5.8e-8), and a
 //                      perturber zero by the state would be round-off, ~1e-16.
 inline constexpr double kEmptyIntegralTol = 1e-12;
-inline constexpr double kGuardedCrossTol = 1e-12;
+inline constexpr double kPopulatedTol = NUMERICAL_ZERO;
+inline constexpr double kRhoTol = 1e-7;
 inline constexpr double kEmptyStateRel = 1e-10;
 
-// One class's guarded tuples along one orbital pair, over raw tuples: `norm`
-// the tuple's N_t, `xMax` the largest |integral| it reads, `normUV` K4's
-// N^{uv}. Counts accumulate over slabs.
+// One class's guarded perturbers along one orbital pair. Counts accumulate
+// over slabs.
 struct ScGuardedCensus {
   int64_t guarded = 0;       // |N_t| <= NUMERICAL_ZERO
   int64_t empty = 0;         // ... and empty by the integrals
-  int64_t populated = 0;     // ... and |N^{uv}| > kGuardedCrossTol: refused
+  int64_t populatedU = 0;    // ... and populated at first order along u
+  int64_t populatedV = 0;    // ... along v
+  int64_t populated = 0;     // ... along both: K6's perturbers (an H class's scored by rho)
+  int64_t rhoAbove = 0;      // ... with rho_t > kRhoTol: the (class, pair) is refused
   int64_t emptyByState = 0;  // guarded, not empty by the integrals, N_t round-off: refused
-  double crossMax = 0.0;     // max |N^{uv}| over the empty tuples
-  // The separation the threshold sits in: the largest |N^{uv}| on an empty
-  // tuple at or under kGuardedCrossTol, and the smallest above it.
+  double rhoMax = 0.0;       // the worst rho_t over `populated` (0 for Sijrs: not scored)
+  // The separation the population floor sits in: the largest N^{ww} / |w|^2
+  // on an empty perturber at or under kPopulatedTol, and the smallest above.
   double unpopulatedMax = 0.0;
   double populatedMin = std::numeric_limits<double>::infinity();
-  [[nodiscard]] bool refused() const { return populated > 0 || emptyByState > 0; }
+  [[nodiscard]] bool refused() const { return rhoAbove > 0 || emptyByState > 0; }
   ScGuardedCensus& operator+=(const ScGuardedCensus& o) {
     guarded += o.guarded;
     empty += o.empty;
+    populatedU += o.populatedU;
+    populatedV += o.populatedV;
     populated += o.populated;
+    rhoAbove += o.rhoAbove;
     emptyByState += o.emptyByState;
-    crossMax = std::max(crossMax, o.crossMax);
+    rhoMax = std::max(rhoMax, o.rhoMax);
     unpopulatedMax = std::max(unpopulatedMax, o.unpopulatedMax);
     populatedMin = std::min(populatedMin, o.populatedMin);
     return *this;
   }
 };
 
-ScGuardedCensus guardedCensus(const Tensor& norm, const Tensor& xMax, const Tensor& normUV,
+// The guarded perturbers' term, over perturbers in the class's own packed
+// order: `norm`, `xMax` (the largest |integral| each reads), `delta`, and
+// K4's cross tables at (u, u), (v, v) and (u, v) for the norm and H sides
+// (both external slots dotted, the Dyall block undotted, summed over ordered
+// slot pairs -- so N^{ww} is N_t's second derivative along w). `scaleU` /
+// `scaleV` are |u|^2, |v|^2. Returns the census, K6, and the ray-limit
+// multipliers (zero off K6's perturbers) in the same order -- what the
+// reverse pairing differentiates with. `hZero`: Sijrs (see above).
+struct ScEmptyPacked {
+  ScGuardedCensus census;
+  double k6 = 0.0;
+  std::vector<double> pBar, qBar;
+};
+
+ScEmptyPacked emptyTermPacked(const std::vector<double>& norm, const std::vector<double>& xMax,
+                              const std::vector<double>& delta,
+                              const std::vector<double>& normUU,
+                              const std::vector<double>& normVV,
+                              const std::vector<double>& normUV, const std::vector<double>& hUU,
+                              const std::vector<double>& hVV, const std::vector<double>& hUV,
+                              double scaleU, double scaleV, bool hZero,
                               std::source_location loc = std::source_location::current()) {
-  if (xMax.dims() != norm.dims() || normUV.dims() != norm.dims())
-    check(false, "guardedCensus: the three tables are not shaped alike", loc);
-  ScGuardedCensus c;
-  for (int64_t q = 0; q < norm.size(); ++q) {
-    const double n = std::fabs(norm.flat(q));
-    if (n > NUMERICAL_ZERO) continue;
+  const std::size_t n = norm.size();
+  for (const std::vector<double>* x : {&xMax, &delta, &normUU, &normVV, &normUV, &hUU, &hVV, &hUV})
+    if (x->size() != n)
+      check(false,
+            std::format("emptyTermPacked: the per-perturber vectors' lengths differ ({} against "
+                        "{})",
+                        x->size(), n),
+            loc);
+  if (!(scaleU > 0.0) || !(scaleV > 0.0))
+    check(false, std::format("emptyTermPacked: |u|^2 = {}, |v|^2 = {}", scaleU, scaleV), loc);
+  ScEmptyPacked out;
+  out.pBar.assign(n, 0.0);
+  out.qBar.assign(n, 0.0);
+  ScGuardedCensus& c = out.census;
+  for (std::size_t k = 0; k < n; ++k) {
+    const double nk = std::fabs(norm[k]);
+    if (nk > NUMERICAL_ZERO) continue;
     ++c.guarded;
-    const double x = xMax.flat(q);
-    if (x <= kEmptyIntegralTol) {
+    const double x = xMax[k];
+    const bool empty = x <= kEmptyIntegralTol;
+    if (empty) {
       ++c.empty;
-      const double uv = std::fabs(normUV.flat(q));
-      c.crossMax = std::max(c.crossMax, uv);
-      if (uv > kGuardedCrossTol) {
-        ++c.populated;
-        c.populatedMin = std::min(c.populatedMin, uv);
-      } else {
-        c.unpopulatedMax = std::max(c.unpopulatedMax, uv);
-      }
-    } else if (n <= kEmptyStateRel * x * x) {
+    } else if (nk <= kEmptyStateRel * x * x) {
       ++c.emptyByState;
     }
+    // A small tuple is the guard's zero, except on Sijrs, which has no guard.
+    if (!empty && !hZero) continue;
+    const double popU = std::fabs(normUU[k]) / scaleU;
+    const double popV = std::fabs(normVV[k]) / scaleV;
+    const bool bu = popU > kPopulatedTol, bv = popV > kPopulatedTol;
+    if (empty)
+      for (const double p : {popU, popV}) {
+        if (p > kPopulatedTol) c.populatedMin = std::min(c.populatedMin, p);
+        else c.unpopulatedMax = std::max(c.unpopulatedMax, p);
+      }
+    if (empty && bu) ++c.populatedU;
+    if (empty && bv) ++c.populatedV;
+    if (empty && bu && bv) ++c.populated;
+    if (hZero) {
+      // Sijrs: the class's own exact multiplier, on every guarded tuple.
+      out.pBar[k] = -1.0 / delta[k];
+      out.k6 += out.pBar[k] * normUV[k];
+      continue;
+    }
+    if (!(bu && bv)) continue;
+    const double s = std::sqrt(std::fabs(normUU[k] * normVV[k]));
+    const double cc = normUV[k] / s, kk = hUV[k] / s;
+    const double etaU = hUU[k] / normUU[k], etaV = hVV[k] / normVV[k];
+    const double eta = 0.5 * (etaU + etaV);
+    const double den = delta[k] + eta;
+    const double rho =
+        std::max(std::fabs(etaU - etaV), 2.0 * std::fabs(kk - cc * eta)) / std::fabs(den);
+    c.rhoMax = std::max(c.rhoMax, rho);
+    if (!(rho <= kRhoTol)) ++c.rhoAbove;
+    const double t = -1.0 / den;
+    out.pBar[k] = 2.0 * t + delta[k] * t * t;
+    out.qBar[k] = t * t;
+    out.k6 += out.pBar[k] * normUV[k] + out.qBar[k] * hUV[k];
   }
-  return c;
+  return out;
+}
+
+// One slab's (or, for Srsi, one class's) tables for the guarded term, each
+// shaped as the class's raw tuple vector, and the two directions' |w|^2.
+struct ScEmptyTables {
+  Tensor norm, xMax;
+  Tensor normUU, normVV, normUV;
+  Tensor hUU, hVV, hUV;
+  double scaleU = 1.0, scaleV = 1.0;
+};
+
+// The guarded term with its multipliers scattered back over the raw tuples
+// (as ScSlabMultipliers' are), so sum_raw Pbar N^{uv}_raw is K6's norm half.
+struct ScEmptySlab {
+  ScGuardedCensus census;
+  double k6 = 0.0;
+  Tensor pBar, qBar;
+  bool any = false;  // a nonzero multiplier anywhere: the reverse pairing has work
+};
+
+ScEmptySlab emptySlabOf(ScEmptyPacked&& e, Tensor pBar, Tensor qBar) {
+  ScEmptySlab s{e.census, e.k6, std::move(pBar), std::move(qBar), false};
+  for (std::size_t k = 0; k < e.pBar.size(); ++k)
+    if (e.pBar[k] != 0.0 || e.qBar[k] != 0.0) s.any = true;
+  return s;
+}
+
+// The tuple-is-perturber case: `delta` in the tuple vector's flat order.
+ScEmptySlab plainEmptyTerm(const ScEmptyTables& t, const std::vector<double>& delta,
+                           bool hZero = false) {
+  ScEmptyPacked e = emptyTermPacked(t.norm.data(), t.xMax.data(), delta, t.normUU.data(),
+                                    t.normVV.data(), t.normUV.data(), t.hUU.data(), t.hVV.data(),
+                                    t.hUV.data(), t.scaleU, t.scaleV, hZero);
+  Tensor p = Tensor::fromFlat(t.norm.dims(), e.pBar);
+  Tensor q = Tensor::fromFlat(t.norm.dims(), e.qBar);
+  return emptySlabOf(std::move(e), std::move(p), std::move(q));
+}
+
+// Sijr: every raw (nr, ncore, ncore) table through the SAME triangle as its
+// multipliers -- the packing is linear, so a packed cross table is the packed
+// perturber's -- and xMax through it too (a sum of two maxima, so an upper
+// bound on the perturber's largest integral within a factor two).
+ScEmptySlab sijrEmptyTerm(const ScEmptyTables& t, int64_t b0, const Tensor& hostECore,
+                          const Tensor& hostEVirt) {
+  const int64_t nr = t.norm.dim(0), ncore = t.norm.dim(1);
+  ScEmptyPacked e = emptyTermPacked(
+      sijrTriangle(t.norm), sijrTriangle(t.xMax), sijrDelta(nr, ncore, b0, hostECore, hostEVirt),
+      sijrTriangle(t.normUU), sijrTriangle(t.normVV), sijrTriangle(t.normUV), sijrTriangle(t.hUU),
+      sijrTriangle(t.hVV), sijrTriangle(t.hUV), t.scaleU, t.scaleV, /*hZero=*/false);
+  Tensor p = sijrScatter(e.pBar, nr, ncore);
+  Tensor q = sijrScatter(e.qBar, nr, ncore);
+  return emptySlabOf(std::move(e), std::move(p), std::move(q));
+}
+
+// Srsi: the same over the whole (nvirt, nvirt, ncore) and srsiTriangle.
+ScEmptySlab srsiEmptyTerm(const ScEmptyTables& t, const Tensor& hostECore,
+                          const Tensor& hostEVirt) {
+  const int64_t nvirt = t.norm.dim(0), ncore = t.norm.dim(2);
+  ScEmptyPacked e = emptyTermPacked(
+      srsiTriangle(t.norm), srsiTriangle(t.xMax), srsiDelta(nvirt, ncore, hostECore, hostEVirt),
+      srsiTriangle(t.normUU), srsiTriangle(t.normVV), srsiTriangle(t.normUV), srsiTriangle(t.hUU),
+      srsiTriangle(t.hVV), srsiTriangle(t.hUV), t.scaleU, t.scaleV, /*hZero=*/false);
+  Tensor p = srsiScatter(e.pBar, nvirt, ncore);
+  Tensor q = srsiScatter(e.qBar, nvirt, ncore);
+  return emptySlabOf(std::move(e), std::move(p), std::move(q));
+}
+
+// --- Sijrs's own finish, exact (#190) ------------------------------------------
+//
+// H_t is identically zero, so E_t = -N_t / Delta_t: linear in N_t, and
+// energy_sijrs applies NO guard. scMultipliers' guard (and the finish
+// Hessian's, which at H = 0 carries E_HH = -2/(N Delta^3) and so cannot just
+// be unguarded) zeroes the multipliers of a tuple the energy does not skip --
+// harmless at first order (a guarded tuple's Ndot is the guard's size), but
+// at second order an empty tuple's N^{uv} is not, and that is the whole of the
+// core x core gap #158's ladders measured (docs/hessian-theory.md, Sec. 5.6).
+// So Sijrs finishes with its own closed forms on every tuple:
+//
+//   T = P = -1/Delta,  Q = 1/Delta^2,  R = N/Delta^2
+//   Pdot = Deltadot/Delta^2,  Qdot = -2 Deltadot/Delta^3,
+//   Rdot = Ndot/Delta^2 - 2 N Deltadot/Delta^3
+//
+// -- scMultipliers' and normToEnergyMultiplierTangent's own values wherever
+// those do not guard (f_NN = 0, f_NDelta = 1/Delta^2, f_DeltaDelta =
+// -2N/Delta^3; Hdot is zero, so no H entry is ever read).
+ScMultipliers sijrsMultipliers(const std::vector<double>& norm, const std::vector<double>& delta,
+                               std::source_location loc = std::source_location::current()) {
+  const std::size_t n = norm.size();
+  if (delta.size() != n)
+    check(false, std::format("sijrsMultipliers: norm/delta lengths differ ({}, {})", n,
+                             delta.size()),
+          loc);
+  ScMultipliers m;
+  m.t.resize(n);
+  m.p.resize(n);
+  m.q.resize(n);
+  m.r.resize(n);
+  for (std::size_t k = 0; k < n; ++k) {
+    const double t = -1.0 / delta[k];
+    m.t[k] = t;
+    m.p[k] = t;
+    m.q[k] = t * t;
+    m.r[k] = norm[k] * t * t;
+    m.norm += norm[k];
+    m.energy += t * norm[k];
+  }
+  return m;
+}
+
+ScSlabMultiplierTangents sijrsMultiplierTangents(const Tensor& norm,
+                                                 const std::vector<double>& delta,
+                                                 const Tensor& normDot,
+                                                 const std::vector<double>& diffDot,
+                                                 std::source_location loc =
+                                                     std::source_location::current()) {
+  const std::size_t n = static_cast<std::size_t>(norm.size());
+  if (delta.size() != n || static_cast<std::size_t>(normDot.size()) != n || diffDot.size() != n)
+    check(false, "sijrsMultiplierTangents: the per-tuple vectors' lengths differ", loc);
+  std::vector<double> p(n), q(n), r(n);
+  for (std::size_t k = 0; k < n; ++k) {
+    const double inv = 1.0 / delta[k];
+    const double inv2 = inv * inv;
+    p[k] = diffDot[k] * inv2;
+    q[k] = -2.0 * diffDot[k] * inv2 * inv;
+    r[k] = normDot.flat(static_cast<int64_t>(k)) * inv2 -
+           2.0 * norm.flat(static_cast<int64_t>(k)) * diffDot[k] * inv2 * inv;
+  }
+  return {Tensor::fromFlat(norm.dims(), p), Tensor::fromFlat(norm.dims(), q), r};
+}
+
+// mixedTermsPacked's five terms for Sijrs, at its exact finish: C1 the 3x3
+// between (Ndot, 0, Ddot)[w] and (Ndot, 0, Ddot)[u], C2 = P N^{wu}, C5 =
+// R Delta(eps^{wu}); C1's digest share, C3 and C4 have no H to live in.
+ScMixedTerms sijrsMixedTerms(const ScMixedTables& t, const std::vector<double>& delta,
+                             const std::vector<double>& diffDotW,
+                             const std::vector<double>& diffDotU,
+                             const std::vector<double>& diffWU,
+                             std::source_location loc = std::source_location::current()) {
+  const std::size_t n = delta.size();
+  if (static_cast<std::size_t>(t.norm.size()) != n || diffDotW.size() != n ||
+      diffDotU.size() != n || diffWU.size() != n ||
+      static_cast<std::size_t>(t.normDotW.size()) != n ||
+      static_cast<std::size_t>(t.normDotU.size()) != n ||
+      static_cast<std::size_t>(t.normWU.size()) != n)
+    check(false, "sijrsMixedTerms: the per-tuple vectors' lengths differ", loc);
+  ScMixedTerms m;
+  for (std::size_t k = 0; k < n; ++k) {
+    const int64_t q = static_cast<int64_t>(k);
+    const double inv = 1.0 / delta[k];
+    const double inv2 = inv * inv;
+    m.c1 += (t.normDotW.flat(q) * diffDotU[k] + diffDotW[k] * t.normDotU.flat(q)) * inv2 -
+            2.0 * t.norm.flat(q) * diffDotW[k] * diffDotU[k] * inv2 * inv;
+    m.c2 += -inv * t.normWU.flat(q);
+    m.c5 += t.norm.flat(q) * inv2 * diffWU[k];
+  }
+  return m;
 }
 
 // One slab's (or, for Srsi, one class's) tables for the pair, each shaped as

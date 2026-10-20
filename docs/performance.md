@@ -657,19 +657,21 @@ ladder corner at the displaced `h2e` — plus #89's transpose, so its floors
 are the plain build's. Measured: `nevpt2_sc_pseudodensity --golden <case>
 --tiles T --sc-hessian-kk` passes at `T = 1`, the lowest count there is, and
 at the ctest entries' `T = 3`, on the three cases that carry a sidecar it
-reads (RTX 3080, CUDA, `default` preset, 656 MiB of the card held by other
-processes, one run each, 2026-10-20):
+reads (RTX 3080, CUDA, `default` preset, one run each, 2026-10-20, with
+#190's K6, its proportional pair and the ladders from `2^-2`):
 
 | case | `--tiles 1`: wall, pool used | `--tiles 3`: wall, pool used |
 |---|---:|---:|
-| N2 CAS(4,4) | 1.5 s, 4.9 MB | 1.4 s, 4.9 MB |
-| N2 CAS(8,8) | 28.3 s, 186.4 MB | 28.6 s, 81.2 MB |
-| N2 CAS(4,4) DF | 1.5 s, 7.3 MB | 1.5 s, 7.3 MB |
+| N2 CAS(4,4) | 2.5 s, 5.4 MB | 2.5 s, 5.4 MB |
+| N2 CAS(8,8) | 54.3 s, 186.4 MB | 55.1 s, 81.2 MB |
+| N2 CAS(4,4) DF | 2.5 s, 7.3 MB | 2.6 s, 7.3 MB |
 
 Beside the build it holds per pair two tangent block sets per class, the
-cross tables and, reverse, one slab's pseudodensity tangents; none of it
-scales with `--tiles`. The CAS(8,8) wall is the ladders' 156 corner energies,
-each with its RDM build.
+cross tables (the guarded tuples' `(u, u)` and `(v, v)` ones too, #190) and,
+reverse, one slab's pseudodensity tangents; none of it scales with
+`--tiles`. The CAS(8,8) wall is the ladders' 360 corner energies, each with
+its RDM build. Under #158 there were 156, and CAS(8,8) took 28.6 s at
+`--tiles 3`.
 
 **The digests' transpose (#89) has the plain build's per-tile working set.**
 `buildDigestAdjointDevice` (`nevpt2.rdm_build`'s `:adjoint` partition) holds
