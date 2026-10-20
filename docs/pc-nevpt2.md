@@ -1076,8 +1076,10 @@ that by up to `1e10`. The fix would be a tighter CI vector, not a looser gate.
 ### The orbital blocks, offline
 
 PC's orbital Hessian blocks are derived in
-[`hessian-theory.md`](hessian-theory.md), §6.4–§6.8 (#199). They are not yet
-in the tree; #200–#202 build them. Before any code, three of the theory's
+[`hessian-theory.md`](hessian-theory.md), §6.4–§6.8 (#199). The first term of
+`H_kk`, the integrals' curvature K1 + K2, is in the tree (#200;
+[`testing.md`](testing.md), "PC's orbital curvature"); #201–#202 build the
+rest. Before any code, three of the theory's
 claims were measured offline:
 
 - `S` does not move along any orbital direction, so `H_kk` needs no rotation

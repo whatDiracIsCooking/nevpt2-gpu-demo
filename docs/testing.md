@@ -1001,9 +1001,98 @@ same code the block-diagonal pairs run, and on the fitted case the three-index
 jet, which shares nothing with it past `B`, agrees with it at 1e-13 on
 `active x full`.
 
+Since #200 each ladder pairs the term's own second-order inputs
+(`orbitalSecondInputsDevice`, and for the product parameterisation the
+first-order inputs at `[u, v]`, `orbitalMatrixInputsDevice`) in the same walk
+as its displaced corners, and converges to that pairing; the pairing is held
+to the curvature call's own value at 1e-7. For SC the two agree to ≤8.4e-14
+(CAS(4,4)), 5.9e-15 (CAS(8,8)) and 1.6e-14 (CAS(4,4) DF), one run each,
+2026-10-20; the ladder figures above are unchanged by it. "PC's orbital
+curvature", below, is why it is there.
+
 A run takes about 1 s at CAS(4,4), 10 s at CAS(8,8) (the forward digests —
 one plain RDM build per term per pair, printed as they run — are most of
 it) and 2 s on the fitted CAS(4,4).
+
+## PC's orbital curvature
+
+`nevpt2_sc_pseudodensity_<case>_pc_hessian_kk_int` for `cas44`, `cas88`,
+`cas44_df` and `cas88_df` (`gpu`; the two CAS(4,4) ones `small`) run
+`nevpt2_sc_pseudodensity --golden <case> --tiles 3 --pc --sc-hessian-kk-int`
+and match `PASS: the PC orbital Hessian's integral curvature <Ehat', I''> =
+K1 + K2 agrees … (PC's first-order source term gated first, both
+dualities)`, the fitted ones with their route named too (#200). They run the
+section above's checks on `nevpt2.gradient`'s `pcOrbitalCurvatureDevice`:
+#154's input generators paired against PC's integral adjoint `Ehat'_pc`
+([`hessian-theory.md`](hessian-theory.md), §6.7), on a state the PC energy
+stage has first held to the golden's block2 total. Same seeds, pairs, ladder
+and gates as SC's, with three differences:
+
+- **Check 0, PC's first-order orbital source term itself**, on four seeded
+  full kappas (base `0x5eed0200`): the integral half's duality and the full
+  one (`<kappa, Y_pc>` with `hbar_pc` against the frozen-digest tangent plus
+  `pcDigestRotationTangentDevice`), at 1e-7. On a fitted case nothing else
+  in the tree gates PC's first-order source term, and K1 at an antisymmetric
+  matrix is that pairing (§6.7's precondition), so the curvature there rests
+  on this check.
+- **The traced pairs' zero is `h1e_v_Sr`'s alone**: PC reads no `v2tr`.
+- **A PC walk does not reproduce itself to reassociation.** Its
+  pseudodensities come through the solve's S-cut eigenbasis, whose
+  conditioning amplifies the einsums' atomicAdd order from run to run (at
+  CAS(8,8) the smallest kept `s / s_max` is 1.0e-10; [`pc-nevpt2.md`](pc-nevpt2.md),
+  "What the cut drops, and how it moves"). Three runs of conventional
+  CAS(8,8) gave `<kappa, Y_pc>` along one seeded kappa as 4.018540444e-4,
+  4.018543167e-4 and 4.018540975e-4. So check 2, K1's matrix path against
+  the first-order pairing (two walks), is gated at the tree's 1e-7 for PC
+  rather than SC's 1e-10; the intra-space pairs' forward digests' term,
+  which `pcTangentsDevice` forms as `X(D + 0) - X(D)`, is zero to round-off
+  (gate 1e-12) rather than bit for bit; and each ladder pairs its own term
+  in its own walk (the section above). Everything else is within one walk
+  and keeps SC's gate.
+
+RTX 3080 (CUDA, `default` preset), the worst of three runs at each case,
+2026-10-20:
+
+| exact check | CAS(4,4) | CAS(8,8) | CAS(4,4) DF | CAS(8,8) DF | gate |
+|---|---|---|---|---|---|
+| 0: the first-order integral half's duality / the full one | 1.2e-17 / 2.1e-17 | 1.4e-14 / 5.4e-10 | 6.9e-18 / 1.1e-17 | 8.9e-15 / 3.9e-10 | 1e-7 |
+| 1: the sidecar against itself, worst family (relative) | 3.1e-14 | 2.8e-13 | 1.6e-15 | 1.9e-15 | 1e-10 |
+| 2: K1's matrix path against the first-order pairing, adjoint / tangent's integral half | 7.0e-17 / 6.7e-17 | 4.8e-10 / 4.8e-10 | 6.6e-17 / 6.7e-17 | 1.6e-10 / 1.6e-10 | 1e-7 |
+| 2: the restored traced terms alone at a full kappa / an active one | 2.0e-19 / 9.6e-19 | 1.5e-18 / 1.1e-17 | 6.0e-20 / 4.9e-19 | 6.9e-20 / 1.4e-19 | 1e-12 |
+| 3: the duality, worst term of every pair | 3.5e-17 | 5.7e-9 | 9.7e-17 | 5.0e-9 | 1e-7 |
+| 3: the swap | 2.2e-17 | 7.3e-11 | 2.8e-17 | 1.0e-10 | 1e-7 |
+| 4: the traced pairs' K1 + K2 (K1's share) | 8.7e-19 (5.4e-3) | 3.8e-18 (−3.0e-4) | 8.7e-19 (5.5e-3) | 1.6e-19 (−3.0e-4) | 1e-12 |
+| 5: core x core and virtual x virtual, conventional: K1 alone, its duality | 1.4e-17 | 2.5e-17 | — | — | 1e-7 |
+| 5: fitted: the forward digests' term / the active blocks' K1 + K2 | — | — | 9.8e-18 / 1.1e-16 | 5.7e-16 / 1.9e-17 | 1e-12 / 1e-12 |
+| 6: each ladder's term in its own walk against the curvature's | 1.5e-16 | 7.9e-10 | 1.7e-16 | 4.5e-10 | 1e-7 |
+| 8: the two routes, worst pair | — | — | 1.6e-16 | 6.2e-9 | 1e-7 |
+
+The ladders, best error relative to `max(|term|, |<u, Y>|, |<v, Y>|)`
+(gate 1e-6, three fourfold halvings), worst of the three runs with the
+fewest halvings seen:
+
+| pair | CAS(4,4) | CAS(8,8) | CAS(4,4) DF | CAS(8,8) DF |
+|---|---|---|---|---|
+| active x active | 1.8e-8 (7) | 7.3e-8 (5) | 2.1e-8 (8) | 4.7e-8 (5) |
+| active x core | 6.6e-9 (7) | 6.5e-9 (6) | 9.0e-9 (7) | 5.1e-9 (7) |
+| active x virtual | 3.1e-9 (7) | 6.7e-8 (7) | 2.0e-9 (7) | 4.6e-8 (6) |
+| core x virtual | — | — | 6.4e-9 (7) | 8.2e-10 (7) |
+| core x core | — | — | 6.3e-9 (8) | 8.0e-9 (8) |
+| virtual x virtual | — | — | 3.0e-8 (6) | 1.3e-8 (7) |
+| along `exp(s u) exp(t v)` | 1.3e-8 (8), active x active | 7.5e-8 (5), active x active | 4.5e-9 (6), virtual x virtual | 4.3e-8 (6), active x active |
+
+The parameterisation's offset, (1/2) `|<[u, v], Y_pc>|`, is 8.5e-4 at both
+CAS(8,8) cases and 4.8e-4 on the fitted CAS(4,4)'s `virtual x virtual`, and
+4.5e-17 at conventional CAS(4,4), where `<[u, v], Y_pc>` vanishes by
+symmetry as SC's does. Before each ladder paired its term in its own walk,
+the CAS(8,8) ladders were measured against the curvature call's value: the
+walk-to-walk spread entered their error, and the worst came to 3.0e-7
+relative (the product-parameterisation row, four halvings) — inside the
+1e-6 gate, but by a margin a flaky entry would erode.
+
+A run takes about 1.5 s at CAS(4,4), 20 s at CAS(8,8), 3 s on the fitted
+CAS(4,4) and 35 s on the fitted CAS(8,8): the forward digests, one plain RDM
+build and one PC tangent per term per pair, are most of it.
 
 ## The orbital block's sandwich
 
@@ -1765,7 +1854,7 @@ is not.
 
 ## The Hessian tier's entries
 
-Every ctest entry the Hessian milestone added (#150–#158, #184, #190), in
+Every ctest entry the Hessian milestones added (#150–#158, #184, #190, #200), in
 one place: its binary and flag, its gate (the `PASS_REGULAR_EXPRESSION` the
 entry matches) and its labels. What each one checks, and every number it
 comes out at, is in the section the last column names, not here.
@@ -1781,15 +1870,19 @@ exact digests:
 | `nevpt2_cas44_sc_hessian_vector`, `nevpt2_cas88_sc_hessian_vector` | `nevpt2_demo --sc-hessian-vector` | `PASS: the SC Hessian-vector product matches` | `gpu;small` / `gpu` | "The SC Hessian-vector product's checks" |
 | `nevpt2_sc_pseudodensity_cas44_sc_hessian_kc`, `nevpt2_sc_pseudodensity_cas88_sc_hessian_kc` | `nevpt2_sc_pseudodensity --sc-hessian-kc` | `PASS: the SC mixed Hessian block H_kc's two orientations agree` | `gpu;small` / `gpu` | "The SC mixed Hessian block's checks" |
 | `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk_int`, `nevpt2_sc_pseudodensity_cas88_sc_hessian_kk_int`, `nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk_int` | `nevpt2_sc_pseudodensity --sc-hessian-kk-int` | `PASS: the SC orbital Hessian's integral curvature <Ehat', I''> = K1 + K2 agrees`; the fitted entry's line must also name the route, `(density-fitted: K2 by the three-index jets, both routes agree)` | `gpu;small` (the two CAS(4,4)) / `gpu` | "The orbital block's integral curvature" |
+| `nevpt2_sc_pseudodensity_cas44_pc_hessian_kk_int`, `_cas88_pc_hessian_kk_int`, `_cas44_df_pc_hessian_kk_int`, `_cas88_df_pc_hessian_kk_int` | `nevpt2_sc_pseudodensity --pc --sc-hessian-kk-int` | `PASS: the PC orbital Hessian's integral curvature <Ehat', I''> = K1 + K2 agrees … (PC's first-order source term gated first, both dualities)`; the fitted entries' line must also name the route, `(density-fitted: K2 by the three-index jets, both routes agree)` | `gpu;small` (the two CAS(4,4)) / `gpu` | "PC's orbital curvature" |
 | `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk`, `nevpt2_sc_pseudodensity_cas88_sc_hessian_kk`, `nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk` | `nevpt2_sc_pseudodensity --sc-hessian-kk` | `PASS: the SC orbital Hessian's sandwich I'^T Ehat'' I' = K3 + K4 + K5 + K6 agrees with itself by duality … 2 pairs refused, with no Hessian along them (rho_t, Sec. 5.6)`, the fitted entry's line ending `(density-fitted)` | `gpu;small` (the two CAS(4,4)) / `gpu` | "The orbital block's sandwich" |
 | `nevpt2_pc_hessian_cas44` | `nevpt2_pc_tangent --pc-hessian` | `PASS: the PC-NEVPT2 Hessian Eddot(u, v) matches Euler` | `gpu;small` | "The PC Hessian against a finite difference of the three-term tangent" |
 | `nevpt2_pc_hessian_vector_cas44` | `nevpt2_pc_tangent --pc-hessian-vector` | `PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches` | `gpu;small` | "The PC Hessian-vector product's checks" |
 | the seven `*_cas44_casscf*` Hessian entries, one per flag | the same seven flags on `n2_ccpvdz_cas44_casscf` | the CASCI twin's PASS line, plus the orbital-energy mode where the line names it, and on the two PC entries the smallest kept `s / s_max` and smallest gap | `gpu;small` | "The Hessian on CASSCF orbitals" |
 
-There is no CAS(8,8) PC Hessian entry: there both second-order checks
+There is no CAS(8,8) entry for PC's CI block: there both second-order checks
 converge to a value standing off the analytic one, for a conditioning reason
 no step can fix (#194; [`pc-nevpt2.md`](pc-nevpt2.md), "The second
-derivative, Eddot(u, v)"). Nor is there an entry above CAS(8,8). Which
+derivative, Eddot(u, v)"). PC's orbital curvature has CAS(8,8) entries: it
+pairs a first derivative held fixed, so no eigenstate assumption enters, and
+its ladders pair their term in their own walk ("PC's orbital curvature").
+Nor is there an entry above CAS(8,8). Which
 build sets each flag's tile floor is [`performance.md`](performance.md),
 "Which build sets a Hessian flag's floor".
 

@@ -1149,6 +1149,25 @@ Result<std::vector<ScOrbitalCurvatureResult>> scOrbitalCurvatureDevice(
     const ScOrbitalCurvatureSetup& setup, const std::vector<ScOrbitalCurvatureRequest>& pairs,
     const DeviceResources& res);
 
+// The pair's second-order inputs themselves, I''[u, v] = I'[W] + I^x[u, v],
+// as one increment of every input (shaped as `setup.ints`' own), by the same
+// routes and with the same refusals as scOrbitalCurvatureDevice (and PC's,
+// below) -- the inputs are the variants' alike (docs/hessian-theory.md, Sec.
+// 6.7). Handed to scDottedPairingDevice / pcDottedPairingDevice in ONE walk
+// with a ladder's displaced increments, its pairing is the term that ladder
+// must converge to, free of the walk-to-walk spread a PC walk carries (#200).
+Result<NevptIntegralsDevice> orbitalSecondInputsDevice(const ScOrbitalCurvatureSetup& setup,
+                                                       const ScOrbitalCurvatureRequest& pair,
+                                                       const DeviceResources& res);
+
+// The first-order rule at ANY (n_mo, n_mo) matrix M, traced pairs restored
+// (K1's machinery), as one increment of every input -- at an antisymmetric M,
+// I'[M]; what a ladder along exp(s u) exp(t v) adds at (1/2) [u, v]. A matrix
+// of the wrong shape is the caller's input: an Error.
+Result<NevptIntegralsDevice> orbitalMatrixInputsDevice(const ScOrbitalCurvatureSetup& setup,
+                                                       const Tensor& m,
+                                                       const DeviceResources& res);
+
 // K1's machinery on its own: the first-order pairing <Ehat', I'[M]> at ANY
 // (n_mo, n_mo) matrix M -- symmetric, antisymmetric or neither -- with the
 // traced pairs restored. At an antisymmetric M it is scFullRotationDevice's
@@ -1537,6 +1556,68 @@ Result<std::vector<ScDigestTangent>> pcDigestRotationTangentDevice(
     const DeviceTensor& dm2, const DeviceTensor& dm3, const DeviceTensor& f3ac,
     const DeviceTensor& f3ca, const std::vector<ScRotationRequest>& dirs,
     const DeviceResources& res);
+
+// --- PC's orbital block: the integrals' curvature <Ehat'_pc, I''> (#200) -------
+//
+// docs/hessian-theory.md, Sec. 6.4 and 6.7: the first term of PC's orbital
+// Hessian block, Eddot_kk(u, v) = <Ehat'_pc, I''[u, v]> + (the sandwich, #202),
+// along U = exp(s u + t v). PC's integral adjoint Ehat'_pc is the set #74's
+// reverse mode already forms for Y_pc -- dE/dslab against every stored
+// block's dot, dE/dK = U sym(mgg) U^T against the class's own K builder at
+// the dotted h1e / h2e (pcClassMatrices), R_t against the orbital energies'
+// increment, and the digests' hbar_pc (pcDigestAdjointDevice) against h2e's
+// -- and #154's input generators produce the second-order inputs unchanged
+// (they are inputs, not pairings). So this is scOrbitalCurvatureDevice with
+// PC's pairing in place of SC's, and everything that header says carries over:
+//
+//   K1 = <Ehat'_pc, I'[W]>, W = (uv + vu)/2, through the promotion rule at a
+//        matrix with the traced pairs restored (PC reads no v2tr -- its Sir
+//        pairs Sir2's own dotted block -- so only h1e_v_Sr's restoration
+//        reaches the pairing, and the traced pairs' zero for two
+//        active-active directions is h1e_v_Sr's share alone);
+//   K2 = <Ehat'_pc, I^x[u, v]>, from the sidecar's composition when one
+//        member is active-active, from the three-index jets of B on a
+//        density-fitted case; a conventional pair with neither member
+//        active-active is refused as Unsupported before any device work (the
+//        same rule as SC's; #180 lifts it for both).
+//
+// Both modes per term: the adjoint pairing (integral + eps + <hbar_pc, h2e''>)
+// and the forward tangent (pcRotationTangent* at the same inputs + eps + the
+// PC energy's response to the RDM build at h2e''). S and S_1 are RDM-only and
+// do not move along any kappa (Sec. 6.4), so the pairing has no further
+// piece. A class the PC solve refuses (the gap or the denominator check) is a
+// Numerical Error naming it -- never a term with a class missing. The setup
+// is SC's: `digestAdjoint` must be PC's hbar (pcDigestAdjointDevice).
+// Same refusals, costs and tile floors as scOrbitalCurvatureDevice.
+Result<std::vector<ScOrbitalCurvatureResult>> pcOrbitalCurvatureDevice(
+    const ScOrbitalCurvatureSetup& setup, const std::vector<ScOrbitalCurvatureRequest>& pairs,
+    const DeviceResources& res);
+
+// scMatrixRotationDevice, PC's: the first-order PC pairing <Ehat'_pc, I'[M]>
+// at ANY (n_mo, n_mo) matrix M, traced pairs restored -- at an antisymmetric
+// M, pcFullRotationDevice's pairing; at W, PC's K1. `ok` false (a refused
+// class) leaves `dirs` empty, as pcFullRotationDevice's.
+Result<PcFullRotationResult> pcMatrixRotationDevice(const NevptIntegralsDevice& ints,
+                                                    const GeneralIntegralsDevice& gen,
+                                                    const RdmTensors& rdm,
+                                                    const DeviceTensor* digestAdjoint,
+                                                    const std::vector<ScRotationRequest>& dirs,
+                                                    const DeviceResources& res);
+
+// scDottedPairingDevice, PC's: Ehat'_pc against caller-supplied increments of
+// every input -- what the ladder of PC's fixed-adjoint pairing runs on.
+Result<PcFullRotationResult> pcDottedPairingDevice(
+    const NevptIntegralsDevice& ints, const RdmTensors& rdm, const DeviceTensor* digestAdjoint,
+    const std::vector<const NevptIntegralsDevice*>& dotted, bool tangent,
+    const DeviceResources& res);
+
+// scRestoredTracePairingDevice, PC's: the restored traced-pair terms at M
+// paired with Ehat'_pc (h1e_v_Sr's alone reaches it). A refused class is a
+// Numerical Error.
+Result<double> pcRestoredTracePairingDevice(const NevptIntegralsDevice& ints,
+                                            const GeneralIntegralsDevice& gen,
+                                            const RdmTensors& rdm, const Tensor& m,
+                                            const DeviceResources& res);
 
 // The per-class PC table every PC source-term report prints: status (REFUSED
 // with its reason, or the energy), and the total.

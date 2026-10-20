@@ -1063,12 +1063,14 @@ TEST(CliScPseudodensityFlagTests, SourceOracleSetsItsPath) {
   EXPECT_EQ(g->gradgoldPath, "s.gradgold");
 }
 
-// --pc (#74): PC-NEVPT2's source terms, so only the two jobs that assemble
-// them take it; the identities and the two kappa checks are SC's.
-TEST(CliScPseudodensityFlagTests, PcIsTheSourceTermJobsAlone) {
+// --pc (#74, #200): PC-NEVPT2's source terms and orbital curvature, so only
+// the three jobs that assemble them take it; the identities and the two kappa
+// checks are SC's.
+TEST(CliScPseudodensityFlagTests, PcIsTheSourceTermAndCurvatureJobsAlone) {
   for (const std::vector<std::string_view>& args :
        {std::vector<std::string_view>{"--pc", "--dump-source-terms", "x.gradsrc"},
-        std::vector<std::string_view>{"--pc", "--source-oracle", "x_pc.srcgold"}}) {
+        std::vector<std::string_view>{"--pc", "--source-oracle", "x_pc.srcgold"},
+        std::vector<std::string_view>{"--pc", "--sc-hessian-kk-int"}}) {
     const Result<Options> r = parse(Binary::ScPseudodensity, args);
     ASSERT_TRUE(r.has_value()) << r.error().message;
     EXPECT_TRUE(r->common.pc);
@@ -1080,8 +1082,9 @@ TEST(CliScPseudodensityFlagTests, PcIsTheSourceTermJobsAlone) {
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
     EXPECT_EQ(r.error().message,
-              "--pc makes --dump-source-terms and --source-oracle PC-NEVPT2's; the identities, "
-              "--kappa-act and --kappa-full are the SC energy's and have no --pc path");
+              "--pc makes --dump-source-terms, --source-oracle and --sc-hessian-kk-int "
+              "PC-NEVPT2's; the identities, --kappa-act and --kappa-full are the SC energy's and "
+              "have no --pc path");
   }
   // The dump builds the digests' tangent with --pc as without: exact digests.
   const Result<Options> r =
@@ -1191,13 +1194,12 @@ TEST(CliScPseudodensityFlagTests, ScHessianKkIntRefusesTheOtherJobs) {
   }
 }
 
-TEST(CliScPseudodensityFlagTests, ScHessianKkIntRefusesPcAndTheApproximateDigests) {
+// With --pc it is PC's orbital curvature (#200), under the same digest rule.
+TEST(CliScPseudodensityFlagTests, ScHessianKkIntTakesPcAndRefusesTheApproximateDigests) {
   const Result<Options> pc = parse(Binary::ScPseudodensity, {"--sc-hessian-kk-int", "--pc"});
-  ASSERT_FALSE(pc.has_value());
-  EXPECT_EQ(pc.error().kind, ErrorKind::InvalidConfig);
-  EXPECT_EQ(pc.error().message,
-            "--sc-hessian-kk-int differentiates the strongly-contracted energy twice; PC's "
-            "orbital Hessian has no path");
+  ASSERT_TRUE(pc.has_value()) << pc.error().message;
+  EXPECT_TRUE(pc->scHessianKkInt);
+  EXPECT_TRUE(pc->common.pc);
   for (const std::vector<std::string_view>& digest :
        {std::vector<std::string_view>{"--cublas"}, std::vector<std::string_view>{"--ozaki"},
         std::vector<std::string_view>{"--fused-digest", "--blas-digest"}}) {

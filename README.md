@@ -281,7 +281,7 @@ ignores it. `test/cli/` holds this matrix against the table:
 | `--golden`, `--tiles`, `--pool-threshold` | ✓ | ✓ | ✓ | ✓ |
 | `--blas-digest`, `--digest-emitted`, `--consume-emitted` | ✓ | ✓ | ✓ | ✓ |
 | `--cublas`, `--mantissa-bits`, `--ozaki`, `--ozaki-pairs`, `--ozaki-check`, `--fused-digest` | ✓ (never with a Hessian flag) | ✓ | ✓ (never with a Hessian flag) | refused |
-| `--pc` | ✓ | ✓ | ✓ (`--dump-source-terms`, `--source-oracle`) | refused |
+| `--pc` | ✓ | ✓ | ✓ (`--dump-source-terms`, `--source-oracle`, `--sc-hessian-kk-int`) | refused |
 | `--profile` | ✓ | ✓ | refused | refused |
 | `--rdm-tangent` | ✓ | ✓ | refused | refused |
 | `--sc-tangent`, `--gradient-source` | ✓ | ✓ | refused | refused |
@@ -302,15 +302,18 @@ both of `Y`'s terms there, the digests' own included (#168), and
 `--dump-source-terms` writes the fitted `Y` and `y`. No binary parses `--df`,
 and `nevpt2_df_demo` keeps refusing the orbital-source-term flags. Two
 combinations are refused at run time on a fitted sidecar: `--source-oracle`
-(no fitted oracle exists) and `--pc --dump-source-terms` (no PC gate over the
-fitted inventory) ([`docs/gradients.md`](docs/gradients.md), §6.2, has the
+(no fitted oracle exists) and `--pc --dump-source-terms` (PC's fitted source
+term is gated only inside `--pc --sc-hessian-kk-int`, and no dump is
+written there) ([`docs/gradients.md`](docs/gradients.md), §6.2, has the
 decisions and their reasons).
 
 Why the refusals: `nevpt2_pc_tangent` is a tangent path throughout, and the
 tangent RDM build is the emitted or the native-fp64 BLAS digest only; it is
 also PC throughout, so `--pc` would change nothing. `nevpt2_sc_pseudodensity`
-takes `--pc` for its two source-term jobs alone — they write and compare
-PC-NEVPT2's source terms with it (#74) — and refuses it with the identities,
+takes `--pc` for its two source-term jobs — they write and compare
+PC-NEVPT2's source terms with it (#74) — and for `--sc-hessian-kk-int`,
+which then checks PC's orbital curvature `<Ehat'_pc, I''>` (#200), and refuses
+it with the identities,
 `--kappa-act` and `--kappa-full`, which are the SC energy's. Neither gradient binary prints a profile table or
 runs the `--rdm-tangent` check. `--dump-source-terms` and `--source-oracle`
 are `nevpt2_sc_pseudodensity`'s alone because `Y_xy` needs the gradient
@@ -324,13 +327,14 @@ digest has no path for,
 `--kappa-act` with `--kappa-full`, `--dump-source-terms` with either,
 `--source-oracle` with any of the three, `--sc-hessian-kc` with any of the
 four or with `--pc` (#184),
-`--sc-hessian-kk-int` with any of the five or with `--pc` (#154),
+`--sc-hessian-kk-int` with any of the five (#154),
 `--sc-hessian-kk` with any of the six or with `--pc` (#158),
 `--gradgold` without `--kappa-full`, `--sc-hessian-kc`, `--sc-hessian-kk-int`,
 `--sc-hessian-kk`, `--dump-source-terms` or `--source-oracle`, or in
 `nevpt2_demo` without `--gradient-source`, `--check-blocks` with
 `--sc-tangent` or `--gradient-source`, `--pc` in
-`nevpt2_sc_pseudodensity` without `--dump-source-terms` or `--source-oracle`,
+`nevpt2_sc_pseudodensity` without `--dump-source-terms`, `--source-oracle` or
+`--sc-hessian-kk-int`,
 `--sc-tangent`, `--sc-hessian` or `--sc-hessian-vector` with `--pc`,
 `--sc-hessian` with `--sc-tangent` or `--gradient-source`,
 `--sc-hessian-vector` with any of those three), and
