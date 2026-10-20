@@ -130,7 +130,7 @@ general, twice differentiable (§6.2, §5.6).
 | no intruder: `Delta_t + H_t/N_t` must not pass through zero | both | NEVPT2's Dyall zeroth order is what makes this rare rather than endemic; where it fails, the *energy* is singular, so there is no gradient either |
 | the CASSCF Hessian must be non-singular at the solution | CASSCF | the implicit function theorem gives `theta(R)` as smooth as the stationarity conditions, which are `C^infinity`. **One derivative and two need the same condition**; this is `gradient-theory.md`, §2.7's conditioning statement, unchanged |
 | the selection must be locally constant, and the pseudocanonical divisions non-degenerate | CASCI | `gradient-theory.md`, §4.1–§4.3 and §2.3's refusal. A selection change is a kink: the *gradient* is already wrong there |
-| the PC metric's rank must be locally constant | PC only | **second order only, along a symmetry-breaking displacement.** The cut is a threshold cut, and what it drops are exact null modes of *this state's* metric — spin, rank-bound and spatial-symmetry modes — not modes null for every CI vector (§6.2). A Gram metric's dropped eigenvalues never move at first order (`P S_u P = 0`), so the gradient's condition is unchanged. At second order the rank stays constant along every direction that keeps the state's spin and full symmetry, a totally symmetric displacement's response included; along one that leaves the symmetry — a non-totally-symmetric displacement's CI response — a class whose dropped modes include spatial-symmetry ones lifts at `h^2` (`L_uv != 0`), and the energy is not twice differentiable along that pair |
+| the PC metric's rank must be locally constant | PC only | **second order only, along a symmetry-breaking displacement.** The cut is a threshold cut, and what it drops are exact null modes of *this state's* metric — spin, rank-bound and spatial-symmetry modes — not modes null for every CI vector (§6.2). A Gram metric's dropped eigenvalues never move at first order (`P S_u P = 0`), so the gradient's condition is unchanged. At second order the rank stays constant along every direction that keeps the state's spin and full symmetry, a totally symmetric displacement's response included, and along every orbital direction whatever its symmetry, because `S` is built from the RDMs alone (§6.5); along one that leaves the symmetry — a non-totally-symmetric displacement's CI response — a class whose dropped modes include spatial-symmetry ones lifts at `h^2` (`L_uv != 0`), and the energy is not twice differentiable along that pair |
 | no root crossing | both | `gradient-theory.md`, §4.4 |
 | no empty perturber populated by two displacements with different Dyall energies | SC only | **second order only.** At a geometry with point-group symmetry, a tuple whose integrals vanish by symmetry has `N_t = 0`; a non-totally-symmetric displacement populates it at first order, and its energy is then homogeneous of degree 2 but a quadratic form only when the contracted function's energy `H_t/N_t` is the same along every combination of the displacements (§5.6). The gradient is `C^1` there and exact; the Hessian is not a bilinear form |
 
@@ -1029,12 +1029,16 @@ mixed `b^{wu} = S'_u x'_w + S_1'_u h1'_w` and
 null-space question of its own: the cut is on `S`'s eigenvalues
 ([`pc-nevpt2.md`](pc-nevpt2.md), "The singular-metric convention") and `S`
 does not move with `kappa`, so the kept span is fixed along `w` and
-`G'_w = -G A'_w G` exactly. Whatever §6.2 settles for the pseudo-inverse's
-derivative along a CI direction is used once per `(w, u)`, and nothing about it
-moves along `w`. F is `pcTangentsDevice`'s walk beside
-`pcFullRotationDevice`'s orbital tangents; R1 is PC's adjoint (`pcCiSourceDevice`)
-differentiated along `w` — the walk tangent PC's `H_cc u` builds, fed orbital
-operands; Euler covers PC's five homogeneous classes.
+`G'_w = -G A'_w G` exactly. §6.2's derivative along the CI direction is
+then used once per `(w, u)`, and it leaves **one** rotation term,
+`-2 rho^T S_u P A_w x`. That term is not zero, because a Dyall block at
+dotted integrals couples `S`'s dropped space from the ket side (§6.5). F is
+`pcTangentsDevice`'s walk beside `pcFullRotationDevice`'s orbital tangents,
+plus that term. R1 is the derivative along `w` of PC's **three-term** `y`,
+the walk `pcCiHessianVectorDevice` builds fed orbital operands. It is not
+the derivative of `pcCiSourceDevice`'s two-term `y`, which lacks the term.
+Euler covers PC's five homogeneous classes. §6.4–§6.8 give the whole
+derivation and its checks.
 
 **Data.** §5.4's row stands: nothing the sidecar lacks, the Fock line's four
 rows included. A case with no sidecar can form `H_kc` only along active–active
@@ -1650,6 +1654,461 @@ needs only extra applications of a factorisation it already has, because the
 five classes against SC's three (§4.3), too. The expensive thing on the PC side
 is not the algebra but the extra solves, one pair per direction per tuple.
 
+### 6.4 PC's orbital blocks: §6.1's solve with orbital-dotted inputs
+
+SC's orbital blocks are §5.1–§5.6. This section and §6.5–§6.8 are PC's,
+written so that the blocks' implementing issues (#200, #201, #202) need not
+re-derive anything. The notation is §6.1's with `G = M`, §6.2's S-cut
+restricted inverse, together with the solve's eigenbasis
+([`pc-nevpt2.md`](pc-nevpt2.md), "The solve: once per class, not once per
+tuple"). `U` is `(d, m)` with `U^T S U = I` and `U^T sym(K) U = Lambda`,
+`T = S U`, and `t_1 = S_1^T U`. Every tuple's `A_t = K + Delta_t S` is then
+diagonal on the kept span, `D_t = Lambda + Delta_t`, with rows
+`yhat_t = U^T b_t` and `xhat_t = D_t^-1 yhat_t` (`x = U xhat`). All of this
+is `PcClassSolve`'s own data.
+
+**What moves along `kappa`, and what does not.** The tree differentiates
+`E(kappa, c)`: the integrals rotated by `C exp(kappa)` with the CI
+coefficients held fixed (`kappaActionDevice` and §3.1's promotion rule of
+[`gradient-theory.md`](gradient-theory.md)). The RDMs therefore do not move
+along any orbital direction, and **neither do `S` and `S_1`**, which are
+built from the RDMs alone. That holds for every block, active–active
+included. `Q`, `P`, `S^+`, `U`, `T` and `t_1` are fixed along `kappa`. What
+moves is
+
+- the external rows `x_t` (the stored blocks) and the one-electron slices
+  `h1_t` (`h1e_v_*`): §5.1's `z'[w]`;
+- `K`, through its builder's integrals. Every Dyall block is linear in
+  `(h1e, h2e, f3ac, f3ca)`, its RDM-free terms included, and `f3` is linear
+  in `h2e` (§5.2). So `K'[w]` is the builder at
+  `(h1e'[w], h2e'[w], f3(h2e'[w]))`. That is `pcClassMatrices` at the dotted
+  integrals, with the digests' tangent merged in (`attachDigestTangents`'
+  `f3acDot` / `f3caDot`, Sr's `a16` and Si's `a22` only). The merge must
+  happen **before** the similarity transform below, for the same reason K3
+  needs it per tuple in §5.1: the solve is nonlinear in `A`;
+- `Delta_t`, through the orbital energies (`deps`), and only when they
+  respond.
+
+**First order** (`Y_pc`, [`gradients.md`](gradients.md), §6.1, restated in
+this notation). Along `w`,
+
+```
+  b_w = S x'_w + S_1 h1'_w,     A_w = K'_w + Delta'_w S
+  yhat_w = T^T x'_w + t_1^T h1'_w            the DOTTED slab through the PLAIN T
+  Ahat_w = U^T sym(K'_w) U + Delta'_w I      U^T S U = I, so Delta' is diagonal
+```
+
+and, because `Q` does not move, `M_w = -M A_w M` **exactly, at any CI
+vector**. The first derivative is the two-term `-nu (2 x^T b_w - x^T A_w x)`
+everywhere, with no third term (contrast §6.2's `-2 rho^T S_v P A x`, which
+exists because a CI direction turns `S`).
+
+**Second order along two orbital directions, `H_kk`.** Along
+`exp(s w + t v)` every input has §5.1's `z'' = z'[W] + z^x[w, v]`, and `S`,
+`S_1` have none. So `b_wv = S x''_wv + S_1 h1''_wv`, `A_wv = K'' +
+Delta''_wv S`, with `K''` the builder at `(h1e'', h2e'', f3(h2e''))`, and
+
+```
+  M_wv = M A_w M A_v M + M A_v M A_w M - M A_wv M
+
+  Eddot_t[w, v] = -nu [ 2 b_wv^T x - x^T A_wv x  +  2 g_w^T M g_v ],     g = b' - A' x
+```
+
+which is §6.1's formula with no projector, rotation or lift term (§6.5 says
+why). The two-coupling classes (Sijr, Srsi, `E_t = -nu b1^T M b2`) carry the
+bilinear version, `b1_wv^T x2 + x1^T b2_wv - x1^T A_wv x2 + g1_w^T M g2_v +
+g1_v^T M g2_w`. `hessianPair`'s polarisation of the single form gives it, as
+it does for `H_cc`. The formula splits exactly where SC's does (§5.1):
+
+- **`2 b_wv^T x - x^T A_wv x` is the first-order pairing at second-order
+  inputs.** That is `<Ehat'_pc, I''[w, v]> = K1 + K2`, #200's term (§6.7).
+- **`2 g_w^T M g_v` is the whole of `I'^T Ehat'' I'`**, #202's sandwich. In
+  the eigenbasis it is
+  `sum_t -2 nu gammahat_w,t^T D_t^-1 gammahat_v,t`, with
+  `gammahat_w,t = yhat_w,t - Ahat_w,t xhat_t`. That is `pcQuadSecond`'s
+  `2 cross` term with both legs orbital, the rotation blocks empty. PC has
+  no counterpart of SC's K3/K4/K5 split, of §2's 3×3, or of K6. Its finish
+  is a quadratic form in `b` against `A^-1`, not a rational function of
+  `(N, H, Delta)`, so the per-tuple curvature is one bilinear form in the
+  two first-order sets. #158's walk structure carries over: one slab walk
+  holding both directions' dotted slabs and `K'` blocks. Its per-tuple
+  finish does not. It is the two-leg `cross` above, with no guarded-tuple
+  census (§6.6).
+
+**The extra solves.** In the eigenbasis there are none, in the factorisation
+sense. §6.1's "one extra solve per direction" becomes, per class and orbital
+direction:
+
+- one slab walk through the plain `T` (`yhat_w`, the energy's own GEMM at the
+  dotted slab);
+- `K'_w`'s build (`pcClassMatrices` at the dotted integrals) and, for Sr and
+  Si, the digests' tangent, which is one plain RDM build at `h2e'[w]` (#88);
+- one similarity transform `U^T sym(K'_w) U`, the cost of
+  `PcClassDirection::mK`;
+- for `H_kc` only, the dropped block `H_w = Vn sym(K'_w) U` (§6.5).
+
+Per tuple, the cost is one `m x m` product `Ahat_w xhat_t` and diagonal
+divides by `D_t`. Each direction's set is reusable across every pair it
+enters, the same economy §5.1 states for SC's digests.
+
+**The orbital energies' two modes.**
+
+- **Frozen:** `Delta' = Delta'' = 0`. `Ahat_w` is `U^T sym(K'_w) U` alone.
+- **Responding to `kappa`** (`deps` out of the sidecar, the mode SC's
+  `H_kk` always runs in): `Ahat_w` gains `Delta'_w,t I` per tuple, and
+  `A_wv` gains `Delta''_wv S`. The latter is part of K1+K2's `eps` term
+  (`ScCurvatureTerm::eps`, at `eps'' = eps'[W] + eps^x`), so the sandwich
+  sees only the first-order `Delta'`.
+
+`pcQuadSecond` takes one `Delta` per tuple and no `Delta` tangents, because
+`pcHessianDevice` is frozen-`eps`. A responding mode needs the per-tuple
+`Delta'_t` of each leg added to that leg's `apply` (an identity block,
+`nS = I` here, scaled per tuple). That is the one per-tuple change.
+
+**The mixed inputs, `H_kc`** (`w` orbital, `u` a CI direction; §6.5 has the
+formula):
+
+```
+  b_wu = S'_u x'_w + S'_1u h1'_w               yhat_wu = Tdot_u^T x'_w + t1dot_u^T h1'_w
+  A_wu = K_wu + Delta_wu S + Delta'_w S'_u     (Delta'_u S'_w = 0: S'_w = 0)
+```
+
+`K_wu` is the builder at `u`'s tangent RDMs and `w`'s dotted integrals
+(§5.5's C3), with the digests at both legs (C4). Those are
+`buildRdmTangentsDevice` at `(c, u)` handed `h2e'[w]`. `Delta_wu` is C5's
+`eps^{wu}` (`generalEpsResponseTangent`), reused verbatim because the
+orbital energies are the same for SC and PC. `Tdot_u`, `t1dot_u`, `nS_u`,
+`mK_u` and `G_u` are `pcClassDirection`'s at the CI leg.
+
+### 6.5 The cut's null space does not move along `kappa`; `H_kc` carries one rotation term
+
+**`S` does not move along any orbital direction, so `H_kk` has no projector,
+rotation or lift term.** This is in the functional the tree differentiates
+(§6.4). The milestone plan expected an active–active `kappa` to rotate `S`
+orthogonally at constant rank, and so to need §6.2's rotation terms. That
+is the same fact seen through the active–active gauge
+([`gradient-theory.md`](gradient-theory.md), §1.3), and it is not what the
+tree computes. With `what` the determinant-space generator of the rotation,
+`sum_pq w_pq a+_p a_q` on both spins,
+
+```
+  E(exp(s w), c)  =  E(1, exp(s what) c)          w active-active
+```
+
+On the right-hand side the RDMs turn, so `S -> R S R^T` with `R` the
+class's tensor power of `exp(s w)`, at constant rank. §6.2's rotation terms
+are non-zero there, because they belong to the CI direction `what c`. On the
+left-hand side, which is what `kappaActionDevice` and the promotion rule
+compute, nothing in `S` moves. Both sides are the same function. #200–#202
+implement the left. So, for every (class, orbital pair), active–active
+included:
+
+- `P S_w = 0`, and `L_ww = L_wv = 0` identically. There is no lift test and
+  no lift refusal.
+- `M(kappa) = Q (Q^T A(kappa) Q)^-1 Q^T` with `Q` fixed. It is as smooth as
+  `A` wherever the denominator check passes, and §6.4's `H_kk` is the
+  derivative of the energy the code computes.
+
+**`H_kc`: `S` moves along `u` only, and one rotation term survives.**
+Differentiate `M_w = -M A_w M` along `u`, with `M_u` §6.2's `dM`:
+
+```
+  Eddot_t[w, u] / (-nu) = 2 b_wu^T x - x^T A_wu x + 2 g_w^T (M b_u + M_u b)
+```
+
+This holds exactly, at any CI vector. At the eigenstate (`P A = 0`), and
+with `P b = P b_w = 0` (`b` and `b_w` lie in `S`'s range: `S` is fixed
+along `w`, and `S_1` is a Gram column), it is
+
+```
+  Eddot_t[w, u] = -nu [ 2 b_wu^T x - x^T A_wu x + 2 g_w^T M g_u
+                        - 2 rho^T S_u P A_w x ]                       rho = S^+ x
+```
+
+This is §6.2's `F_uv` with one leg orbital. Of its three rotation terms, two
+carry `P S_w` and vanish. The third, `-2 rho^T S_v P A_u x` with `v` the CI
+leg, is the one above.
+
+**Why the surviving term is not zero.** `P A_w x = P K'_w x`, because
+`P S = 0`. A Dyall block is `K_{mu nu} = <Phi_mu|[H_D, O_nu]|c>`
+([`pc-nevpt2.md`](pc-nevpt2.md), "Symmetrisation"). It annihilates a dropped
+mode `n` (`O_n|c> = 0`) from the bra side at any integrals, but from the ket
+side only when `H_D|c>` is proportional to `|c>`. At dotted integrals,
+
+```
+  (K'_w n)_mu = -<Phi_mu| O_n |r_w>,     r_w = (H_D'[w] - <c|H_D'[w]|c>) |c>
+```
+
+`r_w` is the state's residual under the dotted Dyall Hamiltonian, and it is
+not zero. So `sym(K'_w)` couples the kept and dropped spaces from one side.
+§6.2's three kinds of dropped mode give:
+
+- **spin modes:** zero. `O_n` annihilates every singlet, and `H_D'[w]` is
+  spin-free, so `r_w` is a singlet;
+- **rank-bound modes** (null for this `c` only): non-zero in general;
+- **spatial-symmetry modes:** zero along a `w` that keeps the state's full
+  symmetry, because `r_w` shares it. Non-zero in general along a `w` that
+  breaks it.
+
+The term also needs `P S_u != 0`, a CI direction that turns the dropped
+space (§6.2). It is present along **every** `w` that moves `K`, not along
+active–active `w` alone: every block except core–core and virtual–virtual.
+Those two move no active integral and leave `h^eff`'s active block
+invariant, so `K'_w = 0` (§6.8's intra-space zeros).
+
+**In the solve's own objects.** With `G_u = Vn sym(S_u) U` and
+`H_w = Vn sym(K'_w) U` (`PcClassDirection`'s `G` at the CI leg and `H` at
+the orbital one), and `C = U^T U` (`PcDroppedBase::C`, so
+`S^+ = U U^T`), the term is
+
+```
+  -2 rho^T S_u P A_w x  =  -2 xhat^T C G_u^T H_w xhat
+```
+
+That is exactly `pcRotationBlocks`' `A1 = C G_u^T H_v` with `v` the orbital
+leg. `B1`, `B2`, `A2` and `Ju r_v` all vanish there, because `G_w = 0` and
+`r_w = Vn b_w = 0`. So #201's forward scalar can run `pcQuadSecond` with `u`
+the CI leg and `v` the orbital leg:
+
+| leg `v` field | value |
+|---|---|
+| `yv` | `yhat_w` |
+| `mKv` | `U^T sym(K'_w) U` |
+| `nSv`, `Gv`, `rv` | zero |
+| `Hv` | `H_w` |
+| `yuv` | `Tdot_u^T x'_w + t1dot_u^T h1'_w` |
+| `mKuv` | `U^T sym(K_wu) U` |
+| `nSuv` | zero |
+
+A responding mode adds §6.4's per-tuple `Delta` tangents in both legs, and
+`Delta_wu I + Delta'_w nS_u` in `mKuv`. For the two-coupling classes the term is
+`nu [ rho1^T S_u P A_w x2 + rho2^T S_u P A_w x1 ]`, as `hessianPair`
+polarises it.
+
+**The reverse orientation, `H_kc^T w`, differentiates the three-term `y`.**
+§5.5's R1 for PC is the derivative along `w` of §6.2's three-term `y`
+(`pcCiHessianVectorDevice`'s walk; `pcCiSourceThreeTermDevice`). It is
+**not** the derivative of `pcCiSourceDevice`'s two-term one. The rotation
+term is exactly the `w`-derivative of the third term,
+`-2 rho^T S_v P A x`, at the eigenstate: its `rho_w` and `x_w` factors
+multiply `P A = 0`. Its adjoint in `S_v` adds, per tuple,
+
+```
+  dE/dS  +=  2 nu sym( rho (P K'_w x)^T )  =  2 nu sym( U C xhat xhat^T H_w^T Vn )
+```
+
+to the walk's tangent, built from the walk's own `C`, `xhat` and `Vn` and the
+orbital leg's `H_w`. A `y` without the third term, differentiated along `w`,
+omits it. So would a duality against a forward scalar that also omits it.
+Euler cannot see it either (`u = c` gives `P S_c = 2 P S = 0`, §6.8).
+
+**The lift, along `(w, u)`.** The dropped eigenvalues' second-order
+coefficient has `L_ww = L_wu = 0` identically (`S_w = S_wu = 0`), so the only
+test is the CI leg's own: first-order `P S_u P` and `L_uu` against
+`PC_LIFT_TOL`, exactly `pcCiHessianVectorDevice`'s. `H_kc` inherits the CI
+side's lift refusal through its `c` direction, and nothing more. The
+determinant vector `H_kc^T w` has no CI direction to test, so the consumer
+that pairs it with a `u` applies `u`'s test. That is how
+`pcCiHessianVectorDevice` leaves `v`'s to `pcHessianDevice`. #201's forward
+scalar tests its `u`.
+
+**Which (class, block) pairs carry which terms.** Which modes each class
+drops on which golden is measured in [`pc-nevpt2.md`](pc-nevpt2.md), "What
+the cut drops, and how it moves". The terms follow from the kinds:
+
+| class | `H_kk` | `H_kc` |
+|---|---|---|
+| Sr, Si | §6.4's terms; no rotation, no lift. The digests' share in `K'` | §6.4's terms, plus the rotation term on rank-bound and symmetry modes (spin modes give zero), plus the CI leg's lift test. The digests' share in `K'_w` and `K_wu` |
+| Sir | the same, no digests | the same, no digests. Its spatial-symmetry mode lifts along a CI direction that breaks that symmetry, and the (class, `u`) is then refused |
+| Sijr, Srsi, Srs, Sij | §6.4's terms | §6.4's terms. The rotation term and the lift test are carried generically and vanish where `nd = 0` |
+| Sijrs | SC's Sijrs, unchanged: K1+K2 through its SC pseudodensity (`gradientSijrs`), and §5.6's sandwich with `P = -1/Delta` on every tuple (`sijrsMultipliers`). Exact, never refused | SC's Sijrs, unchanged. It reads no RDM, so in a mode with the orbital energies fixed in `c` its share is zero. In the full mode it is §5.5's C5 through its `Delta` |
+
+### 6.6 PC has no empty-perturber term and no `rho_t` refusal
+
+**§5.6's pathology does not carry over.** PC's finish evaluates every tuple.
+`E_t = -nu sum_k yhat_k^2 / (lambda_k + Delta_t)` divides by no norm, and
+nothing in the PC classes applies `NUMERICAL_ZERO`. Take an integral-empty
+tuple (`x_t = 0`, `h1_t = 0`, so `b_t = 0` at every CI vector). Along
+`kappa = s w + t v`, `S` is fixed and `M` depends smoothly on `(s, t)` through
+`K` and `Delta` only, wherever the denominator check passes. So
+
+```
+  E_t(s, t) = -nu (s b_w + t b_v)^T M (s b_w + t b_v) + O(3)
+```
+
+is a **quadratic form** in `(s, t)`. Its mixed derivative,
+`-2 nu b_w^T M b_v`, is §6.4's sandwich at `x = 0` (`g = b'`). There is no
+Rayleigh quotient: an empty tuple's "contracted function" is the whole span,
+so the direction of the displacement does not fix an energy, as it does in
+§5.6.
+
+- **No K6.** The general formula already contains the term, on every tuple.
+- **No `rho_t` refusal**, and no population floor to measure.
+- **`H_kc` and `H_cc` are untouched by integral-empty tuples.** `x_t = 0`
+  for every `c`, so `b_t = s b_w(c + t u)` and `E_t = O(s^2)`: its mixed
+  derivative vanishes, as in §5.5.
+- **A tuple empty by the state** (`x_t != 0`, `b_t = S x_t = 0`, so `x_t` lies
+  in `P`'s range) is covered too, unlike SC's refused row. Along `kappa`,
+  `b_w = S x'_w` and the argument above applies. Along a CI `u`,
+  `b_u = S_u x_t = S_u P x_t`, which lies in `Q`'s range wherever
+  `P S_u P = 0`. Then `E_t = -nu t^2 b_u^T M b_u + O(t^3)`, again a
+  quadratic form, and §6.2's formula needs no special case wherever the lift
+  test passes.
+- **Sijrs is SC's class.** It is exact through `sijrsMultipliers`, and
+  `rho_t` exempts it (`H = 0`).
+
+So §9.1's four guarded-tuple rows are SC's alone. PC's seven solved classes
+add no row. [`pc-nevpt2.md`](pc-nevpt2.md), "The orbital blocks, offline"
+has the numbers: along virtual–virtual pairs that populate empty tuples in
+five PC classes, on which SC's `rho_t` is far above its tolerance, the PC
+class energies' four-point ladders land on the closed-form bilinear values.
+
+### 6.7 PC's integral adjoint `Ehat'_pc`, and the curvature term
+
+**`Ehat'_pc` already exists.** It is the set #74's reverse mode forms for
+`Y_pc` ([`gradients.md`](gradients.md), §6.1), one pairing per line of
+
+```
+  <kappa, Y_pc> = sum_slabs <dE/dslab, slabdot> + <dE/dK, Kdot>
+                + sum_t R_t Deltadot_t          + <hbar_pc, h2e_dot>
+```
+
+Per class, those pairings are:
+
+- `dE/dslab` (`T ybar` per tuple), paired with every stored block's dot;
+- `dE/dK = U sym(mgg) U^T`, taken through the class's own Dyall-block
+  adjoints onto `(h1e, h2e)` (`rotAct`);
+- `R_t = dE/dDelta_t`, scattered onto `dE/de` (`rotEps`);
+- `hbar_pc` (`pcDigestAdjointDevice`): Sr's and Si's `dE/d(f3ac)`,
+  `dE/d(f3ca)`, transposed onto `h2e`. It is direction-independent and built
+  once per state.
+
+Sijrs contributes SC's pseudodensity (`gradientSijrs`). `dE/dS` and
+`dE/dS_1` are not part of it: they have no integral dependence.
+
+**K1 and K2 for PC.** `<Ehat'_pc, I''[u, v]> = K1 + K2` is that pairing at
+the dotted sets #154's generators produce. The generators are `ScDotted`:
+`dottedAtMatrix` for K1, and `composedCross` or `dfDottedCross` for K2. They
+produce **inputs**, not pairings, so they serve PC unchanged. What #200 adds
+is a PC pairing that accepts a direction carrying a `ScDotted`, with four
+pieces:
+
+- slabs: the bypass `:terms`' `slabDots` already has for SC;
+- `Kdot`: `pcClassMatrices` at the set's `h1e` / `h2e` fields;
+- `Delta`: from its orbital-energy field;
+- digests: `hbar_pc` against its `h2e` field.
+
+For the duality, the forward tangent is `pcRotationTangent*` at the same
+inputs, plus `pcDigestRotationTangentDevice` at `h2e''`. Two remarks are
+specific to PC:
+
+- **PC reads no `v2tr`.** `dottedAtMatrix`'s `v2tr` restoration is SC's
+  alone. PC's Sir pairs `dE/dslab` against `h2e_v2_Sir`'s own dotted block,
+  which the generator forms in full. The `h1e_v_Sr` restoration applies
+  unchanged: PC reads `h1e_v_Sr` as Sr's one-body slab. §5.1's traced-pair
+  zero for two active–active directions therefore holds for PC with
+  `h1e_v_Sr`'s share alone.
+- **`K` at a symmetric `W`.** `pcClassMatrices` is linear in its integrals
+  and accepts any dotted pair. `mK = U^T sym(K'') U` as at first order.
+
+**K2 hits the same conventional-case refusal (#180).** PC reads the same
+inputs SC does: the twelve stored blocks, `h1e`, `h2e` and the orbital
+energies. §5.4's union is over arrays, not classes. So K2's two-general-index
+data is the same, and so is the rule:
+
+- **a pair with an active–active member:** `composedCross`;
+- **a density-fitted case:** `dfDottedCross`, any pair;
+- **any other conventional pair:** `err_unsupported` before any device work.
+
+#180 lifts the refusal for both variants at once.
+
+**One precondition on the density-fitted case.** PC's first-order orbital
+source term on a fitted golden has no gate in the tree. `--kappa-full` is
+SC's, and `--pc --dump-source-terms` is refused there
+([`gradients.md`](gradients.md), §6.2). K1 at an antisymmetric matrix is that
+first-order pairing. So #200's (and #201's, #202's) density-fitted entry
+must first gate PC's first-order dualities on the fitted inventory, the
+integral half and the full one on seeded directions, as `--kappa-full` does
+for SC. Its K1/K2 on that case mean nothing until then.
+
+### 6.8 Identities for PC's orbital blocks
+
+**`H_kc`.**
+
+- **Duality**, `<H_kc^T w, u> == Eddot_kc(w, u)`, round-off exact: the
+  three-term walk's tangent against the forward scalar (§6.5).
+- **Euler in `c`**, for PC's five homogeneous classes (Sr, Si, Srsi, Srs,
+  Sir; [`gradients.md`](gradients.md), §4.3). Their `S`, `K` and `S_1` are
+  linear in the RDMs, so `E(kappa, s c) = s^2 E(kappa, c)` with the orbital
+  energies fixed in `c` (the cut is relative, hence invariant). Per class,
+
+  ```
+    Eddot_kc(w, c)  ==  2 <w, Y_pc>          any w
+  ```
+
+  against the already-gated `Y_pc` (`pcFullRotationDevice`'s adjoint with
+  `hbar_pc`). It reaches §6.4's mixed terms, the digests' both-legs term
+  included, but not the rotation term (`P S_c = 0`) and not C5 (off in
+  that mode). Sijr and Sij are affine (`hdm1`, `hdm2`), and Sijrs has
+  degree 0.
+- **The active-rotation gauge** (`w` active–active, any `u`, no step size).
+  From `E(exp(s w), c + t u) = E(1, exp(s what)(c + t u))`,
+
+  ```
+    Eddot_kc(w, u)  ==  Eddot_cc(what c, u)  +  <y, what u>
+  ```
+
+  with `Eddot_cc` `pcHessianDevice`'s and `y` the gated one. At first order
+  it is §1.3's `<w, Y_pc> == <y, what c>`. **It is the only step-free check
+  that sees the rotation term.** The left side carries it as §6.5's single
+  term. The right side carries it as `Eddot_cc`'s own rotation terms along
+  `what c`, which turns `S` orthogonally. `what c` never lifts: `P S_{what c}
+  P = 0` and `L = 0` identically for an orthogonal similarity, so only `u`'s
+  test applies. Both sides run with the orbital energies frozen, or both
+  responding; never mixed. `what` is a non-symmetric one-body operator.
+  (PySCF's `direct_spin1.contract_1e` reads only `f`'s lower triangle;
+  `direct_nosym`'s does not.)
+- **The intra-space exact zeros.** Along a core–core or virtual–virtual `w`,
+  `K'_w = 0`. So `H_w`, the rotation term, `K_wu` (C3/C4's analogue) and the
+  digests' share vanish identically. `yhat_w`, `Delta'_w` and `b_wu` do not.
+- **One finite difference of the gated three-term `y` along `kappa`** (#201's
+  acceptance). It sees the rotation term and C5.
+
+**`H_kk`.**
+
+- **K1 at an antisymmetric matrix is the first-order pairing** `<M, Y_pc>`,
+  as `scMatrixRotationDevice`'s is SC's.
+- **The traced-pair zero** for two active–active directions (§6.7: Sr's
+  share alone).
+- **Forward against reverse** on each term, and the digests' sandwich share
+  against `pcHessianDevice` run at the digests' tangents alone (`dotU =
+  f3'[w]`, `dotV = f3'[v]`, every other RDM tangent and the second-order set
+  zero). With `S_u = 0` in both legs its rotation terms and lift tests are
+  empty. This is #202's "the digests' share against the plain digest path".
+- **The gauge tying `H_kk` to `H_kc`** (`w` active–active, any `v`, no step
+  size). `C exp(t v) exp(s w)` at CI `c` is `C exp(t v)` at CI
+  `exp(s what) c`. With Baker–Campbell–Hausdorff
+  (`exp(t v) exp(s w) = exp(t v + s w + (ts/2)[v, w] + ...)`), that gives
+
+  ```
+    Eddot_kk(v, w) + (1/2) <[v, w], Y_pc>  ==  Eddot_kc(v, what c)
+  ```
+
+  in a matched orbital-energy mode. It holds the assembled `Eddot_kk`
+  against `H_kc`, whose rotation term the right-hand side carries and the
+  left does not. It is #202's identity against #201 when both have landed.
+  It holds for SC as well, with SC's blocks.
+- **Ladders** of the total PC energy along `exp(s u + t v)` (#202), with
+  §5.6's floor-aware rule unchanged. PC has no non-bilinear pair to refuse
+  (§6.6), so every ladder must converge to `Eddot_kk`.
+
+The offline evidence for §6.5 and §6.6 is
+`reference_data/pc_orbital_hessian_probe.py`. Its figures are in
+[`pc-nevpt2.md`](pc-nevpt2.md), "The orbital blocks, offline". It covers
+`H_kk` along active–active pairs against an energy ladder, the mixed block
+with and without the rotation term against a difference of the exact
+orbital derivative, both gauges, and the empty tuples.
+
 ## 7. Level 2: what the Lagrangian's second derivative adds
 
 Level 1 is the Hessian of the NEVPT2 *energy* in the parameters. A nuclear
@@ -1865,7 +2324,10 @@ code because two of its entries are not obvious.
 | a PC class the gap or denominator check refuses | **refuse** that class, `err_numerical` naming it, through the same status the energy, tangent and adjoint use | `PC_MIN_GAP` is §6.2's licence for the rank: no kept mode can sink under the threshold cut, which drops only this state's own null modes. A refused class has no valid second derivative, and a zero would be a wrong answer rather than a missing one |
 | a PC (class, direction pair) along which the dropped modes lift: the Schur lift `L_uv = P (S_uv − S_u S⁺ S_v − S_v S⁺ S_u) P`, or `L_uu`, or `L_vv` (or, to first order, `P S_u P`), above round-off | **refuse** that (class, pair), `err_numerical` | along a direction that breaks the state's spatial symmetry the cut's dropped modes genuinely lift at `h²`, so the PC energy is not twice differentiable there (§6.2). A number would be the derivative of an energy whose rank changes under it |
 | a PC class whose kept `S` is ill-conditioned — a small smallest kept `s / s_max` — with its gap above `PC_MIN_GAP` | **not** a refusal: **print** it | `PC_MIN_GAP` guards the rank, not the `S⁺` conditioning §6.2's rotation terms carry; the derivative is still the energy's. Saying it on the PASS line is what keeps it visible |
-| a conventional case whose sidecar lacks the full MO-integral tensor K2 reads (§5.4), for a direction pair with neither member active–active | **refuse** `H_kk` | a partial `H_kk` is not a Hessian, and the omission would be invisible in every identity that pairs the two modes (both would omit it) — exactly how the §6 digest gap survived until #89 |
+| a PC `H_kc` (class, CI direction `u`) along which `S`'s dropped modes lift: `P S_u P` or `L_uu` above `PC_LIFT_TOL` | **refuse** that (class, pair), `err_numerical`, through the class's status | `L_ww = L_wu = 0` identically, so the CI leg's test is the whole test (§6.5). A (class, `u`) with no second derivative in `u` has none in `(w, u)` either. The vector `H_kc^T w` has no `u` to test, so its consumer applies `u`'s test |
+| a PC `H_kk` (class, orbital pair), active–active included | **not** a refusal, and no lift test runs | `S` does not move along `kappa` (§6.5), so the rank cannot change. Such a test would measure nothing |
+| a PC tuple that is empty, by the integrals or by the state | **not** a refusal, and no sixth term | PC's energy is a quadratic form in `b_t`, and the general formula already holds the empty tuple's term (§6.6). SC's four guarded-tuple rows below do not apply to PC's seven solved classes. PC's Sijrs is SC's and takes SC's rows |
+| a conventional case whose sidecar lacks the full MO-integral tensor K2 reads (§5.4), for a direction pair with neither member active–active | **refuse** `H_kk`, SC's and PC's alike (§6.7) | a partial `H_kk` is not a Hessian, and the omission would be invisible in every identity that pairs the two modes (both would omit it) — exactly how the §6 digest gap survived until #89 |
 | a sidecar missing any array of the inventory it is read for | **refuse** the whole sidecar | the same argument: a partial inventory is a partial `H_kk` (or `H_kc`) that no pairing of the two modes would notice |
 | a guarded tuple (`\|N_t\| <= NUMERICAL_ZERO`) that is **small**, a real perturber under the guard | **not** a refusal: contribute zero | the guard holds its energy at zero on a neighbourhood of the state, so zero is the derivative of the energy the code computes (§5.6) |
 | a guarded tuple **empty by the integrals**, populated by at most one direction of the pair, or by both with proportional tables (`rho_t` at round-off) | **not** a refusal: contribute §5.6's K6, which is K4 at the ray-limit multipliers | `E_t` is a quadratic form along the pair. A zero here was the earlier version of this row, and #158's ladders measured it as wrong. Sijrs always falls in this row and simply takes `P = -1/Delta` (§5.6) |
@@ -1878,6 +2340,23 @@ The last two rows are the non-obvious ones, and they point opposite ways: one
 mode must stay available with a weaker check, and one reference kind must
 **not** inherit a refusal that the first-derivative path has for reasons that
 do not apply here.
+
+**PC's orbital blocks** (§6.4–§6.8) take three rows of their own, above. The
+other rows apply to them unchanged:
+
+- the approximate digests, the wrong binary, a gap- or denominator-refused
+  class, a missing sidecar array and a `casscf`-kind golden;
+- the Euler row, with `H_kc`'s two modes as SC's;
+- the conditioning row. `H_kc`'s rotation term carries `S^+` once (through
+  `C = U^T U`), so the smallest kept `s` sets its size as it sets the CI
+  block's. `H_kk` carries no `S^+` at all, only the denominators `D_t`.
+
+Two things are rules for what is built, not refusals:
+
+- `H_kc` is never formed without its rotation term;
+- `H_kc^T w` differentiates the three-term `y`, never the two-term one.
+
+Leaving out either is invisible to the duality (§6.5).
 
 **As built** (#157 tabulates it; the flags are #152–#158, #184 and #190).
 Seven Hessian flags exist: `nevpt2_demo --sc-hessian` / `--sc-hessian-vector`
@@ -1971,6 +2450,27 @@ row above, as the tree has it:
   (`Eddot_kc(w, c) == 2 <w, Y>`, homogeneous classes), the intra-space exact
   zeros of the active-integral terms, and one finite difference of the gated
   `y` along `kappa`.
+- **PC's orbital blocks (§6.4–§6.8), settled before code (#199).**
+  - **`S` and `S_1` do not move along any `kappa`, active–active included.**
+    The tree rotates the integrals at fixed CI. The orthogonal turn of `S`
+    belongs to the gauge-equivalent CI direction `what c`. So `H_kk` is
+    §6.1's formula on a fixed kept span: no projector, rotation or lift
+    term. It is `<Ehat'_pc, I''>` (K1+K2, at the dotted sets #154's
+    generators make) plus one bilinear sandwich `2 g_w^T M g_v`, with no
+    3×3, no K3–K5 split and no K6.
+  - **`H_kc` carries one rotation term**, `-2 rho^T S_u P A_w x`, along
+    every `w` that moves `K` (all blocks but core–core and
+    virtual–virtual), on rank-bound and symmetry modes. A Dyall block at
+    dotted integrals couples the dropped space from the ket side. `H_kc`'s
+    reverse orientation must differentiate the three-term `y`. Its only
+    lift test is the CI leg's (`P S_u P`, `L_uu`).
+  - **PC has no empty-perturber term and no `rho_t` refusal**: its energy is
+    a quadratic form in `b_t`.
+  - **`Ehat'_pc`** is #74's set. K2's conventional refusal is SC's.
+  - **Two step-free gauges** hold `H_kc` against `H_cc` and `H_kk` against
+    `H_kc` along active–active directions.
+  - **One precondition:** on a density-fitted case, PC's first-order
+    orbital term must be gated before K1/K2 run there.
 - The exactness budget costs **one** new finite difference (§9).
 - A second derivative needs the wavefunction parameters only to **first** order
   and the multipliers only to **zeroth** — the 2n+1/2n+2 rules, §7. So no
@@ -2099,6 +2599,7 @@ support, and the distinction matters for how much each part should be trusted:
 | §2, the scalar finish's 3×3 and its identities | **none needed.** Elementary calculus on a rational function of three scalars, and verified against a central difference and its own two exact zeros |
 | §3–§5, the structural results | **none available, and none needed.** These are claims about *this tree's* multilinearity — the RDMs' exact quadraticity, the block builders' linearity, `f3`'s linearity in `h2e` — each checkable by inspection of the code they describe. §3–§4's chain was additionally verified on a model carrying the same algebra (quadratic densities, RDM-linear blocks, the rational finish): §4.1's two terms against a central difference, §4.2's duality and the Hessian's symmetry to round-off, and §4.3's Euler identity holding in the homogeneous frozen-`eps` case and **failing** in both of the cases §4.2–§4.3 say it must — an RDM-free term, and a responding `eps` |
 | §5.6, the empty perturbers | **none found** in the literature we could read (§5.6, "Related work", which lists what is known around it and what was not read). Elementary: a degree-2 homogeneous rational function and when it is a quadratic form. Checked on a host model running PySCF's own class formulas on the committed goldens (`reference_data/sc_empty_perturber_probe.py`): the sixth term against a Richardson ladder, the parallelogram defect, the census, and `rho_t`'s separation ([`testing.md`](testing.md), "The empty-perturber term, offline"), plus synthetic hand cases. It was found the hard way: §5.1 said "no sixth term" until #158's ladders disagreed |
+| §6.4–§6.8, PC's orbital blocks | **none found**, and none needed beyond §6.2's. The S-cut inverse along a direction that leaves `S` fixed is elementary, and the surviving rotation term is §6.2's formula with one leg orbital. Checked on a host model (`reference_data/pc_orbital_hessian_probe.py`, [`pc-nevpt2.md`](pc-nevpt2.md), "The orbital blocks, offline"): `H_kk` against energy ladders, `H_kc` with and without the term against a difference of the exact orbital derivative, both gauges, and the empty tuples' ladders |
 | §6, the pseudo-inverse differentiated twice | **Golub–Pereyra**, and it was needed: the formula first written here carried a single `A^+` in the range-complement terms where the correct one carries `A^+ A^+` ([`references.md`](references.md), "Numerical linear algebra"). The null modes that lift, `L_uv` and the projector terms: textbook mathematics (Stewart, Kato) with partial precedents in quantum chemistry, none stated in this form (§6.2, "Related work") |
 | §7–§8, what order of response a second derivative needs | **Helgaker–Jørgensen's 2n+1/2n+2 rules**, and these were needed too: the operator the `3N` responses solve against is the *reference's* Hessian, not level 1's or level 2's ([`references.md`](references.md), "Derivative theory") |
 | §8's oracle argument | **confirmed by practice.** Both 2019 NEVPT2 first-derivative papers take their second derivatives seminumerically from their analytic gradients |

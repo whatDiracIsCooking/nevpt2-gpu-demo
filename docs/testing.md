@@ -218,6 +218,23 @@ What they are, all on synthetic inputs, no PySCF solve, no card, no network:
   reproduces its class energies, and every guarded tuple is empty by its
   integrals ([`hessian-theory.md`](hessian-theory.md), §5.6; "The
   empty-perturber term, offline" below).
+- **`test_pc_orbital_hessian_probe.py`** (#199) — `pc_orbital_hessian_probe.py`'s
+  algebra, on `test_pc_null_mode_probe.py`'s synthetic Gram family given an
+  orbital parameter that moves `x`, `h1` and `K` but not `S`. Along it, the
+  two-term first derivative matches a difference at the base point and off
+  it. The mixed second derivative matches only with the rotation term
+  `-2 rho.S_u.P.A_w.x` included. An empty tuple's four-point mixed
+  difference is step-independent and equal to `-2 b_u.M.b_v`, with the
+  parallelogram law exact. `second_dotted` and `eps_second` are checked as
+  mixed derivatives of the rotations they differentiate. Two cases read
+  `golden/n2_ccpvdz_cas44` (a second of CPU), both on Sr:
+  - the active-rotation gauge holds to round-off and fails without the CI
+    side's rotation terms;
+  - `H_kk` along two active directions, with no rotation term, matches a
+    ladder of the rotated energy and the Baker–Campbell–Hausdorff gauge
+    against `H_kc`.
+
+  ([`hessian-theory.md`](hessian-theory.md), §6.4–§6.8.)
 
 **The thresholds are written into the tests as numbers**, not read from the
 module: a test comparing against `DEGENERACY_TOL` would move with it.
@@ -229,8 +246,10 @@ gradient), and `_block2_pc`'s block2-SC-equals-PySCF-SC gate (it runs both).
 Those stay with "The golden regeneration gate" below.
 
 It is the `pytest` phase of `cpp-tier.sh` ("No CI, and the local gate",
-above), after `ruff`. Measured: 332 tests, 31 s, no card (RTX 3080 box's
-CPU, 2026-10-20; the ten empty-perturber cases take 1 s of it). Negative controls, run once in scratch and reverted: setting
+above), after `ruff`. Measured: 343 tests, 32 s, no card (RTX 3080 box's
+CPU, 2026-10-20, with two other CPU jobs running; the ten empty-perturber
+cases take 1 s of it, and the eleven PC orbital-Hessian cases (#199) another
+1 s). Negative controls, run once in scratch and reverted: setting
 `DEGENERACY_TOL` to 1e-5 fails 4 tests (the pinned value and the three
 0.99e-4 refusals); leaving the constant alone and loosening the comparison
 inside `_check_degeneracy` to `DEGENERACY_TOL / 10` fails the same three
