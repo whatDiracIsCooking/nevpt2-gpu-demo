@@ -783,6 +783,50 @@ pair with neither member active–active. An omitted K2 is invisible to the
 forward/reverse duality (both modes would omit it) and to the symmetry check;
 only a Hessian-vector ladder sees it.
 
+In the tree (#154) K1 and K2 are `nevpt2.gradient`'s
+`scOrbitalCurvatureDevice`, the I'' half of `Eddot_kk(u, v)` and nothing
+else: each term is a **dotted input set** — every stored block, `h1e`, `h2e`
+and the orbital energies already differentiated, plus `v2tr`'s — paired over
+the existing walk in both modes (`:rotation`'s `ScDotted`; a direction
+carrying one bypasses the promotion rule in `:terms`' `slabDots`). The
+generators are the `:curvature` partition's:
+
+- **K1** is the first-order rule at `W` (`dottedAtMatrix`): the promotion
+  machinery with its antisymmetry refusal lifted, plus §5.1's restorations —
+  `h1e_v_Sr`'s traced `b` promoted over its x-in-active rows too, and `v2tr`'s
+  dot taken as the trace of Sir2's *whole* dot rather than of its general
+  half. Both restorations depend on `M` only through `M + M^T`, which is why
+  an antisymmetric kappa may drop them and why §5.1's traced-pair sum is
+  zero for two active–active directions.
+- **K2 with one direction `o` active–active** (`composedCross`) needs no
+  two-general-index array. Applying `o`'s first-order rule to the other
+  direction `i`'s first-order inputs gives every pair of slots once, the
+  same slot twice included, which is the first-order rule at the product
+  `i o`: `A_o A_i z = z^x[o, i] + z'[i o]`. An active–active `o` reads `i`'s
+  dotted inputs only at active values of active slots, which they carry; on
+  hidden slots it leaves a traced active pair invariant (the projector
+  commutes with `o`) and the core and virtual labels untouched, and turns the
+  orbital energies' density labels as `[o, gamma]`. So
+  `z^x = A_o^vis(z'[i]) - z'[i o]` and
+  `eps^x = <[o, gamma], W'[i]> - eps'[i o]`, `W'` being §5.5's C5 generator.
+- **K2 on a density-fitted case** (`dfDottedCross`), for any pair: every input
+  is a sum over `L` of products of two `B(U)_L = U^T B_L U` factors (the
+  traced and tied pairs among them) plus `U^T h U`, so with
+  `U = 1 + s u + t v` the cross-slot term is each product's `st` coefficient,
+  `F_st G + F G_st + F_s G_t + F_t G_s`, from `B_s = u^T B + B u` and
+  `B_st = u^T B v + v^T B u` — three-index throughout. The same evaluator at
+  first order (`dfDottedFirst`) is an independent K1 on that case.
+- A conventional pair with neither member active–active is refused as
+  Unsupported before any device work; lifting that is #180.
+
+The gate is `nevpt2_sc_pseudodensity --sc-hessian-kk-int`
+([`testing.md`](testing.md), "The orbital block's integral curvature"): each
+term's duality, the traced pairs' and the intra-space zeros, and the ladder
+this section asks for — of the pairing itself, the pseudodensities frozen, so
+that it sees I'' and nothing of K3–K5: `L(U) = <Ehat'_0, I(U)>` has exactly
+this term as its mixed second derivative along `exp(s u + t v)`, displaced
+from stored blocks along every block-diagonal pair.
+
 ### 5.5 The mixed block `H_kc`: three orientations, two of them built
 
 Write `w` for an orbital direction — an ordinary antisymmetric

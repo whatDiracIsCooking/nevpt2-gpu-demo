@@ -814,6 +814,53 @@ if(NEVPT2_BUILD_TESTING)
     set_tests_properties(nevpt2_sc_pseudodensity_cas88_sc_hessian_kc PROPERTIES
       PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_kc_pass}")
   endif()
+
+  # --- the orbital block's integral curvature, --sc-hessian-kk-int (#154) --------
+  #
+  # nevpt2_sc_pseudodensity --sc-hessian-kk-int (apps/sc_pseudodensity/
+  # hessian_kk_check.cppm; docs/hessian-theory.md, Sec. 5.1 and Sec. 5.4): the
+  # first term of the SC energy's orbital Hessian, <Ehat', I''[u, v]> = K1 + K2
+  # -- K1 the first-order pairing at W = (uv + vu)/2 with the three traced-pair
+  # promotions restored, K2 the cross-slot term (from the sidecar when one of
+  # u, v is active-active; on a fitted case from the three-index B for any
+  # pair). Each term's adjoint against its forward tangent (1e-7, the digests'
+  # term in both modes), the swap, K1's matrix path against the first-order
+  # pairing at an antisymmetric kappa, the traced pairs' zero, the intra-space
+  # exact zeros, Richardson-verified ladders of the fixed-pseudodensity
+  # pairing along exp(s u + t v) for every block-diagonal pair, the product
+  # parameterisation's (1/2) <[u, v], Y> offset, and the refusals (a
+  # conventional pair with neither member active-active is Unsupported, never
+  # answered with K1 alone). The fitted case adds full x full and inactive
+  # pairs and holds the two routes to each other. CAS(4,4) -- both flavours --
+  # is `small`, so the sanitizer tier runs the device work; CAS(8,8)'s
+  # forward digests are a plain RDM build per term per pair, which keeps it
+  # out (docs/testing.md, "The orbital block's integral curvature").
+  set(_nevpt2_sc_hessian_kk_pass
+      "PASS: the SC orbital Hessian's integral curvature <Ehat', I''> = K1 \\+ K2 agrees")
+  foreach(_case cas44 cas88 cas44_df)
+    set(_kk_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.nevpt2gold")
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.gradgold")
+      message(FATAL_ERROR "nevpt2: committed gradient sidecar missing for n2_ccpvdz_${_case}")
+    endif()
+    _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_${_case}_sc_hessian_kk_int
+                          "${_kk_gold}" --tiles 3 --sc-hessian-kk-int)
+    if(TEST nevpt2_sc_pseudodensity_${_case}_sc_hessian_kk_int)
+      set_tests_properties(nevpt2_sc_pseudodensity_${_case}_sc_hessian_kk_int PROPERTIES
+        PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_kk_pass}")
+    endif()
+    unset(_kk_gold)
+  endforeach()
+  foreach(_case cas44 cas44_df)
+    if(TEST nevpt2_sc_pseudodensity_${_case}_sc_hessian_kk_int)
+      set_tests_properties(nevpt2_sc_pseudodensity_${_case}_sc_hessian_kk_int PROPERTIES
+        LABELS "gpu;small")
+    endif()
+  endforeach()
+  # The fitted case's PASS line names its route.
+  if(TEST nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk_int)
+    set_tests_properties(nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk_int PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_kk_pass} .*\\(density-fitted: K2 by the three-index jets, both routes agree\\)")
+  endif()
   unset(_df_y_gold)
   unset(_df_y_side)
 

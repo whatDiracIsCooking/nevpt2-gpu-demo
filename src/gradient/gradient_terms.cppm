@@ -356,6 +356,25 @@ ScSlabDots slabDots(const std::vector<const DeviceTensor*>& blocks,
   ScSlabDots out;
   out.owned.resize(blocks.size());
   out.ptr.assign(blocks.size(), nullptr);
+  // A dotted input set (#154): every block's dot is the set's own field, a
+  // view, with no promotion run. The fields are whole blocks, so the slab
+  // must be one too -- anything else is our bug (only the integral-direct
+  // entry points build such a direction).
+  if (dir.dotted != nullptr) {
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+      const DeviceTensor& src =
+          kinds[i] == RotBlock::V2tr ? dir.dotted->v2tr : dottedField(dir.dotted->d, kinds[i]);
+      if (src.dims != blocks[i]->dims)
+        check(false,
+              std::format("slabDots: the dotted set's {} is not shaped like the slab -- a dotted "
+                          "direction needs one slab per block",
+                          rotBlockName(kinds[i])),
+              loc);
+      out.owned[i] = src.view();
+      out.ptr[i] = &out.owned[i];
+    }
+    return out;
+  }
   // Each block's GENERAL part, kept alive until the walk over `blocks` is
   // done: V2tr's tangent is the trace of Sir2's.
   std::vector<DeviceTensor> general(blocks.size());

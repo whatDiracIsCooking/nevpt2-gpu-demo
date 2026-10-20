@@ -183,6 +183,11 @@ struct Options {
   // a time with the four above, SC only, exact digests only. It reads the
   // sidecar when there is one (--gradgold PATH, or `<case>.gradgold`).
   bool scHessianKc = false;
+  // nevpt2_sc_pseudodensity: --sc-hessian-kk-int, the first term of the SC
+  // energy's orbital Hessian block, the integrals' own curvature
+  // <Ehat', I''> = K1 + K2 (#154); one job at a time with the five above, SC
+  // only, exact digests only. It reads the sidecar (required).
+  bool scHessianKkInt = false;
   std::string gradgoldPath;
   std::string dumpSourceTermsPath;
   std::string sourceOraclePath;
