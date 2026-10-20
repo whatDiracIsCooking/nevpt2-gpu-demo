@@ -1009,12 +1009,14 @@ flag"; `test/cli/` holds it, host-only.
 **Everything that builds a tangent runs the emitted or the native-fp64 BLAS
 digest.** `--cublas`, `--ozaki` and `--fused-digest` are refused at flag
 parsing by `--rdm-tangent`, `--sc-tangent` and `--gradient-source` (as a
-combination), by `nevpt2_sc_pseudodensity`'s `--kappa-full`,
-`--dump-source-terms`, `--sc-hessian-kc`, `--sc-hessian-kk-int` and
-`--sc-hessian-kk` (as a combination: all five build the digests' tangent along a rotation, §6 —
-the last at the second-order integrals — and `--sc-hessian-kc` the tangent
-RDM build too) and by `nevpt2_pc_tangent` (as flags it does not
-implement), because a tangent built from an approximate digest is not the
+combination), by `nevpt2_sc_pseudodensity`'s `--kappa-full` and
+`--dump-source-terms` (as a combination: both build the digests' tangent along
+a rotation, §6), by every Hessian flag — `--sc-hessian`,
+`--sc-hessian-vector`, `--sc-hessian-kc`, `--sc-hessian-kk-int`,
+`--sc-hessian-kk` — as *unsupported*, before any other check on the digest
+flags (#157; [`hessian-theory.md`](hessian-theory.md), §9.1), and by
+`nevpt2_pc_tangent` (as flags it does not implement, `--pc-hessian` and
+`--pc-hessian-vector` included), because a tangent built from an approximate digest is not the
 derivative of anything the energy stage computed. `nevpt2_sc_pseudodensity`'s
 other modes — the identities, `--kappa-act` and `--source-oracle` — are the
 exception, and consistently so: they build no tangent RDMs — they read the

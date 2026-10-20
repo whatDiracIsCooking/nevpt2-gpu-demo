@@ -21,14 +21,17 @@
 //                           docs/gradient-theory.md's inventory, the (O1)
 //                           invariant of its §3.6, and the one-electron
 //                           matrices against the slices of them the committed
-//                           golden beside it carries (§3.5)
+//                           golden beside it carries (§3.5); and the
+//                           general-range inventory required whole, the
+//                           sidecar with any one array erased refused (#157)
 //   GradGoldDfCas44Tests    the committed density-fitted (NEVPT2F1, #164)
 //                           golden/n2_ccpvdz_cas44_df.gradgold: header and
 //                           inventory, pairing with its *_df golden only, its
 //                           tied arrays as the six B blocks contracted, and
 //                           its matrices and orbital energies as the fitted
 //                           golden's (§3.8), and the shape of the numerical
-//                           gradient nevpt2_numgrad.py --df appended (#167)
+//                           gradient nevpt2_numgrad.py --df appended (#167),
+//                           and its fitted inventory required whole (#157)
 //
 // The malformed and synthetic files are written to a per-test temp directory,
 // removed in TearDown. The committed files are only ever read; their paths
@@ -459,6 +462,33 @@ TEST_F(GradGoldCas44Tests, HeaderFields) {
   EXPECT_EQ(g.ncore, golden_->ncore);
 }
 
+// The general-range inventory the orbital source term, H_kc and H_kk read is
+// required WHOLE (#157; docs/hessian-theory.md, Sec. 9.1): the committed
+// sidecar carries all of it, and the same sidecar with any one array erased
+// is an IO Error naming that array -- never a partial inventory, so never a
+// partial H_kk.
+void expectInventoryRequiredWhole(const GradGoldFile& sidecar, const std::size_t count) {
+  EXPECT_EQ(sidecar.generalInventoryNames().size(), count);
+  EXPECT_TRUE(sidecar.requireGeneralInventory().has_value());
+  for (const std::string_view name : sidecar.generalInventoryNames()) {
+    GradGoldFile partial = sidecar;
+    ASSERT_EQ(partial.arrays.erase(std::string(name)), 1u) << name;
+    const Status st = partial.requireGeneralInventory();
+    ASSERT_FALSE(st.has_value()) << name;
+    EXPECT_EQ(st.error().kind, ErrorKind::IO) << name;
+    EXPECT_NE(st.error().message.find(std::format("missing required array '{}'", name)),
+              std::string::npos)
+        << st.error().message;
+  }
+}
+
+TEST_F(GradGoldCas44Tests, TheGeneralInventoryIsRequiredWhole) {
+  ASSERT_FALSE(sidecar_->densityFitted());
+  // docs/gradient-theory.md, §3.3's seventeen blocks (g_xc_cc as its two) and
+  // §3.5's three matrices.
+  expectInventoryRequiredWhole(*sidecar_, 21);
+}
+
 TEST_F(GradGoldCas44Tests, ArrayShapesAreTheInventory) {
   const GradGoldFile& g = *sidecar_;
   const int64_t m = g.nmo, c = g.ncore, a = g.nact, v = g.nvirt;
@@ -718,6 +748,13 @@ TEST_F(GradGoldDfCas44Tests, HeaderAndInventory) {
 // differenced, and an energy that does not depend on where the molecule sits
 // has equal and opposite axial components and no transverse ones. The bound is
 // the stencil's own error-bar scale, not a measured number.
+// The fitted inventory likewise (§3.8: B_cc, B_vv, the three matrices and the
+// four tied arrays).
+TEST_F(GradGoldDfCas44Tests, TheGeneralInventoryIsRequiredWhole) {
+  ASSERT_TRUE(sidecar_->densityFitted());
+  expectInventoryRequiredWhole(*sidecar_, 9);
+}
+
 TEST_F(GradGoldDfCas44Tests, CarriesTheDensityFittedNumericalGradient) {
   const GradGoldFile& g = *sidecar_;
   ASSERT_TRUE(

@@ -39,7 +39,9 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //   --rdm-tangent   the demos only: the gradient binaries run no Euler check of
 //                   the tangent RDM build beside their own (#38, #39).
 //   the --cublas / --ozaki family and --fused-digest: every binary but
-//                   nevpt2_pc_tangent (kNotPcTangent, above).
+//                   nevpt2_pc_tangent (kNotPcTangent, above). With any
+//                   Hessian flag, on any binary, they are Unsupported
+//                   (checkHessianDigests, below; #157).
 //   --sc-tangent, --gradient-source
 //                   the demos (#162): both differentiate the CI vector at
 //                   fixed integrals, so the density-fitted demo runs them over
@@ -206,6 +208,46 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
   return {};
 }
 
+// Every Hessian flag, of every binary (docs/hessian-theory.md, Sec. 9.1).
+constexpr std::array<std::string_view, 7> kHessianFlags{
+    "--sc-hessian",    "--sc-hessian-vector", "--sc-hessian-kc", "--sc-hessian-kk-int",
+    "--sc-hessian-kk", "--pc-hessian",        "--pc-hessian-vector"};
+
+// The first Hessian flag `opt` sets, in kHessianFlags' order; empty for none.
+std::string_view hessianFlagOf(const Options& opt) {
+  const std::array<bool, kHessianFlags.size()> set{
+      opt.scHessian,   opt.scHessianVector, opt.scHessianKc,    opt.scHessianKkInt,
+      opt.scHessianKk, opt.pcHessian,       opt.pcHessianVector};
+  for (std::size_t k = 0; k < set.size(); ++k)
+    if (set[k]) return kHessianFlags[k];
+  return {};
+}
+
+// Any Hessian flag with --cublas, --ozaki or --fused-digest: Unsupported
+// (#157; docs/hessian-theory.md, Sec. 9.1's first row). A second derivative
+// built from an approximate digest is not the derivative of anything the
+// energy stage computed, and the fused GEMM has no tangent path; the request
+// is valid, and no binary has the code for it. Run before finalize(), so the
+// kind does not depend on what finalize() would have said of the digest flags
+// first. nevpt2_pc_tangent never gets here with one: it implements none of
+// the three, so parseArgs has refused them already, as Unsupported too.
+Status checkHessianDigests(const Options& opt) {
+  const std::string_view hessian = hessianFlagOf(opt);
+  if (hessian.empty()) return {};
+  const RdmBuildOptions& r = opt.common.rdm;
+  const std::string_view digest = r.cublas ? "--cublas"
+                                  : r.ozaki ? "--ozaki"
+                                  : r.fusedDigest ? "--fused-digest"
+                                                  : "";
+  if (digest.empty()) return {};
+  return err_unsupported(std::format(
+      "{} with {}: a second derivative built from an approximate digest is not the derivative "
+      "of anything the energy stage computed, so every Hessian runs the emitted digest or "
+      "--blas-digest alone; not --cublas, --ozaki or --fused-digest (docs/hessian-theory.md, "
+      "Sec. 9.1)",
+      hessian, digest));
+}
+
 // The checks the demos share on --sc-tangent / --gradient-source (and
 // nevpt2_demo's --sc-hessian / --sc-hessian-vector, which only it can set):
 // one at a time, the
@@ -236,7 +278,8 @@ Status checkDifferentiationFlags(const Options& opt) {
                                                        : "--gradient-source";
   // Both differentiation checks run the tangent RDM build, which is the
   // emitted or the native-fp64 BLAS digest only -- the rule finalize()
-  // applies to --rdm-tangent.
+  // applies to --rdm-tangent. (For --sc-hessian / --sc-hessian-vector this
+  // never fires: checkHessianDigests has refused the pair as Unsupported.)
   if (c.rdm.cublas || c.rdm.ozaki || c.rdm.fusedDigest)
     return err_config(std::format(
         "{} runs the tangent RDM build, which is the emitted digest or --blas-digest; "
@@ -361,26 +404,9 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
             "--gradgold is the sidecar --kappa-full, --sc-hessian-kc, --sc-hessian-kk-int, "
             "--sc-hessian-kk, --dump-source-terms and --source-oracle read; it does nothing on "
             "its own");
-      // --sc-hessian-kc runs the tangent RDM build (its forward orientation)
-      // and the digests' tangent: exact digests only, as every tangent path.
-      if (opt.scHessianKc && (c.rdm.cublas || c.rdm.ozaki || c.rdm.fusedDigest))
-        return err_config(
-            "--sc-hessian-kc runs the tangent RDM build and the digests' tangent, which are "
-            "the emitted digest or --blas-digest; not --cublas, --ozaki or --fused-digest");
-      // --sc-hessian-kk-int builds the digests' tangent at h2e'' and their
-      // transpose: exact digests only (docs/hessian-theory.md, Sec. 9.1).
-      if (opt.scHessianKkInt && (c.rdm.cublas || c.rdm.ozaki || c.rdm.fusedDigest))
-        return err_config(
-            "--sc-hessian-kk-int builds the digests' tangent at the second-order integrals, "
-            "which is the emitted digest or --blas-digest; not --cublas, --ozaki or "
-            "--fused-digest");
-      // --sc-hessian-kk builds every direction's digests' tangent, the
-      // curvature's at h2e'' and their transpose: exact digests only.
-      if (opt.scHessianKk && (c.rdm.cublas || c.rdm.ozaki || c.rdm.fusedDigest))
-        return err_config(
-            "--sc-hessian-kk builds the digests' tangents along each direction and at the "
-            "second-order integrals, which is the emitted digest or --blas-digest; not "
-            "--cublas, --ozaki or --fused-digest");
+      // --sc-hessian-kc / -kk-int / -kk with an approximate digest never get
+      // here: checkHessianDigests refused them before finalize(), as
+      // Unsupported (docs/hessian-theory.md, Sec. 9.1).
       // --kappa-full and --dump-source-terms build the f3ac/f3ca digests'
       // tangent along a rotation (#88) -- the RDM build rerun at the dotted
       // integrals -- and a tangent is only ever formed from an exact digest,

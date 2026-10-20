@@ -1317,6 +1317,45 @@ if(NEVPT2_BUILD_TESTING)
   add_golden_test(nevpt2_cas1010_casscf "${_gold_1010_casscf}" --tiles 3)
   add_pc_golden_test(nevpt2_cas1010_casscf_pc "${_gold_1010_casscf}" --tiles 3)
 
+  # --- every Hessian flag on CASSCF orbitals (#157) -------------------------------
+  #
+  # Level 1 differentiates the energy functional, which does not know how its
+  # orbitals were made, so every Hessian flag sits behind the SOURCE-TERM gate
+  # and takes a CASSCF golden -- the opposite of the Lagrangian gate a full
+  # gradient sits behind (docs/hessian-theory.md, Sec. 9.1). One entry per
+  # flag on n2_ccpvdz_cas44_casscf, the same binary and flags as its CASCI
+  # twin above; where the PASS line names the orbital-energy mode, the regex
+  # holds it to that mode (fixed for the CI block and PC; FULL with Euler
+  # skipped, and EULER with it gated, for H_kc, whose committed sidecar sits
+  # beside this golden). All `small`, as their CAS(4,4) twins are.
+  # A regex here never spells a literal ';' (a PASS_REGULAR_EXPRESSION is a
+  # list, and one would split it into two alternatives): '.' stands in.
+  function(_add_casscf_hessian_test binary name flag pass)
+    _add_golden_test_with(${binary} ${name} "${_gold_44_casscf}" --tiles 3 ${flag})
+    if(TEST ${name})
+      set_tests_properties(${name} PROPERTIES PASS_REGULAR_EXPRESSION "${pass}"
+                                              LABELS "gpu;small")
+    endif()
+  endfunction()
+  _add_casscf_hessian_test(nevpt2_demo nevpt2_cas44_casscf_sc_hessian --sc-hessian
+    "${_nevpt2_sc_hessian_pass} .*\\(the orbital energies held fixed\\)")
+  _add_casscf_hessian_test(nevpt2_demo nevpt2_cas44_casscf_sc_hessian_vector --sc-hessian-vector
+    "${_nevpt2_sc_hessian_vector_pass} .*\\(the orbital energies held fixed on both legs\\)")
+  _add_casscf_hessian_test(nevpt2_sc_pseudodensity
+    nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kc --sc-hessian-kc
+    "${_nevpt2_sc_hessian_kc_pass} .*\\(orbital-energy modes: FULL, the orbital energies responding to kappa and to c, Euler skipped there. EULER, held fixed in c, Euler gated\\)")
+  _add_casscf_hessian_test(nevpt2_sc_pseudodensity
+    nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kk_int --sc-hessian-kk-int
+    "${_nevpt2_sc_hessian_kk_pass}")
+  _add_casscf_hessian_test(nevpt2_sc_pseudodensity
+    nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kk --sc-hessian-kk
+    "${_nevpt2_sc_hessian_kk_full_pass}")
+  _add_casscf_hessian_test(nevpt2_pc_tangent nevpt2_pc_hessian_cas44_casscf --pc-hessian
+    "PASS: the PC-NEVPT2 Hessian Eddot\\(u, v\\) matches Euler .*\\(orbital energies held fixed. smallest kept s/s_max [^ ]+ \\([A-Za-z]+\\), smallest gap [^ ]+ against PC_MIN_GAP")
+  _add_casscf_hessian_test(nevpt2_pc_tangent nevpt2_pc_hessian_vector_cas44_casscf
+    --pc-hessian-vector
+    "PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches .*\\(orbital energies held fixed. smallest kept s/s_max [^ ]+ \\([A-Za-z]+\\), smallest gap [^ ]+ against PC_MIN_GAP")
+
   # --- the PC tangent with respect to the CI vector -------------------------------
   #
   # nevpt2_pc_tangent (apps/pc_tangent/, the only binary that links

@@ -354,7 +354,7 @@ reference-kind gates. The **source-term** gate
 fixed orbitals and CI vector, and carry no reference-kind dependence (Park
 Eqs. 26–28, 36–38, 41–48). `nevpt2_demo --sc-tangent` / `--gradient-source`
 and `nevpt2_sc_pseudodensity --dump-source-terms` / `--source-oracle` sit
-behind it. The **Lagrangian** gate (`requireLagrangianReference`) refuses one
+behind it, and so does every Hessian flag (#157, below). The **Lagrangian** gate (`requireLagrangianReference`) refuses one
 as `err_unsupported`, because the CI Z-vector → Sylvester → CPHF chain is
 derived for CASCI on RHF orbitals ([`gradient-theory.md`](gradient-theory.md),
 §1.2 and §2.2–§2.6), and the CASSCF branch (§2.7) is not implemented yet.
@@ -367,6 +367,31 @@ The split is checked in the unit tier by `test/golden`'s
 of those reads `golden/n2_ccpvdz_cas44_casscf.nevpt2gold` itself, so the split
 is held against a committed reference as well as a spliced one. Host-only,
 no card.
+
+### The Hessian on CASSCF orbitals
+
+Level 1 of the Hessian differentiates the energy functional, which does not
+know how its orbitals were made, so all seven Hessian flags sit behind the
+source-term gate ([`hessian-theory.md`](hessian-theory.md), §9.1). #157
+registers each on `n2_ccpvdz_cas44_casscf`, the same binary and flags as its
+CASCI-orbital twin, all `gpu;small`:
+
+| entry | binary | flag | the mode its regex holds |
+|---|---|---|---|
+| `nevpt2_cas44_casscf_sc_hessian` | `nevpt2_demo` | `--sc-hessian` | orbital energies held fixed |
+| `nevpt2_cas44_casscf_sc_hessian_vector` | `nevpt2_demo` | `--sc-hessian-vector` | held fixed on both legs |
+| `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kc` | `nevpt2_sc_pseudodensity` | `--sc-hessian-kc` | FULL (Euler skipped, and said so) and EULER (Euler gated), off the committed `.gradgold` |
+| `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kk_int` | `nevpt2_sc_pseudodensity` | `--sc-hessian-kk-int` | — (the twin's regex) |
+| `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kk` | `nevpt2_sc_pseudodensity` | `--sc-hessian-kk` | — (the twin's regex, 2 pairs refused for `rho_t`) |
+| `nevpt2_pc_hessian_cas44_casscf` | `nevpt2_pc_tangent` | `--pc-hessian` | held fixed, with the smallest kept `s / s_max` and gap printed |
+| `nevpt2_pc_hessian_vector_cas44_casscf` | `nevpt2_pc_tangent` | `--pc-hessian-vector` | likewise |
+
+Measured on the RTX 3080 (CUDA, `--tiles 3`, the default digest), #157: all
+seven pass, each in under 3 s. Both PC entries print the smallest kept
+`s / s_max` as 2.7e-05 (Sir) and the smallest gap as 1.2e+09 against
+`PC_MIN_GAP`'s 1e+03 — the conditioning a PC Hessian PASS line now prints
+rather than refuses (#194 owns the conditioning itself). `--sc-hessian-kk`
+refuses the same two pairs for `rho_t` as on the CASCI-orbital twin.
 
 ### The source terms on CASSCF orbitals: the wave-0 canary
 

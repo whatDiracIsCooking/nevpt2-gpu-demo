@@ -429,7 +429,8 @@ nevpt2::Result<bool> checkScHessianKc(const nevpt2::GoldenFile& g,
     std::printf("\n%s: the SC mixed Hessian block H_kc's two orientations agree by duality to "
                 "%.0e (no sidecar: an active-active w, the orbital energies frozen on both legs, "
                 "every other w refused), Euler in c holds on the homogeneous classes, and the "
-                "finite difference of y converges\n",
+                "finite difference of y converges (orbital-energy mode: FROZEN, held fixed in "
+                "kappa and in c)\n",
                 ok ? "PASS" : "FAIL", kKcTol);
     return ok;
   }
@@ -544,6 +545,16 @@ nevpt2::Result<bool> checkScHessianKc(const nevpt2::GoldenFile& g,
                 static_cast<long long>(ndet), static_cast<long long>(kKcColumnMaxDet));
   }
 
+  // The Euler gate with the orbital-energy response on is SKIPPED, and says
+  // so -- not refused: the identity does not hold once the orbital energies
+  // move with c (docs/hessian-theory.md, Sec. 4.3), but the FULL mode is the
+  // valid one a nuclear gradient consumes (Sec. 9.1). Euler is gated in the
+  // EULER mode instead, [4].
+  std::printf("\n  Euler in c, Eddot_kc(w, c) == 2 <w, Y>: SKIPPED in mode %s -- with the "
+              "orbital energies\n  responding to c it is not an identity (Sec. 4.3); it is "
+              "gated in the EULER mode, [4]\n",
+              kcModeName(true, true));
+
   // --- 4. Euler in c, the Euler mode ----------------------------------------------
   {
     const nevpt2::ScMixedHessianSetup euler =
@@ -650,7 +661,9 @@ nevpt2::Result<bool> checkScHessianKc(const nevpt2::GoldenFile& g,
               "sidecar, every other w refused), Euler in c holds on the homogeneous classes, "
               "the digests' share merged per tuple is the first-order term, the intra-space "
               "zeros hold, C5's generator rebuilds f over the whole range, and the finite "
-              "differences of y converge\n",
+              "differences of y converge (orbital-energy modes: FULL, the orbital energies "
+              "responding to kappa and to c, Euler skipped there; EULER, held fixed in c, Euler "
+              "gated)\n",
               ok ? "PASS" : "FAIL", kKcTol);
   return ok;
 }
