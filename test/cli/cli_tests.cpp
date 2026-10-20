@@ -23,7 +23,8 @@
 //                        --sc-tangent / --gradient-source (#162)
 //   CliScPseudodensityFlagTests  --kappa-act / --kappa-full / --gradgold /
 //                                --dump-source-terms / --source-oracle /
-//                                --sc-hessian-kc / --sc-hessian-kk-int
+//                                --sc-hessian-kc / --sc-hessian-kk-int /
+//                                --sc-hessian-kk
 //   CliPcTangentFlagTests        --fd-steps / --fd-start-pow / --pc-hessian /
 //                                --pc-hessian-vector
 //
@@ -403,7 +404,7 @@ constexpr std::array kExpectedMatrix{
     MatrixRow{"--sc-hessian-vector", "D"},  MatrixRow{"--batch", "F"},
     MatrixRow{"--check-blocks", "F"},       MatrixRow{"--kappa-act", "S"},
     MatrixRow{"--kappa-full", "S"},         MatrixRow{"--sc-hessian-kc", "S"},
-    MatrixRow{"--sc-hessian-kk-int", "S"},
+    MatrixRow{"--sc-hessian-kk-int", "S"},  MatrixRow{"--sc-hessian-kk", "S"},
     MatrixRow{"--gradgold", "DS"},          MatrixRow{"--dump-source-terms", "S"},
     MatrixRow{"--source-oracle", "S"},      MatrixRow{"--fd-steps", "P"},
     MatrixRow{"--fd-start-pow", "P"},       MatrixRow{"--pc-hessian", "P"},
@@ -641,6 +642,7 @@ TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
       {Binary::ScPseudodensity, {"--tiles", "3", "--source-oracle", "x.srcgold"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--sc-hessian-kc"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--sc-hessian-kk-int"}},
+      {Binary::ScPseudodensity, {"--tiles", "3", "--sc-hessian-kk"}},
       {Binary::PcTangent, {"--tiles", "3"}},
       {Binary::PcTangent, {"--tiles", "40", "--fd-steps", "3"}},
       {Binary::PcTangent, {"--tiles", "3", "--pc-hessian"}},
@@ -987,7 +989,8 @@ TEST(CliScPseudodensityFlagTests, GradgoldNeedsKappaFull) {
     EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
     EXPECT_EQ(r.error().message,
               "--gradgold is the sidecar --kappa-full, --sc-hessian-kc, --sc-hessian-kk-int, "
-              "--dump-source-terms and --source-oracle read; it does nothing on its own");
+              "--sc-hessian-kk, --dump-source-terms and --source-oracle read; it does nothing on "
+              "its own");
   }
 }
 
@@ -1199,6 +1202,72 @@ TEST(CliScPseudodensityFlagTests, ScHessianKkIntRefusesPcAndTheApproximateDigest
               "--sc-hessian-kk-int builds the digests' tangent at the second-order integrals, "
               "which is the emitted digest or --blas-digest; not --cublas, --ozaki or "
               "--fused-digest");
+  }
+}
+
+// --sc-hessian-kk (#158), nevpt2_sc_pseudodensity alone: the orbital block's
+// sandwich and the whole Eddot_kk, one job at a time, SC only, exact digests
+// only; --gradgold rides on it.
+TEST(CliScPseudodensityFlagTests, ScHessianKkSetsItsFieldAndTakesGradgold) {
+  const Result<Options> r = parse(Binary::ScPseudodensity, {"--sc-hessian-kk"});
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_TRUE(r->scHessianKk);
+  EXPECT_FALSE(r->scHessianKkInt);
+  const Result<Options> g = parse(Binary::ScPseudodensity,
+                                  {"--sc-hessian-kk", "--gradgold", "s.gradgold", "--blas-digest"});
+  ASSERT_TRUE(g.has_value()) << g.error().message;
+  EXPECT_EQ(g->gradgoldPath, "s.gradgold");
+}
+
+TEST(CliScPseudodensityFlagTests, ScHessianKkRefusesTheOtherJobs) {
+  for (const std::vector<std::string_view>& other :
+       {std::vector<std::string_view>{"--kappa-act"}, std::vector<std::string_view>{"--kappa-full"},
+        std::vector<std::string_view>{"--sc-hessian-kc"},
+        std::vector<std::string_view>{"--sc-hessian-kk-int"},
+        std::vector<std::string_view>{"--dump-source-terms", "x.gradsrc"},
+        std::vector<std::string_view>{"--source-oracle", "x.srcgold"}}) {
+    std::vector<std::string_view> args{"--sc-hessian-kk"};
+    args.insert(args.end(), other.begin(), other.end());
+    const Result<Options> r = parse(Binary::ScPseudodensity, args);
+    ASSERT_FALSE(r.has_value()) << other.front();
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(r.error().message,
+              "--sc-hessian-kk checks the orbital Hessian block; --kappa-act, --kappa-full, "
+              "--sc-hessian-kc, --sc-hessian-kk-int, --dump-source-terms and --source-oracle "
+              "are jobs of their own -- run one at a time");
+  }
+}
+
+TEST(CliScPseudodensityFlagTests, ScHessianKkRefusesPcAndTheApproximateDigests) {
+  const Result<Options> pc = parse(Binary::ScPseudodensity, {"--sc-hessian-kk", "--pc"});
+  ASSERT_FALSE(pc.has_value());
+  EXPECT_EQ(pc.error().kind, ErrorKind::InvalidConfig);
+  EXPECT_EQ(pc.error().message,
+            "--sc-hessian-kk differentiates the strongly-contracted energy twice; PC's orbital "
+            "Hessian has no path");
+  for (const std::vector<std::string_view>& digest :
+       {std::vector<std::string_view>{"--cublas"}, std::vector<std::string_view>{"--ozaki"},
+        std::vector<std::string_view>{"--fused-digest", "--blas-digest"}}) {
+    if (digest.front() == "--cublas" && !kHaveCublasEmul) continue;
+    std::vector<std::string_view> args{"--sc-hessian-kk"};
+    args.insert(args.end(), digest.begin(), digest.end());
+    const Result<Options> r = parse(Binary::ScPseudodensity, args);
+    ASSERT_FALSE(r.has_value()) << digest.front();
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig) << digest.front();
+    EXPECT_EQ(r.error().message,
+              "--sc-hessian-kk builds the digests' tangents along each direction and at the "
+              "second-order integrals, which is the emitted digest or --blas-digest; not "
+              "--cublas, --ozaki or --fused-digest");
+  }
+}
+
+TEST(CliScPseudodensityFlagTests, OtherBinariesRefuseScHessianKk) {
+  for (const Binary b : {Binary::Demo, Binary::DfDemo, Binary::PcTangent}) {
+    const Result<Options> r = parse(b, {"--sc-hessian-kk"});
+    ASSERT_FALSE(r.has_value()) << binaryName(b);
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << binaryName(b);
+    EXPECT_NE(r.error().message.find("only nevpt2_sc_pseudodensity"), std::string::npos)
+        << r.error().message;
   }
 }
 

@@ -54,6 +54,13 @@
 //                             two-parameter family, plain and through Sijr's
 //                             and Srsi's own packing; C1's digest share as
 //                             the same sandwich, linear in its triple
+//   PairTermsTests            the orbital block's sandwich K3-K5 (#158):
+//                             pairTermsVia's three remappings against a mixed
+//                             central difference of the class energy, plain
+//                             and through Sijr's packing; the exchanged
+//                             finish and the digests' shares
+//   GuardedCensusTests        guardedCensus, #158's temporary refusal: each
+//                             of Sec. 5.6's kinds of guarded tuple by hand
 //   CiSourceHostTests        ciSourceAddInto / ciSourceSymmetrized /
 //                             ciSourceFolded's basic shape
 //   CiSourceFoldTests         the fold against an UNFOLDED host reference
@@ -1064,6 +1071,152 @@ TEST(MixedTermsTests, SymmetrizedClassesAreTheirEnergysMixedDerivative) {
     });
     EXPECT_NEAR(m.total(), fd, 1e-5);
   }
+}
+
+// ---------------------------------------------------------------------------
+// PairTermsTests (#158): the orbital block's sandwich, per perturber
+// ---------------------------------------------------------------------------
+//
+// K3 + K4 + K5 is the mixed second derivative of the scalar finish along
+//
+//   N(s, t) = N + s Ndot[u] + t Ndot[v] + s t N^{uv}
+//   H(s, t) = H + s Hdot[u] + t Hdot[v] + s t (H^{uv} + H^{u,K'v} + H^{v,K'u})
+//   Delta(s, t) = Delta + s Ddot[u] + t Ddot[v]        (no Delta^{uv}: K1 / K2's)
+//
+// through pairTermsVia's three remappings of the class's mixed finish; the
+// same bound as MixedTermsTests, for the same reason.
+
+ScPairTables pairTables(const std::vector<int64_t>& dims, std::uint64_t seed) {
+  std::mt19937_64 gen(seed);
+  std::uniform_real_distribution<double> dist(-0.5, 0.5);
+  const auto fill = [&](double base) {
+    Tensor t(dims);
+    for (int64_t k = 0; k < t.size(); ++k) t.flatRef(k) = base + dist(gen);
+    return t;
+  };
+  ScPairTables p;
+  p.norm = fill(2.0);
+  p.h = fill(1.0);
+  p.normDotU = fill(0.0);
+  p.hDotU = fill(0.0);
+  p.hDotUDigest = fill(0.0);
+  p.normDotV = fill(0.0);
+  p.hDotV = fill(0.0);
+  p.hDotVDigest = fill(0.0);
+  p.normUV = fill(0.0);
+  p.hUV = fill(0.0);
+  p.hUBlockV = fill(0.0);
+  p.hUBlockVDigest = fill(0.0);
+  p.hVBlockU = fill(0.0);
+  p.hVBlockUDigest = fill(0.0);
+  return p;
+}
+
+TEST(PairTermsTests, PlainTermsAreTheFinishsMixedDerivative) {
+  const ScPairTables t = pairTables({4}, 0x5eed'4158u);
+  const std::vector<double> delta{1.0, 1.5, 0.75, 2.0};
+  const std::vector<double> dU{0.25, -0.5, 0.125, 0.5}, dV{-0.25, 0.375, 0.5, -0.125};
+  const auto fn = [&](const ScMixedTables& m, const std::vector<double>& dw,
+                      const std::vector<double>& du, const std::vector<double>& dwu) {
+    return plainMixedTerms(m, delta, dw, du, dwu);
+  };
+  const ScPairTerms p = pairTermsVia(fn, t, dU, dV);
+  Tensor hAll = t.hUV;
+  for (int64_t k = 0; k < hAll.size(); ++k)
+    hAll.flatRef(k) += t.hUBlockV.flat(k) + t.hVBlockU.flat(k);
+  const auto energyAt = [&](double s, double u) {
+    std::vector<double> d = delta;
+    for (std::size_t k = 0; k < d.size(); ++k) d[k] += s * dU[k] + u * dV[k];
+    return scMultipliers(mixedAt(t.norm, t.normDotU, t.normDotV, t.normUV, s, u).data(),
+                         mixedAt(t.h, t.hDotU, t.hDotV, hAll, s, u).data(), d)
+        .energy;
+  };
+  const double h = std::ldexp(1.0, -12);
+  const double fd =
+      (energyAt(h, h) - energyAt(h, -h) - energyAt(-h, h) + energyAt(-h, -h)) / (4.0 * h * h);
+  EXPECT_NEAR(p.total(), fd, 1e-5);
+  EXPECT_GT(std::fabs(p.k3), 1e-3);
+  EXPECT_GT(std::fabs(p.k4), 1e-3);
+  EXPECT_GT(std::fabs(p.k5uv), 1e-3);
+  EXPECT_GT(std::fabs(p.k5vu), 1e-3);
+  // The exchanged finish: the 3x3 is symmetric and K4's table is one table.
+  EXPECT_NEAR(p.k3, p.k3Swap, 1e-14);
+  EXPECT_EQ(p.k4, p.k4Swap);
+  // Hand every digests' share its whole triple: each share is then the whole
+  // term (the sandwich is linear in each triple).
+  ScPairTables all = t;
+  all.normDotU = Tensor(t.norm.dims());
+  all.normDotV = Tensor(t.norm.dims());
+  all.hDotUDigest = t.hDotU;
+  all.hDotVDigest = t.hDotV;
+  all.hUBlockVDigest = t.hUBlockV;
+  all.hVBlockUDigest = t.hVBlockU;
+  const std::vector<double> zero(4, 0.0);
+  const ScPairTerms q = pairTermsVia(fn, all, zero, zero);
+  EXPECT_NEAR(q.k3DigestU, q.k3, 1e-15);
+  EXPECT_NEAR(q.k3DigestV, q.k3, 1e-15);
+  EXPECT_NEAR(q.k3DigestDigest, q.k3, 1e-15);
+  EXPECT_EQ(q.k5uvDigest, q.k5uv);
+  EXPECT_EQ(q.k5vuDigest, q.k5vu);
+}
+
+// Through Sijr's own packing: the sum is the mixed difference of THAT class's
+// energy along the raw tables, the orbital energies through its Delta.
+TEST(PairTermsTests, SymmetrizedClassIsItsEnergysMixedDerivative) {
+  const ScPairTables t = pairTables({1, 2, 2}, 0x5eed'5158u);
+  const Tensor ec = vec({-1.0, -2.0}), ev = vec({5.0, 3.0});
+  const Tensor ecU = vec({0.25, -0.5}), evU = vec({0.75, 0.5});
+  const Tensor ecV = vec({-0.25, 0.125}), evV = vec({0.5, -0.25});
+  const auto fn = [&](const ScMixedTables& m, const std::vector<double>& dw,
+                      const std::vector<double>& du, const std::vector<double>& dwu) {
+    return sijrMixedTerms(m, dw, du, dwu, 1, ec, ev);
+  };
+  const ScPairTerms p =
+      pairTermsVia(fn, t, sijrDelta(1, 2, 1, ecU, evU), sijrDelta(1, 2, 1, ecV, evV));
+  Tensor hAll = t.hUV;
+  for (int64_t k = 0; k < hAll.size(); ++k)
+    hAll.flatRef(k) += t.hUBlockV.flat(k) + t.hVBlockU.flat(k);
+  const Tensor zeroE = vec({0.0, 0.0});
+  const double h = std::ldexp(1.0, -12);
+  const auto e = [&](double s, double u) {
+    return sijrMultipliers(mixedAt(t.norm, t.normDotU, t.normDotV, t.normUV, s, u),
+                           mixedAt(t.h, t.hDotU, t.hDotV, hAll, s, u), 1,
+                           mixedAt(ec, ecU, ecV, zeroE, s, u), mixedAt(ev, evU, evV, zeroE, s, u))
+        .energy;
+  };
+  const double fd = (e(h, h) - e(h, -h) - e(-h, h) + e(-h, -h)) / (4.0 * h * h);
+  EXPECT_NEAR(p.total(), fd, 1e-5);
+}
+
+// ---------------------------------------------------------------------------
+// GuardedCensusTests (#158): the temporary refusal's tuple classes
+// ---------------------------------------------------------------------------
+//
+// docs/hessian-theory.md, Sec. 5.6's three kinds of guarded tuple, one per
+// row, beside an unguarded one: only an empty tuple both directions populate,
+// and one empty by the state, are reasons to refuse.
+TEST(GuardedCensusTests, ClassifiesEachKind) {
+  //            unguarded  empty, Nuv round-off  empty, populated  small      empty by the state
+  const Tensor norm = vec({1.0, 0.0, 0.0, 1e-19, 1e-30});
+  const Tensor xMax = vec({0.5, 1e-15, 2e-15, 1e-9, 1e-6});
+  const Tensor nuv = vec({3.0, 1e-20, 1e-6, 5.0, 0.0});
+  const ScGuardedCensus c = guardedCensus(norm, xMax, nuv);
+  EXPECT_EQ(c.guarded, 4);
+  EXPECT_EQ(c.empty, 2);
+  EXPECT_EQ(c.populated, 1);
+  EXPECT_EQ(c.emptyByState, 1);
+  EXPECT_EQ(c.crossMax, 1e-6);
+  EXPECT_EQ(c.populatedMin, 1e-6);
+  EXPECT_EQ(c.unpopulatedMax, 1e-20);
+  EXPECT_TRUE(c.refused());
+  // The small tuple alone, and the round-off one, refuse nothing.
+  const ScGuardedCensus ok =
+      guardedCensus(vec({0.0, 1e-19}), vec({1e-15, 1e-9}), vec({1e-20, 5.0}));
+  EXPECT_FALSE(ok.refused());
+  ScGuardedCensus sum = ok;
+  sum += c;
+  EXPECT_EQ(sum.populated, 1);
+  EXPECT_EQ(sum.guarded, 6);
 }
 
 // ---------------------------------------------------------------------------

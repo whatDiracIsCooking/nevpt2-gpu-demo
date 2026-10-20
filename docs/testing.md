@@ -572,10 +572,12 @@ itself ("The SC Hessian's finite-difference cross-check", below), and
 `--sc-hessian-vector` one of `y` against the vector `H_cc u` ("The SC
 Hessian-vector product's checks", below), `--sc-hessian-kc` four of `y`
 along `kappa` against the mixed block's `H_kc^T w` ("The SC mixed Hessian
-block's checks", below), and `--sc-hessian-kk-int` second differences of the
+block's checks", below), `--sc-hessian-kk-int` second differences of the
 fixed-pseudodensity pairing along `exp(s u + t v)` against the orbital
 block's integral curvature ("The orbital block's integral curvature",
-below). It
+below), and `--sc-hessian-kk` Richardson-extrapolated second
+differences of the SC total itself along the same family against the
+whole orbital block ("The orbital block's sandwich", below). It
 validates `energiesTangentDevice` (`nevpt2.energy`'s `:sc_tangent`
 partition) so that
 every later check of the reverse-mode assembly can be an exact dot-product
@@ -958,6 +960,94 @@ jet, which shares nothing with it past `B`, agrees with it at 1e-13 on
 A run takes about 1 s at CAS(4,4), 10 s at CAS(8,8) (the forward digests —
 one plain RDM build per term per pair, printed as they run — are most of
 it) and 2 s on the fitted CAS(4,4).
+
+## The orbital block's sandwich
+
+`nevpt2_sc_pseudodensity_cas44_sc_hessian_kk`,
+`nevpt2_sc_pseudodensity_cas88_sc_hessian_kk` and
+`nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk` (`gpu`; the two CAS(4,4)
+ones `small`) run `nevpt2_sc_pseudodensity --golden <case> --tiles 3
+--sc-hessian-kk`. They match `PASS: the SC orbital Hessian's sandwich I'^T
+Ehat'' I' = K3 + K4 + K5 agrees with itself by duality ... 4 pairs refused on
+their guarded empty tuples (#190)`, and the fitted one ends `(density-fitted)`
+(#158). They check `nevpt2.gradient`'s `scOrbitalSandwichDevice`, the second
+of the orbital Hessian block's two terms, and `scOrbitalHessianDevice`, the
+whole `Eddot_kk(u, v) = <Ehat', I''> + I'^T Ehat'' I'`
+([`hessian-theory.md`](hessian-theory.md), §5.1 and §5.6;
+`apps/sc_pseudodensity/hessian_kk_sandwich_check.cppm` has the checks). The
+directions are seeded (base `0x5eed0158`): two active–active, two fully
+mixed, and two each inside the core and the virtual space. The pairs are
+`active x full` and its swap, `full x full`, `active x active`, `active x
+core`, `active x virtual`, `core x virtual`, `core x core` and `virtual x
+virtual`. RTX 3080 (CUDA, `default` preset), the worst of three runs at each
+case (two at `--tiles 3`, one at `--tiles 1`), 2026-10-20:
+
+| exact check | CAS(4,4) | CAS(8,8) | CAS(4,4) DF | gate |
+|---|---|---|---|---|
+| the merge: the walk's own `Edot(u)`, `Edot(v)` (the digests' share in every tuple's `Hdot`) against `--kappa-full`'s `<k, Y>` with `hbar` | 2.1e-14 | 6.8e-15 | 2.1e-14 | 1e-7 |
+| the duality, forward K3 + K4 + K5 against the reverse pairing `<Ddot[v], X'[u]> + <Mdot_G[v], G'[u]> + Rdot[v] . Ddot[u]`, worst pair | 2.2e-16 | 7.5e-16 | 1.9e-16 | 1e-7 |
+| the swap, `(full, active)` against `(active, full)`: the sandwich / `Eddot_kk` | 1.9e-14 / 1.8e-14 | 6.9e-16 / 4.0e-15 | 3.4e-15 / 1.9e-14 | 1e-7 |
+| K3 and K4 from the exchanged finish | 6.2e-32 | 2.0e-19 | 7.4e-32 | 1e-7 |
+| the digests alone: K3's digest x digest share against `energiesHessianDevice` at `f3'[u]`, `f3'[v]`, and with the curvature's reverse digests' term against its forward one at `h2e''`, worst | 1.3e-13 | 2.8e-14 | 1.3e-13 | 1e-7 |
+| the intra-space directions' K5 half (`h1e'`'s round-off) | 4.6e-19 | 4.6e-19 | 4.6e-19 | 1e-13 |
+
+Exact in every run: along a core–core or virtual–virtual direction `h2e'`
+and the digests' tangent `f3'` are `0.0`, and so are the digests' shares of
+K3 and of K5 with that direction's Dyall block. K3's digest x digest share
+is 8.8e-2 on CAS(8,8)'s `active x full`, so that check is not a check of
+zero there; at CAS(4,4) it is 1e-16 or less, because an active direction
+that mixes N2's four π irreps leaves every tuple's first-order triple zero
+(the reason `<u, Y_aa>` vanishes there).
+
+**The guarded tuples, refused (§5.6; the temporary refusal until #190).**
+`full x full`, `core x virtual`, `core x core` and `virtual x virtual` are
+refused as Numerical on all three cases: their two directions both populate
+tuples the vanishing-norm guard skips and the integrals leave empty, whose
+second-order term K6 (or the absence of any Hessian along the pair) is not in
+K3–K5. On CAS(4,4) and its fitted twin every class with empty tuples is
+named, and on CAS(8,8) Sijrs (and, along `full x full` and `virtual x
+virtual`, Sijr and Srsi). The largest `|N^{uv}|` on an empty tuple, which
+decides: at most 4.2e-19 on every computed pair (`0.0` at CAS(4,4)), at least
+3.8e-5 on every refused one (CAS(8,8)'s `core x virtual`; most are 1e-4 to
+3.7). `kGuardedCrossTol` is 1e-12 between them. Inside a refused pair the
+tuple values run continuously through 1e-12 (Sijrs's, along two virtual
+rotations, from 3.0e-12 down to 5.3e-13 at CAS(4,4)), so the tuple counts the
+refusal prints are indicative. No guarded tuple was empty by the state on any
+case. `Eddot_kk` along `full x full` is refused as Unsupported on the
+conventional cases (#154's K2 refusal, before any device work) and as
+Numerical on the fitted one.
+
+**The ladders: the SC total, differenced.** `E(U)` at fixed CI along `U =
+exp(s u + t v)`: every stored block's axes rotated on the host, the orbital
+energies the rotated generalized Fock's diagonal, and the digests rebuilt at
+each corner's `h2e` (one plain RDM build and one `energiesDevice` per
+corner). Its second difference converges to `Eddot_kk`, and `E(U) - L(U)`,
+with `L` the fixed-pseudodensity pairing of "The orbital block's integral
+curvature", to the sandwich alone. The steps are those ladders' (`h = 2^-k`,
+`k = 4…16`). Each is verified by a run of at least three fourfold halvings of
+the raw differences' error and gated on its Richardson extrapolation `(4
+D(h/2) - D(h)) / 3`, whose best error relative to `max(|Eddot_kk|, |<u, Y>|,
+|<v, Y>|)` must be under 1e-6. The raw differences alone reach the total
+energy's round-off floor, about `eps |E| / h^2`, at 1.1e-6 to 1.5e-6 on the
+pairs with small `Eddot` (#158's first run); the extrapolation is what the
+gate reads. Worst extrapolated relative error (fewest raw halvings), `E` /
+`E - L`:
+
+| pair | CAS(4,4) | CAS(8,8) | CAS(4,4) DF |
+|---|---|---|---|
+| active x active | 2.0e-8 / 1.9e-8 (7) | 1.8e-8 / 1.7e-8 (5) | 1.7e-8 / 1.7e-8 (7) |
+| active x core | 2.1e-7 / 2.1e-7 (3) | 9.2e-8 / 9.2e-8 (5) | 2.3e-7 / 2.3e-7 (3) |
+| active x virtual | 8.1e-8 / 8.1e-8 (6) | 6.6e-8 / 6.6e-8 (4) | 1.1e-7 / 1.0e-7 (6) |
+
+The refused pairs run no ladder. A run takes about 1.5 s at CAS(4,4) (either
+flavour) and 28 s at CAS(8,8), where the ladders' 156 corner energies, each
+with its RDM build, are most of it.
+
+The pair finish's assembly, card-free, is `test/gradient_plan/`'s
+`PairTermsTests` (K3 + K4 + K5 against a mixed central difference of the
+class energy, plain and through Sijr's packing) and `GuardedCensusTests`
+(§5.6's kinds of guarded tuple, by hand); the flag's refusals are
+`test/cli/`'s `CliScPseudodensityFlagTests`.
 
 ## The empty-perturber term, offline
 
@@ -4332,6 +4422,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_sc_pseudodensity_cas44`, `nevpt2_sc_pseudodensity_cas88` | the SC gradient's pseudodensity assembly and its identities ("The SC pseudodensity identities", above) |
 | `nevpt2_sc_pseudodensity_cas44_sc_hessian_kc` | `--sc-hessian-kc`: the gradient walk carrying a mixed direction (an orbital `w` with its digests' tangent merged, a CI `u`'s tangent blocks and the mixed blocks; or the walk's tangent along `w` with three sweeps more per class), the tangent RDM build at `h2e'[w]`, the sigma calls at `h2e'[w]`, and 36 columns ("The SC mixed Hessian block's checks", above). `nevpt2_sc_pseudodensity_cas88_sc_hessian_kc` runs the same at CAS(8,8) less the columns and is **not** `small` |
 | `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk_int`, `nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk_int` | `--sc-hessian-kk-int`: the gradient walk over dotted input sets (whole-block second-order inputs, four per pair), their generators — the promotion rule at a symmetric matrix with the traced pairs restored, the composition, and on the fitted case the three-index jets over the whole `B` — the digests' transpose and a plain RDM build per term per pair, and the ladders' pairings ("The orbital block's integral curvature", above). `nevpt2_sc_pseudodensity_cas88_sc_hessian_kk_int` runs the same at CAS(8,8) and is **not** `small` |
+| `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk`, `nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk` | `--sc-hessian-kk`: the gradient walk carrying two orbital directions with their digests' tangents merged (two tangent block sets per class, the cross tables, and the pseudodensities' tangent along one of them), one plain RDM build per direction, the curvature's walks, `energiesHessianDevice` at the digests' tangents, and the ladders' corner energies, each with its RDM build ("The orbital block's sandwich", above). `nevpt2_sc_pseudodensity_cas88_sc_hessian_kk` runs the same at CAS(8,8) and is **not** `small` |
 | `nevpt2_pc_tangent_cas44`, `nevpt2_pc_tangent_cas88` | the PC tangent: a second solve per class, the tangent slab einsums and the `(m, m)` blocks' GEMMs, plus ten RDM builds and PC stages per entry ("The PC tangent against a finite difference", above) |
 | `nevpt2_pc_hessian_cas44` | the PC Hessian: the dropped eigenvectors kept from the solve, their `(d, nd)` projections and slab einsums, the three-argument RDM build and five more tangent builds ("The PC Hessian against a finite difference of the three-term tangent", above) |
 | `nevpt2_pc_hessian_vector_cas44` | the PC Hessian-vector product: the PC adjoint walk carrying a CI direction (the dropped eigenvectors, the tangent slab einsums against `T_u`, the `(d, nd)` bar accumulators and their sandwiches, a second sweep per class), per-class sigma calls, four Hessian-vector products, the three-term `y` at eight displaced states, and four `pcHessianDevice` runs for the duality ("The PC Hessian-vector product's checks", above) |
@@ -4466,7 +4557,14 @@ memcheck with the leak check. "plain" is the same entry unsanitized
 | `nevpt2_gradient_source_cas88` | 2.52 | 2.51 | 59.25 | 37.07 | — | — | — | — | 1.91 | — |
 | `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk_int` | 9.92 | — | 9.08 | 8.24 | — | — | — | — | 1.03 | — |
 | `nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk_int` | 19.10 | — | 22.25 | 17.52 | — | — | — | — | 1.97 | — |
+| `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk` | 9.83 | — | 16.09 | 13.15 | — | — | — | — | 1.49 | — |
+| `nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk` | 9.99 | — | 17.45 | 13.70 | — | — | — | — | 1.52 | — |
 | each canary | 0.36 | 0.35 | 0.75–0.86 | 0.49 | 0.53 | 0.77 | 0.37 | 0.36 | — | — |
+
+The two `*_sc_hessian_kk` rows (#158, 2026-10-20) were run clean under
+`asan`, memcheck (with the leak check) and initcheck on CUDA, each inside its
+preset's whole run, and not under ubsan, racecheck, synccheck or on HIP;
+their `—` columns mean "not measured", not "clean".
 
 The two `*_sc_hessian_kk_int` rows (#154, 2026-10-20) were run clean under
 `asan`, memcheck (with the leak check) and initcheck on CUDA, each inside its

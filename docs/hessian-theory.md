@@ -1739,6 +1739,11 @@ mode must stay available with a weaker check, and one reference kind must
 **not** inherit a refusal that the first-derivative path has for reasons that
 do not apply here.
 
+*As built* (#158), the empty-tuple K6 row is not yet in the tree: until #190
+lands K6 and the `rho_t` test, `scOrbitalSandwichDevice` refuses every
+(class, pair) with an integral-empty guarded tuple that both directions
+populate, proportional or not, as `err_numerical`.
+
 ## 10. What this settles, and what it does not
 
 **Settled.**

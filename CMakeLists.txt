@@ -861,6 +861,47 @@ if(NEVPT2_BUILD_TESTING)
     set_tests_properties(nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk_int PROPERTIES
       PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_kk_pass} .*\\(density-fitted: K2 by the three-index jets, both routes agree\\)")
   endif()
+
+  # --- the orbital block's sandwich and Eddot_kk, --sc-hessian-kk (#158) ----------
+  #
+  # nevpt2_sc_pseudodensity --sc-hessian-kk (apps/sc_pseudodensity/
+  # hessian_kk_sandwich_check.cppm; docs/hessian-theory.md, Sec. 5.1 and Sec.
+  # 5.6): the second term of the SC energy's orbital Hessian, the sandwich
+  # I'^T Ehat'' I' = K3 + K4 + K5, forward against reverse (1e-7), the
+  # per-tuple merge of the digests' share against the first-order <k, Y>, the
+  # intra-space exact zeros, the digests' curvature against the energy
+  # stage's own Hessian at the plain digest path's tangents, and
+  # Richardson-extrapolated ladders of the SC total along exp(s u + t v)
+  # against Eddot_kk = <Ehat', I''> + the sandwich (and of E - L against the
+  # sandwich alone), both held to 1e-6 relative. A pair whose two directions
+  # both populate a guarded empty perturber is refused as Numerical (the
+  # temporary refusal until #190) and the PASS line counts them; on N2 those
+  # are full x full, core x virtual, core x core and virtual x virtual. CAS(4,4)
+  # -- both flavours -- is `small`, so the sanitizer tier runs the device work;
+  # CAS(8,8)'s ladders are a plain RDM build and an energy per corner, which
+  # keeps it out (docs/testing.md, "The orbital block's sandwich").
+  set(_nevpt2_sc_hessian_kk_full_pass
+      "PASS: the SC orbital Hessian's sandwich I'\\^T Ehat'' I' = K3 \\+ K4 \\+ K5 agrees with itself by duality .* 4 pairs refused on their guarded empty tuples \\(#190\\)")
+  foreach(_case cas44 cas88 cas44_df)
+    set(_kk_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.nevpt2gold")
+    _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_${_case}_sc_hessian_kk
+                          "${_kk_gold}" --tiles 3 --sc-hessian-kk)
+    if(TEST nevpt2_sc_pseudodensity_${_case}_sc_hessian_kk)
+      set_tests_properties(nevpt2_sc_pseudodensity_${_case}_sc_hessian_kk PROPERTIES
+        PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_kk_full_pass}")
+    endif()
+    unset(_kk_gold)
+  endforeach()
+  foreach(_case cas44 cas44_df)
+    if(TEST nevpt2_sc_pseudodensity_${_case}_sc_hessian_kk)
+      set_tests_properties(nevpt2_sc_pseudodensity_${_case}_sc_hessian_kk PROPERTIES
+        LABELS "gpu;small")
+    endif()
+  endforeach()
+  if(TEST nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk)
+    set_tests_properties(nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_kk_full_pass} \\(density-fitted\\)")
+  endif()
   unset(_df_y_gold)
   unset(_df_y_side)
 

@@ -900,6 +900,225 @@ ScMixedTerms srsiMixedTerms(const ScMixedTables& t, const std::vector<double>& d
                           srsiTriangle(t.hWUDigest), diffWU);
 }
 
+// --- the orbital block's sandwich, per perturber (#158) ----------------------
+//
+// docs/hessian-theory.md, Sec. 5.1's second term, I'[u]^T Ehat'' I'[v], along
+// two ORBITAL directions u and v, per perturber k:
+//
+//   K3 = (Ndot, Hdot, Ddot)_k[u] . Hess f_k . (Ndot, Hdot, Ddot)_k[v]   the finish's curvature
+//   K4 = P_k N_k^{uv} + Q_k H_k^{uv}       both external slots, one per direction, K undotted
+//   K5 = Q_k H_k^{u,K'[v]} + Q_k H_k^{v,K'[u]}   one external slot and the Dyall block
+//
+// every Hdot carrying the digests' share (merged per tuple), and every Dyall
+// block tangent K' its own. There is no Delta^{uv} here: the orbital energies'
+// second order is <Ehat', I''>'s (the curvature's K1 / K2), not this term's.
+//
+// The shape is the mixed block's (Sec. 5.5's C1 / C2 / C3 / C4 with the CI
+// direction moved to the integrals), so the finish IS mixedTermsPacked, read
+// through each class's own packing (plainMixedTerms, sijrMixedTerms,
+// srsiMixedTerms -- `mixedFn` below), three times over remapped tables:
+//
+//   W = u, U = v: c1 = K3, c1Digest = K3's share of the digests along u,
+//                 c2 = K4, c3 = K5's (x'[u], K'[v]) half, c4 its digests' part;
+//   W = v, U = u: the same with the directions exchanged -- K3 and K4 again
+//                 (the 3x3 is symmetric, and K4's table is the same table),
+//                 K3's share of the digests along v, the (x'[v], K'[u]) half;
+//   W = u, U = v, both triples the digests' share alone: c1Digest is the
+//                 digest x digest part of K3 -- the energy's own curvature in
+//                 the digests, which the energy stage's Hessian computes too
+//                 (energiesHessianDevice at f3'[u], f3'[v]).
+//
+// c5 is the mixed Delta term, zero here (dwu = 0). Every table is the class's
+// raw tuple vector, as ScMixedTables' are.
+struct ScPairTerms {
+  double k3 = 0.0;              // the finish's curvature (the 3x3 sandwich)
+  double k3DigestU = 0.0;       // the part of k3 the digests' share of Hdot[u] carries
+  double k3DigestV = 0.0;       // ... of Hdot[v]
+  double k3DigestDigest = 0.0;  // the part both digests' shares carry (in both of those)
+  double k4 = 0.0;              // both external slots, one along u and one along v
+  double k5uv = 0.0;            // one external slot along u, the Dyall block along v
+  double k5uvDigest = 0.0;      // the part of k5uv the digests' share of K'[v] carries
+  double k5vu = 0.0;            // one external slot along v, the Dyall block along u
+  double k5vuDigest = 0.0;      // the part of k5vu the digests' share of K'[u] carries
+  double k3Swap = 0.0;          // k3 from the exchanged finish: equal by the 3x3's symmetry
+  double k4Swap = 0.0;          // k4 likewise: the same table, the same sum
+  [[nodiscard]] double total() const { return k3 + k4 + k5uv + k5vu; }
+  ScPairTerms& operator+=(const ScPairTerms& o) {
+    k3 += o.k3;
+    k3DigestU += o.k3DigestU;
+    k3DigestV += o.k3DigestV;
+    k3DigestDigest += o.k3DigestDigest;
+    k4 += o.k4;
+    k5uv += o.k5uv;
+    k5uvDigest += o.k5uvDigest;
+    k5vu += o.k5vu;
+    k5vuDigest += o.k5vuDigest;
+    k3Swap += o.k3Swap;
+    k4Swap += o.k4Swap;
+    return *this;
+  }
+};
+
+// --- the guarded tuples along the pair: #158's temporary refusal -------------
+//
+// docs/hessian-theory.md, Sec. 5.6: a tuple the vanishing-norm guard skips
+// (|N_t| <= NUMERICAL_ZERO) and whose integrals are all zero by symmetry
+// ("empty by the integrals") contributes at second order when BOTH
+// directions populate it -- K6, or no Hessian along the pair at all -- and
+// K3-K5 carry neither. Until #190 adds K6 and its proportionality test, the
+// orbital pair REFUSES every (class, pair) with such a tuple, and any guarded
+// tuple empty by the state (x_t != 0, N_t round-off against |x_t|^2), which
+// Sec. 5.6 does not derive. A SMALL guarded tuple (a real perturber under the
+// guard) is held at zero by the guard on a neighbourhood of the state and is
+// not a reason to refuse.
+//
+// The three thresholds, from the measured separations:
+//   kEmptyIntegralTol  a tuple's largest integral. Empty ones measure <=
+//                      2.7e-15 on every committed golden, small ones >= 2.6e-9
+//                      (acrolein): docs/testing.md, "The empty-perturber term,
+//                      offline" -- the same 1e-12 as Sec. 5.6's census.
+//   kGuardedCrossTol   |N^{uv}| on an empty tuple. A direction that does not
+//                      populate the tuple leaves its dot exactly zero or at
+//                      the promotion's round-off, so N^{uv} is a product with a
+//                      round-off factor. The decision is per (class, pair), on
+//                      the pair's LARGEST such |N^{uv}|; measured on the card
+//                      (docs/testing.md, "The orbital block's sandwich"):
+//                      every computed pair's is <= 4.2e-19, every refused
+//                      pair's >= 3.8e-5 -- 1e-12 sits seven decades from
+//                      each. Within a refused pair the tuple values run
+//                      continuously through it (Sijrs's from 3e-12 down to
+//                      5e-13 along two virtual rotations), so the tuple count
+//                      a refusal prints is indicative, not a measurement.
+//   kEmptyStateRel     N_t / max|x_t|^2 on a guarded tuple that is not empty
+//                      by the integrals: acrolein's small tuples measure
+//                      >= 1e-1 (N_t 4.5e-16 against |x_t| 5.8e-8), and a
+//                      perturber zero by the state would be round-off, ~1e-16.
+inline constexpr double kEmptyIntegralTol = 1e-12;
+inline constexpr double kGuardedCrossTol = 1e-12;
+inline constexpr double kEmptyStateRel = 1e-10;
+
+// One class's guarded tuples along one orbital pair, over raw tuples: `norm`
+// the tuple's N_t, `xMax` the largest |integral| it reads, `normUV` K4's
+// N^{uv}. Counts accumulate over slabs.
+struct ScGuardedCensus {
+  int64_t guarded = 0;       // |N_t| <= NUMERICAL_ZERO
+  int64_t empty = 0;         // ... and empty by the integrals
+  int64_t populated = 0;     // ... and |N^{uv}| > kGuardedCrossTol: refused
+  int64_t emptyByState = 0;  // guarded, not empty by the integrals, N_t round-off: refused
+  double crossMax = 0.0;     // max |N^{uv}| over the empty tuples
+  // The separation the threshold sits in: the largest |N^{uv}| on an empty
+  // tuple at or under kGuardedCrossTol, and the smallest above it.
+  double unpopulatedMax = 0.0;
+  double populatedMin = std::numeric_limits<double>::infinity();
+  [[nodiscard]] bool refused() const { return populated > 0 || emptyByState > 0; }
+  ScGuardedCensus& operator+=(const ScGuardedCensus& o) {
+    guarded += o.guarded;
+    empty += o.empty;
+    populated += o.populated;
+    emptyByState += o.emptyByState;
+    crossMax = std::max(crossMax, o.crossMax);
+    unpopulatedMax = std::max(unpopulatedMax, o.unpopulatedMax);
+    populatedMin = std::min(populatedMin, o.populatedMin);
+    return *this;
+  }
+};
+
+ScGuardedCensus guardedCensus(const Tensor& norm, const Tensor& xMax, const Tensor& normUV,
+                              std::source_location loc = std::source_location::current()) {
+  if (xMax.dims() != norm.dims() || normUV.dims() != norm.dims())
+    check(false, "guardedCensus: the three tables are not shaped alike", loc);
+  ScGuardedCensus c;
+  for (int64_t q = 0; q < norm.size(); ++q) {
+    const double n = std::fabs(norm.flat(q));
+    if (n > NUMERICAL_ZERO) continue;
+    ++c.guarded;
+    const double x = xMax.flat(q);
+    if (x <= kEmptyIntegralTol) {
+      ++c.empty;
+      const double uv = std::fabs(normUV.flat(q));
+      c.crossMax = std::max(c.crossMax, uv);
+      if (uv > kGuardedCrossTol) {
+        ++c.populated;
+        c.populatedMin = std::min(c.populatedMin, uv);
+      } else {
+        c.unpopulatedMax = std::max(c.unpopulatedMax, uv);
+      }
+    } else if (n <= kEmptyStateRel * x * x) {
+      ++c.emptyByState;
+    }
+  }
+  return c;
+}
+
+// One slab's (or, for Srsi, one class's) tables for the pair, each shaped as
+// the class's raw tuple vector.
+struct ScPairTables {
+  Tensor norm, h;                   // N, H
+  Tensor normDotU, hDotU;           // along u -- the digests' share merged into hDotU
+  Tensor hDotUDigest;               // the digests' share of hDotU alone
+  Tensor normDotV, hDotV;           // along v, likewise
+  Tensor hDotVDigest;
+  Tensor normUV, hUV;               // K4: two external slots, one per direction
+  Tensor hUBlockV, hUBlockVDigest;  // K5: x'[u] against K'[v], and against its digests' part
+  Tensor hVBlockU, hVBlockUDigest;  // K5: x'[v] against K'[u], likewise
+};
+
+// The pair's terms through the class's own mixed finish `mixedFn(tables, dw,
+// du, dwu)` (its plainMixedTerms / sijrMixedTerms / srsiMixedTerms lambda),
+// the three remappings above. `diffDotU` / `diffDotV` are the class's Delta
+// construction at deps(u) / deps(v), in perturber order.
+template <class MixedFn>
+ScPairTerms pairTermsVia(MixedFn&& mixedFn, const ScPairTables& t,
+                         const std::vector<double>& diffDotU,
+                         const std::vector<double>& diffDotV) {
+  const std::vector<double> zero(diffDotU.size(), 0.0);
+  const Tensor zeroT(t.norm.dims());
+  ScMixedTables a;
+  a.norm = t.norm;
+  a.h = t.h;
+  a.normDotW = t.normDotU;
+  a.hDotW = t.hDotU;
+  a.hDotWDigest = t.hDotUDigest;
+  a.normDotU = t.normDotV;
+  a.hDotU = t.hDotV;
+  a.normWU = t.normUV;
+  a.hWU = t.hUV;
+  a.hWUInt = t.hUBlockV;
+  a.hWUDigest = t.hUBlockVDigest;
+  const ScMixedTerms uv = mixedFn(a, diffDotU, diffDotV, zero);
+
+  ScMixedTables b = a;
+  b.normDotW = t.normDotV;
+  b.hDotW = t.hDotV;
+  b.hDotWDigest = t.hDotVDigest;
+  b.normDotU = t.normDotU;
+  b.hDotU = t.hDotU;
+  b.hWUInt = t.hVBlockU;
+  b.hWUDigest = t.hVBlockUDigest;
+  const ScMixedTerms vu = mixedFn(b, diffDotV, diffDotU, zero);
+
+  // Both triples the digests' share alone: c1Digest reads (0, hDotWDigest, 0)
+  // against (normDotU, hDotU, du), so hand it (0, hDotVDigest, 0) there.
+  ScMixedTables c = a;
+  c.normDotU = zeroT;
+  c.hDotU = t.hDotVDigest;
+  const ScMixedTerms dd = mixedFn(c, zero, zero, zero);
+
+  ScPairTerms p;
+  p.k3 = uv.c1;
+  p.k3DigestU = uv.c1Digest;
+  p.k4 = uv.c2;
+  p.k5uv = uv.c3;
+  p.k5uvDigest = uv.c4;
+  p.k3Swap = vu.c1;
+  p.k3DigestV = vu.c1Digest;
+  p.k4Swap = vu.c2;
+  p.k5vu = vu.c3;
+  p.k5vuDigest = vu.c4;
+  p.k3DigestDigest = dd.c1Digest;
+  return p;
+}
+
 
 // --- the CI source term's host half (Park Eq. 48) ----------------------------
 //

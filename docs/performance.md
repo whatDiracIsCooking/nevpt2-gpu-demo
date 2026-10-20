@@ -650,6 +650,27 @@ was 4.9 MB (CAS(4,4)), 72.6 MB (CAS(8,8), the RDM build's own figure) and
 7.3 MB (CAS(4,4) density-fitted), on the RTX 3080 (CUDA, `default` preset),
 2026-10-20.
 
+**`--sc-hessian-kk` (#158): floor 1 on every case it runs.** Its RDM work is
+the plain build only — once for the state, once per direction of every pair
+for the digests' tangent, the curvature's builds at `h2e''`, and one per
+ladder corner at the displaced `h2e` — plus #89's transpose, so its floors
+are the plain build's. Measured: `nevpt2_sc_pseudodensity --golden <case>
+--tiles T --sc-hessian-kk` passes at `T = 1`, the lowest count there is, and
+at the ctest entries' `T = 3`, on the three cases that carry a sidecar it
+reads (RTX 3080, CUDA, `default` preset, 656 MiB of the card held by other
+processes, one run each, 2026-10-20):
+
+| case | `--tiles 1`: wall, pool used | `--tiles 3`: wall, pool used |
+|---|---:|---:|
+| N2 CAS(4,4) | 1.5 s, 4.9 MB | 1.4 s, 4.9 MB |
+| N2 CAS(8,8) | 28.3 s, 186.4 MB | 28.6 s, 81.2 MB |
+| N2 CAS(4,4) DF | 1.5 s, 7.3 MB | 1.5 s, 7.3 MB |
+
+Beside the build it holds per pair two tangent block sets per class, the
+cross tables and, reverse, one slab's pseudodensity tangents; none of it
+scales with `--tiles`. The CAS(8,8) wall is the ladders' 156 corner energies,
+each with its RDM build.
+
 **The digests' transpose (#89) has the plain build's per-tile working set.**
 `buildDigestAdjointDevice` (`nevpt2.rdm_build`'s `:adjoint` partition) holds
 the plain build's `R` and `L2` per tile and one `n^2`-by-width `Wbar` in

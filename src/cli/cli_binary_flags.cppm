@@ -65,6 +65,9 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   integral curvature <Ehat', I''> reads the sidecar and the
 //                   orbital directions this binary owns, and its ladder
 //                   displaces the stored blocks as --kappa-full does.
+//   --sc-hessian-kk nevpt2_sc_pseudodensity alone (#158): the orbital block's
+//                   sandwich and the whole Eddot_kk, for --sc-hessian-kk-int's
+//                   reasons, its ladders displacing as that flag's do.
 //   each binary's own flags: that binary alone. --dump-source-terms is
 //                   nevpt2_sc_pseudodensity's because Y_xy needs the gradient
 //                   sidecar's full-MO-range arrays; nevpt2_demo computes y_I
@@ -112,6 +115,7 @@ constexpr std::array kFlagTable{
     FlagSpec{"--kappa-full", "", kScPd},
     FlagSpec{"--sc-hessian-kc", "", kScPd},
     FlagSpec{"--sc-hessian-kk-int", "", kScPd},
+    FlagSpec{"--sc-hessian-kk", "", kScPd},
     FlagSpec{"--gradgold", "path", kDemo | kScPd},
     FlagSpec{"--dump-source-terms", "path", kScPd},
     FlagSpec{"--source-oracle", "path", kScPd},
@@ -171,6 +175,8 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
     opt.scHessianKc = true;
   } else if (a == "--sc-hessian-kk-int") {
     opt.scHessianKkInt = true;
+  } else if (a == "--sc-hessian-kk") {
+    opt.scHessianKk = true;
   } else if (a == "--gradgold") {
     opt.gradgoldPath = std::string(args[++i]);
   } else if (a == "--dump-source-terms") {
@@ -330,6 +336,18 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
         return err_config(
             "--sc-hessian-kk-int differentiates the strongly-contracted energy twice; PC's "
             "orbital Hessian has no path");
+      // --sc-hessian-kk (#158) likewise: one job per run, SC only.
+      if (opt.scHessianKk && (opt.kappaAct || opt.kappaFull || opt.scHessianKc ||
+                              opt.scHessianKkInt || !opt.dumpSourceTermsPath.empty() ||
+                              !opt.sourceOraclePath.empty()))
+        return err_config(
+            "--sc-hessian-kk checks the orbital Hessian block; --kappa-act, --kappa-full, "
+            "--sc-hessian-kc, --sc-hessian-kk-int, --dump-source-terms and --source-oracle are "
+            "jobs of their own -- run one at a time");
+      if (c.pc && opt.scHessianKk)
+        return err_config(
+            "--sc-hessian-kk differentiates the strongly-contracted energy twice; PC's orbital "
+            "Hessian has no path");
       // --pc picks PC-NEVPT2's source terms (#74): only the two jobs that
       // assemble them take it.
       if (c.pc && opt.dumpSourceTermsPath.empty() && opt.sourceOraclePath.empty())
@@ -337,11 +355,12 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
             "--pc makes --dump-source-terms and --source-oracle PC-NEVPT2's; the identities, "
             "--kappa-act and --kappa-full are the SC energy's and have no --pc path");
       if (!opt.gradgoldPath.empty() && !opt.kappaFull && !opt.scHessianKc &&
-          !opt.scHessianKkInt && opt.dumpSourceTermsPath.empty() &&
+          !opt.scHessianKkInt && !opt.scHessianKk && opt.dumpSourceTermsPath.empty() &&
           opt.sourceOraclePath.empty())
         return err_config(
             "--gradgold is the sidecar --kappa-full, --sc-hessian-kc, --sc-hessian-kk-int, "
-            "--dump-source-terms and --source-oracle read; it does nothing on its own");
+            "--sc-hessian-kk, --dump-source-terms and --source-oracle read; it does nothing on "
+            "its own");
       // --sc-hessian-kc runs the tangent RDM build (its forward orientation)
       // and the digests' tangent: exact digests only, as every tangent path.
       if (opt.scHessianKc && (c.rdm.cublas || c.rdm.ozaki || c.rdm.fusedDigest))
@@ -355,6 +374,13 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
             "--sc-hessian-kk-int builds the digests' tangent at the second-order integrals, "
             "which is the emitted digest or --blas-digest; not --cublas, --ozaki or "
             "--fused-digest");
+      // --sc-hessian-kk builds every direction's digests' tangent, the
+      // curvature's at h2e'' and their transpose: exact digests only.
+      if (opt.scHessianKk && (c.rdm.cublas || c.rdm.ozaki || c.rdm.fusedDigest))
+        return err_config(
+            "--sc-hessian-kk builds the digests' tangents along each direction and at the "
+            "second-order integrals, which is the emitted digest or --blas-digest; not "
+            "--cublas, --ozaki or --fused-digest");
       // --kappa-full and --dump-source-terms build the f3ac/f3ca digests'
       // tangent along a rotation (#88) -- the RDM build rerun at the dotted
       // integrals -- and a tangent is only ever formed from an exact digest,

@@ -245,6 +245,23 @@ struct ScMixedWalk {
   const Tensor* epsVirtWU = nullptr;
   // reverse
   std::vector<ScActiveAccum> dActive;  // Mdot_G along w
+  // THE ORBITAL PAIR (#158; docs/hessian-theory.md, Sec. 5.1's second term):
+  // the second direction is a second ORBITAL one, v = rot.dirs[1], and u is
+  // rot.dirs[0] (`w` above). Every term x . G . x then has, at second order in
+  // (u, v), the finish's curvature between the two first-order triples (K3),
+  // both external slots dotted, one per direction (K4), and one external slot
+  // against the Dyall block's tangent along the other direction (K5) -- the
+  // Dyall blocks have no second derivative in the integrals, and their
+  // tangents at I'' are the curvature's (scOrbitalCurvatureDevice), not this.
+  // FORWARD (pairForward) finishes those per perturber (ScPairTerms) into
+  // acc.pair; REVERSE (pairReverse) differentiates the pseudodensities along
+  // v -- D's and M_G's tangents, and R's -- and pairs them with u's dotted
+  // inputs into acc.pairReverse: <Ddot[v], X'[u]> + <Mdot_G[v], G'[u]> +
+  // Rdot[v] . Ddot[u], the same number by duality. `vDigest` is the digests'
+  // share of G'[v] alone, as `wDigest` is of G'[u].
+  bool pairForward = false;
+  bool pairReverse = false;
+  std::vector<ScGDot> vDigest;
 };
 
 // The SECOND-ORDER cross terms of a term list: every term with one EXTERNAL
@@ -309,6 +326,146 @@ void accumActiveDerivativesAlong(const std::vector<ScTerm>& terms, const DeviceT
   }
 }
 
+// --- the orbital pair (#158) ----------------------------------------------------
+
+// K4's per-tuple table: every term with one EXTERNAL operand replaced by its
+// tangent along u (`blockDotsU`) and ANOTHER external operand by its tangent
+// along v (`blockDotsV`), the active block undotted -- summed over ordered
+// slot pairs, so a term x . G . x carries both x'[u] . G . x'[v] and
+// x'[v] . G . x'[u], which is the product rule's st coefficient.
+void evalTermsCross(const std::vector<ScTerm>& terms,
+                    const std::vector<const DeviceTensor*>& blockDotsU,
+                    const std::vector<const DeviceTensor*>& blockDotsV, const DeviceTensor& out,
+                    wwrStream_t stream) {
+  for (const ScTerm& term : terms) {
+    for (std::size_t k = 0; k < term.ops.size(); ++k) {
+      if (term.ops[k].block == kScActive) continue;
+      const DeviceTensor* dotU = blockDotsU[static_cast<std::size_t>(term.ops[k].block)];
+      if (dotU == nullptr) continue;
+      for (std::size_t j = 0; j < term.ops.size(); ++j) {
+        if (j == k || term.ops[j].block == kScActive) continue;
+        const DeviceTensor* dotV = blockDotsV[static_cast<std::size_t>(term.ops[j].block)];
+        if (dotV == nullptr) continue;
+        std::vector<const DeviceTensor*> ops;
+        ops.reserve(term.ops.size());
+        for (std::size_t i = 0; i < term.ops.size(); ++i)
+          ops.push_back(i == k ? dotU : (i == j ? dotV : term.ops[i].t));
+        deviceEinsumAccum(term.subs, ops, out, term.coef, stream);
+      }
+    }
+  }
+}
+
+// The pseudodensities' tangent along v at FIXED multipliers: the derivative
+// of every term with respect to each operand k -- external into dBlocks[its
+// block], active into its accumulator -- with ANOTHER operand j replaced by
+// its tangent along v (an external one from `blockDotsV`, the active block
+// from `gDotsV`), weighted by `mult`. The other half of Ddot / Mdot, the
+// multipliers' own tangent against the plain derivative, is accumDerivatives
+// at Pdot / Qdot. accumActiveDerivativesAlong is this restricted to an active
+// k (the CI side needs no D).
+void accumDerivativesAlongAll(const std::vector<ScTerm>& terms, const DeviceTensor& mult,
+                              const std::vector<const DeviceTensor*>& blockDotsV,
+                              const std::vector<ScGDot>& gDotsV,
+                              std::vector<DeviceTensor>& dBlocks,
+                              std::vector<ScActiveAccum>& dActive, const DeviceResources& res) {
+  const wwrStream_t stream = res.stream();
+  for (const ScTerm& term : terms) {
+    for (std::size_t k = 0; k < term.ops.size(); ++k) {
+      const std::string subs = derivativeSubscripts(term.subs, static_cast<int>(k));
+      for (std::size_t j = 0; j < term.ops.size(); ++j) {
+        if (j == k) continue;
+        const ScOperand& oj = term.ops[j];
+        const DeviceTensor* dot = oj.block == kScActive
+                                      ? gDotOf(gDotsV, oj.t)
+                                      : blockDotsV[static_cast<std::size_t>(oj.block)];
+        if (dot == nullptr) continue;
+        std::vector<const DeviceTensor*> ops;
+        ops.reserve(term.ops.size());
+        for (std::size_t i = 0; i < term.ops.size(); ++i)
+          if (i != k) ops.push_back(i == j ? dot : term.ops[i].t);
+        ops.push_back(&mult);
+        const DeviceTensor& out =
+            term.ops[k].block == kScActive
+                ? activeAccumFor(dActive, term.ops[k].t, res)
+                : dBlocks[static_cast<std::size_t>(term.ops[k].block)];
+        deviceEinsumAccum(subs, ops, out, term.coef, stream);
+      }
+    }
+  }
+}
+
+// sum_G <M_G, G'>: accumulators against a direction's tangent blocks, keyed by
+// the base block (an accumulator with no tangent -- an RDM-only metric -- does
+// not move along the direction and pairs with nothing).
+double pairActiveAccums(const std::vector<ScActiveAccum>& accums, const std::vector<ScGDot>& gDots,
+                        const DeviceResources& res) {
+  double sum = 0.0;
+  for (const ScActiveAccum& a : accums)
+    if (const DeviceTensor* dot = gDotOf(gDots, a.g); dot != nullptr)
+      sum += dotTensors(a.d, *dot, res);
+  return sum;
+}
+
+// The largest |integral| each tuple reads, on the host (#158's census of the
+// guarded tuples, docs/hessian-theory.md Sec. 5.6): over every EXTERNAL
+// operand of every term in `lists`, each element is scattered to the tuple
+// its own labels name -- the term's output labels, every one of which an
+// external operand carries (an operand missing one is our bug). Read back
+// once per operand; the walk runs one slab per block on the cases that ask.
+Tensor tupleIntegralMax(const std::vector<const std::vector<ScTerm>*>& lists,
+                        const std::vector<int64_t>& tupleDims, wwrStream_t stream,
+                        std::source_location loc = std::source_location::current()) {
+  Tensor out(tupleDims);
+  std::vector<std::pair<const DeviceTensor*, Tensor>> seen;
+  for (const std::vector<ScTerm>* terms : lists)
+    for (const ScTerm& term : *terms) {
+      const std::size_t arrow = term.subs.find("->");
+      const std::string outLabels = term.subs.substr(arrow + 2);
+      std::vector<std::string> in;
+      std::size_t start = 0;
+      for (std::size_t p = 0; p <= arrow; ++p)
+        if (p == arrow || term.subs[p] == ',') {
+          in.push_back(term.subs.substr(start, p - start));
+          start = p + 1;
+        }
+      for (std::size_t k = 0; k < term.ops.size(); ++k) {
+        if (term.ops[k].block == kScActive) continue;
+        const DeviceTensor* dev = term.ops[k].t;
+        const Tensor* host = nullptr;
+        for (const auto& [d, t] : seen)
+          if (d == dev) host = &t;
+        if (host == nullptr) {
+          seen.emplace_back(dev, downloadTensor(*dev, stream));
+          host = &seen.back().second;
+        }
+        const std::string& lab = in[k];
+        std::vector<std::size_t> where(outLabels.size());
+        for (std::size_t o = 0; o < outLabels.size(); ++o) {
+          where[o] = lab.find(outLabels[o]);
+          if (where[o] == std::string::npos)
+            check(false, std::format("tupleIntegralMax: operand '{}' of '{}' lacks a tuple label",
+                                     lab, term.subs),
+                  loc);
+        }
+        const std::vector<int64_t> dims = host->dims();
+        std::vector<int64_t> idx(dims.size(), 0);
+        for (int64_t e = 0; e < host->size(); ++e) {
+          int64_t r = e;
+          for (std::size_t a = dims.size(); a-- > 0;) {
+            idx[a] = r % dims[a];
+            r /= dims[a];
+          }
+          int64_t flat = 0;
+          for (std::size_t o = 0; o < outLabels.size(); ++o)
+            flat = flat * tupleDims[o] + idx[where[o]];
+          out.flatRef(flat) = std::max(out.flat(flat), std::fabs(host->flat(e)));
+        }
+      }
+    }
+  return out;
+}
+
 // One per-tuple table of a term list's tangent, on the host: evalTermsTangent
 // into a fresh zero vector of the tuple shape, read back (downloadTensor
 // synchronizes the stream the einsums were issued on).
@@ -328,6 +485,16 @@ Tensor mixedTable(const std::vector<ScTerm>& terms,
                   const DeviceResources& res) {
   const DeviceTensor out = DeviceTensor::zeros(tupleDims, res);
   evalTermsMixed(terms, blockDotsW, gDotsU, out, res.stream());
+  return downloadTensor(out, res.stream());
+}
+
+// The same for evalTermsCross (K4).
+Tensor crossTable(const std::vector<ScTerm>& terms,
+                  const std::vector<const DeviceTensor*>& blockDotsU,
+                  const std::vector<const DeviceTensor*>& blockDotsV,
+                  const std::vector<int64_t>& tupleDims, const DeviceResources& res) {
+  const DeviceTensor out = DeviceTensor::zeros(tupleDims, res);
+  evalTermsCross(terms, blockDotsU, blockDotsV, out, res.stream());
   return downloadTensor(out, res.stream());
 }
 
@@ -572,8 +739,11 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
 
   // --- the mixed direction (#184) -------------------------------------------
   if (mix != nullptr) {
-    check(rot.size() == 1 && rot.dirs[0].tangent,
-          "assembleSlab: the mixed direction is rot.dirs[0], with its tangent blocks");
+    const bool pair = mix->pairForward || mix->pairReverse;
+    check(rot.size() == (pair ? 2u : 1u) && rot.dirs[0].tangent &&
+              (!pair || (rot.dirs[1].tangent && mix->epsKappa)),
+          "assembleSlab: the mixed direction is rot.dirs[0] (and the orbital pair's second "
+          "rot.dirs[1]), with its tangent blocks");
     const ScRotationDir& w = rot.dirs[0];
     const ScSlabDots dots = slabDots(blocks, kinds, w, rot.gen, res);
     const std::vector<const DeviceTensor*> none(blocks.size(), nullptr);
@@ -611,6 +781,59 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
       accumActiveDerivativesAlong(normTerms, mp, dots.ptr, mix->dActive, res);
       accumActiveDerivativesAlong(hTerms, mq, dots.ptr, mix->dActive, res);
       if (mix->epsCi) deltaAdjointInto(deltaOf, t.r, acc.dEdCoreDot, acc.dEdVirtDot);
+    }
+    // --- the orbital pair (#158): v = rot.dirs[1] beside u = w ---------------
+    if (pair) {
+      const ScRotationDir& v = rot.dirs[1];
+      const ScSlabDots dotsV = slabDots(blocks, kinds, v, rot.gen, res);
+      ScPairTables pt;
+      pt.norm = hostNorm;
+      pt.h = hostH;
+      pt.normDotU = tab.normDotW;
+      pt.hDotU = tab.hDotW;
+      pt.hDotUDigest = tab.hDotWDigest;
+      pt.normDotV = tangentTable(normTerms, dotsV.ptr, gDots[1], tupleDims, res);
+      pt.hDotV = tangentTable(hTerms, dotsV.ptr, gDots[1], tupleDims, res);
+      const std::vector<double> diffDotV = deltaOf(v.epsCoreDot, v.epsVirtDot);
+      acc.pairEdotV += dotHost(m.p.data(), pt.normDotV.data()) +
+                       dotHost(m.q.data(), pt.hDotV.data()) + dotHost(m.r, diffDotV);
+      if (mix->pairForward) {
+        pt.hDotVDigest = tangentTable(hTerms, none, mix->vDigest, tupleDims, res);
+        pt.normUV = crossTable(normTerms, dots.ptr, dotsV.ptr, tupleDims, res);
+        pt.hUV = crossTable(hTerms, dots.ptr, dotsV.ptr, tupleDims, res);
+        // K5 is the H side's alone: no metric moves with an orbital direction
+        // (an RDM-only block has no tangent in gDots, so the norm side's
+        // evalTermsMixed would issue nothing).
+        pt.hUBlockV = mixedTable(hTerms, dots.ptr, gDots[1], tupleDims, res);
+        pt.hUBlockVDigest = mixedTable(hTerms, dots.ptr, mix->vDigest, tupleDims, res);
+        pt.hVBlockU = mixedTable(hTerms, dotsV.ptr, gDots[0], tupleDims, res);
+        pt.hVBlockUDigest = mixedTable(hTerms, dotsV.ptr, mix->wDigest, tupleDims, res);
+        acc.pair += pairTermsVia(mixedFn, pt, diffDotW, diffDotV);
+        acc.guarded += guardedCensus(
+            hostNorm, tupleIntegralMax({&normTerms, &hTerms}, tupleDims, stream), pt.normUV);
+      }
+      if (mix->pairReverse) {
+        // The pseudodensities' tangent along v, this slab's share: the
+        // multipliers' tangents (the 3x3 against v's triple) against the plain
+        // derivative, plus the multipliers against every term with one OTHER
+        // operand dotted along v -- then paired with u's dotted inputs. Per
+        // slab, since the pairing is linear in the accumulators: the active
+        // ones are this slab's share of Mdot_G and are freed with it.
+        const ScSlabMultiplierTangents t =
+            multiplierDotFn(hostNorm, hostH, pt.normDotV, pt.hDotV, diffDotV);
+        const DeviceTensor pDot = uploadTensor(t.p, res);
+        const DeviceTensor qDot = uploadTensor(t.q, res);
+        std::vector<DeviceTensor> dDot;
+        dDot.reserve(blocks.size());
+        for (const DeviceTensor* b : blocks) dDot.push_back(DeviceTensor::zeros(b->dims, res));
+        std::vector<ScActiveAccum> mDot;
+        accumDerivatives(normTerms, pDot, dDot, mDot, res);
+        accumDerivatives(hTerms, qDot, dDot, mDot, res);
+        accumDerivativesAlongAll(normTerms, mp, dotsV.ptr, gDots[1], dDot, mDot, res);
+        accumDerivativesAlongAll(hTerms, mq, dotsV.ptr, gDots[1], dDot, mDot, res);
+        acc.pairReverse += pairSlabDots(dots, dDot, res) + pairActiveAccums(mDot, gDots[0], res) +
+                           dotHost(t.r, diffDotW);
+      }
     }
   }
 

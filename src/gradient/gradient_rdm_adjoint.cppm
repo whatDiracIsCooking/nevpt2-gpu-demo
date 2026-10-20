@@ -125,6 +125,14 @@ struct ScMixedDirection {
   // reverse
   ScRdmAdjoint* adjDot = nullptr;
   ScRdmAdjoint* adjFree = nullptr;
+  // THE ORBITAL PAIR (#158): the second direction is not a CI one but a
+  // second ORBITAL direction v = rot.dirs[1], beside u = rot.dirs[0] -- the
+  // orbital block's sandwich K3-K5 (:terms' ScMixedWalk says what each mode
+  // forms). Both directions carry their tangent blocks with the digests'
+  // share merged, and the orbital energies respond to kappa (`epsKappa`).
+  // `forward` / `reverse` stay false: nothing CI-side runs.
+  bool pairForward = false;
+  bool pairReverse = false;
 };
 
 // A class's walk state for `d`, its flags and borrowed vectors set; the class
@@ -139,6 +147,8 @@ ScMixedWalk mixedWalkOf(const ScMixedDirection& d) {
   w.epsVirtU = &d.epsVirtU;
   w.epsCoreWU = &d.epsCoreWU;
   w.epsVirtWU = &d.epsVirtWU;
+  w.pairForward = d.pairForward;
+  w.pairReverse = d.pairReverse;
   return w;
 }
 

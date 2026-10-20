@@ -169,6 +169,18 @@ struct ScClassGradient {
   double mixedEdotU = 0.0;
   std::vector<double> dEdCoreDot{};
   std::vector<double> dEdVirtDot{};
+
+  // --- the orbital block's sandwich along two orbital directions (#158) ---
+  // Forward (scOrbitalSandwichDevice): this class's K3-K5 along (u, v), in
+  // their pieces. Reverse: the pseudodensities' tangent along v paired with
+  // u's dotted inputs -- the same number by duality. `mixedEdotW` above is
+  // the walk's own Edot(u) there, and `pairEdotV` its Edot(v), the digests'
+  // share merged in both. Zero when the walk carried no orbital pair.
+  ScPairTerms pair{};
+  double pairReverse = 0.0;
+  double pairEdotV = 0.0;
+  // The guarded tuples along the pair (#158's temporary refusal; Sec. 5.6).
+  ScGuardedCensus guarded{};
 };
 
 struct ScGradientResult {
@@ -1057,9 +1069,11 @@ Result<ScMixedHessianVectorResult> scMixedHessianVectorDevice(const ScMixedHessi
 // pairing at W and, with K2's minus sign, at v u), and their sum must be zero
 // to round-off while neither is.
 //
-// For #158 (K3-K5, the finish's and the energy's own curvature in the
-// integrals): Eddot_kk(u, v) = ScOrbitalCurvatureResult::value() + those
-// terms. This call owns the I'' half and nothing else.
+// The other half, K3-K5 (the finish's and the energy's own curvature in the
+// integrals), is scOrbitalSandwichDevice below (#158), and
+// scOrbitalHessianDevice assembles Eddot_kk(u, v) =
+// ScOrbitalCurvatureResult::value() + those terms. This call owns the I''
+// half and nothing else.
 enum class ScCurvatureRoute {
   Auto,        // K1: Sidecar. K2: ThreeIndex on a fitted case, else Sidecar, else refused
   Sidecar,     // K1: the promotion rule at W. K2: the composition (one of u, v active-active)
@@ -1167,6 +1181,138 @@ Result<double> scRestoredTracePairingDevice(const NevptIntegralsDevice& ints,
                                             const GeneralIntegralsDevice& gen,
                                             const RdmTensors& rdm, const Tensor& m,
                                             const DeviceResources& res);
+
+// --- the orbital block's sandwich, I'^T Ehat'' I' (#158) ---------------------
+//
+// docs/hessian-theory.md, Sec. 5.1's SECOND term, the energy's own curvature in
+// its inputs, along two orbital directions u and v (ordinary antisymmetric
+// (n_mo, n_mo) kappas):
+//
+//   I'[u]^T Ehat'' I'[v] = K3 + K4 + K5,
+//
+//   K3  the finish's curvature: per perturber, (Ndot, Hdot, Ddot)[u] . Hess f .
+//       (Ndot, Hdot, Ddot)[v] -- Sec. 2's 3x3 between the two first-order
+//       triples, every Hdot carrying the digests' share MERGED PER TUPLE
+//       (ScRotationDir::f3acDot, #184), since the sandwich is nonlinear in it;
+//   K4  both external slots, one per direction: P N^{uv} + Q H^{uv}, the
+//       Dyall block undotted;
+//   K5  one external slot along one direction against the Dyall block's
+//       tangent along the other -- Q H with x'[u] and K'[v], plus u <-> v --
+//       K' carrying the digests' own tangent f3' (the RDM build at h2e').
+//
+// There is no sixth piece (Sec. 5.1): N_t reads no active integral, the Dyall
+// blocks are linear in (h1e, h2e, f3) and f3 in h2e (Sec. 5.2 -- no
+// second-order digest kernel), and Delta_t is linear in the orbital energies.
+// Every input's own second derivative is the first term's,
+// scOrbitalCurvatureDevice, so
+//
+//   Eddot_kk(u, v) = ScOrbitalCurvatureResult::value() + this term's total
+//
+// along U = exp(s u + t v) (scOrbitalHessianDevice below assembles it).
+//
+// BOTH MODES, and their duality is the gate. FORWARD runs one slab walk with
+// u and v as its two tangent directions and finishes each perturber's tables
+// (the pieces above). REVERSE differentiates the walk's pseudodensities along
+// v -- D, M_G and R, each through the 3x3's multiplier tangents and the
+// product rule at fixed multipliers -- and pairs them with u's dotted inputs:
+//
+//   <Ddot[v], X'[u]> + <Mdot_G[v], G'[u]> + Rdot[v] . Deltadot[u]  ==  K3 + K4 + K5
+//
+// to round-off, with no step size: the second-order partner of the first-order
+// duality <D, X'> + <M_G, G'> == P.Ndot + Q.Hdot. It shares the operand
+// tangents and the 3x3 with forward, and no evaluator: the derivative
+// subscripts against the product rule, as at first order.
+//
+// DATA. First-order dotted inputs only -- the sidecar's arrays, both
+// directions' digests' tangents -- so unlike K2 it is formed for ANY pair on
+// a conventional case (docs/hessian-theory.md, Sec. 5.4's verdict row
+// "H_kk, K1 and K3-K5"). The orbital energies respond to kappa (deps out of
+// the sidecar) in both modes; the CI vector is held fixed.
+//
+// Integral-direct, one slab per block, everything on res.stream() and from
+// res's pool. Per pair: one walk, and one plain RDM build per direction for
+// its digests' tangent at `opt.nTiles` -- the plain build's floors
+// (docs/performance.md, "Tile floors"). Exact digests only (`opt`; cli
+// refuses the rest). A malformed direction or a sidecar that does not fit
+// the integrals is the caller's input: an Error, before any device work.
+//
+// THE GUARDED TUPLES (docs/hessian-theory.md, Sec. 5.6; a TEMPORARY refusal
+// until #190). A tuple the vanishing-norm guard skips whose integrals are
+// zero by symmetry contributes at second order when both directions
+// populate it -- the sixth term K6, or no Hessian along the pair at all --
+// and K3-K5 carry neither. So any (class, pair) with such a tuple, or with a
+// guarded tuple empty by the state, is REFUSED as a Numerical Error naming
+// the classes and their tuple counts, never answered without the term. A
+// small guarded tuple (a real perturber under the guard) is not a reason to
+// refuse. The test runs on the walk's own K4 tables, so the refusal comes
+// after that pair's walk; the thresholds are nevpt2.gradient_plan's
+// guardedCensus.
+struct ScOrbitalSandwichRequest {
+  Tensor u;  // (n_mo, n_mo), antisymmetric
+  Tensor v;  // (n_mo, n_mo), antisymmetric
+  bool reverse = false;  // also take the reverse pairing (the duality)
+  // Also run the energy stage's own Hessian walk at the digests' tangents
+  // alone (energiesHessianDevice at dotU = f3'[u], dotV = f3'[v], every other
+  // RDM tangent and the second-order set zero): the digests' curvature,
+  // computed off the plain digest path, which must be `total.k3DigestDigest`.
+  bool digestReference = false;
+};
+
+struct ScOrbitalSandwichResult {
+  std::array<ScPairTerms, 8> classes{};  // CLASSES order
+  ScPairTerms total{};
+  double forward = 0.0;  // total.total(): K3 + K4 + K5
+  // The reverse pairing, per class and summed (when asked for).
+  bool hasReverse = false;
+  std::array<double, 8> reverseClasses{};
+  double reverse = 0.0;
+  // The walk's own first-order pairs, P.Ndot + Q.Hdot + R.Ddot with the
+  // digests' share merged: Edot(u) and Edot(v), which must be the first-order
+  // <u, Y> / <v, Y> with the digests' term (scFullRotationDevice's adjoint
+  // with hbar) -- the free check that the merge is the first-order term.
+  std::array<double, 8> edotU{}, edotV{};
+  double edotUTotal = 0.0, edotVTotal = 0.0;
+  // Did each direction move the active integrals, and so the digests, at all:
+  // max |h2e'|, and max |f3ac'|, |f3ca'| (EXACTLY 0 along an intra-space one).
+  double h2eDotMaxU = 0.0, h2eDotMaxV = 0.0;
+  double f3DotMaxU = 0.0, f3DotMaxV = 0.0;
+  // energiesHessianDevice's Eddot at the digests' tangents alone (when asked).
+  bool hasDigestReference = false;
+  double digestReference = 0.0;
+  // The guarded tuples per class along the pair (a returned pair has none
+  // populated by both directions and none empty by the state; see below).
+  std::array<ScGuardedCensus, 8> guarded{};
+};
+
+struct ScOrbitalSandwichSetup {
+  const NevptIntegralsDevice& ints;
+  const GeneralIntegralsDevice& gen;  // the sidecar: required (every input's first order)
+  const RdmTensors& rdm;              // the state's five RDMs
+  const Tensor& ci;                   // (nstringsA, nstringsB): the digests' tangents
+  int64_t nelecA = 0;
+  int64_t nelecB = 0;
+  const RdmBuildOptions& opt;         // exact digests only, at opt.nTiles
+};
+
+Result<std::vector<ScOrbitalSandwichResult>> scOrbitalSandwichDevice(
+    const ScOrbitalSandwichSetup& setup, const std::vector<ScOrbitalSandwichRequest>& pairs,
+    const DeviceResources& res);
+
+// Eddot_kk(u, v) assembled: the curvature's two terms (with `setup.ci` the
+// digests' forward term too) and the sandwich, per pair. The curvature's
+// refusal stands -- a conventional pair with neither member active-active has
+// no K2, and is refused as Unsupported before any device work, never answered
+// without it (Sec. 9.1). `setup.ci` is required (the sandwich's digests); a
+// request's `tangent` asks for both terms' second mode.
+struct ScOrbitalHessianResult {
+  ScOrbitalCurvatureResult curvature;
+  ScOrbitalSandwichResult sandwich;
+  double value() const { return curvature.value() + sandwich.forward; }
+};
+
+Result<std::vector<ScOrbitalHessianResult>> scOrbitalHessianDevice(
+    const ScOrbitalCurvatureSetup& setup, const std::vector<ScOrbitalCurvatureRequest>& pairs,
+    const DeviceResources& res);
 
 // --- PC-NEVPT2's reverse mode (#74) -------------------------------------------
 //
