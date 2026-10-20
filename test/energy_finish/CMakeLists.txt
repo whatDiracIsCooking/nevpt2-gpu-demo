@@ -14,7 +14,10 @@
 # TANGENT's per-tuple arithmetic (pcCoefficients, pcQuadForm, tangentSingle),
 # and the PC ADJOINT's (#74: pcAdjointSingle / pcAdjointPair, the forward
 # rotation tangent pcRotationTangent*, pcDeltaTangentSingle), each against an
-# independent host energy with the full matrix inverted.
+# independent host energy with the full matrix inverted, and the PC SECOND
+# derivative's (#152: pcQuadSecond against a turning null space) and its
+# reverse in v (#155: pcAdjointSecond*, the H_cc u walk's per-tuple bars,
+# against pcQuadSecond by host-level duality).
 # Logic on hand cases, never an energy of a real state. No device, no kernel,
 # no golden: NOT REQUIRES_GPU, so these run on a box with no card visible.
 add_gtest_executable(
@@ -29,7 +32,7 @@ add_gtest_suite_tests(
          PcCoefficientsTests PcQuadFormTests TangentSingleTests PcAdjointTests
          PcRotationTangentTests PcDeltaTangentTests NormToEnergyHessianTests
          NormToEnergyMultiplierTangentTests NormToEnergyHessianSandwichTests
-         PcQuadSecondTests)
+         PcQuadSecondTests PcAdjointSecondTests)
 
 # The abort tier: normToEnergyTangent's five vectors (and the Delta and
 # multiplier tangents' four and six, the Hessian sandwich's nine) must be one class's, so differing lengths

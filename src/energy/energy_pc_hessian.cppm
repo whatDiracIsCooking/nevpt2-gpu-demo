@@ -204,10 +204,7 @@ Result<ClassHessianParts> hessianParts(const Build& build, const PcHessianBundle
       for (const double l : lifts) p.lift = std::max(p.lift, l / p.cs.sMax);
       if (!(p.lift <= PC_LIFT_TOL)) {
         p.cs.result.status = PcStatus::Refused;
-        p.cs.result.why = std::format(
-            "S's dropped modes lift along this direction pair (|P S P|, |L| / s_max = {:.1e} > "
-            "PC_LIFT_TOL {:.0e}): the energy is not twice differentiable here",
-            p.lift, PC_LIFT_TOL);
+        p.cs.result.why = pcLiftRefusalWhy(p.lift);
         return p;
       }
     }

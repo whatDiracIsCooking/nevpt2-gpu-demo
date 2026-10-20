@@ -111,6 +111,13 @@
 //                          miss); with nothing dropped it is tangentSingle's
 //                          finish; hessianPair's polarisation is the direct
 //                          pair form; pcLiftNorm on a hand case
+//   PcAdjointSecondTests   the PC Hessian-vector product's per-tuple
+//                          arithmetic (#155): pcAdjointSecondSingle / Pair's
+//                          bars paired with random v-objects are
+//                          hessianSingle / hessianPair's Eddot(u, v) and their
+//                          Edot(u), both pair layouts; with no direction, the
+//                          third term's gbar3 completes pcAdjointSingle's two
+//                          terms to the forward side's three-term Edot(v)
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
 // textual std #include before any import.
@@ -1783,6 +1790,180 @@ TEST(PcQuadSecondTests, TheLiftIsTheSchurBlockOnTheDroppedSpace) {
   EXPECT_NEAR(pcLiftNorm(1, 2, {2.0 * (1.0 + 4.0)}, Ga, Ga), 0.0, 1e-15);
   EXPECT_LT(PC_LIFT_TOL, 1.1e-2);
   EXPECT_GT(PC_LIFT_TOL, 3.4e-8);
+}
+
+// --- PcAdjointSecondTests ---------------------------------------------------------
+//
+// The reverse of pcQuadSecond in v (#155): for random rows and blocks, the
+// bars pcAdjointSecond* hands back, paired with random v-objects (y_v and
+// r_v rows, alpha_v's mK_v / nS_v, the dropped blocks G_v / H_v), are the
+// forward side's Eddot(u, v) (with no second-order set: its bilinear part)
+// -- and with no direction, the three-term Edot(v) beside pcAdjoint*'s two
+// terms. The host-level duality the device's <v, H_cc u> == Eddot(u, v)
+// rests on.
+
+struct AdjointSecondCase {
+  int64_t nt = 0, m = 3, nd = 2;
+  std::vector<double> y, x, yu, xu, yv, xv, rv, rxv, lambda, delta;
+  PcAdjointBlocks blk;
+  std::vector<double> mKv, nSv, Gv, Hv;
+};
+
+AdjointSecondCase adjointSecondCase(int64_t nt, std::uint64_t seed) {
+  std::mt19937_64 gen(seed);
+  std::uniform_real_distribution<double> u(-1.0, 1.0);
+  AdjointSecondCase c;
+  c.nt = nt;
+  const std::size_t m = 3, nd = 2, n = static_cast<std::size_t>(nt);
+  const auto fill = [&](std::size_t k) {
+    std::vector<double> v(k);
+    for (double& z : v) z = u(gen);
+    return v;
+  };
+  const auto sym = [&]() {
+    std::vector<double> v(m * m);
+    for (std::size_t k = 0; k < m; ++k)
+      for (std::size_t l = k; l < m; ++l) v[k * m + l] = v[l * m + k] = u(gen);
+    return v;
+  };
+  c.y = fill(n * m);
+  c.x = fill(n * m);
+  c.yu = fill(n * m);
+  c.xu = fill(n * m);
+  c.yv = fill(n * m);
+  c.xv = fill(n * m);
+  c.rv = fill(n * nd);
+  c.rxv = fill(n * nd);
+  for (std::size_t k = 0; k < m; ++k) c.lambda.push_back(0.5 + 0.3 * static_cast<double>(k));
+  for (std::size_t t = 0; t < n; ++t) c.delta.push_back(1.0 + 0.25 * u(gen));
+  c.blk.m = 3;
+  c.blk.nd = 2;
+  c.blk.C = sym();
+  for (std::size_t k = 0; k < m; ++k) c.blk.C[k * m + k] += 2.0;
+  c.blk.H0 = fill(nd * m);
+  c.blk.direction = true;
+  c.blk.mKu = sym();
+  c.blk.nSu = sym();
+  c.blk.Gu = fill(nd * m);
+  c.blk.Hu = fill(nd * m);
+  c.mKv = sym();
+  c.nSv = sym();
+  c.Gv = fill(nd * m);
+  c.Hv = fill(nd * m);
+  return c;
+}
+
+// The forward side's blocks for the pair (u, v), no second-order set.
+PcHessianBlocks forwardBlocks(const AdjointSecondCase& c) {
+  return {c.blk.mKu, c.blk.nSu, c.mKv, c.nSv, std::vector<double>(9, 0.0),
+          std::vector<double>(9, 0.0)};
+}
+
+PcRotationBlocks forwardRotation(const AdjointSecondCase& c) {
+  return pcRotationBlocks(c.m, c.nd, c.blk.C, c.blk.Gu, c.blk.Hu, c.Gv, c.Hv, c.blk.H0,
+                          /*second=*/true);
+}
+
+// The reverse side's per-class pairing with the v-objects.
+double blockPairing(const AdjointSecondCase& c, const PcAdjointSecond& a) {
+  return frob(a.mggDot, c.mKv) + frob(a.mggDotDelta, c.nSv) + frob(a.gbarDot, c.Gv) +
+         frob(a.hbarDot, c.Hv);
+}
+
+TEST(PcAdjointSecondTests, SingleIsTheReverseOfPcQuadSecondInV) {
+  for (const std::uint64_t seed : {0x1550u, 0x1551u}) {
+    SCOPED_TRACE(seed);
+    const AdjointSecondCase c = adjointSecondCase(3, seed);
+    const double factor = 0.5;
+    // Forward: pcQuadSecond through hessianSingle, y_uv = 0.
+    const Tensor y = rows(c.y, 3, 3), yu = rows(c.yu, 3, 3), yv = rows(c.yv, 3, 3);
+    const Tensor yuv = rows(std::vector<double>(9, 0.0), 3, 3);
+    const Tensor rv = rows(c.rv, 3, 2);
+    PcHessianSums fwd;
+    double minDen = std::numeric_limits<double>::infinity();
+    hessianSingle({&y, &yu, &yv, &yuv, &rv}, c.lambda, c.delta, forwardBlocks(c),
+                  forwardRotation(c), factor, fwd, minDen);
+    // Reverse.
+    PcAdjointSecond acc = pcAdjointSecondZeros(c.blk);
+    const PcSlabAdjointSecond bars =
+        pcAdjointSecondSingle(y, &yu, c.lambda, c.delta, factor, c.blk, acc);
+    const double rev = frob(bars.ybarDot, c.yv) + frob(bars.rbarDot, c.rv) + blockPairing(c, acc);
+    EXPECT_NEAR(rev, fwd.eddot, 1e-13 * std::max(1.0, std::fabs(fwd.eddot)));
+    EXPECT_NEAR(acc.edotU, fwd.edotU, 1e-13 * std::max(1.0, std::fabs(fwd.edotU)));
+    // The test has teeth: the rotation's share is not small here.
+    PcHessianSums bare;
+    const Tensor noRv = Tensor::fromFlat({3, 0}, {});
+    hessianSingle({&y, &yu, &yv, &yuv, &noRv}, c.lambda, c.delta, forwardBlocks(c),
+                  PcRotationBlocks{}, factor, bare, minDen);
+    EXPECT_GT(std::fabs(bare.eddot - fwd.eddot), 1e-3);
+  }
+}
+
+TEST(PcAdjointSecondTests, TheThirdTermCompletesTheTwoTermAdjoint) {
+  // With no direction: pcAdjointSingle's ybar / mgg plus gbar3, paired with
+  // (y_v, mK_v, nS_v, G_v), is the forward side's three-term Edot(v).
+  AdjointSecondCase c = adjointSecondCase(3, 0x1552u);
+  const Tensor y = rows(c.y, 3, 3), yu = rows(c.yu, 3, 3), yv = rows(c.yv, 3, 3);
+  const double factor = 1.0;
+  PcHessianSums fwd;
+  double minDen = std::numeric_limits<double>::infinity();
+  const PcRotationBlocks rot =
+      pcRotationBlocks(c.m, c.nd, c.blk.C, c.blk.Gu, c.blk.Hu, c.Gv, c.Hv, c.blk.H0, false);
+  hessianSingle({&y, &yu, &yv, nullptr, nullptr}, c.lambda, c.delta, forwardBlocks(c), rot,
+                factor, fwd, minDen);
+  std::vector<double> mgg(9, 0.0), mggD(9, 0.0);
+  const PcSlabAdjoint two = pcAdjointSingle(y, c.lambda, c.delta, factor, mgg, mggD, minDen);
+  c.blk.direction = false;
+  PcAdjointSecond acc = pcAdjointSecondZeros(c.blk);
+  const PcSlabAdjointSecond none =
+      pcAdjointSecondSingle(y, nullptr, c.lambda, c.delta, factor, c.blk, acc);
+  EXPECT_TRUE(none.ybarDot.empty());
+  const double twoTerm = frob(two.ybar, c.yv) + frob(mgg, c.mKv) + frob(mggD, c.nSv);
+  const double third = frob(acc.gbar3, c.Gv);
+  EXPECT_NEAR(twoTerm + third, fwd.edotV, 1e-13 * std::max(1.0, std::fabs(fwd.edotV)));
+  EXPECT_GT(std::fabs(third), 1e-3);
+}
+
+TEST(PcAdjointSecondTests, PairBothLayoutsAreTheReverseOfHessianPair) {
+  for (const bool twoTensor : {true, false}) {
+    SCOPED_TRACE(twoTensor ? "two tensors" : "partner map");
+    const AdjointSecondCase c = adjointSecondCase(4, twoTensor ? 0x1553u : 0x1554u);
+    // An involution with two fixed points: a tuple may be its own partner.
+    const std::vector<int64_t> partner{1, 0, 2, 3};
+    const std::vector<double> zeros(3, 0.0);
+    PcHessianSums fwd;
+    double minDen = std::numeric_limits<double>::infinity();
+    const PcHessianBlocks fb = forwardBlocks(c);
+    const PcRotationBlocks rot = forwardRotation(c);
+    const auto span3 = [](const std::vector<double>& v, int64_t t) {
+      return std::span<const double>(v.data() + t * 3, 3);
+    };
+    const auto span2 = [](const std::vector<double>& v, int64_t t) {
+      return std::span<const double>(v.data() + t * 2, 2);
+    };
+    for (int64_t t = 0; t < 4; ++t) {
+      const int64_t pt = twoTensor ? t : partner[static_cast<std::size_t>(t)];
+      const std::vector<double>& bx = twoTensor ? c.x : c.y;
+      const std::vector<double>& bxu = twoTensor ? c.xu : c.yu;
+      const std::vector<double>& bxv = twoTensor ? c.xv : c.yv;
+      const std::vector<double>& brx = twoTensor ? c.rxv : c.rv;
+      const PcHessianRow a{span3(c.y, t), span3(c.yu, t), span3(c.yv, t), zeros, span2(c.rv, t)};
+      const PcHessianRow b{span3(bx, pt), span3(bxu, pt), span3(bxv, pt), zeros, span2(brx, pt)};
+      hessianPair(a, b, c.lambda, c.delta[static_cast<std::size_t>(t)], fb, rot, true, fwd,
+                  minDen);
+    }
+    const Tensor y = rows(c.y, 4, 3), x = rows(c.x, 4, 3), yu = rows(c.yu, 4, 3),
+                 xu = rows(c.xu, 4, 3);
+    PcAdjointSecond acc = pcAdjointSecondZeros(c.blk);
+    const PcSlabAdjointSecond bars =
+        twoTensor ? pcAdjointSecondPair(y, &x, &yu, &xu, {}, c.lambda, c.delta, c.blk, acc)
+                  : pcAdjointSecondPair(y, nullptr, &yu, nullptr, partner, c.lambda, c.delta,
+                                        c.blk, acc);
+    double rev = frob(bars.ybarDot, c.yv) + frob(bars.rbarDot, c.rv) + blockPairing(c, acc);
+    if (twoTensor) rev += frob(bars.xbarDot, c.xv) + frob(bars.rxbarDot, c.rxv);
+    EXPECT_NEAR(rev, fwd.eddot, 1e-13 * std::max(1.0, std::fabs(fwd.eddot)));
+    EXPECT_NEAR(acc.edotU, fwd.edotU, 1e-13 * std::max(1.0, std::fabs(fwd.edotU)));
+  }
 }
 
 }  // namespace nevpt2::test::energy_finish

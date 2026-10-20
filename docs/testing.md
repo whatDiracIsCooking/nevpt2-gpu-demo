@@ -1397,6 +1397,54 @@ or a broken ladder fails. The measured numbers, and why there is no CAS(8,8)
 entry, are in [`pc-nevpt2.md`](pc-nevpt2.md), "The second derivative,
 Eddot(u, v)".
 
+## The PC Hessian-vector product's checks
+
+`nevpt2_pc_hessian_vector_cas44` (`gpu;small`) runs `nevpt2_pc_tangent
+--golden golden/n2_ccpvdz_cas44.nevpt2gold --tiles 3 --pc-hessian-vector` and
+matches `PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches` (#155).
+It checks `nevpt2.gradient`'s `pcCiHessianVectorDevice`, PC's `H_cc u` by
+reverse over forward ([`hessian-theory.md`](hessian-theory.md), §4.2 and
+§6.2), per class, at the golden's **fixed** orbital energies (the PASS line
+says so). `u` is `--pc-hessian`'s, and so is the first `v`.
+
+| check | against | tolerance |
+|---|---|---|
+| the walk's own three-term `Edot(u)` per class, and `<u, y>` of its own `y` | `pcHessianDevice`'s three-term `Edot(u)` | 1e-9, relative, floor 1 |
+| `<v, H_cc u>` per class and summed, three seeded `v` and the state | `pcHessianDevice`'s `Eddot(u, v)` (the entry above's), exact | 1e-9, relative, floor 1 |
+| `<v, H_cc u>` | `<u, H_cc v>`, a second reverse walk | 1e-9, relative, floor 1 |
+| Euler `H_cc c`, five classes | that class's `y`, exact for a degree-2 class | 1e-9 relative to `‖y‖` |
+| the negative control `H_cc w`, `w` a random amplitude vector | at least one class refused for its lift, none for any other reason | — |
+| the central difference of each class's **three-term** `y` along `c(h)` | for every class with a nonzero `H_cc u` and for the total: every ratio 4 ± 0.5 and a run of at least two, every displaced state's gap recorded and ≥ `PC_MIN_GAP` | — |
+| its Richardson extrapolation, per class | that class's `H_cc u` | 1e-8, relative to its norm |
+| a class with `H_cc u = 0` exactly (Sijrs; Si on this golden) | its difference must be exactly 0 too | 0 |
+| a class refused along `u` (gap, denominator, or lift: `|P S_u P|`, `L_uu`) | nothing: the entry FAILS and no vector is formed | — |
+
+The one finite difference is of the GPU's own exact `y`, never a second
+difference of the energy ("The PC CI source term's step is a first-order
+trap", below). It is the three-term `y` (`pcCiSourceThreeTermDevice`), because
+the two-term one is the gradient only at the eigenstate and the difference
+visits displaced states. It is the only check here that sees the rotation
+terms: the duality would still pass if both `H_cc u` and `pcHessianDevice`
+dropped them. So the gate is per class, and a plateau in any class fails,
+Sr's and Sir's in particular. The measured residuals, and what happens with
+either piece removed, are in [`pc-nevpt2.md`](pc-nevpt2.md), "The
+Hessian-vector product, H_cc u". The same section says why there is no
+CAS(8,8) entry.
+
+The host halves need no card. `test/energy_finish/`'s `PcAdjointSecondTests`
+hold the per-tuple bars against `pcQuadSecond` by host-level duality, both
+pair layouts included. They also check that the third term's block completes
+the two-term adjoint to the three-term `Edot`. `test/pc_tangent/`'s
+`PcHessianVectorReportTests` lock in that a refusal, a duality, symmetry or
+Euler miss, a control that answers, or a plateau in any one class fails. The
+card halves are three of `test/pc_adjoint/`'s `PcAdjointRefusalTests`. The
+first: on the refused displaced state, `H_cc u` and the three-term `y`
+refuse what the energy refuses and form no vector. The second: along a
+symmetry-breaking direction, `H_cc w` refuses exactly the classes
+`pcHessianDevice` refuses along `(w, w)`. The third: off the eigenstate the
+three-term `y` is the gradient of the three-term `Edot` and the two-term `y`
+is not.
+
 ## The density-fitted orbital source term
 
 #165 runs "The full orbital source term" above on the **density-fitted**
@@ -4156,6 +4204,7 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk_int`, `nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk_int` | `--sc-hessian-kk-int`: the gradient walk over dotted input sets (whole-block second-order inputs, four per pair), their generators — the promotion rule at a symmetric matrix with the traced pairs restored, the composition, and on the fitted case the three-index jets over the whole `B` — the digests' transpose and a plain RDM build per term per pair, and the ladders' pairings ("The orbital block's integral curvature", above). `nevpt2_sc_pseudodensity_cas88_sc_hessian_kk_int` runs the same at CAS(8,8) and is **not** `small` |
 | `nevpt2_pc_tangent_cas44`, `nevpt2_pc_tangent_cas88` | the PC tangent: a second solve per class, the tangent slab einsums and the `(m, m)` blocks' GEMMs, plus ten RDM builds and PC stages per entry ("The PC tangent against a finite difference", above) |
 | `nevpt2_pc_hessian_cas44` | the PC Hessian: the dropped eigenvectors kept from the solve, their `(d, nd)` projections and slab einsums, the three-argument RDM build and five more tangent builds ("The PC Hessian against a finite difference of the three-term tangent", above) |
+| `nevpt2_pc_hessian_vector_cas44` | the PC Hessian-vector product: the PC adjoint walk carrying a CI direction (the dropped eigenvectors, the tangent slab einsums against `T_u`, the `(d, nd)` bar accumulators and their sandwiches, a second sweep per class), per-class sigma calls, four Hessian-vector products, the three-term `y` at eight displaced states, and four `pcHessianDevice` runs for the duality ("The PC Hessian-vector product's checks", above) |
 | `nevpt2_cas44_casscf`, `nevpt2_cas44_casscf_pc`, `nevpt2_df_cas44_casscf`, `nevpt2_df_cas44_casscf_pc` | the same four paths on **CASSCF orbitals** — a `NEVPT2G2` golden whose `reference_kind` is CASSCF ("The CASSCF-orbital entries", above). Same CAS(4,4) shape, so the same cost |
 | `nevpt2_cas44_casscf_sc_tangent`, `nevpt2_sc_pseudodensity_kappa_cas44_casscf` | the two source-term canaries on **CASSCF orbitals** (`--sc-tangent`, `--kappa-act`; "The source terms on CASSCF orbitals: the wave-0 canary", above). Their CASCI twins' cost |
 | `nevpt2_gradient_source_cas44_casscf`, `nevpt2_gradient_source_pc_cas44_casscf` | the SC and PC CI source terms' duality on **CASSCF orbitals**, with the CASSCF sidecar ("The source terms on CASSCF orbitals, measured", above). Their CASCI twins' cost |

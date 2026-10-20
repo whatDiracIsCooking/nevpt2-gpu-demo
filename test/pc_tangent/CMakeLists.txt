@@ -20,4 +20,5 @@ add_gtest_executable(
 
 add_gtest_suite_tests(
   TARGET pc_tangent_tests
-  SUITES PcTangentReportTests PcTangentLadderTests PcHessianReportTests)
+  SUITES PcTangentReportTests PcTangentLadderTests PcHessianReportTests
+         PcHessianVectorReportTests)

@@ -198,6 +198,10 @@ struct Options {
   // derivative Eddot(u, v) in place of the tangent check (#152); the same
   // finite-difference steps, now of Edot.
   bool pcHessian = false;
+  // nevpt2_pc_tangent: --pc-hessian-vector, the VECTOR H_cc u by reverse
+  // over forward (#155), against --pc-hessian's Eddot by duality and a
+  // finite difference of the three-term y; the same steps, now of y.
+  bool pcHessianVector = false;
 };
 
 // Parses `args` (argv without argv[0]) for binary `b`, then finalize()s the

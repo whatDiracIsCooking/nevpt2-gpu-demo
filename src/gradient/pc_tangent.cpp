@@ -11,6 +11,9 @@ module;
 module nevpt2.pc_tangent;
 
 import std;
+// pcCiHessianVectorDevice and pcCiSourceThreeTermDevice, the Hessian-vector
+// check's subject (#155): this unit's business, so not re-exported.
+import nevpt2.gradient;
 
 namespace nevpt2 {
 
@@ -769,6 +772,427 @@ bool printPcHessianReport(const PcHessianCheck& c, double atol, double idtol, do
               "of Edot (orbital energies held fixed; smallest kept s/s_max %.1e, smallest gap "
               "%.1e; Richardson to %.0e, every ratio 4 +- %.1f, a run of %d)\n",
               ok ? "PASS" : "FAIL", minKept, minGap, atol, ratioTol, kPcMinFourfoldRun);
+  return ok;
+}
+
+// --- the Hessian-vector product, H_cc u (#155) -----------------------------------
+//
+// What is checked, and why the difference is of the THREE-term y, is at
+// PcHessianVectorCheck in pc_tangent.cppm.
+
+// The borrowed view nevpt2.gradient's entry points take.
+RdmTensors rdmTensorsOf(const PcOwnedRdms& o) {
+  return RdmTensors{o.dm1, o.dm2, o.rdm.dm3, o.rdm.f3ac, o.rdm.f3ca};
+}
+
+// a * every RDM of `o`: along the state itself the first-order set is 2 dm,
+// and so is the second-order set at (c, c) -- every RDM is quadratic in c.
+PcOwnedRdms pcScaledSet(const PcOwnedRdms& o, double a, const DeviceResources& res) {
+  PcOwnedRdms out;
+  out.dm1 = pcTangentScaled(o.dm1, a, res);
+  out.dm2 = pcTangentScaled(o.dm2, a, res);
+  out.rdm.dm3 = pcTangentScaled(o.rdm.dm3, a, res);
+  out.rdm.f3ac = pcTangentScaled(o.rdm.f3ac, a, res);
+  out.rdm.f3ca = pcTangentScaled(o.rdm.f3ca, a, res);
+  return out;
+}
+
+double pcDot(const Tensor& x, const Tensor& y) {
+  double s = 0.0;
+  for (int64_t i = 0; i < x.size(); ++i) s += x.flat(i) * y.flat(i);
+  return s;
+}
+
+double pcNorm(const Tensor& x) { return std::sqrt(pcDot(x, x)); }
+
+// ||a - b||_2.
+double pcDistance(const Tensor& a, const Tensor& b) {
+  double s = 0.0;
+  for (int64_t i = 0; i < a.size(); ++i) s += (a.flat(i) - b.flat(i)) * (a.flat(i) - b.flat(i));
+  return std::sqrt(s);
+}
+
+// One displaced state's per-class three-term y (pcCiSourceThreeTermDevice),
+// from its own host dm1/dm2 and device RDM build -- scoped, so one state's
+// buffers at a time. `minGap` as PcDisplacedEnergies'. A class refused there
+// is a Numerical Error naming the step.
+struct PcDisplacedSource {
+  std::array<Tensor, 8> yClass{};
+  double minGap = 0.0;
+};
+
+Result<PcDisplacedSource> pcThreeTermSourceAt(const RdmBuildOptions& opt,
+                                              const NevptIntegralsDevice& ints,
+                                              const HostDm12Builder& builder, const Tensor& c,
+                                              const Tensor& h2e, std::string_view what,
+                                              const SigmaVectorOptions& sigma,
+                                              const DeviceResources& res) {
+  const int64_t norb = builder.norb(), na = builder.nelecA(), nb = builder.nelecB();
+  const PcOwnedRdms base =
+      pcOwned(builder.dm12(c), buildRdmsDevice(opt, c, norb, na, nb, h2e, res), res);
+  PcCiHessianResult r = NEVPT2_TRY(
+      pcCiSourceThreeTermDevice(ints, c, na, nb, rdmTensorsOf(base), /*perClass=*/true, sigma, res));
+  if (!r.ok)
+    return err_numerical(std::format(
+        "the PC CI source term is refused at the displaced state {}: {}; no finite difference "
+        "of it can be formed there",
+        what, r.walk.refusals()));
+  PcDisplacedSource out;
+  out.yClass = std::move(r.yClass);
+  out.minGap = std::numeric_limits<double>::infinity();
+  bool anySpectrum = false;
+  for (const PcClassGradient& k : r.walk.classes)
+    if (k.result.hasSpectrum) {
+      anySpectrum = true;
+      out.minGap = std::min(out.minGap, k.result.spectrum.gap);
+    }
+  if (!anySpectrum) out.minGap = 0.0;  // "not recorded", which the report fails on
+  return out;
+}
+
+Result<PcHessianVectorCheck> pcHessianVectorCheck(const RdmBuildOptions& rdmOpt,
+                                                  const NevptIntegralsDevice& ints,
+                                                  const Tensor& ci, int64_t norb, int64_t nelecA,
+                                                  int64_t nelecB, const Tensor& h2e,
+                                                  std::span<const double> steps,
+                                                  std::uint64_t seedU,
+                                                  std::span<const std::uint64_t> seedsV,
+                                                  std::uint64_t seedControl,
+                                                  const DeviceResources& res) {
+  const auto t0 = std::chrono::steady_clock::now();
+  const HostDm12Builder builder =
+      NEVPT2_TRY(pcCheckInputs(ci, norb, nelecA, nelecB, steps, "PC Hessian-vector check"));
+  if (seedsV.empty())
+    return err_config("the PC Hessian-vector check needs at least one direction v");
+  SigmaVectorOptions sigma;
+  sigma.nTiles = rdmOpt.nTiles;
+
+  PcHessianVectorCheck out;
+  const HostDm12 host = builder.dm12(ci);
+  // u the Hessian check's own (the tangent's kind: S's dropped modes turn
+  // along it but do not lift); every v the same kind.
+  const Tensor u = pcTangentDirection(builder, ci, host.dm1, seedU);
+  std::array<Tensor, 8> huClass{};
+  {
+    // The state: its RDMs, the sets along u, H_cc u; then every check that
+    // needs the state's buffers. Scoped, so none is held through the steps.
+    const PcOwnedRdms base = pcOwned(
+        host, buildRdmsDevice(rdmOpt, ci, norb, nelecA, nelecB, h2e, res), res);
+    const PcOwnedRdms dotU = pcTangentSet(rdmOpt, builder, ci, u, h2e, res);
+    const PcOwnedRdms ddotUU = pcTangentSet(rdmOpt, builder, u, u, h2e, res);
+    std::printf("\nH_cc u: the PC adjoint's walk differentiated along u, two sigma calls per "
+                "class...\n");
+    const PcCiHessianResult hu = NEVPT2_TRY(pcCiHessianVectorDevice(
+        ints, ci, u, nelecA, nelecB, rdmTensorsOf(base), rdmTensorsOf(dotU),
+        rdmTensorsOf(ddotUU), /*perClass=*/true, sigma, res));
+    for (std::size_t k = 0; k < 8; ++k) {
+      out.result[k] = hu.walk.classes[k].result;
+      out.lift[k] = hu.walk.classes[k].lift;
+      out.walkEdot[k] = hu.walk.classes[k].ciEdot;
+    }
+    out.allDone = hu.ok;
+    // A refused class is the answer, not an error: the report prints it and
+    // fails the gate, and nothing is differenced.
+    if (!hu.ok) return out;
+    huClass = hu.huClass;
+    out.uy = pcDot(u, hu.y);
+
+    // 4. Euler: H_cc c, the first-order set along c and the (c, c) set both
+    // 2 dm.
+    const PcOwnedRdms two = pcScaledSet(base, 2.0, res);
+    std::printf("H_cc c, for Euler...\n");
+    const PcCiHessianResult hc = NEVPT2_TRY(pcCiHessianVectorDevice(
+        ints, ci, ci, nelecA, nelecB, rdmTensorsOf(base), rdmTensorsOf(two), rdmTensorsOf(two),
+        /*perClass=*/true, sigma, res));
+    for (std::size_t k = 0; k < 8; ++k) {
+      if (!hc.ok) {
+        out.euler[k] = std::numeric_limits<double>::infinity();  // refused along c: fails
+        continue;
+      }
+      const double yn = pcNorm(hu.yClass[k]);
+      const double d = pcDistance(hc.huClass[k], hu.yClass[k]);
+      out.euler[k] = yn > 0.0 ? d / yn : d;
+    }
+
+    // 2. The duality, against pcHessianDevice; 3. the symmetry, on the first v.
+    const auto dualRow = [&](std::string what, const Tensor& v, const PcRdms& dotV,
+                             const PcRdms& ddotUV, const PcRdms& ddotVV) -> Status {
+      std::printf("Eddot(u, v) for v = %s (pcHessianDevice)...\n", what.c_str());
+      const PcRdms vUU = ddotUU.view();
+      const PcHessianResult hess = NEVPT2_TRY(pcHessianDevice(
+          ints, PcHessianSets{base.view(), dotU.view(), dotV, &ddotUV, &vUU, &ddotVV}, res));
+      PcHessianVectorCheck::Dual row;
+      row.what = std::move(what);
+      for (std::size_t k = 0; k < 8; ++k) {
+        row.lhs[k] = pcDot(v, huClass[k]);
+        // A class pcHessianDevice refuses for this pair has no Eddot: NaN,
+        // which no tolerance accepts.
+        row.rhs[k] = hess.classes[k].result.status == PcStatus::Done
+                         ? hess.classes[k].eddot
+                         : std::numeric_limits<double>::quiet_NaN();
+        if (out.duals.empty()) out.edotRef[k] = hess.classes[k].edotU;
+      }
+      out.duals.push_back(std::move(row));
+      return {};
+    };
+    for (std::size_t i = 0; i < seedsV.size(); ++i) {
+      const Tensor v = pcTangentDirection(builder, ci, host.dm1, seedsV[i]);
+      RdmHessianTangents three =
+          buildRdmHessianTangentsDevice(rdmOpt, ci, u, v, norb, nelecA, nelecB, h2e, res);
+      const PcOwnedRdms dotV = pcOwned(builder.dm12Dot(ci, v), std::move(three.cv), res);
+      const PcOwnedRdms ddotUV = pcOwned(builder.dm12Dot(u, v), std::move(three.uv), res);
+      const PcOwnedRdms ddotVV = pcTangentSet(rdmOpt, builder, v, v, h2e, res);
+      NEVPT2_TRY(dualRow(std::format("seed 0x{:x}", seedsV[i]), v, dotV.view(), ddotUV.view(),
+                         ddotVV.view()));
+      if (i != 0) continue;
+      std::printf("H_cc v, for the symmetry...\n");
+      const PcCiHessianResult hv = NEVPT2_TRY(pcCiHessianVectorDevice(
+          ints, ci, v, nelecA, nelecB, rdmTensorsOf(base), rdmTensorsOf(dotV),
+          rdmTensorsOf(ddotVV), /*perClass=*/false, sigma, res));
+      out.vHu = pcDot(v, hu.hu);
+      out.uHv = hv.ok ? pcDot(u, hv.hu) : std::numeric_limits<double>::quiet_NaN();
+    }
+    // v = c: the first-order set along c is 2 dm, the (u, c) set is the
+    // tangent along u and the (c, c) set 2 dm.
+    NEVPT2_TRY(dualRow("the state itself", ci, two.view(), dotU.view(), two.view()));
+
+    // 5. The negative control.
+    std::printf("the negative control: H_cc w along a symmetry-breaking w...\n");
+    const Tensor w = pcHessianControlDirection(ci, seedControl);
+    const PcOwnedRdms dotW = pcTangentSet(rdmOpt, builder, ci, w, h2e, res);
+    const PcOwnedRdms ddotWW = pcTangentSet(rdmOpt, builder, w, w, h2e, res);
+    const PcCiHessianResult hw = NEVPT2_TRY(pcCiHessianVectorDevice(
+        ints, ci, w, nelecA, nelecB, rdmTensorsOf(base), rdmTensorsOf(dotW), rdmTensorsOf(ddotWW),
+        /*perClass=*/false, sigma, res));
+    for (std::size_t k = 0; k < 8; ++k) {
+      out.control[k] = hw.walk.classes[k].result;
+      out.controlLift[k] = hw.walk.classes[k].lift;
+    }
+  }
+
+  // 6. The finite difference of the three-term y, per class.
+  Tensor huTotal(ci.dims());
+  for (std::size_t k = 0; k < 8; ++k) {
+    out.huNorm[k] = pcNorm(huClass[k]);
+    ciSourceAddInto(huClass[k], huTotal);
+  }
+  out.huNorm[8] = pcNorm(huTotal);
+  std::array<std::array<Tensor, 9>, 2> lastFd{};  // the two finest steps' quotients
+  for (const double h : steps) {
+    std::printf("\nfinite difference of y at h=%.6g: two more states, each an RDM build and a "
+                "three-term y\n",
+                h);
+    const PcDisplacedSource plus = NEVPT2_TRY(
+        pcThreeTermSourceAt(rdmOpt, ints, builder, pcTangentStep(ci, h, u), h2e,
+                            std::format("c + {:g} u", h), sigma, res));
+    const PcDisplacedSource minus = NEVPT2_TRY(
+        pcThreeTermSourceAt(rdmOpt, ints, builder, pcTangentStep(ci, -h, u), h2e,
+                            std::format("c - {:g} u", h), sigma, res));
+    PcHessianVectorCheck::Step st;
+    st.h = h;
+    st.displacedGap = {plus.minGap, minus.minGap};
+    std::array<Tensor, 9> fd;
+    fd[8] = Tensor(ci.dims());
+    for (std::size_t k = 0; k < 8; ++k) {
+      fd[k] = Tensor(ci.dims());
+      for (int64_t i = 0; i < ci.size(); ++i)
+        fd[k].flatRef(i) = (plus.yClass[k].flat(i) - minus.yClass[k].flat(i)) / (2.0 * h);
+      st.err[k] = pcDistance(fd[k], huClass[k]);
+      ciSourceAddInto(fd[k], fd[8]);
+    }
+    st.err[8] = pcDistance(fd[8], huTotal);
+    out.steps.push_back(st);
+    lastFd[0] = std::move(lastFd[1]);
+    lastFd[1] = std::move(fd);
+  }
+  const Tensor v0 = pcTangentDirection(builder, ci, host.dm1, seedsV[0]);
+  for (std::size_t k = 0; k < 9; ++k) {
+    Tensor rich(ci.dims());
+    for (int64_t i = 0; i < ci.size(); ++i)
+      rich.flatRef(i) = (4.0 * lastFd[1][k].flat(i) - lastFd[0][k].flat(i)) / 3.0;
+    out.richardsonErr[k] = pcDistance(rich, k < 8 ? huClass[k] : huTotal);
+    if (k == 8) {
+      out.richardsonV = pcDot(v0, rich);
+      out.huV = pcDot(v0, huTotal);
+    }
+  }
+  out.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  return out;
+}
+
+bool printPcHessianVectorReport(const PcHessianVectorCheck& c, double idtol, double dualTol,
+                                double fdTol, double ratioTol) {
+  const auto within = [](double a, double b, double tol) {
+    return std::fabs(a - b) < tol * std::max(1.0, std::fabs(b));  // false on NaN
+  };
+  std::printf(
+      "\nPC-NEVPT2 Hessian-vector product H_cc u with respect to the CI vector (the integrals "
+      "and the orbital energies held fixed)\n"
+      "  walk Edot    the walk's own three-term Edot(u) from its tangent rows, against\n"
+      "               pcHessianDevice's (|d Edot|)\n"
+      "  |H_cc u|     the class's share of the vector\n"
+      "  Euler        ||H_cc c - y|| / ||y||, exact (0) only where the class is homogeneous of\n"
+      "               degree 2; Sijr / Sij print theirs in brackets, Sijrs has y = 0\n"
+      "  lift         the dropped modes' lift along (u, u) over s_max (refused above "
+      "PC_LIFT_TOL)\n");
+  std::printf("%-6s %18s %9s %14s %10s %9s %9s\n", "class", "walk Edot (Ha)", "|d Edot|",
+              "|H_cc u|", "Euler", "kept s", "lift");
+  bool ok = true;
+  int computed = 0;
+  double minKept = std::numeric_limits<double>::infinity();
+  for (int i = 0; i < 8; ++i) {
+    const std::size_t k = static_cast<std::size_t>(i);
+    const PcClassResult& r = c.result[k];
+    const char* name = CLASSES[k].c_str();
+    if (r.status != PcStatus::Done) {
+      ok = false;
+      std::printf("%-6s %18s %9s %14s %10s %9s %9.1e  (%s)\n", name,
+                  r.status == PcStatus::Refused ? "REFUSED" : "not yet", "-", "-", "-", "-",
+                  c.lift[k], r.why.empty() ? "not computed" : r.why.c_str());
+      continue;
+    }
+    ++computed;
+    if (!c.allDone) continue;
+    const double dEdot = std::fabs(c.walkEdot[k] - c.edotRef[k]);
+    ok = ok && within(c.walkEdot[k], c.edotRef[k], idtol);
+    std::string euler = std::format("[{:.2e}]", c.euler[k]);
+    if (kPcHomogeneousInCi[k]) {
+      ok = ok && c.euler[k] < idtol;
+      euler = std::format("{:.2e}", c.euler[k]);
+    }
+    const std::string kept =
+        r.hasSpectrum ? std::format("{:.1e}", r.spectrum.smallestKept) : std::string("-");
+    if (r.hasSpectrum) minKept = std::min(minKept, r.spectrum.smallestKept);
+    std::printf("%-6s %18.10f %9.2e %14.10f %10s %9s %9.1e\n", name, c.walkEdot[k], dEdot,
+                c.huNorm[k], euler.c_str(), kept.c_str(), c.lift[k]);
+  }
+  ok = ok && computed == 8 && c.allDone;
+  if (!c.allDone) {
+    std::printf("\nFAIL: the PC-NEVPT2 Hessian-vector product H_cc u was refused (above)\n");
+    return false;
+  }
+  double edotTotal = 0.0;
+  for (const double e : c.edotRef) edotTotal += e;
+  const bool uyOk = within(c.uy, edotTotal, idtol);
+  ok = ok && uyOk;
+  std::printf("\n<u, y> of the walk's own three-term y = %.12f   Edot(u) = %.12f   |delta| = "
+              "%.2e -- %s\n",
+              c.uy, edotTotal, std::fabs(c.uy - edotTotal), uyOk ? "ok" : "NO");
+
+  // The duality, per class and summed.
+  std::printf("\n<v, H_cc u> against Eddot(u, v) (pcHessianDevice), per class; relative "
+              "|delta| (floor 1)\n");
+  std::printf("%-18s", "v");
+  for (int i = 0; i < 8; ++i) std::printf(" %9s", CLASSES[static_cast<std::size_t>(i)].c_str());
+  std::printf(" %20s %20s %9s\n", "<v, H_cc u>", "Eddot(u, v)", "total");
+  double worstDual = 0.0;
+  for (const PcHessianVectorCheck::Dual& row : c.duals) {
+    std::printf("%-18s", row.what.c_str());
+    double lhs = 0.0, rhs = 0.0;
+    for (std::size_t k = 0; k < 8; ++k) {
+      const double rel = std::fabs(row.lhs[k] - row.rhs[k]) / std::max(1.0, std::fabs(row.rhs[k]));
+      ok = ok && within(row.lhs[k], row.rhs[k], dualTol);
+      worstDual = std::max(worstDual, std::isnan(rel) ? std::numeric_limits<double>::infinity()
+                                                      : rel);
+      std::printf(" %9.1e", rel);
+      lhs += row.lhs[k];
+      rhs += row.rhs[k];
+    }
+    const double rel = std::fabs(lhs - rhs) / std::max(1.0, std::fabs(rhs));
+    ok = ok && within(lhs, rhs, dualTol);
+    worstDual = std::max(worstDual, std::isnan(rel) ? std::numeric_limits<double>::infinity() : rel);
+    std::printf(" %20.12f %20.12f %9.1e\n", lhs, rhs, rel);
+  }
+  const bool symOk = within(c.vHu, c.uHv, dualTol);
+  ok = ok && symOk;
+  std::printf("symmetry: <v, H_cc u> = %.12f, <u, H_cc v> = %.12f, |delta| = %.2e -- %s\n", c.vHu,
+              c.uHv, std::fabs(c.vHu - c.uHv), symOk ? "ok" : "NO");
+
+  // The negative control, as the Hessian check's.
+  int liftRefused = 0, otherRefused = 0;
+  std::printf("\nnegative control, H_cc w with w a random vector of amplitudes (the dropped "
+              "modes must lift and be refused):\n");
+  for (std::size_t k = 0; k < 8; ++k) {
+    const bool refused = c.control[k].status == PcStatus::Refused;
+    const bool lifted = refused && c.controlLift[k] > PC_LIFT_TOL;
+    liftRefused += lifted ? 1 : 0;
+    otherRefused += (refused && !lifted) || c.control[k].status == PcStatus::NotYet ? 1 : 0;
+    std::printf("  %-6s lift %9.1e  %s\n", CLASSES[k].c_str(), c.controlLift[k],
+                refused ? "REFUSED"
+                        : (c.control[k].status == PcStatus::Done ? "computed" : "not yet"));
+  }
+  const bool controlOk = liftRefused > 0 && otherRefused == 0;
+  ok = ok && controlOk;
+  std::printf("negative control: %d class(es) refused for their lift, %d otherwise -- %s\n",
+              liftRefused, otherRefused, controlOk ? "ok" : "NO");
+
+  // The finite difference, per class and summed: relative error per step,
+  // the ratio, and the gate on every class with a nonzero H_cc u.
+  std::printf("\ncentral differences of the three-term y along c + h u, per class: ||fd - H_cc "
+              "u|| / ||H_cc u|| (ratio to the previous step)\n");
+  std::printf("%12s", "h");
+  for (int i = 0; i < 8; ++i) std::printf(" %16s", CLASSES[static_cast<std::size_t>(i)].c_str());
+  std::printf(" %16s %16s\n", "total", "guard gap");
+  bool guarded = true;
+  for (std::size_t s = 0; s < c.steps.size(); ++s) {
+    const PcHessianVectorCheck::Step& st = c.steps[s];
+    std::printf("%12.6g", st.h);
+    for (std::size_t k = 0; k < 9; ++k) {
+      const double rel = c.huNorm[k] > 0.0 ? st.err[k] / c.huNorm[k] : st.err[k];
+      if (s == 0)
+        std::printf(" %9.2e %6s", rel, "-");
+      else
+        std::printf(" %9.2e %6.3f", rel,
+                    st.err[k] > 0.0 ? c.steps[s - 1].err[k] / st.err[k] : 0.0);
+    }
+    const bool stepGuarded =
+        st.displacedGap[0] >= PC_MIN_GAP && st.displacedGap[1] >= PC_MIN_GAP;
+    guarded = guarded && stepGuarded;
+    std::printf(" %.1e %.1e%s\n", st.displacedGap[0], st.displacedGap[1], stepGuarded ? "" : " NO");
+  }
+  ok = ok && guarded;
+  std::printf("Richardson (4 fd(h_min) - fd(2 h_min)) / 3, relative error:");
+  bool fdOk = true;
+  for (std::size_t k = 0; k < 9; ++k) {
+    const double rel =
+        c.huNorm[k] > 0.0 ? c.richardsonErr[k] / c.huNorm[k] : c.richardsonErr[k];
+    std::printf(" %s %.1e", k < 8 ? CLASSES[k].c_str() : "total", rel);
+    // A class whose H_cc u is exactly zero (Sijrs; a class with no tuple)
+    // has an exactly zero y everywhere: nothing to converge, nothing gated.
+    if (c.huNorm[k] == 0.0) {
+      fdOk = fdOk && c.richardsonErr[k] == 0.0;
+      continue;
+    }
+    std::vector<double> errs;
+    bool ratios = true;
+    for (std::size_t s = 0; s < c.steps.size(); ++s) {
+      errs.push_back(c.steps[s].err[k]);
+      if (s > 0)
+        ratios = ratios && c.steps[s].err[k] > 0.0 &&
+                 std::fabs(c.steps[s - 1].err[k] / c.steps[s].err[k] - 4.0) < ratioTol;
+    }
+    const FourfoldRun run = longestFourfoldRun(errs, 4.0 - ratioTol, 4.0 + ratioTol);
+    fdOk = fdOk && ratios && run.length >= kPcMinFourfoldRun && rel < fdTol;
+  }
+  std::printf("\n");
+  if (!c.duals.empty())
+    std::printf("projected on v = %s: <v, Richardson> = %.10f, <v, H_cc u> = %.10f, |delta| = "
+                "%.2e (--pc-hessian's difference of Edot(v), read through y)\n",
+                c.duals.front().what.c_str(), c.richardsonV, c.huV,
+                std::fabs(c.richardsonV - c.huV));
+  ok = ok && fdOk;
+  std::printf("finite difference: every class with a nonzero H_cc u and the total fourfold at "
+              "every halving (4 +- %.1f, a run of %d), Richardson within %.0e relative -- %s; "
+              "the conditioning guard ran and passed at every displaced state -- %s\n",
+              ratioTol, kPcMinFourfoldRun, fdTol, fdOk ? "ok" : "NO", guarded ? "ok" : "NO");
+  std::printf("Hessian-vector check: %d of 8 classes computed, worst duality %.1e, %.1fs\n",
+              computed, worstDual, c.seconds);
+
+  std::printf("\n%s: the PC-NEVPT2 Hessian-vector product H_cc u matches Eddot(u, v) by duality "
+              "to %.0e and the finite difference of the three-term y per class (orbital energies "
+              "held fixed; smallest kept s/s_max %.1e; Richardson to %.0e, every ratio 4 +- %.1f, "
+              "a run of %d)\n",
+              ok ? "PASS" : "FAIL", dualTol, minKept, fdTol, ratioTol, kPcMinFourfoldRun);
   return ok;
 }
 

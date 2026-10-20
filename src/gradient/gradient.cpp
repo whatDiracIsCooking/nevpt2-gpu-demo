@@ -1412,6 +1412,138 @@ Result<PcCiSourceResult> pcCiSourceDevice(const NevptIntegralsDevice& ints, cons
   return out;
 }
 
+// a + b as a fresh tensor from the pool, same shape.
+DeviceTensor sumOfTensors(const DeviceTensor& a, const DeviceTensor& b,
+                          const DeviceResources& dr) {
+  std::vector<int> axes(a.dims.size());
+  std::iota(axes.begin(), axes.end(), 0);
+  DeviceTensor out = deviceTransposeNew(a, axes, 1.0, dr);
+  addTensorInto(b, out, dr.stream());
+  return out;
+}
+
+// The five coefficient tensors of one ScRdmAdjoint, host-resident (each
+// downloadTensor synchronizes the stream the sweeps were issued on).
+ScRdmCoefficients coefficientsOf(const ScRdmAdjoint& a, const wwrStream_t s) {
+  return ScRdmCoefficients{downloadTensor(a.dm1, s), downloadTensor(a.dm2, s),
+                           downloadTensor(a.dm3, s), downloadTensor(a.f3ac, s),
+                           downloadTensor(a.f3ca, s)};
+}
+
+// pcCiHessianVectorDevice and pcCiSourceThreeTermDevice: one walk, `u` null
+// for y alone.
+Result<PcCiHessianResult> pcCiWalkDevice(const NevptIntegralsDevice& ints, const Tensor& ci,
+                                         const Tensor* u, const int64_t nelecA,
+                                         const int64_t nelecB, const RdmTensors& rdm,
+                                         const RdmTensors* dotU, const RdmTensors* ddotUU,
+                                         const bool perClass, const SigmaVectorOptions& sigma,
+                                         const DeviceResources& dr) {
+  const wwrStream_t s = dr.stream();
+  const int64_t norb = rdm.dm1.dims[0];
+  check(u == nullptr || (u->dims() == ci.dims() && dotU != nullptr && ddotUU != nullptr),
+        "pcCiHessianVectorDevice: u must be shaped like the CI vector, with its two RDM sets");
+  FullBlockSource src(ints);
+  const ActiveIntegralsDevice ai = activeViewOf(ints);
+  const PcRdms base{&rdm.dm1, &rdm.dm2, &rdm.dm3, &rdm.f3ac, &rdm.f3ca};
+
+  // The RDMs plus each set: every class's matrix tangent is one subtraction
+  // of two builds (nevpt2.energy's pcClassDirection), as pcHessianDevice's.
+  struct Sum {
+    DeviceTensor dm1, dm2, dm3, f3ac, f3ca;
+    PcRdms view() const { return {&dm1, &dm2, &dm3, &f3ac, &f3ca}; }
+  };
+  const auto plus = [&](const RdmTensors& d) {
+    return Sum{sumOfTensors(rdm.dm1, d.dm1, dr), sumOfTensors(rdm.dm2, d.dm2, dr),
+               sumOfTensors(rdm.dm3, d.dm3, dr), sumOfTensors(rdm.f3ac, d.f3ac, dr),
+               sumOfTensors(rdm.f3ca, d.f3ca, dr)};
+  };
+  std::optional<Sum> sumU, sumUU;
+  PcRdms viewU, viewUU;
+  if (u != nullptr) {
+    sumU.emplace(plus(*dotU));
+    sumUU.emplace(plus(*ddotUU));
+    viewU = sumU->view();
+    viewUU = sumUU->view();
+  }
+
+  // One accumulator pair shared by every class, or one per RDM class.
+  const std::size_t nAdj = perClass ? 8 : 1;
+  std::vector<ScRdmAdjoint> adj, adjDot;
+  for (std::size_t k = 0; k < nAdj; ++k) {
+    adj.push_back(ScRdmAdjoint::zeros(norb, dr));
+    if (u != nullptr) adjDot.push_back(ScRdmAdjoint::zeros(norb, dr));
+  }
+  std::array<ScRdmAdjoint*, 8> pAdj{}, pAdjDot{};
+  for (std::size_t c = 0; c < 8; ++c) {
+    const std::size_t k = perClass ? c : 0;
+    pAdj[c] = &adj[k];
+    pAdjDot[c] = u != nullptr ? &adjDot[k] : nullptr;
+  }
+
+  PcCiHessianResult out;
+  out.walk = NEVPT2_TRY(assemblePcCiClasses(ai, src, /*batch=*/0, base,
+                                            u != nullptr ? &viewU : nullptr,
+                                            u != nullptr ? &viewUU : nullptr, pAdj, pAdjDot, dr));
+  out.ok = out.walk.allDone();
+  // A refused class has no derivative: no vector is formed.
+  if (!out.ok) return out;
+
+  const Tensor h2e = downloadTensor(ai.h2e, s);
+  const auto sigmaOf = [&](const ScRdmCoefficients& g, const Tensor& at) {
+    return ciSourceVector(sigma, at, norb, nelecA, nelecB, g.dm1, g.dm2, g.dm3, g.f3ac, g.f3ca,
+                          h2e, dr);
+  };
+  out.y = Tensor(ci.dims());
+  if (u != nullptr) {
+    out.hu = Tensor(ci.dims());
+    out.fromWalkTangent = Tensor(ci.dims());
+    out.fromDirection = Tensor(ci.dims());
+  }
+  for (std::size_t k = 0; k < nAdj; ++k) {
+    // Sijrs's accumulators (class 2, per class) were never swept into: its
+    // share of y and of H_cc u is exactly zero, and no sigma is run for it.
+    if (perClass && k == 2) {
+      out.yClass[k] = Tensor(ci.dims());
+      if (u != nullptr) out.huClass[k] = Tensor(ci.dims());
+      continue;
+    }
+    const ScRdmCoefficients g = coefficientsOf(adj[k], s);
+    const Tensor yk = sigmaOf(g, ci);
+    ciSourceAddInto(yk, out.y);
+    if (perClass) out.yClass[k] = yk;
+    if (u == nullptr) continue;
+    const Tensor walkTangent = sigmaOf(coefficientsOf(adjDot[k], s), ci);
+    const Tensor direction = sigmaOf(g, *u);
+    ciSourceAddInto(walkTangent, out.fromWalkTangent);
+    ciSourceAddInto(direction, out.fromDirection);
+    Tensor hk = walkTangent;
+    ciSourceAddInto(direction, hk);
+    ciSourceAddInto(hk, out.hu);
+    if (perClass) out.huClass[k] = std::move(hk);
+  }
+  return out;
+}
+
+Result<PcCiHessianResult> pcCiHessianVectorDevice(const NevptIntegralsDevice& ints,
+                                                  const Tensor& ci, const Tensor& u,
+                                                  const int64_t nelecA, const int64_t nelecB,
+                                                  const RdmTensors& rdm, const RdmTensors& dotU,
+                                                  const RdmTensors& ddotUU, const bool perClass,
+                                                  const SigmaVectorOptions& sigma,
+                                                  const DeviceResources& res) {
+  return pcCiWalkDevice(ints, ci, &u, nelecA, nelecB, rdm, &dotU, &ddotUU, perClass, sigma, res);
+}
+
+Result<PcCiHessianResult> pcCiSourceThreeTermDevice(const NevptIntegralsDevice& ints,
+                                                    const Tensor& ci, const int64_t nelecA,
+                                                    const int64_t nelecB, const RdmTensors& rdm,
+                                                    const bool perClass,
+                                                    const SigmaVectorOptions& sigma,
+                                                    const DeviceResources& res) {
+  return pcCiWalkDevice(ints, ci, /*u=*/nullptr, nelecA, nelecB, rdm, /*dotU=*/nullptr,
+                        /*ddotUU=*/nullptr, perClass, sigma, res);
+}
+
 Result<PcFullRotationResult> pcFullRotationDevice(
     const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen, const DeviceTensor& dm1,
     const DeviceTensor& dm2, const DeviceTensor& dm3, const DeviceTensor& f3ac,

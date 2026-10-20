@@ -1343,6 +1343,28 @@ if(NEVPT2_BUILD_TESTING)
       PASS_REGULAR_EXPRESSION "PASS: the PC-NEVPT2 Hessian Eddot\\(u, v\\) matches Euler"
       LABELS "gpu;small")
   endif()
+
+  # --- the PC Hessian-vector product, H_cc u (#155) -------------------------------
+  #
+  # nevpt2_pc_tangent --pc-hessian-vector: nevpt2.gradient's
+  # pcCiHessianVectorDevice -- PC's adjoint walk differentiated along u, then
+  # two sigma calls per class -- at the golden's fixed orbital energies,
+  # against the entry above's Eddot(u, v) by duality (per class, three seeded
+  # v and the state), H_cc's symmetry, Euler as a vector (H_cc c == y on the
+  # homogeneous classes), a negative control that must be REFUSED for its
+  # lift, and ONE finite difference: of the GPU's own three-term y, per class,
+  # Richardson-verified, which must converge fourfold for every class -- the
+  # only check that sees the rotation terms (docs/pc-nevpt2.md, "The
+  # Hessian-vector product, H_cc u"). CAS(4,4), as above, and `small`. No
+  # CAS(8,8) entry, for the same conditioning reason as --pc-hessian's (same
+  # section).
+  _add_golden_test_with(nevpt2_pc_tangent nevpt2_pc_hessian_vector_cas44 "${_pc_hess_gold}"
+                        --tiles 3 --pc-hessian-vector)
+  if(TEST nevpt2_pc_hessian_vector_cas44)
+    set_tests_properties(nevpt2_pc_hessian_vector_cas44 PROPERTIES
+      PASS_REGULAR_EXPRESSION "PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches"
+      LABELS "gpu;small")
+  endif()
   unset(_pc_hess_gold)
 
   # --- salicylaldimine CAS(8,8)/6-31G** -------------------------------------------

@@ -604,13 +604,54 @@ struct PcClassSolve {
   DeviceTensor T;
   DeviceTensor t1;
   DeviceTensor Ut;
+  // With `keepDropped` (#155): S's dropped eigenvectors, (nd, d), row k one of
+  // them -- empty when nothing is dropped -- and S's largest eigenvalue, what
+  // the cut and the lift test are relative to. What the third term of the
+  // first derivative and the H_cc u walk's rotation terms are built from
+  // (docs/hessian-theory.md, Sec. 6.2), exactly as pcHessianDevice's.
+  DeviceTensor Vn;
+  double sMax = 0.0;
 };
 
 // solveClass on `mx` (its S, K and, when it has one, S_1), named `name` in a
-// devInfo error. On res.stream(); an eigensolve's devInfo != 0 is the
-// Numerical Error pcEnergiesDevice returns for it.
+// devInfo error, keeping the dropped eigenvectors when `keepDropped`. On
+// res.stream(); an eigensolve's devInfo != 0 is the Numerical Error
+// pcEnergiesDevice returns for it.
 Result<PcClassSolve> pcSolveClass(const PcMatrices& mx, const char* name,
-                                  const DeviceResources& res);
+                                  const DeviceResources& res, bool keepDropped);
+
+// One CI direction's blocks on a solved class (#155): what pcHessianDevice
+// builds per tangent set (energy_pc_solve.cppm's tangentClass and
+// energy_pc_hessian.cppm's rotationTangent, the same two functions), for
+// nevpt2.gradient's PC Hessian-vector walk. `Tdot` (d, m) = sym(Sdot) U and
+// `t1dot` (n1, m) = S_1dot^T U are the slab einsum's tangent operands, `mK` /
+// `nS` the (m, m) U^T sym(Kdot) U / U^T sym(Sdot) U; on S's dropped space
+// `G` / `H` the (nd, m) Vn sym(Sdot) U / Vn sym(Kdot) U and `pSp` the
+// (nd, nd) Vn sym(Sdot) Vn^T, the lift test's (empty when nothing is
+// dropped; with `full` false, pSp alone of the three and nothing else).
+struct PcClassDirection {
+  DeviceTensor Tdot, t1dot;
+  std::vector<double> mK, nS, G, H, pSp;
+};
+
+// `cs` from pcSolveClass(..., keepDropped=true) with status Done; `base` the
+// class at the RDMs the solve was handed, `dot` the same class built at the
+// RDMs PLUS a tangent set -- turned into the tangent itself in place (one
+// subtraction: every matrix is affine in the RDMs, energy_pc_tangent.cppm's
+// `tangentMatrices`).
+PcClassDirection pcClassDirection(const PcClassSolve& cs, PcMatrices& dot, const PcMatrices& base,
+                                  bool full, const DeviceResources& res);
+
+// The dropped space's blocks at the state itself: `H0` (nd, m) = Vn sym(K) U,
+// which is zero at an eigenstate and carries the first derivative's third
+// term off it, and `C` (m, m) = U^T U, so S^+ = U U^T acts in the eigenbasis.
+// Both empty when nothing is dropped.
+struct PcDroppedBase {
+  std::vector<double> H0, C;
+};
+
+PcDroppedBase pcDroppedBase(const PcClassSolve& cs, const PcMatrices& base,
+                            const DeviceResources& res);
 
 // --- PC-NEVPT2's second directional derivative (#152) -------------------------
 //

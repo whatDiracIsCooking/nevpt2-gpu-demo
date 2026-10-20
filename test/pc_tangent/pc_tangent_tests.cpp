@@ -29,6 +29,14 @@
 //                         instead of refusing, or refuses for another reason,
 //                         fails; the ladder and the extrapolation as the
 //                         tangent's
+//   PcHessianVectorReportTests  the --pc-hessian-vector gate (#155): a clean
+//                         check passes; a class refused along u fails; the
+//                         walk's own Edot(u) and <u, y>, the duality per class
+//                         (a pair pcHessianDevice refused, NaN, never passes)
+//                         and the symmetry are gated; Euler on the homogeneous
+//                         classes only; the control as --pc-hessian's; a
+//                         plateau in ANY class's difference fails, as does a
+//                         class with H_cc u = 0 that does not difference to 0
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
 // textual std #include before any import.
@@ -306,6 +314,137 @@ TEST(PcHessianReportTests, TheLadderAndTheExtrapolationAreGatedAsTheTangents) {
   PcHessianCheck unguarded = cleanHessian();
   unguarded.steps[1].displacedGap[0] = 0.0;
   EXPECT_FALSE(hessGate(unguarded));
+}
+
+// --- PcHessianVectorReportTests (#155) ------------------------------------------
+
+constexpr double kDualTol = 1e-9;
+constexpr double kFdTol = 1e-8;
+
+// A Hessian-vector check that passes: every class computed, the walk's
+// tangent and <u, y> exact, two duality rows and the symmetry exact, Euler
+// exact, the control refusing Sr, Si and Sir for their lift, and four steps
+// whose per-class errors fall fourfold, with Sijrs's H_cc u exactly zero.
+PcHessianVectorCheck cleanVector() {
+  PcHessianVectorCheck c;
+  const PcTangentCheck t = cleanCheck();
+  c.allDone = true;
+  for (std::size_t i = 0; i < 8; ++i) {
+    c.result[i] = t.classes[i].result;
+    c.result[i].spectrum.smallestKept = 1e-3;
+    c.walkEdot[i] = c.edotRef[i] = 0.003 * static_cast<double>(i + 1);
+    c.uy += c.edotRef[i];
+    c.control[i].status = PcStatus::Done;
+    if (i == 0 || i == 1 || i == 7) {
+      c.control[i].status = PcStatus::Refused;
+      c.control[i].why = "S's dropped modes lift along this direction pair";
+      c.controlLift[i] = 0.4;
+    }
+  }
+  for (const char* what : {"seed 0x5eed0152", "the state itself"}) {
+    PcHessianVectorCheck::Dual row;
+    row.what = what;
+    for (std::size_t i = 0; i < 8; ++i) row.lhs[i] = row.rhs[i] = 0.1 * static_cast<double>(i);
+    c.duals.push_back(row);
+  }
+  c.vHu = c.uHv = 5.3;
+  for (std::size_t k = 0; k < 9; ++k) c.huNorm[k] = k == 2 ? 0.0 : 1.0 + static_cast<double>(k);
+  double h = 1.0 / 4096.0, scale = 1e-5;
+  for (int s = 0; s < 4; ++s) {
+    PcHessianVectorCheck::Step st;
+    st.h = h;
+    st.displacedGap = {1e9, 1e9};
+    for (std::size_t k = 0; k < 9; ++k) st.err[k] = k == 2 ? 0.0 : scale * c.huNorm[k];
+    c.steps.push_back(st);
+    h /= 2.0;
+    scale /= 4.0;
+  }
+  for (std::size_t k = 0; k < 9; ++k) c.richardsonErr[k] = k == 2 ? 0.0 : 1e-11 * c.huNorm[k];
+  return c;
+}
+
+bool vectorGate(const PcHessianVectorCheck& c) {
+  return printPcHessianVectorReport(c, kIdTol, kDualTol, kFdTol, kRatioTol);
+}
+
+TEST(PcHessianVectorReportTests, ACleanCheckPasses) { EXPECT_TRUE(vectorGate(cleanVector())); }
+
+TEST(PcHessianVectorReportTests, ARefusedClassFailsTheGate) {
+  // A gap, denominator or lift refusal along u is the answer: no vector.
+  for (const char* why : {"S's gap 7.9e-01 < PC_MIN_GAP 1e+03",
+                          "S's dropped modes lift along this direction pair"})
+    for (std::size_t i = 0; i < 8; ++i) {
+      PcHessianVectorCheck c = cleanVector();
+      c.result[i].status = PcStatus::Refused;
+      c.result[i].why = why;
+      c.allDone = false;
+      EXPECT_FALSE(vectorGate(c)) << "class index " << i << ": " << why;
+    }
+}
+
+TEST(PcHessianVectorReportTests, TheWalksTangentAndItsYAreGated) {
+  PcHessianVectorCheck edot = cleanVector();
+  edot.walkEdot[3] += 1e-6;
+  EXPECT_FALSE(vectorGate(edot));
+  PcHessianVectorCheck uy = cleanVector();
+  uy.uy += 1e-6;
+  EXPECT_FALSE(vectorGate(uy));
+}
+
+TEST(PcHessianVectorReportTests, TheDualityIsGatedPerClassAndOnARefusedPair) {
+  for (std::size_t i = 0; i < 8; ++i) {
+    PcHessianVectorCheck c = cleanVector();
+    c.duals[1].lhs[i] += 1e-6;
+    EXPECT_FALSE(vectorGate(c)) << "class index " << i;
+  }
+  // pcHessianDevice refusing the pair leaves no Eddot (NaN): never a pass.
+  PcHessianVectorCheck refused = cleanVector();
+  refused.duals[0].rhs[0] = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_FALSE(vectorGate(refused));
+  PcHessianVectorCheck sym = cleanVector();
+  sym.uHv += 1e-6;
+  EXPECT_FALSE(vectorGate(sym));
+}
+
+TEST(PcHessianVectorReportTests, EulerIsGatedOnTheHomogeneousClassesOnly) {
+  for (std::size_t i = 0; i < 8; ++i) {
+    PcHessianVectorCheck c = cleanVector();
+    c.euler[i] = 0.5;
+    EXPECT_EQ(vectorGate(c), !kPcHomogeneousInCi[i]) << "class index " << i;
+  }
+}
+
+TEST(PcHessianVectorReportTests, AControlThatAnswersInsteadOfRefusingFails) {
+  PcHessianVectorCheck none = cleanVector();
+  for (std::size_t i = 0; i < 8; ++i) {
+    none.control[i].status = PcStatus::Done;
+    none.controlLift[i] = 0.0;
+  }
+  EXPECT_FALSE(vectorGate(none));
+  PcHessianVectorCheck other = cleanVector();
+  other.control[3].status = PcStatus::Refused;
+  EXPECT_FALSE(vectorGate(other));
+}
+
+TEST(PcHessianVectorReportTests, APlateauInAnyClassFails) {
+  // The plateau the unrepaired formula leaves in Sr and Sir
+  // (docs/pc-nevpt2.md, "What the cut drops, and how it moves"), in any class
+  // with a nonzero H_cc u -- even when the total converges.
+  for (const std::size_t k : {0u, 1u, 3u, 4u, 5u, 6u, 7u, 8u}) {
+    PcHessianVectorCheck c = cleanVector();
+    c.steps[3].err[k] = c.steps[2].err[k];
+    EXPECT_FALSE(vectorGate(c)) << "index " << k;
+  }
+  PcHessianVectorCheck far = cleanVector();
+  far.richardsonErr[7] = 1e-6 * far.huNorm[7];
+  EXPECT_FALSE(vectorGate(far));
+  // A class whose H_cc u is exactly zero must difference to exactly zero.
+  PcHessianVectorCheck zero = cleanVector();
+  zero.richardsonErr[2] = 1e-15;
+  EXPECT_FALSE(vectorGate(zero));
+  PcHessianVectorCheck unguarded = cleanVector();
+  unguarded.steps[1].displacedGap[1] = 0.0;
+  EXPECT_FALSE(vectorGate(unguarded));
 }
 
 }  // namespace nevpt2::test::pc_tangent

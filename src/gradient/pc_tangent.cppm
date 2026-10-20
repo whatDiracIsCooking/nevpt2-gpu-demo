@@ -2,7 +2,9 @@
 // tangent: it drives nevpt2.energy's pcTangentsDevice at one state and
 // nevpt2.energy's pcEnergiesDevice at the displaced states c +- h u, and
 // compares. A leaf, like nevpt2.gradient beside it: nothing in src/ imports
-// it and neither demo links it; apps/pc_tangent/ is what drives it.
+// it and neither demo links it; apps/pc_tangent/ is what drives it. It also
+// holds the checks of PC's second derivative (#152) and of its
+// Hessian-vector product, nevpt2.gradient's (#155), below.
 //
 // WHAT IS BEING CHECKED. pcTangentsDevice differentiates the PC solve
 // analytically -- the derivation, and why a pseudo-inverse may be
@@ -175,7 +177,7 @@ Result<PcTangentCheck> pcTangentFdCheck(const RdmBuildOptions& rdmOpt,
 // the analytic tangent.
 bool printPcTangentReport(const PcTangentCheck& c, double atol, double idtol, double ratioTol);
 
-// --- the second derivative, Eddot(u, v) (#152; pc_hessian.cpp) -----------------
+// --- the second derivative, Eddot(u, v) (#152; pc_tangent.cpp) -----------------
 //
 // The check of nevpt2.energy's pcHessianDevice, at the golden's FIXED orbital
 // energies, along two directions built exactly as the tangent's
@@ -260,5 +262,111 @@ Result<PcHessianCheck> pcHessianFdCheck(const RdmBuildOptions& rdmOpt,
 // extrapolation is within `atol` of Eddot(u, v).
 bool printPcHessianReport(const PcHessianCheck& c, double atol, double idtol, double edotTol,
                           double ratioTol);
+
+// --- the Hessian-vector product, H_cc u (#155) -----------------------------------
+//
+// The check of nevpt2.gradient's pcCiHessianVectorDevice -- PC's reverse
+// mode at second order, H_cc u = sigma(gdot[u], c) + sigma(g, u), per class
+// and summed -- at the golden's FIXED orbital energies, along the Hessian
+// check's own u (`pcTangentDirection`, seed `seedU`):
+//
+//   1. THE WALK'S OWN TANGENT, free: the three-term Edot(u) the walk forms from
+//      the tangent rows it built, per class, against pcHessianDevice's (the
+//      forward side's three-term Edot), and <u, y> of the walk's own y against
+//      the same total.
+//   2. THE DUALITY, exact: <v, H_cc u> == Eddot(u, v), pcHessianDevice's, per
+//      class and summed, for the seeded v of `seedsV` (the tangent's kind of
+//      direction, along which nothing lifts) and for the state itself. The two
+//      sides share the per-class blocks (pcClassDirection is pcHessianDevice's
+//      own tangentClass / rotationTangent) and nothing after them: one is
+//      pcQuadSecond's forward algebra, the other its reverse in v, the RDM
+//      sweep and the sigma kernels. No step size.
+//   3. SYMMETRY: <v, H_cc u> == <u, H_cc v>, two reverse walks.
+//   4. EULER, as a vector: on the five homogeneous classes H_cc c == y, per
+//      class (the gradient of a degree-2 function is of degree 1).
+//   5. THE NEGATIVE CONTROL: H_cc w along `seedControl`'s random amplitude
+//      vector, which breaks the state's symmetry: a class whose dropped modes
+//      lift must be REFUSED (PC_LIFT_TOL), never answered.
+//   6. ONE FINITE DIFFERENCE, of the GPU's own exact y: the three-term y
+//      (pcCiSourceThreeTermDevice, exact at any CI vector -- the two-term one
+//      lacks -2 rho^T S_v P A x off the eigenstate, and differencing it would
+//      difference another function), per class, at c(+-h) on the tangent
+//      check's unit-sphere path, (y_k(c(h)) - y_k(c(-h))) / 2h -> H_cc u per
+//      class. NOT a second difference of the energy (docs/testing.md, "The PC
+//      CI source term's step is a first-order trap"). It is the only check
+//      that sees the rotation terms (the duality would pass if both sides
+//      omitted them): each class's error must fall fourfold per halving, Sr's
+//      and Sir's in particular -- the two that plateau without them
+//      (docs/pc-nevpt2.md, "What the cut drops, and how it moves").
+//
+// A class refused at the state fails the check; one refused at a displaced
+// state is a Numerical Error naming the step.
+struct PcHessianVectorCheck {
+  std::array<PcClassResult, 8> result{};  // the walk's per-class verdict along u
+  std::array<double, 8> lift{};           // its lift along (u, u) over s_max
+  bool allDone = false;
+  // 1.
+  std::array<double, 8> walkEdot{};  // the walk's three-term Edot(u)
+  std::array<double, 8> edotRef{};   // pcHessianDevice's
+  double uy = 0.0;                   // <u, y>
+  // 2. One row per v: <v, H_cc u> and Eddot(u, v) per class.
+  struct Dual {
+    std::string what;
+    std::array<double, 8> lhs{}, rhs{};
+  };
+  std::vector<Dual> duals;
+  // 3.
+  double vHu = 0.0, uHv = 0.0;
+  // 4. ||H_cc c - y|| / ||y|| per class (0 for a class with y = 0).
+  std::array<double, 8> euler{};
+  // 5.
+  std::array<PcClassResult, 8> control{};
+  std::array<double, 8> controlLift{};
+  // 6. ||H_cc u|| per class and summed (index 8), and per step the error of
+  // each class's difference (and the total's) against it.
+  std::array<double, 9> huNorm{};
+  struct Step {
+    double h = 0.0;
+    std::array<double, 9> err{};
+    std::array<double, 2> displacedGap{};  // as PcFdStep's
+  };
+  std::vector<Step> steps;
+  // Richardson over the two finest steps, per class and summed: the error of
+  // (4 fd(h) - fd(2h)) / 3 against H_cc u.
+  std::array<double, 9> richardsonErr{};
+  // The total's Richardson value and H_cc u projected on the first v: the
+  // difference of the three-term Edot(v) --pc-hessian takes, which is
+  // <v, y>'s, so the two checks' finite differences can be read side by side.
+  double richardsonV = 0.0, huV = 0.0;
+  double seconds = 0.0;
+};
+
+// Runs the check on one state: `seedU` draws u, `seedsV` the duality's v
+// (the first also the symmetry's), `seedControl` the control's w. Inputs as
+// pcHessianFdCheck's; `nTiles` is the sigma kernels' tiling (the RDM build's).
+Result<PcHessianVectorCheck> pcHessianVectorCheck(const RdmBuildOptions& rdmOpt,
+                                                  const NevptIntegralsDevice& ints,
+                                                  const Tensor& ci, int64_t norb, int64_t nelecA,
+                                                  int64_t nelecB, const Tensor& h2e,
+                                                  std::span<const double> steps,
+                                                  std::uint64_t seedU,
+                                                  std::span<const std::uint64_t> seedsV,
+                                                  std::uint64_t seedControl,
+                                                  const DeviceResources& res);
+
+// Prints the tables and the gate line the `nevpt2_pc_hessian_vector_*` ctest
+// entries match: "PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches
+// ..." or "FAIL: ...". True only when all eight classes were computed; the
+// walk's Edot(u) and <u, y> are within `idtol` of pcHessianDevice's
+// (relative, floor 1); every duality row, per class and summed, within
+// `dualTol` (relative, floor 1), and the symmetry likewise; Euler within
+// `idtol` on the homogeneous classes; the control refused at least one class
+// for its lift and none otherwise; and, for every class with a nonzero
+// H_cc u and the total, every ratio of the difference's error is within
+// `ratioTol` of 4, they make a run of at least kPcMinFourfoldRun, every
+// displaced state carries a gap of at least PC_MIN_GAP, and the Richardson
+// error is within `fdTol` relative of ||H_cc u||.
+bool printPcHessianVectorReport(const PcHessianVectorCheck& c, double idtol, double dualTol,
+                                double fdTol, double ratioTol);
 
 }  // namespace nevpt2

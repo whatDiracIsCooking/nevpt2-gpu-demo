@@ -221,16 +221,64 @@ PcMatrices pcClassMatrices(const int cls, const DeviceTensor& h1e, const DeviceT
 }
 
 Result<PcClassSolve> pcSolveClass(const PcMatrices& mx, const char* name,
-                                  const DeviceResources& res) {
+                                  const DeviceResources& res, const bool keepDropped) {
   const DeviceTensor s1 = mx.hasS1 ? mx.matS1() : DeviceTensor();
   ClassSolve cs = NEVPT2_TRY(solveClass(mx.matS(), mx.matK(), name, res,
-                                        mx.hasS1 ? &s1 : nullptr, /*keepUt=*/true));
+                                        mx.hasS1 ? &s1 : nullptr, /*keepUt=*/true, keepDropped));
   PcClassSolve out;
   out.result = std::move(cs.result);
   out.lambda = std::move(cs.lambda);
   out.T = std::move(cs.T);
   out.t1 = std::move(cs.t1);
   out.Ut = std::move(cs.Ut);
+  out.Vn = std::move(cs.Vn);
+  out.sMax = cs.sMax;
+  return out;
+}
+
+// The :pc_solve / :pc_hessian view of an exported solve: the same buffers,
+// borrowed (tangentClass and rotationTangent read Ut, Vn, the status and m).
+ClassSolve classSolveView(const PcClassSolve& p) {
+  ClassSolve cs;
+  cs.result = p.result;
+  cs.lambda = p.lambda;
+  cs.Ut = p.Ut.view();
+  if (p.Vn.rank() == 2) cs.Vn = p.Vn.view();
+  cs.sMax = p.sMax;
+  return cs;
+}
+
+PcClassDirection pcClassDirection(const PcClassSolve& cs, PcMatrices& dot, const PcMatrices& base,
+                                  const bool full, const DeviceResources& res) {
+  check(cs.result.status == PcStatus::Done, "pcClassDirection: the class was not solved");
+  tangentMatrices(dot, base, res);
+  const ClassSolve view = classSolveView(cs);
+  const DeviceTensor dotS1 = dot.hasS1 ? dot.matS1() : DeviceTensor();
+  const DeviceTensor* s1 = dot.hasS1 ? &dotS1 : nullptr;
+  PcClassDirection out;
+  RotationTangent rt = rotationTangent(view, dot.matS(), dot.matK(), s1, full, res);
+  out.pSp = std::move(rt.pSp);
+  if (!full) return out;
+  ClassTangent ct = tangentClass(view, dot.matS(), dot.matK(), res, s1);
+  out.Tdot = std::move(ct.Tdot);
+  out.t1dot = std::move(ct.t1dot);
+  out.mK = std::move(ct.mK);
+  out.nS = std::move(ct.nS);
+  out.G = std::move(rt.G);
+  out.H = std::move(rt.H);
+  return out;
+}
+
+PcDroppedBase pcDroppedBase(const PcClassSolve& cs, const PcMatrices& base,
+                            const DeviceResources& res) {
+  check(cs.result.status == PcStatus::Done, "pcDroppedBase: the class was not solved");
+  PcDroppedBase out;
+  if (cs.Vn.rank() != 2) return out;  // nothing dropped
+  // pcHessianDevice's own two products (energy_pc_hessian.cppm, hessianParts).
+  const DeviceTensor Ks = symmetrised(base.matK(), res);
+  const DeviceTensor KU = gemm(Ks, false, cs.Ut, true, res);
+  out.H0 = hostOf(gemm(cs.Vn, false, KU, false, res), res);
+  out.C = hostOf(gemm(cs.Ut, false, cs.Ut, true, res), res);
   return out;
 }
 
