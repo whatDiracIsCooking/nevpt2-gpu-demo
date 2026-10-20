@@ -369,6 +369,181 @@ positive on the kept range). The device refuses a class rather than divide
 through a sign change. The smallest measured is 0.828 Eh (Si, CAS(4,4)); for
 Sr it is 1.13 Eh (cc-pVTZ).
 
+### What the cut drops, and how it moves
+
+The cut above is a **threshold** on `S`'s eigenvalues (`pcRankCut`); nothing
+in the code decides which modes are structural. What it drops, and how that
+space behaves when the CI vector moves, was measured offline with
+`reference_data/pc_null_mode_probe.py` (2026-10-20; **no card** — CPU, PySCF
+2.14.0, numpy's `eigh`, 6 OpenMP threads on the 12-physical-core Ryzen
+5900X). The probe rebuilds every class's `S`, `K` and `S_1` from the golden's
+CI vector the way the device does, reproduces the golden's block2
+`pc_class_energies` (worst 2.4e-10, CAS(8,8) Sr, as in "Accuracy against
+block2"), and uses the RDMs' exact quadratic dependence on the CI vector, so
+every derivative of `S` and `K` below is exact; only the reference second
+derivative is a difference (Richardson, steps `2^-p` as listed). The theory
+these numbers settle is [`hessian-theory.md`](hessian-theory.md), §6.2.
+
+```
+uv run python reference_data/pc_null_mode_probe.py golden/n2_ccpvdz_cas44.nevpt2gold
+uv run python reference_data/pc_null_mode_probe.py golden/n2_ccpvdz_cas44.nevpt2gold \
+    --parts hessian --kinds given \
+    --given-u=0.17786578376125828,-0.80668865406914825,-0.16107826557652827,0.90981717673859919 \
+    --given-v=-0.063060125646273169,0.68941125217425281,0.59723938945350552,-0.18775891053169191
+uv run python reference_data/pc_null_mode_probe.py golden/acrolein_def2svp_cas65.nevpt2gold \
+    --kinds Epq,family,sector,singlet --fd-pows 18,19,20
+uv run python reference_data/pc_null_mode_probe.py golden/n2_ccpvdz_cas88.nevpt2gold --fd-pows 16,17,18
+uv run python reference_data/pc_null_mode_probe.py golden/n2_ccpvdz_cas1010.nevpt2gold --fd-pows 16,17,18
+uv run python reference_data/pc_null_mode_probe.py golden/n2_ccpvdz_cas1012.nevpt2gold \
+    --parts energies,structure --nrand 4 --nfamily 2         # 9.6 min
+uv run python reference_data/pc_null_mode_probe.py golden/n2_ccpvdz_cas1012.nevpt2gold \
+    --parts order --kinds Epq                                  # 13.5 min
+```
+
+**No dropped mode is null for every CI vector.** Over random vectors of the
+whole fixed-`M_s` determinant space no mode is common to all of them (each
+such vector still has a nullity of its own where a rank bound applies: 16 in
+CAS(4,4) Sr and Si, 25 in acrolein Si, 0 elsewhere). Restricted to
+singlets, to singlets of the state's abelian irrep, and to the *family* of
+states sharing the Hamiltonian's full symmetry (ground states of
+`h1 + b h1^2`, `a h2` near `(a, b) = (1, 0)`), the dropped modes split three
+ways. "Null for every" is the nullity of a sum of the vectors' metrics (8
+random vectors per kind, 4 at CAS(10,12); the family is sampled from 4
+states, 2 at CAS(10,12), so its column is an upper bound); "each" is every
+sampled singlet's own nullity:
+
+| golden | class (`d`) | dropped | null for every singlet | each singlet's own | null across the family |
+|---|---|---:|---:|---:|---:|
+| `cas44` | Sr, Si (64) | 44 | 4 | 44 | 10 |
+| | Sir (32) | 2 | 1 | 1 | 2 |
+| `acrolein_def2svp_cas65` | Sr (125) | 50 | 5 | 50 | 10 |
+| | Si (125) | 85 | 5 | 85 | 14 |
+| | Sir (50) | 2 | 1 | 1 (2 in the A' irrep) | 2 |
+| `cas88` | Sr, Si (512) | 16 | 8 | 8 | 16 |
+| | Sir (128) | 2 | 1 | 1 | 2 |
+| `cas1010` | Sr, Si (1000) | 10 | 10 | 10 | 10 |
+| | Sir (200) | 1 | 1 | 1 | 1 |
+| `cas1012` | Sr, Si (1728) | 24 | 12 | 12 | 24 |
+| | Sir (288) | 2 | 1 | 1 | 2 |
+
+- **Spin** (`ncas` modes in Sr and in Si, one in Sir): combinations that
+  two orderings of a repeated active index produce identically on an `S = 0`
+  state — in Sr's basis `delta_pr e_q - delta_pq e_r`, one per orbital `q`.
+  Null for every singlet, not for every `M_s = 0` vector. At CAS(10,10) this
+  is everything the cut drops.
+- **A rank bound** (CAS(4,4) and acrolein): Sr's functions lie in the
+  `(N-1)`-electron doublet space of the active orbitals and Si's in the
+  `(N+1)`-electron one, of dimension 20 and 20 at CAS(4,4), 75 and 40 at
+  CAS(6,5). Every singlet has nullity `d` minus that (44, 44; 50, 85), but
+  only the spin modes are common: the rank is constant, the null space turns
+  with the state. CAS(8,8)'s 2352-dimensional space is past `d = 512`, so
+  there is no bound there.
+- **The state's spatial symmetry**: the rest of CAS(8,8)'s and CAS(10,12)'s
+  (8 and 12 in Sr and Si) and Sir's second mode on N2 are null across the
+  family but not for a generic singlet of the D2h irrep the CI vector is
+  masked to — the linear molecule's full symmetry, which the abelian mask does
+  not carry. On acrolein (Cs) the abelian irrep is the whole group: 5 more Sr
+  and Si modes, and Sir's second, are null for every A' singlet (Si's family
+  column, 14, is a sampled upper bound).
+
+`K` annihilates the dropped space at the state to its convergence:
+`|P K|/|K|` ≤ 1.2e-12 except CAS(8,8) (3.6e-10 / 5.0e-10, Sr / Si) and
+CAS(10,12) (3.0e-10 / 3.2e-10), whose CI residuals `|Hc - Ec|` are 4.3e-7 and
+3.7e-7 against ≤3.5e-15 for the others.
+
+**How the dropped space moves, per kind of direction.** `Epq` is
+`nevpt2_pc_tangent`'s direction (`sum w_pq E_pq |c>` over `dm1`'s nonzero
+pairs — on these states the number operators of the state's own orbitals);
+`family` a family state; `sector` a random singlet of the abelian irrep;
+`singlet` one of any irrep (acrolein only: what a non-totally-symmetric
+response is). "Coupling" is `|P S_u Q|/|S_u|` (zero: the null space does not
+turn); "lift" is the order at which the dropped eigenvalues of
+`S(c + h u)` leave zero (none: below 1e-15 relative at `h = 2^-8`), and
+`L_uu` the second-order lift's largest eigenvalue over `s_max`
+([`hessian-theory.md`](hessian-theory.md), §6.2). `|P S_u P|/|S_u|` is zero
+to round-off in every row — ≤1.5e-11, 2.6e-9 along CAS(8,8)'s lifting
+`sector` direction — because a Gram metric's dropped eigenvalues never move
+at first order; `|P K_u P|/|K_u|` likewise (≤4.0e-11, and ≤3.0e-9 on the two
+states with the 4e-7 CI residuals):
+
+| golden, class | `Epq`: coupling, lift | `family` | `sector` | `singlet` |
+|---|---|---|---|---|
+| `cas44` Sr, Si | 0.56, none | 0.52, none | 0.66, none | |
+| `cas44` Sir | 0.04, `h^4` | 0.00, none | 0.03, **`h^2`** (`L_uu` 0.27) | |
+| `acrolein` Sr | 0.48, none | 0.43, none | 0.54, none | 0.52, none |
+| `acrolein` Si | 0.56, none | 0.58, none | 0.62, none | 0.61, none |
+| `acrolein` Sir | 0.00, none | 0.00, none | 0.00, none | 0.04, **`h^2`** (`L_uu` 1.1e-2) |
+| `cas88` Sr, Si | 0.02, `h^4` | 0.00, none | 0.04, **`h^2`** (`L_uu` 1.9e-2) | |
+| `cas88` Sir | 0.01, `h^4` | 0.00, none | 0.01, **`h^2`** (`L_uu` 3.4e-2) | |
+| `cas1010` Sr, Si, Sir | 0.00, none | 0.00, none | 0.00, none | |
+| `cas1012` Sr, Si | 0.03, `h^4` | | | |
+| `cas1012` Sir | 0.02, `h^4` | | | |
+
+Where nothing lifts at second order (none or `h^4`), `L_uu` is round-off:
+≤2.8e-10 over `s_max`, 2.2e-9 at CAS(10,12), and acrolein Sr's 1.6e-8
+(`sector`) and 3.4e-8 (`singlet`) — `S^+` (smallest kept 1.8e-10 to 4.6e-10)
+amplifying rounding. Every measured `h^2` lift is ≥1.1e-2. The `h^4` modes
+sit at 2e-12 to 3e-11 relative at `h = 2^-8` (`Epq`); Sir's is the one "What
+the check can and cannot displace" steps around.
+
+`A = K + Delta S`'s own eigenvalues on `S`'s dropped slots are not null off
+the eigenstate even where `S`'s are: along `Epq` at `h = 2^-6` / `2^-8`,
+1e-6 / 2e-7 of its largest for CAS(4,4) Sr, 2e-5 / 1e-6 for acrolein Sr,
+against ≤3e-17 for CAS(4,4) Sir (`S`'s dropped eigenvalues stay ≤1e-15 in
+all three). That is the Moore–Penrose inverse of `A` — and block2's
+per-tuple `lstsq` on `H_D` — changing rank where the device's `S`-cut solve
+does not.
+
+**The second derivative.** `Eddot` without the rotation terms (§6.1 as
+first written), with them, and the difference quotient of the device's
+two-term `Edot`, each against the Richardson difference of the exact
+three-term `Edot` (relative; "ref spread" is the difference between its last
+two once-extrapolated values, the reference's own uncertainty):
+
+| golden, class, direction | ref spread | without | repaired | FD of device `Edot` |
+|---|---:|---:|---:|---:|
+| `cas44` Sr, #152's own `u, v` | 3e-10 | 2.8e-1 | 1.3e-10 | 1.4e-1 |
+| `cas44` Sir, #152's own `u, v` | 1e-10 | 1.5e-6 | 5.4e-12 | 9.3e-7 |
+| `cas44` Sr, `Epq` / `family` / `sector` | ≤2e-10 | 2.8e-1 / 3.7e-1 / 1.0 | ≤1.8e-10 | 1.4e-1 / 2.0e-1 / 3.4e-2 |
+| `cas44` Sir, `Epq` / `sector` | ≤1e-8 | 5.4e-6 / 5.6e-4 | ≤3.9e-10 | 4.5e-6 / 5.1e-4 |
+| `acrolein` Sr, `Epq` / `sector` / `singlet` | ≤3e-6 | 1.7e-5 / 2.0 / 7.2e-1 | ≤1.7e-5 | 1.6e-5 / 7.0e-1 / 1.5 |
+| `acrolein` Si, `Epq` / `sector` / `singlet` | ≤4e-7 | 5.7e-3 / 1.4e-1 / 1.0e-2 | ≤2.6e-7 | 2.6e-3 / 1.3e-1 / 1.7e-3 |
+| `acrolein` Sir, `singlet` | 2e-10 | 2.6e-4 | 1.5e-10 | 2.2e-5 |
+| `cas88` Sr, `Epq` / `sector` | ≤5e-7 | 3.1e-7 / 1.3e-5 | ≤3.5e-9 | 7.7e-8 / 9.2e-6 |
+| `cas88` Sir, `Epq` / `sector` | ≤7e-9 | 1.8e-5 / 5.8e-6 | ≤3.4e-9 | 1.8e-6 / 3.2e-6 |
+| `cas88` every class `family`; `cas1010` every class and kind | ≤5e-6 | = repaired (no rotation) | ≤3.8e-8 | = ref |
+
+The "#152's own" rows take `nevpt2_pc_tangent`'s two seeds' weights
+(`--given-u`/`--given-v`, what libc++'s `mt19937_64` draws for `0x5eed0033`
+and `0x5eed0152`) and reproduce #152's RTX 3080 run to its printed digits:
+without the rotation terms Sr is 0.1265035562 and Sir 4.0340320600, and the
+device-`Edot` quotient 0.1508600517 and 4.0340343134 (its Sir row,
+4.0340343378, is a coarser ladder). The second derivative of the energy the
+device computes is **0.1752129067** (Sr) and **4.0340380951** (Sir): neither
+of #152's two numbers. The quotient of the device's `Edot` plateaus because
+that `Edot` lacks a term off the eigenstate; the analytic one because it
+lacks the rotation; and they miss by different amounts.
+
+**What the rotation terms cost, and what `PC_MIN_GAP` does not see.** They
+carry `S^+`, so the smallest kept eigenvalue — not the gap — sets their
+size. They reach O(1) of the class's second derivative on the rank-bound
+states (CAS(4,4) Sr: up to 1.0; acrolein Sr: up to 2.0) and are exactly zero
+where nothing turns. Separately, where the smallest kept `s` is ~1e-10
+relative (CAS(8,8)–CAS(10,12) Sr and Si, acrolein Sr) the second derivative
+itself is large (|Sr| from 40 to 1.3e4 Eh per unit CI direction squared,
+against `E_Sr` of 0.03–0.11 Eh) and short-ranged: the reference difference
+needed steps of `2^-16` (N2) and `2^-18` (acrolein) to converge, against
+`2^-12` at CAS(4,4) (smallest kept 9.1e-4), and moving the CI vector by 1e-9
+moves the repaired value by up to 4e-4 relative (acrolein Sr, `sector`; ≤6e-7
+on the N2 states). The gap check (CAS(8,8) Sr 4.2e5, acrolein Sr 7.6e4)
+passes all of these.
+
+Along CAS(8,8)'s `sector` direction the fixed-rank continuation is smooth —
+its reference converges and the repaired formula matches it to 2.6e-10 —
+but it is not the device's energy: with `L_uu` 1.9e-2 the lifted
+eigenvalue passes `PC_TAU` at `h ≈ 2^-19`, after which the threshold keeps a
+mode the continuation drops.
+
 ### Per class
 
 `n` = `ncas`. Layouts are `energy.cppm`'s `ExtBlock` table, and einsum
@@ -650,8 +825,11 @@ Edot_t = -c (2 x^T bdot_t - x^T Adot_t x)
 and no `dU/dh` or `dlambda/dh` appears. `A^+` is a pseudo-inverse, so this is
 legitimate only where the rank is locally constant, which is exactly what
 `PC_MIN_GAP` enforces (see "The singular-metric convention"): the dropped
-modes are structural, three decades below the smallest kept one, so the cut
-cannot move under a small change of the state. **A class the gap or
+modes are exact null modes of the state's metric, three decades below the
+smallest kept one, so the cut cannot move under a small change of the state.
+(They are not null for every CI vector, and some turn with the state: that
+leaves this first derivative exact at the state, and changes the second —
+"What the cut drops, and how it moves".) **A class the gap or
 denominator check refuses is refused in the tangent too** — never given a
 zero derivative. The full argument is in `src/energy/energy.cppm`'s header
 and at `tangentClass` in `energy_pc_solve.cppm`.

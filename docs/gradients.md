@@ -888,13 +888,23 @@ Three conditions, each enforced in code rather than assumed.
 is **locally constant** — otherwise `dA^+` does not exist and the tangent
 expression is meaningless. Local rank constancy is exactly what the
 singular-metric convention already enforces: the modes the cut drops are
-**structural** — linear dependencies among the class's active-space operator
-strings, null for *every* CI vector, not small-for-this-state — and
+**exact null modes of the state's metric** — not of every CI vector: some are
+null for every singlet (spin), some are fixed in number for every singlet while
+*which* combinations are null turns with the state (a rank bound), some are
+null only across states sharing the molecule's full symmetry
+([`pc-nevpt2.md`](pc-nevpt2.md), "What the cut drops, and how it moves") — and
 `PC_MIN_GAP` demands decades of separation between them and the smallest kept
-mode, so no mode can cross the cut under a small change of the state
+mode, so no kept mode can sink under the cut under a small change of the state
 ([`pc-nevpt2.md`](pc-nevpt2.md), "The singular-metric convention", has the
-constant and the measured spectra). The two extra terms of the general
-pseudo-inverse derivative drop because `b_t` lies in the kept range. So the
+constant and the measured spectra). The metric is a Gram matrix, so its
+dropped eigenvalues never move at first order, and the rank condition the
+*first* derivative needs holds along any direction. The solve is the S-cut
+restricted inverse, whose derivative has extra terms; at first order they drop
+because `b_t` lies in the kept range and because, **at an eigenstate**, `K`
+annihilates `S`'s dropped space. Off an eigenstate that second fact fails, so
+the two-term tangent is the derivative only at the state itself — which is all
+the gradient needs, and not enough for a difference of it
+([`hessian-theory.md`](hessian-theory.md), §6.2). So the
 tangent is valid **precisely on the states the energy stage already accepts,
 and only there**: a refused class is refused in the tangent, never given a
 zero derivative (§4.3), and `test/pc_tangent/` locks that in. The adjoint

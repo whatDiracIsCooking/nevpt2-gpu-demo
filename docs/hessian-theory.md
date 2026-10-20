@@ -987,67 +987,146 @@ more right-hand sides:
 
 No eigensolve is rerun and no eigenvector derivative appears, at either order.
 
-### 6.2 The null-space terms drop — because the null space is structural, not small
+### 6.2 The null-space terms do not drop — the cut's null space turns with the state
 
-The derivative of a Moore–Penrose pseudo-inverse at locally constant rank is
-Golub and Pereyra's (Ref. in [`references.md`](references.md), "Numerical
-linear algebra"), which for symmetric `A` reads
+§6.1 differentiates `A^+` as if the energy stage's solve were the
+Moore–Penrose inverse of `A` and as if its null space never moved. Neither
+holds, and the second derivative needs the terms that correct both. What the
+cut drops, mode by mode, and every figure behind this section are measured in
+[`pc-nevpt2.md`](pc-nevpt2.md), "What the cut drops, and how it moves".
 
-```
-  dA^+ = -A^+ dA A^+ + A^+ A^+ dA P_N + P_N dA A^+ A^+
-```
-
-**Note the `A^+ A^+` in the two range-complement terms**: the easy mistake is
-to write a single `A^+` there by analogy with the first term, and it is wrong —
-a numerical check against a difference quotient on a rank-deficient matrix
-whose null space *moves* misses by an O(1) relative amount, not by a small one.
-It happens not to matter for the conclusion below, because both terms carry a
-`P_N` factor either way, but the formula is the formula.
-
-At first order the last two terms drop simply because `b_t` lies in the kept
-range, so `P_N b = 0` ([`gradients.md`](gradients.md), §7). **That argument
-alone does not survive to second order**: terms carrying
-`P_N dA A^+ x` and `bdot^T P_N` appear, and `bdot` has no reason to lie in the
-range.
-
-They drop anyway, for a stronger reason than the first-order one, and it is
-worth spelling out because it is the whole licence for PC's second derivative.
-The modes the cut drops are **structural** — "linear dependencies among the
-class's active-space operator strings, null for *every* CI vector, not
-small-for-this-state" ([`gradients.md`](gradients.md), §7). A dropped mode `w`
-is therefore a vector with `sum_mu w_mu |Phi_mu> = 0` *as a function*, not
-merely a small eigenvalue of this state's metric. Hence, identically in `c`,
+**What the solve is.** The energy stage cuts `S`, not `A`: with `Q` the kept
+eigenvectors of `S` (`s_k > PC_TAU s_max`, a plain threshold —
+`pcRankCut` knows nothing about which modes are structural), it computes
 
 ```
-  S(c) w = 0   and   K(c) w = 0   for every c
-  =>  dS . w = dK . w = 0  and  d^2 S . w = d^2 K . w = 0
-  =>  P_N dA = dA P_N = 0  and  P_N A'' = A'' P_N = 0
+  M = Q (Q^T A Q)^-1 Q^T,      E_t = -nu b_t^T M b_t
 ```
 
-so every null-space term vanishes at **every** order, not just the first —
-`dA^+` collapses to its first term, `-A^+ dA A^+`, and stays collapsed under
-further differentiation. (This is also why the `A^+ A^+` correction above
-changes nothing here: it only ever multiplies a `P_N dA`.) The
-condition that licenses this is the one the energy stage already enforces — the
-singular-metric convention's structural cut, with `PC_MIN_GAP` guaranteeing
-local rank constancy ([`pc-nevpt2.md`](pc-nevpt2.md), "The singular-metric
-convention") — so the second derivative is valid precisely on the states the
-energy stage accepts, and a class the gap or denominator check refuses must be
-refused in the Hessian too, exactly as in the tangent and the adjoint.
+which is `A^+` only where `A` annihilates `S`'s dropped space. At an
+eigenstate it does — `K`'s columns are `<Phi_mu|[H_D, O_w]|c>`, and
+`O_w|c> = 0` with `H_D|c> = E|c>` make them vanish — but at any other CI
+vector, including every displaced state a finite difference visits, `K` couples
+the two spaces. Golub and Pereyra's formula
+([`references.md`](references.md), "Numerical linear algebra") is then the
+wrong object: it needs `A`'s own rank locally constant, and `A`'s is not.
+`P K P` stays zero (the bra `O_w|c'>` vanishes), but `P K Q` does not, so off
+the eigenstate `A` is a saddle-point matrix on `S`'s dropped space and its
+eigenvalues there rise as `h^2` — along the very directions where `S` keeps its
+rank. (block2's per-tuple `lstsq` on `H_D` is `A^+` with a cut, so its PC
+energy off an eigenstate is a different function from the device's.) `M` is
+differentiable wherever `S`'s rank is locally constant, and its derivative
+carries `S`'s pseudo-inverse, not `A^+ A^+`. With `P` the dropped-space projector and `S^+` on the kept
+space,
 
-Two honest qualifications:
+```
+  dM = -M dA M + P dS S^+ M + M S^+ dS P - M S^+ dS P A M - M A P dS S^+ M
+```
 
-- The identity is exact in the idealisation and approximate in arithmetic: the
-  dropped eigenvalues are not exactly zero, only structurally so, and the
-  measured magnitudes are the table in
-  [`pc-nevpt2.md`](pc-nevpt2.md), "The singular-metric convention". Nothing
-  amplifies them — `A^+` is identically zero on the dropped subspace, so no
-  small denominator meets a small numerator — but the claim is "bounded by the
-  measured null-mode size", not "zero".
-- The conclusion depends on the cut being the *structural* one. A cut raised to
-  drop physics ([`pc-nevpt2.md`](pc-nevpt2.md) measures what that costs the
-  energy) would make `P_N dA` genuinely non-zero and put the dropped terms
-  back. The second derivative is one more reason the cut must stay where it is.
+**First order.** `b_t = S x_t + S_1 h1_t` lies in `S`'s range at every CI
+vector (`S_1` is a Gram column of the same functions), so
+
+```
+  Edot_t = -nu (2 x^T bdot_t - x^T Adot_t x - 2 rho^T Sdot P A x),     rho = S^+ x
+```
+
+The third term vanishes exactly where `P A = 0`, at the eigenstate, which is
+why [`gradients.md`](gradients.md), §4.3's two-term tangent is right *there*
+and why its first-order check passes. Off the eigenstate it is the derivative
+of nothing: a central difference of the device's two-term `Edot` along `u`
+converges to the Hessian **plus** the derivative of the missing term,
+`2 rho^T S_v P (A_u x - S_u S^+ b)`, not to the Hessian. A finite-difference
+gate on the second derivative must difference the three-term `Edot` (or the
+energy twice).
+
+**Second order, at the eigenstate.** With `g = bdot - Adot x` and
+`sigma = S^+ b`,
+
+```
+  F_uv = 2 b_uv^T x - x^T A_uv x + 2 g_u^T M g_v                         (6.1's terms)
+       + 2 rho^T S_u P g_v - 2 rho^T S_v P A_u x + 2 rho^T S_v P S_u sigma   (the rotation)
+  Eddot_t[u,v] = -nu F_uv
+```
+
+symmetric in `(u, v)`. Every rotation term carries the kept–dropped block of
+`S`'s tangent, `P S_u` or `P S_v`, so they vanish where the dropped space does
+not turn — and it does turn, for rank-bound modes along any singlet direction
+and for spatial-symmetry modes along any direction that breaks that symmetry,
+`nevpt2_pc_tangent`'s included. They need no eigen-derivative and no new solve —
+`S^+ = U U^T` and `P = I - T U^T` in the solve's own `U` and `T = S U`
+([`pc-nevpt2.md`](pc-nevpt2.md), "The solve: once per class, not once per
+tuple") — so §6.1's conclusion that the eigendecomposition is never
+differentiated survives; its "no null projector" does not.
+
+**Why the null space moves.** "Null for every CI vector" is false: on the
+whole fixed-`M_s` determinant space no class drops anything. The dropped
+modes are exact null modes of *this state's* metric, of three kinds:
+
+- **spin**: one combination per active orbital in Sr and Si, and one in Sir,
+  that two orderings of a repeated active index produce identically on an
+  `S = 0` state. Null for every singlet; these do not move.
+- **a rank bound**: Sr's functions live in the `(N-1)`-electron doublet
+  active space and Si's in the `(N+1)`-electron one. When `n^3` exceeds that
+  space's dimension, every singlet has the same nullity but *which*
+  combinations are null depends on `c`. The rank is constant along any singlet
+  direction, to every order, and the null space turns — this is CAS(4,4)'s
+  Sr, the case #152's ladder found.
+- **the state's own spatial symmetry**: modes null across the states that
+  share the Hamiltonian's full point group (for a linear molecule, more than
+  the abelian subgroup the CI vector is masked by), but not for a generic
+  vector of the abelian irrep.
+
+**Is the rank constant to second order?** For a Gram metric the dropped
+eigenvalues never move at first order (`P S_u P = 0` identically). Their
+second-order coefficient along `(u, v)` is
+
+```
+  L_uv = P (S_uv - S_u S^+ S_v - S_v S^+ S_u) P
+```
+
+built from objects the Hessian already holds (§3's second-order metric, the two
+tangents, `S^+`). It vanishes — the rank is constant through second order and
+the repaired `F_uv` is the second derivative of the energy the code computes —
+along every direction that keeps the state's full symmetry and spin: the
+spin-free number-operator directions `nevpt2_pc_tangent` displaces along, the
+states of the symmetry family, and on a rank-bound class any singlet direction.
+It is **non-zero**, for a class whose dropped modes include spatial-symmetry
+ones, along a direction that leaves the state's symmetry: a generic vector of
+the abelian irrep where the molecule's group is larger, or any vector of
+another irrep (the CI response to a non-totally-symmetric displacement).
+Spin and rank-bound modes do not lift along any singlet direction. Where `L`
+is non-zero the rank changes at the order the Hessian probes: the energy
+agrees with its fixed-rank continuation only on a neighbourhood whose size is
+set by `PC_TAU` (in exact arithmetic the span gains a function), and its
+second derivative is the derivative of the threshold convention:
+**refuse** the class for that direction pair, with `L_uv` (and `L_uu`, `L_vv`)
+as the test — measured noise and measured lifts are decades apart.
+
+**Sir's `h^4` mode, in these terms.** Along `nevpt2_pc_tangent`'s direction
+(number operators of the state's own orbitals), the displaced functions stay in
+the old span at first order, so `L_uu = 0` and the mode Sir's spatial-symmetry
+null space carries rises only at fourth order. Through second order the rank is
+constant and the repaired formula is exact; the mode is the reason the
+difference's step has an upper bound, not a reason to refuse. Along a generic
+direction of the abelian irrep the same mode rises at `h^2` and is refused by
+the rule above.
+
+**What `PC_MIN_GAP` still guarantees, and what it does not.** It still is the
+licence for the rank condition — no kept mode can sink under the cut — and a
+class the gap or denominator check refuses is refused here too. It does not
+bound the second derivative's conditioning: the rotation terms carry `S^+`
+once or twice, so the smallest **kept** eigenvalue of `S`, not the gap, sets
+how large they can be, and with it how large the Hessian is, how small a step
+its own finite difference needs, and how far a CI-convergence-sized error in
+`c` moves it. The measured sizes are in
+[`pc-nevpt2.md`](pc-nevpt2.md), "What the cut drops, and how it moves"; a
+second-derivative gate should print the smallest kept `s` beside the gap.
+
+One qualification is unchanged: the conclusions depend on the cut sitting
+below the first real mode. A cut raised to drop physics
+([`pc-nevpt2.md`](pc-nevpt2.md) measures what that costs the energy) would put
+genuinely non-null modes into `P` and make the energy depend on the cut at
+first order already.
 
 ### 6.3 Why PC gains relative to SC here
 
@@ -1293,11 +1372,16 @@ do not apply here.
 - The digests need **no second-order kernel**, because `f3` is linear in `h2e`
   (§5.2). The orbital Hessian's digest terms are the existing #88 and #89 paths
   at new arguments.
-- PC's second derivative needs **no eigen-derivative and no null projector**:
-  the null-space terms that the first-order "`b` is in the range" argument
-  would have left behind drop for a stronger reason — the cut is structural, so
-  `S`, `K` and all their CI derivatives annihilate the dropped subspace
-  identically (§6.2).
+- PC's second derivative needs **no eigen-derivative, but it does need the
+  null-space terms** (§6.2): the solve is the S-cut restricted inverse, not
+  `A^+`, and the dropped space is exact for the state but turns with it (spin
+  modes stay put; rank-bound and spatial-symmetry modes rotate), so `F_uv`
+  carries rotation terms in `S^+ = U U^T` and `P = I - T U^T`, objects the
+  solve already holds. A direction pair whose second-order lift `L_uv` is
+  non-zero — one that leaves the state's symmetry — changes the rank at the
+  order the Hessian probes and is refused for that class. A finite difference
+  of the device's two-term `Edot` does not converge to the Hessian off the
+  eigenstate; the three-term one does.
 - `H_kk` is **five terms**, every one an existing contraction at new
   arguments (§5.1's table): the first-order pairing at the parameterisation's
   symmetric `W = (uv + vu)/2` (K1), the same pairings at a two-slot promotion
