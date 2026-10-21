@@ -325,3 +325,37 @@ INSTALL_CLAUDE_CODE=${INSTALL_CLAUDE_CODE:-0}
 
 CLAUDE_NPM_PACKAGE=${CLAUDE_NPM_PACKAGE:-@anthropic-ai/claude-code}
 CLAUDE_REGISTRY_TIMEOUT=${CLAUDE_REGISTRY_TIMEOUT:-8}
+
+# --- the OTHER agent in the images -----------------------------------------
+
+# The same knobs again for the Antigravity CLI (`agy`), which the GPU
+# Dockerfiles install from docker/install-agy.sh as the layer after Claude
+# Code's. The pin is `ARG AGY_RELEASE=` plus `ARG AGY_SHA512=` in each of these
+# files -- TWO lines, because a release id alone does not say which bytes it
+# names and install-agy.sh verifies rather than records the hash.
+#
+# devtools/agy-version.sh reads, compares and rewrites exactly these, and
+# doctor.sh warns when they disagree or have fallen behind upstream.
+AGY_PIN_FILES=${AGY_PIN_FILES:-"docker/Dockerfile.cuda
+docker/Dockerfile.hip
+docker/Dockerfile.combined"}
+
+# Whether docker/build.sh installs the Antigravity CLI into the GPU images at
+# all. OFF for the reason INSTALL_CLAUDE_CODE is, and one more: the binary is
+# 213MiB, so an image built to reproduce a number should not be carrying a
+# fifth of a GB of agent. Turn it on the same way:
+# export INSTALL_AGY=1 before docker/build.sh.
+INSTALL_AGY=${INSTALL_AGY:-0}
+
+# Where agy-version.sh asks what the CURRENT release is. Upstream's own
+# install.sh uses this endpoint, one JSON document per platform, carrying the
+# version, the storage URL (whose path segment IS the release id this project
+# pins) and the tarball's sha512.
+#
+# TWO spellings of the platform, and they do not match: the MANIFEST is named
+# linux_amd64, while the tarball's URL path segment -- what AGY_PLATFORM in
+# docker/install-agy.sh holds -- is linux-x64. Both are upstream's, so neither
+# is derivable from the other; agy-version.sh carries the mapping.
+AGY_MANIFEST_BASE=${AGY_MANIFEST_BASE:-https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests}
+AGY_MANIFEST_PLATFORM=${AGY_MANIFEST_PLATFORM:-linux_amd64}
+AGY_MANIFEST_TIMEOUT=${AGY_MANIFEST_TIMEOUT:-8}

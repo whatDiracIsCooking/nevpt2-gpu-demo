@@ -136,9 +136,10 @@ devtools/claude-version.sh --rebuild    # ...and rebuild the images already buil
 ```
 
 `ARG CLAUDE_CODE_VERSION` is declared in **all three** GPU files — the fourth
-version to bump in more than one place, after `ROCM_VERSION` and `GPU_TARGETS`
-— which is why that script exists, and why `doctor.sh` warns
-when the three disagree or have fallen behind the registry.
+version to bump in more than one place, after `ROCM_VERSION` and `GPU_TARGETS`,
+and `ARG AGY_RELEASE`/`ARG AGY_SHA512` below are the fifth and sixth — which is
+why those scripts exist, and why `doctor.sh` warns when the copies disagree or
+have fallen behind upstream.
 
 **It is deliberately not in `Dockerfile.base`.** A bump there invalidates the
 CUDA toolkit and the ~19GB ROCm install below it; at the
@@ -150,6 +151,65 @@ permanent cache hit. `devcontainer-lock.json` pins that feature's digest, not
 the version it installs: measured on this box before the change, four images
 off one lockfile carried claude 2.1.197 (×3, built over three days) and 2.1.289
 — the version was a function of build date, and nothing reported it.
+
+### The Antigravity CLI is opt-in too — and pinned by *release*, not version
+
+`agy` gets the same treatment for the same reasons, one layer after Claude
+Code's, and is **off by default** for one reason more: the binary is 213MiB
+(the layer takes `nevpt2:cuda` from 14.5GB to 14.8GB).
+
+```bash
+INSTALL_AGY=1 docker/build.sh cuda            # or set it in devtools/config.sh
+```
+
+With the opt-in, each GPU file runs `docker/install-agy.sh`, which installs
+Google's Antigravity CLI as `/usr/local/bin/agy`: download the pinned tarball,
+verify its sha512, extract the one binary, then check `agy --version` and that
+`agy` on `PATH` is the copy just installed. A 404 or a renamed archive member
+fails the build rather than producing a container with no `agy` in it.
+
+```bash
+devtools/agy-version.sh                 # pinned / upstream / installed here,
+                                        # + running containers on a pre-bump image
+devtools/agy-version.sh --apply         # rewrite the pin to upstream's current release
+devtools/agy-version.sh --apply 1.4.4-4783783166214144
+devtools/agy-version.sh --rebuild       # ...and rebuild the images already built here
+```
+
+**The pin is a release id — `1.4.4-4783783166214144` — and two lines, not
+one.** Upstream's updater endpoint serves only the *current* release, so a
+version on its own is not addressable the way `claude-code@2.1.292` is; what is
+addressable is the storage URL, whose path carries the version plus an opaque
+build id. So `ARG AGY_RELEASE` pins that segment and `ARG AGY_SHA512` pins the
+tarball it names, `install-agy.sh` *verifies* the hash rather than recording it,
+and `agy-version.sh --apply` rewrites both in all three files. The build then
+needs no manifest at all: an upstream release neither changes what the image
+installs nor breaks the build.
+
+Three consequences worth knowing:
+
+- **Rolling back needs a release id you already have** — a previous value of
+  the pin, which is in git. Upstream publishes no index of older releases, and
+  its manifest carries a hash for the current release only, so `--apply
+  <release>` for anything else downloads that tarball (~60MB) to hash it.
+- **`ENV AGY_CLI_DISABLE_AUTO_UPDATE=1` is load-bearing.** `agy` self-updates
+  in the background during normal runs, which would walk the container away
+  from its pin; the binary is root-owned and the container runs as uid 1000, so
+  the attempt fails anyway, but failing quietly on every run is not the same as
+  not being attempted. Bump with `devtools/agy-version.sh`, not `agy update`.
+- **`agy --version` cannot tell you which release you have** — it prints
+  `1.4.4` and never the build id. That is why `AGY_RELEASE` is an `ENV` as well
+  as an `ARG`, and it is what `doctor.sh` compares.
+
+`Dockerfile.combined` runs the script on top of the `cuda` image, which may
+already have run it — so `install-agy.sh` **inherits** a copy that is already at
+the pinned release instead of laying down a second 213MiB layer. The early exit
+is keyed on the version matching, so a `combined` pinned to something other than
+its parent still gets its own.
+
+`agy` keeps its credentials in `$HOME/.gemini`. The devcontainers bind your
+host copy there, exactly as they bind `~/.claude` — see `//agy` in
+`.devcontainer/cuda/devcontainer.json`; without the opt-in nothing reads it.
 
 ### The `-ci` variants, and the registry
 

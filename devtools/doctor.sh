@@ -557,6 +557,98 @@ if [ -n "${CLAUDE_CODE_VERSION:-}" ] && command -v claude >/dev/null 2>&1; then
   fi
 fi
 
+# --- antigravity cli pin (the OTHER agent the image ships) -----------------
+# The same three checks as the Claude Code pin above, against the same kind of
+# drift, with one extra failure mode of its own: the pin is TWO lines
+# (ARG AGY_RELEASE and ARG AGY_SHA512), so "the right release with the wrong
+# bytes" is reachable and `docker build` would be the first thing to say so.
+# agy-version.sh's report covers that one; this reads its porcelain.
+# AGY_PIN_FILES in config.sh is the list of files carrying the pin; empty
+# drops the section.
+AV="$TOP/devtools/agy-version.sh"
+if [ -n "${AGY_PIN_FILES:-}" ] && [ -x "$AV" ]; then
+  echo "antigravity cli pin"
+  av=$("$AV" --porcelain 2>/dev/null)
+  av_pinned=$(printf '%s\n' "$av" | sed -n 's/^pinned //p')
+  av_files=$(printf '%s\n' "$av" | sed -n 's/^files //p')
+  av_upstream=$(printf '%s\n' "$av" | sed -n 's/^upstream //p')
+  av_installed=$(printf '%s\n' "$av" | sed -n 's/^installed //p')
+
+  # 1. the copies agree with each other -- release AND sha512, which is why a
+  #    disagreement here can mean either line.
+  if [ -z "$av_pinned" ] || [ "$av_pinned" = "-" ]; then
+    warn "the Antigravity CLI pin disagrees across the Dockerfiles"
+    note "$av_files"
+    note "(a release and its sha512 must both match; see devtools/agy-version.sh)"
+    note "fix: devtools/agy-version.sh --apply <release>"
+  # 2. and with upstream. Behind is a WARN, never a FAIL, exactly as above.
+  elif [ -z "$av_upstream" ] || [ "$av_upstream" = "-" ]; then
+    ok "Antigravity CLI pinned at $av_pinned"
+    note "the release manifest is unreachable from here -- cannot say whether it is current"
+  elif [ "$av_pinned" != "$av_upstream" ]; then
+    warn "Antigravity CLI pin $av_pinned is behind upstream ($av_upstream)"
+    note "bump: devtools/agy-version.sh --apply && docker/build.sh cuda"
+  else
+    ok "Antigravity CLI pinned at $av_pinned (current)"
+  fi
+
+  # 3. and, inside an image built from that pin, with what is on PATH.
+  #    AGY_RELEASE in the environment is the image's own ENV, so its presence
+  #    is what tells container from host -- and it is the ONLY way to know
+  #    which release a container carries, since `agy --version` prints the
+  #    version half and never the build id. So the comparison below is between
+  #    version halves on both sides.
+  #    No agy at all is an image built without the opt-in (INSTALL_AGY, off by
+  #    default; docker/install-agy.sh), which is correct. Keyed on the binary,
+  #    not on INSTALL_AGY: config.sh, sourced above, defaults that to 0 over
+  #    the image's ENV.
+  if [ -n "${AGY_RELEASE:-}" ] && [ -z "$av_installed" ]; then
+    note "no agy in this image (built without INSTALL_AGY=1; that is the default)"
+  elif [ -n "${AGY_RELEASE:-}" ]; then
+    av_image_version=${AGY_RELEASE%%-*}
+    av_tree_version=${av_pinned%%-*}
+    if [ "$av_installed" != "$av_image_version" ]; then
+      warn "agy on PATH is ${av_installed:-none}, this image pinned $av_image_version ($AGY_RELEASE)"
+      note "something installed over the image's copy; rebuild the container"
+    elif [ -n "$av_pinned" ] && [ "$AGY_RELEASE" != "$av_pinned" ]; then
+      warn "this image was built at $AGY_RELEASE, the tree now pins $av_pinned"
+      note "rebuild: devtools/devcontainer.sh rebuild"
+      # Same version, different build id: `agy --version` cannot see this and
+      # neither can the check above it. Naming it is the whole reason
+      # AGY_RELEASE is an ENV.
+      [ "$av_image_version" != "$av_tree_version" ] || \
+        note "(same version $av_image_version, different build id -- only the ENV shows it)"
+    else
+      ok "agy in here is the pinned $AGY_RELEASE"
+    fi
+  else
+    note "agy here is ${av_installed:-not installed} (a host install, unrelated to the pin)"
+  fi
+fi
+
+# --- antigravity cli config dir (inside the container only) ----------------
+# The counterpart of the claude config check above, and the same failure: agy
+# keeps its credentials under $HOME/.gemini, so a directory uid 1000 cannot
+# write means it asks you to log in on every run with nothing naming the
+# directory. The devcontainers bind your HOST ~/.gemini over it for exactly
+# the reason they bind ~/.claude.
+if [ -n "${AGY_RELEASE:-}" ] && command -v agy >/dev/null 2>&1; then
+  echo "antigravity cli config"
+  agycfg="${HOME:-/home/ubuntu}/.gemini"
+  if [ ! -d "$agycfg" ]; then
+    warn "$agycfg does not exist"
+    note "agy cannot persist a login -- the devcontainers bind your host ~/.gemini here;"
+    note "a bare \`docker run\` of the image has none. fix: devtools/devcontainer.sh rebuild"
+  elif ! touch "$agycfg/.doctor-write-probe" 2>/dev/null; then
+    warn "$agycfg is not writable by $(id -un) (uid $(id -u))"
+    note "owner is $(stat -c '%U:%G' "$agycfg"); agy will ask you to log in every run"
+    note "fix: devtools/devcontainer.sh rebuild"
+  else
+    rm -f "$agycfg/.doctor-write-probe"
+    ok "$agycfg is writable"
+  fi
+fi
+
 # --- docker hygiene (report-only) -----------------------------------------
 # Worktree containers/volumes/images leak when a worktree is removed with plain
 # `git worktree remove` (bypassing worktree.sh rm), or via an agent's worktrees

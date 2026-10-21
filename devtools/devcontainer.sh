@@ -287,33 +287,49 @@ require_sccache_dir() {
   export NEVPT2_SCCACHE_DIR="$d"
 }
 
-# The ~/.claude bind in devcontainer.json names its source as
-# ${localEnv:HOME}/.claude -- no export needed, because unlike the git dir and
-# the sccache store this one IS expressible as a localEnv lookup, so a bare
-# `devcontainer up` or VS Code "Reopen in Container" resolves it the same way
-# this script does. What they do NOT do is the part below.
+# The agent config binds in devcontainer.json name their sources as
+# ${localEnv:HOME}/.claude and ${localEnv:HOME}/.gemini -- no export needed,
+# because unlike the git dir and the sccache store these ARE expressible as
+# localEnv lookups, so a bare `devcontainer up` or VS Code "Reopen in
+# Container" resolves them the same way this script does. What they do NOT do
+# is the part below.
 #
 # WHY THE mkdir, same lesson as the sccache store: docker does not refuse a
 # bind whose source is missing, it CREATES it, owned by root. Here that is
 # worse than a permission error inside the container -- the directory it
-# creates is your HOST ~/.claude, and a root-owned one breaks `claude` on the
-# host too, needing sudo to clear. Making it here, as you, is what stops that.
+# creates is your HOST ~/.claude (or ~/.gemini), and a root-owned one breaks
+# the agent on the host too, needing sudo to clear. Making it here, as you, is
+# what stops that.
 #
 # NOT fatal when it cannot be made. Every other mount in that json is load-
-# bearing for the build; this one only carries your Claude Code login, so a
-# home directory that cannot take it should cost you an auth prompt inside the
-# container, not the container.
-require_claude_dir() {
-  local d="${HOME:-}/.claude"
+# bearing for the build; these two only carry a login, so a home directory
+# that cannot take one should cost you an auth prompt inside the container,
+# not the container.
+#
+# TWO of them, one per agent, which is why this takes the directory and the
+# tool rather than hard-coding either: ~/.claude for Claude Code
+# (docker/install-claude-code.sh) and ~/.gemini for the Antigravity CLI
+# (docker/install-agy.sh). Both agents are opt-in at BUILD time and both
+# directories are bound unconditionally, since JSON cannot make a mount
+# conditional and an empty directory is cheaper than a second variant per
+# backend.
+require_agent_dir() {
+  local name=$1 tool=$2
+  local d="${HOME:-}/$name"
   if [ -z "${HOME:-}" ]; then
-    echo "warn: HOME is unset, so the ~/.claude bind cannot resolve --" >&2
-    echo "      claude inside the container will ask you to log in." >&2
+    echo "warn: HOME is unset, so the ~/$name bind cannot resolve --" >&2
+    echo "      $tool inside the container will ask you to log in." >&2
     return 0
   fi
   if [ ! -d "$d" ] && ! mkdir -p "$d" 2>/dev/null; then
-    echo "warn: cannot create $d for the container's Claude Code config --" >&2
-    echo "      claude inside the container will ask you to log in." >&2
+    echo "warn: cannot create $d for the container's $tool config --" >&2
+    echo "      $tool inside the container will ask you to log in." >&2
   fi
+}
+
+require_agent_dirs() {
+  require_agent_dir .claude claude
+  require_agent_dir .gemini agy
 }
 
 # The container's git IDENTITY -- a different problem from the git DIR above,
@@ -360,7 +376,7 @@ require_claude_dir() {
 # So the two names that cross the boundary are inert to git, and the script
 # inside writes config only when they are non-empty.
 #
-# NON-FATAL, like require_claude_dir: a container with no identity still
+# NON-FATAL, like require_agent_dir: a container with no identity still
 # builds, tests and reads the tree. Only committing from inside it needs this.
 require_git_identity() {
   local ident=""
@@ -580,6 +596,36 @@ report_claude_pin() {
   fi
 }
 
+# The same, for the Antigravity CLI, at the same two moments and for the same
+# reason -- plus one it does not share. `agy` SELF-UPDATES in the background
+# during normal runs, so "the thing in the container is not the thing in git"
+# is not merely possible here, it is what the binary tries to do unless
+# AGY_CLI_DISABLE_AUTO_UPDATE stops it (docker/install-agy.sh). That makes a
+# stale pin worth saying out loud rather than leaving to `doctor.sh`.
+#
+# THREE states, not two: the pin is two lines, so the files can agree on a
+# release and still disagree on its sha512 -- and that one only surfaces at
+# `docker build`, as a checksum failure that reads like a bad download.
+# --porcelain folds it into `pinned -`, which is what the first branch covers.
+report_agy_pin() {
+  local av out pinned upstream files
+  av="$REPO_ROOT/devtools/agy-version.sh"
+  [ -x "$av" ] || return 0
+  [ -n "${AGY_PIN_FILES:-}" ] || return 0
+  out=$(AGY_MANIFEST_TIMEOUT=${AGY_MANIFEST_TIMEOUT:-3} "$av" --porcelain 2>/dev/null)
+  pinned=$(printf '%s\n' "$out" | sed -n 's/^pinned //p')
+  upstream=$(printf '%s\n' "$out" | sed -n 's/^upstream //p')
+  files=$(printf '%s\n' "$out" | sed -n 's/^files //p')
+  if [ -z "$pinned" ] || [ "$pinned" = "-" ]; then
+    echo "agy: the release pin disagrees across the Dockerfiles -- $files" >&2
+    echo "     (a release AND its sha512 must match in all of them)" >&2
+    echo "     fix: devtools/agy-version.sh --apply <release>" >&2
+  elif [ -n "$upstream" ] && [ "$upstream" != "-" ] && [ "$pinned" != "$upstream" ]; then
+    echo "agy: image pins $pinned, upstream has $upstream" >&2
+    echo "     bump: devtools/agy-version.sh --apply, then $0 rebuild" >&2
+  fi
+}
+
 # The CLI prints the whole `docker run` invocation on failure, GH_TOKEN and
 # all. Everything below routes through this so a secret cannot reach the
 # terminal; the exit status is the CLI's, not sed's.
@@ -631,7 +677,7 @@ case "${1:-}" in
     shift
     require_git_dir
     require_sccache_dir
-    require_claude_dir
+    require_agent_dirs
     require_git_identity
     export_host_gids
     run_cli up --workspace-folder "$WORKSPACE" "${DC_CONFIG[@]}" "$@"
@@ -639,6 +685,7 @@ case "${1:-}" in
     tag_variant_image
     apply_cpu_limits
     report_claude_pin
+    report_agy_pin
     ;;
   rebuild)
     # Needed after editing devcontainer.json or the Dockerfile: a plain `up`
@@ -649,7 +696,7 @@ case "${1:-}" in
     shift
     require_git_dir
     require_sccache_dir
-    require_claude_dir
+    require_agent_dirs
     require_git_identity
     export_host_gids
     run_cli up --workspace-folder "$WORKSPACE" \
@@ -660,6 +707,7 @@ case "${1:-}" in
     tag_variant_image
     apply_cpu_limits
     report_claude_pin
+    report_agy_pin
     ;;
   shell)
     shift

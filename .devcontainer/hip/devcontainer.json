@@ -16,10 +16,11 @@
     "--security-opt", "seccomp=unconfined"
   ],
 
-  "//mounts": "Same set as ../cuda/devcontainer.json, which carries the full explanation, except that the build volume lands on build-hip to match the `hip` preset's binaryDir. The two binds -- the host git dir and your host ~/.claude, the latter being what keeps `claude` in here logged in -- are identical to the CUDA variant's, and the `//claude` note over there is the one that explains the second. The invariant from over there applies here too, and only to the volumes: every NAMED-VOLUME target must be pre-created uid 1000 in docker/Dockerfile.base's `install -d` list, or docker mounts it root-owned and uid 1000 cannot write it. A bind takes its HOST path's ownership instead, so it is exempt.",
+  "//mounts": "Same set as ../cuda/devcontainer.json, which carries the full explanation, except that the build volume lands on build-hip to match the `hip` preset's binaryDir. The three binds -- the host git dir, your host ~/.claude and your host ~/.gemini, the latter two being what keep `claude` and `agy` in here logged in -- are identical to the CUDA variant's, and the `//claude` and `//agy` notes over there are the ones that explain them. The invariant from over there applies here too, and only to the volumes: every NAMED-VOLUME target must be pre-created uid 1000 in docker/Dockerfile.base's `install -d` list, or docker mounts it root-owned and uid 1000 cannot write it. A bind takes its HOST path's ownership instead, so it is exempt.",
   "mounts": [
     "source=${localEnv:NEVPT2_GIT_DIR:/dev/null},target=${localEnv:NEVPT2_GIT_DIR:/dev/null},type=bind,consistency=cached",
     "source=${localEnv:HOME}/.claude,target=/home/ubuntu/.claude,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.gemini,target=/home/ubuntu/.gemini,type=bind,consistency=cached",
     "source=nevpt2-sccache-${devcontainerId},target=/home/ubuntu/.sccache,type=volume",
     "source=nevpt2-build-hip-${devcontainerId},target=/workspaces/nevpt2/build-hip,type=volume",
     "source=nevpt2-uvcache-${devcontainerId},target=/home/ubuntu/.cache/uv,type=volume"

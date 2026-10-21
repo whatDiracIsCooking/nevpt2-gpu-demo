@@ -190,11 +190,12 @@ them. There are three variants under `.devcontainer/`, driven by
   `devtools/config.sh`; a wrong gid shows up as `hipErrorNoDevice`.
   `combined` needs **both** vendors' cards, and on a host without
   `/dev/kfd` it doesn't start at all.
-- **Claude Code is not installed unless you ask.** The maintainer works with
-  it in the container (`INSTALL_CLAUDE_CODE=1 docker/build.sh cuda`); a plain
-  build leaves it and Node out. The devcontainers still bind-mount the host's
-  `~/.claude` (created empty if missing) and read `GH_TOKEN` for that tooling.
-  Neither is needed to build or test.
+- **Neither agent is installed unless you ask.** The maintainer works with them
+  in the container (`INSTALL_CLAUDE_CODE=1 INSTALL_AGY=1 docker/build.sh cuda`);
+  a plain build leaves Claude Code and Node out, and the Antigravity CLI (`agy`)
+  with them. The devcontainers still bind-mount the host's `~/.claude` and
+  `~/.gemini` (created empty if missing) and read `GH_TOKEN` for that tooling.
+  None of it is needed to build or test.
 
 ```bash
 docker/build.sh cuda && devtools/devcontainer.sh up && devtools/devcontainer.sh shell
