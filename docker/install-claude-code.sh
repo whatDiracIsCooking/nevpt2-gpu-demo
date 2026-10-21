@@ -34,10 +34,12 @@
 # devtools/claude-version.sh and reported by devtools/doctor.sh.
 set -euo pipefail
 
-# OPT-IN. The images build and test this project without Claude Code, so an
-# outside user building the container should not get it by default. The
-# maintainer's workflow sets INSTALL_CLAUDE_CODE=1 (devtools/config.sh, or the
-# environment of docker/build.sh).
+# OPT-IN AT THIS LAYER. The images build and test this project without Claude
+# Code, so a plain `docker build` of a GPU Dockerfile -- an outside user
+# building the container to reproduce a number -- should not get it: that
+# ARG's default is 0. THIS project's builds do get it, because
+# devtools/config.sh defaults INSTALL_CLAUDE_CODE to 1 and docker/build.sh
+# always forwards whatever that file says.
 if [ "${INSTALL_CLAUDE_CODE:-0}" != 1 ]; then
   echo "=== Claude Code not installed (INSTALL_CLAUDE_CODE=${INSTALL_CLAUDE_CODE:-0}; set 1 to opt in) ==="
   exit 0

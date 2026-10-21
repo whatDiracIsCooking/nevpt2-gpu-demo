@@ -502,12 +502,15 @@ if [ -n "${CLAUDE_PIN_FILES:-}" ] && [ -x "$CV" ]; then
   # 3. and, inside an image built from that pin, with what is on PATH.
   #    CLAUDE_CODE_VERSION in the environment is the image's own ENV, so its
   #    presence is what tells container from host.
-  #    No claude at all there is an image built without the opt-in
-  #    (INSTALL_CLAUDE_CODE, off by default; docker/install-claude-code.sh),
-  #    which is correct. Keyed on the binary, not on INSTALL_CLAUDE_CODE:
-  #    config.sh, sourced above, defaults that to 0 over the image's ENV.
+  #    No claude at all there is an image built with the install declined --
+  #    INSTALL_CLAUDE_CODE=0 past docker/build.sh, or a by-hand `docker build`,
+  #    whose ARG defaults to 0 (docker/install-claude-code.sh) -- which is a
+  #    legitimate image, not a fault. Keyed on the binary, not on
+  #    INSTALL_CLAUDE_CODE: config.sh, sourced above, defaults that to 1 over
+  #    the image's ENV, so the variable here says what THIS TREE would build,
+  #    never what the running image did.
   if [ -n "${CLAUDE_CODE_VERSION:-}" ] && [ -z "$cv_installed" ]; then
-    note "no claude in this image (built without INSTALL_CLAUDE_CODE=1; that is the default)"
+    note "no claude in this image (built with INSTALL_CLAUDE_CODE=0, or by hand off the Dockerfile)"
   elif [ -n "${CLAUDE_CODE_VERSION:-}" ]; then
     if [ "$cv_installed" != "$CLAUDE_CODE_VERSION" ]; then
       warn "claude on PATH is ${cv_installed:-none}, this image pinned $CLAUDE_CODE_VERSION"
@@ -598,12 +601,14 @@ if [ -n "${AGY_PIN_FILES:-}" ] && [ -x "$AV" ]; then
   #    which release a container carries, since `agy --version` prints the
   #    version half and never the build id. So the comparison below is between
   #    version halves on both sides.
-  #    No agy at all is an image built without the opt-in (INSTALL_AGY, off by
-  #    default; docker/install-agy.sh), which is correct. Keyed on the binary,
-  #    not on INSTALL_AGY: config.sh, sourced above, defaults that to 0 over
-  #    the image's ENV.
+  #    No agy at all is an image built with the install declined -- INSTALL_AGY=0
+  #    past docker/build.sh, or a by-hand `docker build`, whose ARG defaults to
+  #    0 (docker/install-agy.sh) -- which is a legitimate image, not a fault.
+  #    Keyed on the binary, not on INSTALL_AGY: config.sh, sourced above,
+  #    defaults that to 1 over the image's ENV, so the variable here says what
+  #    THIS TREE would build, never what the running image did.
   if [ -n "${AGY_RELEASE:-}" ] && [ -z "$av_installed" ]; then
-    note "no agy in this image (built without INSTALL_AGY=1; that is the default)"
+    note "no agy in this image (built with INSTALL_AGY=0, or by hand off the Dockerfile)"
   elif [ -n "${AGY_RELEASE:-}" ]; then
     av_image_version=${AGY_RELEASE%%-*}
     av_tree_version=${av_pinned%%-*}

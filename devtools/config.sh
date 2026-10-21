@@ -316,12 +316,22 @@ docker/Dockerfile.hip
 docker/Dockerfile.combined"}
 
 # Whether docker/build.sh installs Claude Code into the GPU images at all.
-# OFF by default: nothing in the build or the tests needs it, and someone
-# building the container to reproduce a number should not get an agent
-# installed. The maintainer's workflow (.claude/, the pin above) wants it on:
-# export INSTALL_CLAUDE_CODE=1 before docker/build.sh. Changing it rebuilds
-# only the last layers of each GPU image, as a pin bump does.
-INSTALL_CLAUDE_CODE=${INSTALL_CLAUDE_CODE:-0}
+# ON here, because this file IS the maintainer's workflow (.claude/, the pin
+# above): a `docker/build.sh cuda` run from this checkout should produce an
+# image that actually has the agent, and a pin bump that moved ENV
+# CLAUDE_CODE_VERSION while leaving no binary behind it is the drift the pin
+# exists to end. Turn it off for one build with INSTALL_CLAUDE_CODE=0 before
+# docker/build.sh.
+#
+# THE DOCKERFILE'S OWN DEFAULT STAYS 0, and that is the opt-in
+# docker/install-claude-code.sh argues for: a plain `docker build -f
+# docker/Dockerfile.cuda` -- an outside user reproducing a number -- gets no
+# agent, and no Node either. This line decides only what THIS project's
+# build.sh asks for, which it forwards as an explicit --build-arg either way.
+#
+# Changing it rebuilds only the last layers of each GPU image, as a pin bump
+# does.
+INSTALL_CLAUDE_CODE=${INSTALL_CLAUDE_CODE:-1}
 
 CLAUDE_NPM_PACKAGE=${CLAUDE_NPM_PACKAGE:-@anthropic-ai/claude-code}
 CLAUDE_REGISTRY_TIMEOUT=${CLAUDE_REGISTRY_TIMEOUT:-8}
@@ -341,11 +351,14 @@ docker/Dockerfile.hip
 docker/Dockerfile.combined"}
 
 # Whether docker/build.sh installs the Antigravity CLI into the GPU images at
-# all. OFF for the reason INSTALL_CLAUDE_CODE is, and one more: the binary is
-# 213MiB, so an image built to reproduce a number should not be carrying a
-# fifth of a GB of agent. Turn it on the same way:
-# export INSTALL_AGY=1 before docker/build.sh.
-INSTALL_AGY=${INSTALL_AGY:-0}
+# all. ON for the reason INSTALL_CLAUDE_CODE above is: both agents are part of
+# how this project is worked on, so this checkout's builds carry both. Turn it
+# off for one build with INSTALL_AGY=0 before docker/build.sh.
+#
+# The Dockerfile's own default stays 0 here too, and the 213MiB binary is the
+# second half of why: an image built by someone else to reproduce a number
+# should not be carrying a fifth of a GB of agent it never asked for.
+INSTALL_AGY=${INSTALL_AGY:-1}
 
 # Where agy-version.sh asks what the CURRENT release is. Upstream's own
 # install.sh uses this endpoint, one JSON document per platform, carrying the
