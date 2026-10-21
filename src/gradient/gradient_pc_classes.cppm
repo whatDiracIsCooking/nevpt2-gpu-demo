@@ -835,6 +835,206 @@ Status pcClassMixed(const PcClassWalk& w, const ActiveIntegralsDevice& ai, Integ
   return {};
 }
 
+// THE ORBITAL BLOCK'S SANDWICH (#202; docs/hessian-theory.md, Sec. 6.4), one
+// class along two orbital directions u = rot->dirs[0] and v = rot->dirs[1],
+// each with its digests' tangent attached (attachDigestTangents). S and S_1 do
+// not move along kappa, so the solve's kept basis and its dropped space are
+// the state's own throughout: nothing here builds a rotation block.
+//
+//   FORWARD: per tuple, pcQuadSecond with legs (yhat_u, mK_u, Delta'_u) and
+//     (yhat_v, mK_v, Delta'_v), nS = G = r = 0 and the mixed set zero -- its
+//     2 cross term -- and the same finish with one leg cut down for the shares
+//     PcSandwichTerms names (the form is bilinear in the two legs).
+//   REVERSE (`reverse`): pcAdjointSecond* with v as the direction (mK_v,
+//     nS_v = 0, Delta'_v; no dropped block), whose bars on the rows, on the
+//     solve's Hamiltonian and on Delta are taken to the class's own objects --
+//     (dE/dslab)'[v] by the slab einsum's adjoint in its external operand,
+//     (dE/dK)'[v] = U sym(mggDot) U^T -- and paired with u's dotted slabs, u's
+//     whole K'[u] (digests in) and u's Delta'.
+//
+// `epsKappa`: the orbital energies respond to kappa (each direction's Delta'
+// per tuple from its deps); otherwise both legs hold them fixed.
+// `zeroH1e` / `zeroH2e`: the integrals the digests' share alone is built at.
+struct PcSandwichWalk {
+  const ScRotation* rot = nullptr;
+  bool epsKappa = true;
+  bool reverse = false;
+  const DeviceTensor* zeroH1e = nullptr;
+  const DeviceTensor* zeroH2e = nullptr;
+  double scaleU = 1.0, scaleV = 1.0;  // |u|^2, |v|^2: Sijrs's (SC's) census scale
+};
+
+Status pcClassSandwich(const PcClassWalk& w, const ActiveIntegralsDevice& ai, IntegralSource& src,
+                       const Tensor& hostEC, const Tensor& hostEV, const PcRdms& rdm,
+                       const PcSandwichWalk& sw, PcClassGradient& acc, const DeviceResources& dr) {
+  const wwrStream_t s = dr.stream();
+  const char* name = CLASSES[static_cast<std::size_t>(w.cls)].c_str();
+  check(sw.rot != nullptr && sw.rot->size() == 2 && sw.rot->dirs[0].tangent &&
+            sw.rot->dirs[1].tangent && sw.zeroH1e != nullptr && sw.zeroH2e != nullptr,
+        "pcClassSandwich: two tangent orbital directions and the zero integrals");
+  const ScRotationDir& du = sw.rot->dirs[0];
+  const ScRotationDir& dv = sw.rot->dirs[1];
+  check(du.f3acDot != nullptr && du.f3caDot != nullptr && dv.f3acDot != nullptr &&
+            dv.f3caDot != nullptr,
+        "pcClassSandwich: both directions carry their digests' tangent");
+  const bool two = w.pattern == PcPattern::PairTwo;
+  const bool single = w.pattern == PcPattern::Single;
+
+  // The class and its solve, the energy's own (no dropped space: S is fixed).
+  const PcMatrices mx = pcClassMatrices(w.cls, ai.h1e, ai.h2e, rdm, dr);
+  const PcClassSolve cs = NEVPT2_TRY(pcSolveClass(mx, name, dr, /*keepDropped=*/false));
+  acc.result = cs.result;
+  if (cs.result.status != PcStatus::Done) return {};
+  const int64_t m = std::ssize(cs.lambda), d = mx.d;
+  const std::vector<double> zMM(static_cast<std::size_t>(m * m), 0.0);
+
+  // Each leg's K'[w] -- the builder at w's dotted integrals with f3'[w] in the
+  // f3 slots, merged BEFORE the similarity transform -- its eigenbasis block,
+  // and the digests' share alone (Sr's a16 and Si's a22 read f3; every other
+  // class's is exactly zero, and is not built).
+  const bool readsF3 = w.cls == 0 || w.cls == 1;
+  const PcRdms digU{rdm.dm1, rdm.dm2, rdm.dm3, du.f3acDot, du.f3caDot};
+  const PcRdms digV{rdm.dm1, rdm.dm2, rdm.dm3, dv.f3acDot, dv.f3caDot};
+  const PcMatrices kU = pcClassMatrices(w.cls, du.h1eDot, du.h2eDot, digU, dr);
+  const std::vector<double> mKu = projectSym(kU.matK(), cs.Ut, dr);
+  std::vector<double> mKv, mKuDig = zMM, mKvDig = zMM;
+  {
+    const PcMatrices kV = pcClassMatrices(w.cls, dv.h1eDot, dv.h2eDot, digV, dr);
+    mKv = projectSym(kV.matK(), cs.Ut, dr);
+  }
+  if (readsF3) {
+    const PcMatrices a = pcClassMatrices(w.cls, *sw.zeroH1e, *sw.zeroH2e, digU, dr);
+    mKuDig = projectSym(a.matK(), cs.Ut, dr);
+    const PcMatrices b = pcClassMatrices(w.cls, *sw.zeroH1e, *sw.zeroH2e, digV, dr);
+    mKvDig = projectSym(b.matK(), cs.Ut, dr);
+  }
+  const std::vector<DeviceTensor> basis = w.basis(cs.T, cs.t1);
+  const auto deltaOf = [&](const ScRotationDir& dir, int64_t b0, int64_t b1) {
+    return sw.epsKappa && dir.general ? w.delta(b0, b1, dir.epsCoreDot, dir.epsVirtDot)
+                                      : std::vector<double>{};
+  };
+
+  // The finishes, each a PcHessianSums over the class's tuples.
+  enum Fin { kTotal, kKU, kKV, kDigU, kDigV, kDigDig, kFinishes };
+  std::array<PcHessianSums, kFinishes> sums{};
+  const std::array<PcHessianBlocks, kFinishes> blks{
+      PcHessianBlocks{mKu, zMM, mKv, zMM, zMM, zMM},
+      PcHessianBlocks{mKu, zMM, mKv, zMM, zMM, zMM},
+      PcHessianBlocks{mKu, zMM, mKv, zMM, zMM, zMM},
+      PcHessianBlocks{mKuDig, zMM, mKv, zMM, zMM, zMM},
+      PcHessianBlocks{mKu, zMM, mKvDig, zMM, zMM, zMM},
+      PcHessianBlocks{mKuDig, zMM, mKvDig, zMM, zMM, zMM}};
+  // Which legs keep their slab rows and their Delta' in each finish.
+  const std::array<bool, kFinishes> keepU{true, false, true, false, true, false};
+  const std::array<bool, kFinishes> keepV{true, true, false, true, false, false};
+  const PcRotationBlocks noRot{};
+
+  // REVERSE: v the direction of pcAdjointSecond* (no dropped block).
+  PcAdjointBlocks blkA;
+  blkA.m = m;
+  blkA.nd = 0;
+  blkA.direction = true;
+  blkA.mKu = mKv;
+  blkA.nSu = zMM;
+  PcAdjointSecond second = pcAdjointSecondZeros(blkA);
+  double reverse = 0.0;
+
+  double minDen = std::numeric_limits<double>::infinity();
+  forBatches(src.extent(w.block), /*batch=*/0, [&](int64_t b0, int64_t b1) {
+    const PcSlabOperands ops = w.slab(b0, b1);
+    std::vector<const DeviceTensor*> ext;
+    for (const DeviceTensor& t : ops.ext) ext.push_back(&t);
+    const ScSlabDots dotsU = slabDots(ext, ops.kinds, du, sw.rot->gen, dr);
+    const ScSlabDots dotsV = slabDots(ext, ops.kinds, dv, sw.rot->gen, dr);
+    const std::array<DeviceTensor, 2> yy = evalTargets(w, ext, basis, {}, dr);
+    const std::array<std::vector<int64_t>, 2> shapes{yy[0].dims,
+                                                     two ? yy[1].dims : yy[0].dims};
+    // No sync before the downloads: each is behind the einsums that wrote its
+    // source on the one stream, and downloadTensor synchronizes it.
+    const Tensor y = downloadTensor(yy[0], s);
+    const Tensor x = two ? downloadTensor(yy[1], s) : Tensor();
+    const auto rowsOf = [&](const std::vector<const DeviceTensor*>& e) {
+      const std::array<DeviceTensor, 2> t = evalTargets(w, e, basis, shapes, dr);
+      return std::array<Tensor, 2>{downloadTensor(t[0], s),
+                                   two ? downloadTensor(t[1], s) : Tensor()};
+    };
+    // u's and v's rows: the DOTTED slabs through the PLAIN basis.
+    const std::array<Tensor, 2> yu = rowsOf(dotsU.ptr);
+    const std::array<Tensor, 2> yv = rowsOf(dotsV.ptr);
+    const std::array<Tensor, 2> zero{Tensor(y.dims()), two ? Tensor(x.dims()) : Tensor()};
+    const std::vector<double> delta = w.delta(b0, b1, hostEC, hostEV);
+    const std::vector<double> deltaU = deltaOf(du, b0, b1);
+    const std::vector<double> deltaV = deltaOf(dv, b0, b1);
+    const int64_t nt = std::ssize(delta);
+    const std::vector<int64_t> partner =
+        w.pattern == PcPattern::PairSwap ? w.partner(b1 - b0) : std::vector<int64_t>{};
+    const Tensor rvNone = Tensor::fromFlat({0}, {});
+
+    for (int f = 0; f < kFinishes; ++f) {
+      const std::size_t fi = static_cast<std::size_t>(f);
+      const std::array<Tensor, 2>& ru = keepU[fi] ? yu : zero;
+      const std::array<Tensor, 2>& rv = keepV[fi] ? yv : zero;
+      const std::vector<double> none;
+      const std::vector<double>& dU = keepU[fi] ? deltaU : none;
+      const std::vector<double>& dV = keepV[fi] ? deltaV : none;
+      const PcHessianSlab a{&y, &ru[0], &rv[0], &zero[0], &rvNone};
+      if (single) {
+        hessianSingle(a, cs.lambda, delta, blks[fi], noRot, w.factor, sums[fi], minDen, dV, dU);
+        continue;
+      }
+      const PcHessianSlab b{&x, &ru[1], &rv[1], &zero[1], &rvNone};
+      for (int64_t t = 0; t < nt; ++t) {
+        const std::size_t ut = static_cast<std::size_t>(t);
+        const int64_t pt = two ? t : partner[ut];
+        hessianPair(pcHessianRowAt(a, t, m, 0), pcHessianRowAt(two ? b : a, pt, m, 0), cs.lambda,
+                    delta[ut], blks[fi], noRot, /*second=*/true, sums[fi], minDen,
+                    dV.empty() ? 0.0 : dV[ut], dU.empty() ? 0.0 : dU[ut]);
+      }
+    }
+
+    if (!sw.reverse) return;
+    const PcSlabAdjointSecond sec =
+        single ? pcAdjointSecondSingle(y, &yv[0], cs.lambda, delta, w.factor, blkA, second, deltaV)
+               : pcAdjointSecondPair(y, two ? &x : nullptr, &yv[0], two ? &yv[1] : nullptr,
+                                     partner, cs.lambda, delta, blkA, second, deltaV);
+    // (dE/dslab)'[v]: the slab einsum's adjoint in its external operand at
+    // the bars' tangent, paired with u's dotted slabs.
+    std::array<DeviceTensor, 2> barD;
+    barD[0] = uploadTensor(Tensor::fromFlat(y.dims(), sec.ybarDot), dr);
+    if (two) barD[1] = uploadTensor(Tensor::fromFlat(x.dims(), sec.xbarDot), dr);
+    std::vector<DeviceTensor> dExt;
+    for (const DeviceTensor& t : ops.ext) dExt.push_back(DeviceTensor::zeros(t.dims, dr));
+    for (const PcYTerm& t : w.terms)
+      deviceEinsumAccum(derivativeSubscripts(t.subs, 0),
+                        {&basis[static_cast<std::size_t>(t.basis)],
+                         &barD[static_cast<std::size_t>(t.target)]},
+                        dExt[static_cast<std::size_t>(t.ext)], 1.0, s);
+    reverse += pairSlabDots(dotsU, dExt, dr);
+    // R'[v] . Delta'[u].
+    if (!deltaU.empty()) reverse += dotHost(sec.rDot, deltaU);
+  });
+  acc.result.energy = sums[kTotal].energy;
+  checkDenominator(acc.result, minDen);
+  if (acc.result.status != PcStatus::Done) return {};
+
+  PcSandwichTerms& t = acc.sandwich;
+  t.forward = sums[kTotal].eddot;
+  t.kU = sums[kKU].eddot;
+  t.kV = sums[kKV].eddot;
+  t.digestU = sums[kDigU].eddot;
+  t.digestV = sums[kDigV].eddot;
+  t.digestDigest = sums[kDigDig].eddot;
+  t.edotU = sums[kTotal].edotU;
+  t.edotV = sums[kTotal].edotV;
+  if (sw.reverse) {
+    // (dE/dK)'[v] = U sym(mggDot) U^T, paired with u's whole K'[u].
+    const DeviceTensor gKd = sandwich(cs.Ut, symHost(second.mggDot, m), m, dr);
+    reverse += dotTensors(gKd, reshapeView(kU.K, {d, d}), dr);
+    t.reverse = reverse;
+  }
+  return {};
+}
+
 // --- the seven classes ----------------------------------------------------------
 //
 // Each is energy_pc_classes.cppm's pc_<class> read off as a PcClassWalk: the
@@ -1224,6 +1424,58 @@ Result<PcGradientResult> assemblePcMixedClasses(
     gradientSijrs(src, /*batch=*/0, hostEC, hostEV, none, sc, /*mix=*/nullptr, dr);
     r.classes[2].result.status = PcStatus::Done;
     r.classes[2].result.energy = sc.energy;
+  }
+  for (const PcClassGradient& c : r.classes) r.total += c.result.energy;
+  return r;
+}
+
+// The orbital block's sandwich over all eight classes (#202): every RDM class
+// through pcClassSandwich, and Sijrs -- SC's class, read no RDM -- through
+// SC's own gradientSijrs on the orbital pair (#158: its K3 + K4 at its exact
+// P = -1/Delta on every tuple, the guarded ones as K6; forward, and reverse
+// when asked), its share of every PcSandwichTerms field but the forward /
+// reverse / Edots zero.
+Result<PcGradientResult> assemblePcSandwichClasses(const ActiveIntegralsDevice& ai,
+                                                   IntegralSource& src, const PcRdms& rdm,
+                                                   const PcSandwichWalk& sw,
+                                                   const DeviceResources& dr) {
+  const wwrStream_t s = dr.stream();
+  const Tensor hostEC = downloadTensor(ai.e_core, s);
+  const Tensor hostEV = downloadTensor(ai.e_virt, s);
+  const int64_t ncore = hostEC.size(), nvirt = hostEV.size();
+  PcGradientResult r;
+  for (const int cls : {0, 1, 3, 4, 5, 6, 7}) {
+    const PcClassWalk w = pcWalk(cls, ai, src, ncore, nvirt, dr);
+    NEVPT2_TRY(pcClassSandwich(w, ai, src, hostEC, hostEV, rdm, sw,
+                               r.classes[static_cast<std::size_t>(cls)], dr));
+  }
+  {
+    ScMixedDirection mix;
+    mix.epsKappa = sw.epsKappa;
+    mix.pairForward = true;
+    mix.pairReverse = sw.reverse;
+    mix.pairScaleU = sw.scaleU;
+    mix.pairScaleV = sw.scaleV;
+    mix.zeroH1e = sw.zeroH1e;
+    mix.zeroH2e = sw.zeroH2e;
+    mix.epsCoreU = Tensor({ncore});
+    mix.epsVirtU = Tensor({nvirt});
+    mix.epsCoreWU = Tensor({ncore});
+    mix.epsVirtWU = Tensor({nvirt});
+    ScClassGradient sc;
+    const std::size_t nd = sw.rot->size();
+    sc.rotExt.assign(nd, 0.0);
+    sc.rotAct.assign(nd, 0.0);
+    sc.rotTangent.assign(nd, 0.0);
+    sc.rotEps.assign(nd, 0.0);
+    gradientSijrs(src, /*batch=*/0, hostEC, hostEV, *sw.rot, sc, &mix, dr);
+    PcClassGradient& c = r.classes[2];
+    c.result.status = PcStatus::Done;
+    c.result.energy = sc.energy;
+    c.sandwich.forward = sc.pair.total();
+    c.sandwich.reverse = sc.pairReverse;
+    c.sandwich.edotU = sc.mixedEdotW;
+    c.sandwich.edotV = sc.pairEdotV;
   }
   for (const PcClassGradient& c : r.classes) r.total += c.result.energy;
   return r;

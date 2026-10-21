@@ -835,22 +835,25 @@ PcHessianRow pcHessianRowAt(const PcHessianSlab& s, int64_t t, int64_t m, int64_
 
 // The single-coupling classes' four sums over one slab: E_t = -factor Q(t).
 // `deltaDotV` (one per tuple, or empty for zeros) is the v leg's Delta
-// tangent, PcDeltaTangents::v (#201's orbital leg).
+// tangent, PcDeltaTangents::v (#201's orbital leg); `deltaDotU` the u leg's,
+// PcDeltaTangents::u (#202: both legs orbital).
 void hessianSingle(const PcHessianSlab& s, const std::vector<double>& lambda,
                    const std::vector<double>& delta, const PcHessianBlocks& blk,
                    const PcRotationBlocks& rot, double factor, PcHessianSums& acc,
-                   double& minDen, std::span<const double> deltaDotV = {}) {
+                   double& minDen, std::span<const double> deltaDotV = {},
+                   std::span<const double> deltaDotU = {}) {
   const int64_t nt = std::ssize(delta), m = std::ssize(lambda);
   const bool second = s.yuv != nullptr;
   check(s.y->size() == nt * m && s.yu->size() == nt * m && s.yv->size() == nt * m &&
             (!second || (s.yuv->size() == nt * m && s.rv != nullptr &&
                          s.rv->size() == nt * rot.nd)),
         "hessianSingle: the slabs must be (tuples, m) and (tuples, nd)");
-  check(deltaDotV.empty() || std::ssize(deltaDotV) == nt,
+  check((deltaDotV.empty() || std::ssize(deltaDotV) == nt) &&
+            (deltaDotU.empty() || std::ssize(deltaDotU) == nt),
         "hessianSingle: the Delta tangents are one per tuple");
   for (int64_t t = 0; t < nt; ++t) {
-    const PcDeltaTangents dd{
-        0.0, deltaDotV.empty() ? 0.0 : deltaDotV[narrowTo<std::size_t>(t)], 0.0};
+    const PcDeltaTangents dd{deltaDotU.empty() ? 0.0 : deltaDotU[narrowTo<std::size_t>(t)],
+                             deltaDotV.empty() ? 0.0 : deltaDotV[narrowTo<std::size_t>(t)], 0.0};
     const PcQuadDerivatives d = pcQuadSecond(pcHessianRowAt(s, t, m, rot.nd), lambda,
                                              delta[narrowTo<std::size_t>(t)], blk, rot, second,
                                              minDen, dd);
@@ -864,11 +867,13 @@ void hessianSingle(const PcHessianSlab& s, const std::vector<double>& lambda,
 // The two-coupling finish (Sijr, Srsi) for one tuple: E_t = -(2 F(a, a) -
 // F(a, b)) with F(a, b) = [Q(a + b) - Q(a - b)] / 4, a the direct row and b
 // the exchange row at the same Delta.
-// `deltaDotV`: the tuple's v-leg Delta tangent, as hessianSingle's.
+// `deltaDotV` / `deltaDotU`: the tuple's v- and u-leg Delta tangents, as
+// hessianSingle's.
 void hessianPair(const PcHessianRow& a, const PcHessianRow& b, const std::vector<double>& lambda,
                  double delta, const PcHessianBlocks& blk, const PcRotationBlocks& rot,
-                 bool second, PcHessianSums& acc, double& minDen, double deltaDotV = 0.0) {
-  const PcDeltaTangents dd{0.0, deltaDotV, 0.0};
+                 bool second, PcHessianSums& acc, double& minDen, double deltaDotV = 0.0,
+                 double deltaDotU = 0.0) {
+  const PcDeltaTangents dd{deltaDotU, deltaDotV, 0.0};
   const auto combine = [](std::span<const double> x, std::span<const double> y, double sign) {
     std::vector<double> out(x.size());
     for (std::size_t k = 0; k < x.size(); ++k) out[k] = x[k] + sign * y[k];
@@ -1166,9 +1171,11 @@ PcAdjointSecond pcAdjointSecondZeros(const PcAdjointBlocks& b) {
 
 // One slab's bars on its rows: target 0's (`ybarDot` (nt, m), `rbarDot`
 // (nt, nd)) and, for a two-tensor pair, target 1's (`xbarDot`, `rxbarDot`);
-// all empty without a direction.
+// and `rDot` (nt), the tangent along the direction of R_t = dE/dDelta_t
+// (pcAdjoint*'s `r`), which an orbital leg's Delta'_t pairs with (#202). All
+// empty without a direction.
 struct PcSlabAdjointSecond {
-  std::vector<double> ybarDot, xbarDot, rbarDot, rxbarDot;
+  std::vector<double> ybarDot, xbarDot, rbarDot, rxbarDot, rDot;
 };
 
 // One quadratic form of weight `w`: its row y (m) and, with a direction, y_u
@@ -1177,10 +1184,14 @@ struct PcSlabAdjointSecond {
 // orbital direction along which the orbital energies move): alpha_u gains
 // Delta_u I and beta Delta_u nS_v (PcDeltaTangents), whose bar on nS_v,
 // -w Delta_u g g^T, joins the Delta-weighted ones (mggDotDelta).
+// `rDot` non-null: R = dE/dDelta = -w g^T (U^T S U) g differentiated along the
+// direction, -w (2 g . e' + g^T nS_u g) with e' = D^-1 (y_u - alpha_u g), is
+// ADDED to it (#202: an orbital leg's Delta'_t pairs with it).
 void pcAdjointSecondRow(std::span<const double> y, std::span<const double> yu,
                         const std::vector<double>& lambda, double delta, double w,
                         const PcAdjointBlocks& b, PcAdjointSecond& acc, std::span<double> ybarDot,
-                        std::span<double> rbarDot, double deltaDotDir = 0.0) {
+                        std::span<double> rbarDot, double deltaDotDir = 0.0,
+                        double* rDot = nullptr) {
   const std::size_t m = narrowTo<std::size_t>(b.m), nd = narrowTo<std::size_t>(b.nd);
   check(y.size() == m && lambda.size() == m, "pcAdjointSecondRow: a row is not m long");
   check(!b.direction || (yu.size() == m && ybarDot.size() == m && rbarDot.size() == nd),
@@ -1213,6 +1224,14 @@ void pcAdjointSecondRow(std::span<const double> y, std::span<const double> yu,
       acc.mggDot[k * m + l] += c;
       acc.mggDotDelta[k * m + l] += delta * c - w * deltaDotDir * g[k] * g[l];
     }
+  if (rDot != nullptr) {
+    double ge = 0.0, gsg = 0.0;
+    for (std::size_t k = 0; k < m; ++k) {
+      ge += g[k] * e[k];
+      for (std::size_t l = 0; l < m; ++l) gsg += g[k] * b.nSu[k * m + l] * g[l];
+    }
+    *rDot += -w * (2.0 * ge + gsg);
+  }
   double third = 0.0;
   if (nd > 0) {
     std::vector<double> gc(nd, 0.0), z(nd, 0.0), guy(nd, 0.0);
@@ -1254,6 +1273,7 @@ PcSlabAdjointSecond pcAdjointSecondSingle(const Tensor& y, const Tensor* yu,
   if (b.direction) {
     out.ybarDot.assign(narrowTo<std::size_t>(nt * m), 0.0);
     out.rbarDot.assign(narrowTo<std::size_t>(nt * nd), 0.0);
+    out.rDot.assign(narrowTo<std::size_t>(nt), 0.0);
   }
   const auto rowOf = [&](const Tensor* x, int64_t t) {
     if (x == nullptr || !b.direction) return std::span<const double>();
@@ -1267,7 +1287,8 @@ PcSlabAdjointSecond pcAdjointSecondSingle(const Tensor& y, const Tensor* yu,
     }
     pcAdjointSecondRow(std::span<const double>(y.data().data() + t * m, narrowTo<std::size_t>(m)),
                        rowOf(yu, t), lambda, delta[narrowTo<std::size_t>(t)], -factor, b, acc, yb,
-                       rb, deltaDotDir.empty() ? 0.0 : deltaDotDir[narrowTo<std::size_t>(t)]);
+                       rb, deltaDotDir.empty() ? 0.0 : deltaDotDir[narrowTo<std::size_t>(t)],
+                       b.direction ? &out.rDot[narrowTo<std::size_t>(t)] : nullptr);
   }
   return out;
 }
@@ -1293,6 +1314,7 @@ PcSlabAdjointSecond pcAdjointSecondPair(const Tensor& y, const Tensor* x, const 
   if (b.direction) {
     out.ybarDot.assign(narrowTo<std::size_t>(nt * m), 0.0);
     out.rbarDot.assign(narrowTo<std::size_t>(nt * nd), 0.0);
+    out.rDot.assign(narrowTo<std::size_t>(nt), 0.0);
     if (x != nullptr) {
       out.xbarDot.assign(narrowTo<std::size_t>(nt * m), 0.0);
       out.rxbarDot.assign(narrowTo<std::size_t>(nt * nd), 0.0);
@@ -1327,7 +1349,8 @@ PcSlabAdjointSecond pcAdjointSecondPair(const Tensor& y, const Tensor* x, const 
                          lambda, delta[narrowTo<std::size_t>(t)], w, b, acc,
                          b.direction ? std::span<double>(ybs) : std::span<double>(),
                          b.direction ? std::span<double>(rbs) : std::span<double>(),
-                         deltaDotDir.empty() ? 0.0 : deltaDotDir[narrowTo<std::size_t>(t)]);
+                         deltaDotDir.empty() ? 0.0 : deltaDotDir[narrowTo<std::size_t>(t)],
+                         b.direction ? &out.rDot[narrowTo<std::size_t>(t)] : nullptr);
       if (!b.direction) continue;
       for (std::size_t k = 0; k < um; ++k) {
         barA[k] += ybs[k];

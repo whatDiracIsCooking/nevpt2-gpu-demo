@@ -1370,6 +1370,37 @@ Result<std::vector<ScOrbitalHessianResult>> scOrbitalHessianDevice(
 // and pcFullRotationDevice's own tangent plus pcDigestRotationTangentDevice
 // along a rotation.
 
+// One PC class's share of the orbital block's sandwich along (u, v) (#202;
+// pcOrbitalSandwichDevice below), summed over its tuples: Sec. 6.4's
+// sum_t -2 nu gammahat_u,t^T D_t^-1 gammahat_v,t, gammahat = yhat' - Ahat' xhat,
+// and, by the form's bilinearity, the shares the checks read. Each `k*` /
+// `digest*` is the same finish with one leg cut down: `kU` the u leg's Dyall
+// block alone (gammahat_u = -mK'_u xhat, the digests' share in it), `digestU`
+// its digests' share alone (-U^T sym(K(0, f3'[u])) U xhat), the other leg
+// whole; `digestDigest` both legs their digests' share alone. Sijrs (SC's
+// class, Sec. 6.4's table) fills `forward`, `reverse` and the Edots only.
+struct PcSandwichTerms {
+  double forward = 0.0;        // the term, forward (pcQuadSecond's two-leg cross)
+  double reverse = 0.0;        // the term, reverse (the bars' tangent along v against u's inputs)
+  double kU = 0.0, kV = 0.0;   // one leg its Dyall block alone
+  double digestU = 0.0, digestV = 0.0;  // one leg its digests' share alone
+  double digestDigest = 0.0;   // both legs their digests' share alone
+  double edotU = 0.0;          // the walk's own Edot(u), Edot(v): digests merged,
+  double edotV = 0.0;          // Delta' in when the orbital energies respond
+  PcSandwichTerms& operator+=(const PcSandwichTerms& o) {
+    forward += o.forward;
+    reverse += o.reverse;
+    kU += o.kU;
+    kV += o.kV;
+    digestU += o.digestU;
+    digestV += o.digestV;
+    digestDigest += o.digestDigest;
+    edotU += o.edotU;
+    edotV += o.edotV;
+    return *this;
+  }
+};
+
 // One PC class's reverse-mode answer. `result` is the class's own solve's
 // (status, energy, spectrum): nothing else here means anything unless it is
 // Done. The rotation vectors parallel the request list, as ScClassGradient's;
@@ -1398,6 +1429,8 @@ struct PcClassGradient {
   double mixedRotation = 0.0;
   double mixedEdotW = 0.0;
   double mixedEdotU = 0.0;
+  // The orbital block's sandwich along (u, v) (#202; pcOrbitalSandwichDevice).
+  PcSandwichTerms sandwich{};
 };
 
 struct PcGradientResult {
@@ -1728,6 +1761,130 @@ Result<PcMixedHessianVectorResult> pcMixedHessianVectorDevice(const ScMixedHessi
                                                               const Tensor& w, bool perClass,
                                                               const SigmaVectorOptions& sigma,
                                                               const DeviceResources& res);
+
+// --- PC's orbital block: the solve's sandwich and the assembled Eddot_kk (#202) --
+//
+// docs/hessian-theory.md, Sec. 6.4-6.8: the second term of PC's orbital
+// Hessian block along two orbital directions u and v (ordinary antisymmetric
+// (n_mo, n_mo) kappas), I'[u]^T Ehat''_pc I'[v] -- Sec. 6.1's solve with both
+// inputs orbital-dotted. S and S_1 are RDM-only and do NOT move along any
+// kappa (Sec. 6.5), so the cut's null space is fixed: there is no projector,
+// rotation or lift term, active-active pairs included. Per class and tuple,
+// in the solve's eigenbasis,
+//
+//   sum_t -2 nu gammahat_u,t^T D_t^-1 gammahat_v,t,
+//   gammahat_w,t = yhat_w,t - Ahat_w,t xhat_t,
+//
+// yhat_w = T^T x'[w] + t_1^T h1'[w] (the dotted slab through the PLAIN basis),
+// Ahat_w = U^T sym(K'[w]) U + Delta'_w,t I -- K'[w] the class's K builder at
+// w's dotted integrals with the digests' tangent f3'[w] merged BEFORE the
+// similarity transform (attachDigestTangents; the solve is nonlinear in A),
+// and Delta'_w the orbital energies' response when they respond. That is
+// pcQuadSecond's 2 cross term with both legs orbital and the mixed set zero
+// (its b_uv / A_uv are the curvature's, pcOrbitalCurvatureDevice): #158's
+// one-walk structure -- one slab walk holding both directions' dotted slabs
+// and K' blocks -- with a per-tuple finish that is a single bilinear form.
+// Sijrs is SC's class: its share is scOrbitalSandwichDevice's Sijrs (Sec.
+// 5.6's sandwich at its exact P = -1/Delta), the same gradientSijrs.
+//
+// PC HAS NO EMPTY-PERTURBER TERM AND NO rho_t REFUSAL (Sec. 6.6): its finish
+// divides by no norm and applies no NUMERICAL_ZERO guard, so an empty tuple's
+// energy is a quadratic form along any pair and the general formula already
+// carries it. There is no guarded-tuple census, and every pair SC refuses for
+// rho_t is formed here.
+//
+// BOTH MODES, and their duality is the gate. FORWARD is the per-tuple finish
+// above (nevpt2.energy_finish's hessianSingle / hessianPair). REVERSE
+// differentiates PC's integral adjoint Ehat'_pc along v -- the bars on the
+// rows (dE/dslab = T ybar), on the Dyall block (dE/dK = U sym(mgg) U^T) and
+// on Delta (R_t), through pcAdjointSecond* with v as the direction -- and
+// pairs them with u's first-order inputs:
+//
+//   sum_slabs <(dE/dslab)'[v], x'[u]> + <(dE/dK)'[v], K'[u]> + R'[v] . Delta'[u]
+//
+// which must equal the forward term to round-off, with no step size.
+//
+// THE ORBITAL ENERGIES' TWO MODES (Sec. 6.4): `epsKappa` true, they respond
+// to kappa (Delta'_w per tuple out of the sidecar's deps, the mode SC's
+// sandwich always runs in); false, they are frozen (Delta' = 0 on both legs,
+// Sijrs's included). Their second-order Delta'' is the curvature's `eps`
+// term, not this one's.
+//
+// Integral-direct, one slab per block, on res.stream(), every tensor from
+// res's pool. Per pair: one walk, and one plain RDM build per direction for
+// its digests' tangent at `opt.nTiles` -- the plain build's floors
+// (docs/performance.md, "Tile floors"). Exact digests only (`opt`; cli refuses
+// the rest). A malformed or zero direction or a sidecar that does not fit the
+// integrals is the caller's input: an Error, before any device work. A class
+// the gap or the denominator check refuses is a Numerical Error naming it --
+// never a term with a class missing or zeroed.
+struct PcOrbitalSandwichRequest {
+  Tensor u;  // (n_mo, n_mo), antisymmetric
+  Tensor v;  // (n_mo, n_mo), antisymmetric
+  bool reverse = false;  // also take the reverse pairing (the duality)
+  // Also run the energy stage's own PC Hessian at the digests' tangents alone
+  // (pcHessianDevice at dotU = f3'[u], dotV = f3'[v], every other RDM tangent
+  // and the second-order set zero; S_u = S_v = 0, so its rotation terms and
+  // lift tests are empty): the digests' curvature off the plain digest path,
+  // which must be `total.digestDigest` (Sec. 6.8).
+  bool digestReference = false;
+};
+
+struct PcOrbitalSandwichResult {
+  PcGradientResult walk;                     // per class: result, sandwich
+  PcSandwichTerms total{};
+  double forward = 0.0;                      // total.forward
+  double reverse = 0.0;                      // total.reverse (when asked for)
+  bool hasReverse = false;
+  bool epsKappa = true;                      // the orbital energies' mode it ran in
+  // Did each direction move the active integrals, and so the digests, at all:
+  // max |h2e'|, and max |f3ac'|, |f3ca'| (EXACTLY 0 along an intra-space one).
+  double h2eDotMaxU = 0.0, h2eDotMaxV = 0.0;
+  double f3DotMaxU = 0.0, f3DotMaxV = 0.0;
+  bool hasDigestReference = false;
+  double digestReference = 0.0;              // pcHessianDevice's Eddot at f3' alone
+};
+
+struct PcOrbitalSandwichSetup {
+  const NevptIntegralsDevice& ints;
+  const GeneralIntegralsDevice& gen;  // the sidecar: required (every input's first order)
+  const RdmTensors& rdm;              // the state's five RDMs
+  const Tensor& ci;                   // (nstringsA, nstringsB): the digests' tangents
+  int64_t nelecA = 0;
+  int64_t nelecB = 0;
+  const RdmBuildOptions& opt;         // exact digests only, at opt.nTiles
+  bool epsKappa = true;               // the orbital energies respond to kappa
+};
+
+Result<std::vector<PcOrbitalSandwichResult>> pcOrbitalSandwichDevice(
+    const PcOrbitalSandwichSetup& setup, const std::vector<PcOrbitalSandwichRequest>& pairs,
+    const DeviceResources& res);
+
+// PC's Eddot_kk(u, v) assembled (Sec. 6.4): the curvature's K1 + K2
+// (pcOrbitalCurvatureDevice, with `setup.ci` the digests' forward term too)
+// plus the sandwich, per pair, in one orbital-energy mode. The curvature's
+// refusal stands -- a conventional pair with neither member active-active
+// has no K2 and is refused as Unsupported before any device work, never
+// answered without it (Sec. 6.7, 9.1). `setup.ci` is required (the
+// sandwich's digests); `setup.digestAdjoint` must be PC's hbar
+// (pcDigestAdjointDevice); a request's `tangent` asks for both terms' second
+// mode. FROZEN (`epsKappa` false) drops the curvature's `eps` terms (the
+// orbital energies' second order) and runs the sandwich with Delta' = 0 --
+// the functional the gauge against H_kc is taken in (Sec. 6.8).
+struct PcOrbitalHessianResult {
+  ScOrbitalCurvatureResult curvature;
+  PcOrbitalSandwichResult sandwich;
+  bool epsKappa = true;
+  // <Ehat'_pc, I''> in this mode: frozen, without the orbital energies' share.
+  double curvatureValue() const {
+    return curvature.value() - (epsKappa ? 0.0 : curvature.k1.eps + curvature.k2.eps);
+  }
+  double value() const { return curvatureValue() + sandwich.forward; }
+};
+
+Result<std::vector<PcOrbitalHessianResult>> pcOrbitalHessianDevice(
+    const ScOrbitalCurvatureSetup& setup, const std::vector<ScOrbitalCurvatureRequest>& pairs,
+    bool epsKappa, const DeviceResources& res);
 
 // The per-class PC table every PC source-term report prints: status (REFUSED
 // with its reason, or the energy), and the total.

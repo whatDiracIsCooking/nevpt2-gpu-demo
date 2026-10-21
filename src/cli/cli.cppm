@@ -191,8 +191,8 @@ struct Options {
   // nevpt2_sc_pseudodensity: --sc-hessian-kk, the second term of the same
   // block, the energy's own curvature I'^T Ehat'' I' = K3 + K4 + K5, and the
   // whole block Eddot_kk(u, v) against ladders of the SC total (#158); one job
-  // at a time with the six above, SC only, exact digests only. It reads the
-  // sidecar (required).
+  // at a time with the six above, exact digests only; with --pc, PC's
+  // sandwich and Eddot_kk (#202). It reads the sidecar (required).
   bool scHessianKk = false;
   std::string gradgoldPath;
   std::string dumpSourceTermsPath;

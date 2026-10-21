@@ -281,7 +281,7 @@ ignores it. `test/cli/` holds this matrix against the table:
 | `--golden`, `--tiles`, `--pool-threshold` | ✓ | ✓ | ✓ | ✓ |
 | `--blas-digest`, `--digest-emitted`, `--consume-emitted` | ✓ | ✓ | ✓ | ✓ |
 | `--cublas`, `--mantissa-bits`, `--ozaki`, `--ozaki-pairs`, `--ozaki-check`, `--fused-digest` | ✓ (never with a Hessian flag) | ✓ | ✓ (never with a Hessian flag) | refused |
-| `--pc` | ✓ | ✓ | ✓ (`--dump-source-terms`, `--source-oracle`, `--sc-hessian-kc`, `--sc-hessian-kk-int`) | refused |
+| `--pc` | ✓ | ✓ | ✓ (`--dump-source-terms`, `--source-oracle`, `--sc-hessian-kc`, `--sc-hessian-kk-int`, `--sc-hessian-kk`) | refused |
 | `--profile` | ✓ | ✓ | refused | refused |
 | `--rdm-tangent` | ✓ | ✓ | refused | refused |
 | `--sc-tangent`, `--gradient-source` | ✓ | ✓ | refused | refused |
@@ -314,7 +314,9 @@ takes `--pc` for its two source-term jobs — they write and compare
 PC-NEVPT2's source terms with it (#74) — for `--sc-hessian-kk-int`,
 which then checks PC's orbital curvature `<Ehat'_pc, I''>` (#200), and for
 `--sc-hessian-kc`, which then checks PC's mixed block `H_kc` (#201), on a
-density-fitted sidecar too where SC's refuses; and it refuses
+density-fitted sidecar too where SC's refuses, and for `--sc-hessian-kk`,
+which then checks PC's sandwich and the assembled `Eddot_kk` (#202); and it
+refuses
 it with the identities,
 `--kappa-act` and `--kappa-full`, which are the SC energy's. Neither gradient binary prints a profile table or
 runs the `--rdm-tangent` check. `--dump-source-terms` and `--source-oracle`
@@ -330,13 +332,13 @@ digest has no path for,
 `--source-oracle` with any of the three, `--sc-hessian-kc` with any of the
 four (#184),
 `--sc-hessian-kk-int` with any of the five (#154),
-`--sc-hessian-kk` with any of the six or with `--pc` (#158),
+`--sc-hessian-kk` with any of the six (#158),
 `--gradgold` without `--kappa-full`, `--sc-hessian-kc`, `--sc-hessian-kk-int`,
 `--sc-hessian-kk`, `--dump-source-terms` or `--source-oracle`, or in
 `nevpt2_demo` without `--gradient-source`, `--check-blocks` with
 `--sc-tangent` or `--gradient-source`, `--pc` in
 `nevpt2_sc_pseudodensity` without `--dump-source-terms`, `--source-oracle`,
-`--sc-hessian-kc` or `--sc-hessian-kk-int`,
+`--sc-hessian-kc`, `--sc-hessian-kk-int` or `--sc-hessian-kk`,
 `--sc-tangent`, `--sc-hessian` or `--sc-hessian-vector` with `--pc`,
 `--sc-hessian` with `--sc-tangent` or `--gradient-source`,
 `--sc-hessian-vector` with any of those three), and
@@ -376,7 +378,7 @@ against the other. They read the same reference files, and each prints its own
 | `nevpt2_sc_pseudodensity` | `--kappa-act`, or `--kappa-full [--gradgold PATH]` | the SC pseudodensity identities; with `--kappa-act`, the active–active orbital source term instead; with `--kappa-full`, the whole orbital source term out of the `*.gradgold` sidecar — on a `*_df` golden, out of the whole three-index `B`, with both of its terms (#165, #168) |
 | `nevpt2_sc_pseudodensity --sc-hessian-kc` | `[--gradgold PATH]` | the mixed orbital-CI block `H_kc` of the SC total's Hessian, as the scalar `Eddot_kc(w, u)` and the vector `H_kc^T w` against each other by duality, with Euler in `c` and a finite difference of `y` along `kappa`; out of the `*.gradgold` sidecar when there is one, the orbital energies responding, and with none along an active–active `w` alone, the orbital energies frozen (#184) |
 | `nevpt2_sc_pseudodensity --sc-hessian-kk-int` | `[--gradgold PATH]` | the first term of the orbital block `H_kk` of the SC total's Hessian, the integrals' own curvature `<Ehat', I''[u, v]> = K1 + K2` ([`docs/hessian-theory.md`](docs/hessian-theory.md), §5.1 and §5.4), each term's adjoint against its forward tangent, with exact zeros and Richardson-verified ladders of the fixed-pseudodensity pairing along `exp(s u + t v)`; out of the `*.gradgold` sidecar (required). A pair with neither direction active–active is refused on a conventional case; on a `*_df` golden K2 is the three-index jet of `B` for any pair (#154) |
-| `nevpt2_sc_pseudodensity --sc-hessian-kk` | `[--gradgold PATH]` | the orbital block `H_kk`'s second term, the sandwich `I'^T Ehat'' I' = K3 + K4 + K5 + K6` ([`docs/hessian-theory.md`](docs/hessian-theory.md), §5.1 and §5.6), forward against reverse, and the whole `Eddot_kk(u, v)` against Richardson-extrapolated ladders of the SC total along `exp(s u + t v)`; out of the `*.gradgold` sidecar (required). A pair along which the energy has no Hessian (§5.6's `rho_t` test on the empty perturbers) is refused, and `Eddot_kk` keeps `--sc-hessian-kk-int`'s refusal (#158, #190) |
+| `nevpt2_sc_pseudodensity --sc-hessian-kk` | `[--gradgold PATH]`, `[--pc]` | the orbital block `H_kk`'s second term, the sandwich `I'^T Ehat'' I' = K3 + K4 + K5 + K6` ([`docs/hessian-theory.md`](docs/hessian-theory.md), §5.1 and §5.6), forward against reverse, and the whole `Eddot_kk(u, v)` against Richardson-extrapolated ladders of the SC total along `exp(s u + t v)`; out of the `*.gradgold` sidecar (required). A pair along which the energy has no Hessian (§5.6's `rho_t` test on the empty perturbers) is refused, and `Eddot_kk` keeps `--sc-hessian-kk-int`'s refusal (#158, #190). With `--pc`, PC-NEVPT2's: the solve's sandwich forward against reverse with the orbital energies responding and frozen, ladders of the PC total, and the step-free gauge against `H_kc`; PC refuses no pair for its empty perturbers (§6.4–§6.8; #202) |
 | `nevpt2_sc_pseudodensity --source-oracle PATH` | `[--gradgold PATH]` | the GPU's own `Y_xy` and `y_I` against PySCF's exact ones, committed as a `golden/*.srcgold`, block by block: every block must stay within the measured tolerance (the known-gap list is empty since #89) ([`docs/testing.md`](docs/testing.md), "The SC source terms against PySCF's, on a card"). With `--pc`, PC-NEVPT2's against block2's, `golden/n2_ccpvdz_cas44_pc.srcgold` (#74; docs/testing.md, "The PC source terms' oracle"); the oracle's scheme must be the run's. A directional oracle (`golden/*_dir.srcgold`, #105) is compared along its seeded directions per block instead (docs/testing.md, "The directional source-term oracle") |
 | `nevpt2_sc_pseudodensity --dump-source-terms PATH` | `[--gradgold PATH]`, `[--pc]` | writes the GPU's own `Y_xy` and `y_I` to a `.gradsrc` (a NumPy `.npz`) for `reference_data/nevpt2_grad.py --source dump` / `both`, and reads it back; what a nuclear gradient built from it comes out at is [`docs/testing.md`](docs/testing.md), "The GPU as the source-term provider". With `--pc`, PC-NEVPT2's, marked as such, with the PC adjoint held to the PC forward tangent along seeded rotations (#74; [`docs/pc-nevpt2.md`](docs/pc-nevpt2.md), "The source terms by reverse mode") |
 | `nevpt2_pc_tangent` | `--fd-steps N` (3..8, default 4), `--fd-start-pow N` (1..30, default 12: the first step is `2^-N`) | PC's derivative with respect to the CI vector, against a Richardson-verified finite difference |

@@ -1333,6 +1333,95 @@ along the plane, `rho_t`'s scale invariance, Sijrs's exemption, Sijr's
 packing scattered back) and `SijrsFinishTests` (Sijrs's unguarded finish);
 the flag's refusals are `test/cli/`'s `CliScPseudodensityFlagTests`.
 
+## PC's orbital block's sandwich
+
+`nevpt2_sc_pseudodensity_cas44_pc_hessian_kk` and
+`nevpt2_sc_pseudodensity_cas44_df_pc_hessian_kk` (`gpu;small`) run
+`nevpt2_sc_pseudodensity --golden <case> --tiles 3 --pc --sc-hessian-kk`
+and match `PASS: the PC orbital Hessian's sandwich I'^T Ehat''_pc I' agrees
+with itself by duality to 1e-07 in both orbital-energy modes ... no pair
+refused for its empty perturbers (Sec. 6.6)`, the fitted one ending
+`(density-fitted)` (#202). They check `nevpt2.gradient`'s
+`pcOrbitalSandwichDevice` — the solve's two-leg cross term per tuple — and
+`pcOrbitalHessianDevice`, the whole `Eddot_kk = <Ehat'_pc, I''> + the
+sandwich` ([`hessian-theory.md`](hessian-theory.md), §6.4–§6.8;
+`apps/sc_pseudodensity/hessian_kk_pc_check.cppm` has the checks). The state
+is held to block2's PC total first; the fitted entry rests on `--pc
+--sc-hessian-kk-int`'s gate of PC's first-order source term over the fitted
+inventory ("PC's orbital curvature"). The directions are seeded (base
+`0x5eed0202`): two active–active, two fully mixed, two each inside the core
+and the virtual space. The pairs are SC's ("The orbital block's sandwich")
+less the proportional one, which is SC's construction for its K6: `active x
+full` and its swap, `full x full`, `active x active`, `active x core`,
+`active x virtual`, `core x virtual`, `core x core` and `virtual x virtual`.
+
+Four differences from SC's checks:
+
+- **Both orbital-energy modes.** Every pair runs EULER (the orbital energies
+  respond to `kappa`) and FROZEN (fixed); the merge and the duality are held
+  in both. The ladders displace the EULER functional; the gauge is FROZEN.
+- **No guarded tuples, no refusal for them.** PC's finish divides by no
+  norm (§6.6), so every pair is formed: `full x full` and `virtual x
+  virtual`, which SC refuses for `rho_t`, included. `virtual x virtual`'s
+  ladders converge on both cases, and on the fitted one to `Eddot_kk` itself.
+- **The shares the tables print** are the bilinear form with one leg cut
+  down: each leg's Dyall block `K'` alone, its digests' share alone, and
+  both legs' digests' shares alone. The intra-space zeros and the digests'
+  check read them.
+- **The gauge against `H_kc`** (§6.8, step-free, FROZEN): `w` the first
+  active–active direction, `v` each of `full`, `active'`, `core` and
+  `virtual`, `Eddot_kk(v, w) + (1/2) <[v, w], Y_pc>` against #201's
+  `pcMixedHessianDevice` at `Eddot_kc(v, what c)`, `what = sum_pq w_pq E_pq`.
+  The right side carries §6.5's rotation term and the left none. Along
+  `full` it is 5.2e-5 of 2.5e-2, and along `active'` 5.4e-4 of 1.8e-1
+  (CAS(4,4), both flavours alike to two figures), so the gauge sees it.
+
+RTX 3080 (CUDA, `default` preset), the worst of five runs at each case (four
+at `--tiles 3`, one at `--tiles 1`), 2026-10-21:
+
+| exact check | CAS(4,4) | CAS(4,4) DF | gate |
+|---|---|---|---|
+| the merge: each walk's own `Edot(u)`, `Edot(v)` (digests in every `K'`, `Delta'` in EULER) against the gated `<k, Y_pc>` with `hbar_pc` (less its `eps` term in FROZEN), both modes | 5.5e-17 | 5.5e-17 | 1e-7 |
+| the duality, forward against the reverse pairing, worst pair, both modes | 5.6e-16 | 5.6e-16 | 1e-7 |
+| the swap, `(full, active)` against `(active, full)`: the sandwich (both modes) / `Eddot_kk` | 1.3e-16 / 4.2e-17 | 1.2e-16 / 1.2e-16 | 1e-7 |
+| the digests alone: both legs' digests' share against `pcHessianDevice` at `f3'[u]`, `f3'[v]`, and with the curvature's reverse digests' term against its forward one at `h2e''`, worst | 7.6e-17 | 1.5e-16 | 1e-7 |
+| an intra-space leg's Dyall-block share (`h1e'`'s round-off) | 9.1e-18 | 1.4e-17 | 1e-13 |
+| the gauge against `H_kc`, worst `v` | 1.3e-15 | 1.9e-15 | 1e-7 |
+
+Exact in every run: along a core–core or virtual–virtual direction `h2e'`
+and `f3'` are `0.0`, and so is every share that direction's digests carry.
+`Eddot_kk` along `full x full` is refused as Unsupported on the conventional
+case (#154's K2 refusal, before any device work, its message printed) and
+formed on the fitted one, its sandwich within 1e-7 of the duality check's.
+
+**The ladders** are `--sc-hessian-kk`'s (`swLadders`): the PC total at the
+four corners of `exp(s u + t v)`, every block rotated on the host and the
+digests rebuilt per corner, against `Eddot_kk`, and `E - L` against the
+sandwich, Richardson-gated at 1e-6 relative with #190's floor-aware shape
+rule. One difference: they start at `h = 2^-4`, `--pc --sc-hessian-kk-int`'s
+first step, not SC's `2^-2`. At `2^-2` along `active x active` a corner's
+PC solve has a non-positive denominator, so the corner has no PC energy.
+Worst extrapolated relative error over the five runs (fewest halvings above
+the floor), `E` / `E - L`:
+
+| pair | CAS(4,4) | CAS(4,4) DF |
+|---|---|---|
+| active x active | 9.9e-10 / 2.0e-9 (9) | 3.2e-9 / 2.8e-9 (9) |
+| active x core | 5.3e-9 / 5.3e-9 (6) | 5.4e-9 / 5.7e-9 (6) |
+| active x virtual | 4.2e-8 / 4.0e-8 (5) | 1.6e-8 / 1.6e-8 (5) |
+| core x virtual | — / 3.1e-9 (5) | 1.3e-8 / 1.3e-8 (5) |
+| core x core | — / 1.1e-8 (8) | 8.1e-10 / 7.2e-10 (8) |
+| virtual x virtual | — / 5.6e-10 (4) | 1.7e-9 / 6.2e-10 (4) |
+
+A dash is `Eddot_kk` refused on a conventional case (K2). A run takes
+about 5.5 s at either case. CAS(8,8) is a diagnostic, not an entry:
+[`pc-nevpt2.md`](pc-nevpt2.md), "The orbital block's sandwich".
+
+The host half is `test/energy_finish/`'s `PcAdjointSecondTests`
+(card-free): the orbital pair's forward finish, both legs' Delta tangents
+in, against the reverse with `rDot` paired with `Delta_u`, single and pair.
+The flag's parsing is `test/cli/`'s `CliScPseudodensityFlagTests`.
+
 ## The empty-perturber term, offline
 
 [`hessian-theory.md`](hessian-theory.md), §5.6 has the theory: the orbital
@@ -1951,7 +2040,7 @@ is not.
 
 ## The Hessian tier's entries
 
-Every ctest entry the Hessian milestones added (#150–#158, #184, #190, #200, #201), in
+Every ctest entry the Hessian milestones added (#150–#158, #184, #190, #200–#202), in
 one place: its binary and flag, its gate (the `PASS_REGULAR_EXPRESSION` the
 entry matches) and its labels. What each one checks, and every number it
 comes out at, is in the section the last column names, not here.
@@ -1970,6 +2059,7 @@ exact digests:
 | `nevpt2_sc_pseudodensity_cas44_pc_hessian_kk_int`, `_cas88_pc_hessian_kk_int`, `_cas44_df_pc_hessian_kk_int`, `_cas88_df_pc_hessian_kk_int` | `nevpt2_sc_pseudodensity --pc --sc-hessian-kk-int` | `PASS: the PC orbital Hessian's integral curvature <Ehat', I''> = K1 + K2 agrees … (PC's first-order source term gated first, both dualities)`; the fitted entries' line must also name the route, `(density-fitted: K2 by the three-index jets, both routes agree)` | `gpu;small` (the two CAS(4,4)) / `gpu` | "PC's orbital curvature" |
 | `nevpt2_sc_pseudodensity_cas44_pc_hessian_kc`, `nevpt2_sc_pseudodensity_cas44_df_pc_hessian_kc` | `nevpt2_sc_pseudodensity --pc --sc-hessian-kc` | `PASS: the PC mixed Hessian block H_kc's two orientations agree by duality`, the fitted entry's line ending `(density-fitted)` | `gpu;small` | "PC's mixed Hessian block's checks" |
 | `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk`, `nevpt2_sc_pseudodensity_cas88_sc_hessian_kk`, `nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk` | `nevpt2_sc_pseudodensity --sc-hessian-kk` | `PASS: the SC orbital Hessian's sandwich I'^T Ehat'' I' = K3 + K4 + K5 + K6 agrees with itself by duality … 2 pairs refused, with no Hessian along them (rho_t, Sec. 5.6)`, the fitted entry's line ending `(density-fitted)` | `gpu;small` (the two CAS(4,4)) / `gpu` | "The orbital block's sandwich" |
+| `nevpt2_sc_pseudodensity_cas44_pc_hessian_kk`, `nevpt2_sc_pseudodensity_cas44_df_pc_hessian_kk` | `nevpt2_sc_pseudodensity --pc --sc-hessian-kk` | `PASS: the PC orbital Hessian's sandwich I'^T Ehat''_pc I' agrees with itself by duality to 1e-07 in both orbital-energy modes … no pair refused for its empty perturbers (Sec. 6.6)`, the fitted entry's line ending `(density-fitted)` | `gpu;small` | "PC's orbital block's sandwich" |
 | `nevpt2_pc_hessian_cas44` | `nevpt2_pc_tangent --pc-hessian` | `PASS: the PC-NEVPT2 Hessian Eddot(u, v) matches Euler` | `gpu;small` | "The PC Hessian against a finite difference of the three-term tangent" |
 | `nevpt2_pc_hessian_vector_cas44` | `nevpt2_pc_tangent --pc-hessian-vector` | `PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches` | `gpu;small` | "The PC Hessian-vector product's checks" |
 | the seven `*_cas44_casscf*` Hessian entries, one per flag | the same seven flags on `n2_ccpvdz_cas44_casscf` | the CASCI twin's PASS line, plus the orbital-energy mode where the line names it, and on the two PC entries the smallest kept `s / s_max` and smallest gap | `gpu;small` | "The Hessian on CASSCF orbitals" |
@@ -1981,7 +2071,8 @@ derivative, Eddot(u, v)"). PC's orbital curvature has CAS(8,8) entries: it
 pairs a first derivative held fixed, so no eigenstate assumption enters, and
 its ladders pair their term in their own walk ("PC's orbital curvature").
 PC's mixed block has no CAS(8,8) entry, for #194's reason ("PC's mixed
-Hessian block's checks"). Nor is there an entry above CAS(8,8). Which
+Hessian block's checks"), and neither has PC's sandwich ("PC's orbital
+block's sandwich"). Nor is there an entry above CAS(8,8). Which
 build sets each flag's tile floor is [`performance.md`](performance.md),
 "Which build sets a Hessian flag's floor".
 
@@ -1992,7 +2083,7 @@ build sets each flag's tile floor is [`performance.md`](performance.md),
 | `NormToEnergyHessianTests` | `energy_finish_tests` | §2's 3×3 against a hand case, a central difference of the gradient and the `t` form; the structural relations; the ray annihilated exactly; `N = 0` gives zero, not NaN |
 | `NormToEnergyMultiplierTangentTests`, `NormToEnergyMultiplierTangentDeathTest` (`death`) | `energy_finish_tests` | the multipliers' tangent is the 3×3 applied to the direction, and a central difference along a line; the class form per perturber and guarded; a length mismatch aborts |
 | `NormToEnergyHessianSandwichTests`, `NormToEnergyHessianSandwichDeathTest` (`death`) | `energy_finish_tests` | the sandwich against the tangent's central difference at fixed `Delta`, its symmetry, and a guarded perturber's zero; a length mismatch aborts |
-| `PcQuadSecondTests`, `PcAdjointSecondTests` | `energy_finish_tests` | PC's second-order quadratic form against the restricted inverse's differences on a turning null space, its polarisation, the lift as the Schur block; the adjoint as its reverse, and the third term completing the two-term adjoint; the Delta tangents (#201), forward dual to reverse and symmetric in the two legs |
+| `PcQuadSecondTests`, `PcAdjointSecondTests` | `energy_finish_tests` | PC's second-order quadratic form against the restricted inverse's differences on a turning null space, its polarisation, the lift as the Schur block; the adjoint as its reverse, and the third term completing the two-term adjoint; the Delta tangents (#201), forward dual to reverse and symmetric in the two legs; the orbital pair (#202), both legs' Delta tangents and the reverse's `rDot` |
 | `MixedTermsTests`, `PairTermsTests`, `GuardedCensusTests`, `SijrsFinishTests` | `gradient_plan_tests` | the mixed and pair terms as the finish's and the classes' mixed derivatives; the guarded-tuple census, K6 as a tuple's mixed derivative, `rho_t`'s scale freedom, Sijrs's own multiplier |
 | `RdmSecondDerivativeTests`, `RdmHessianTangentsTests` (`gpu`) | `rdm_tangent_tests` | the builder at `(u, v)` against a central difference of the tangent, the third derivative exactly zero; each three-argument set against the tangent build at its pair |
 | `PcHessianReportTests`, `PcHessianVectorReportTests` | `pc_tangent_tests` | the PC Hessian checks' gates: a refused class, a control that answers instead of refusing, a two-term tangent off the three-term one and a plateau in any class each fail |

@@ -36,7 +36,8 @@ add_executable(nevpt2_sc_pseudodensity)
 target_sources(nevpt2_sc_pseudodensity PRIVATE FILE_SET CXX_MODULES
                FILES main.cppm kappa_check.cppm kappa_full_check.cppm source_dump.cppm
                      source_oracle.cppm hessian_kc_check.cppm hessian_kc_pc_check.cppm
-                     hessian_kk_check.cppm hessian_kk_sandwich_check.cppm)
+                     hessian_kk_check.cppm hessian_kk_sandwich_check.cppm
+                     hessian_kk_pc_check.cppm)
 set_target_properties(nevpt2_sc_pseudodensity PROPERTIES CXX_MODULE_STD ON)
 target_compile_features(nevpt2_sc_pseudodensity PRIVATE cxx_std_23)
 target_compile_options(nevpt2_sc_pseudodensity PRIVATE -Wall)

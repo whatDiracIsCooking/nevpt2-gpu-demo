@@ -117,7 +117,9 @@
 //                          hessianSingle / hessianPair's Eddot(u, v) and their
 //                          Edot(u), both pair layouts; with no direction, the
 //                          third term's gbar3 completes pcAdjointSingle's two
-//                          terms to the forward side's three-term Edot(v)
+//                          terms to the forward side's three-term Edot(v);
+//                          and the orbital pair (#202): both legs' Delta
+//                          tangents, the reverse's rDot paired with Delta_u
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
 // textual std #include before any import.
@@ -2034,6 +2036,66 @@ TEST(PcAdjointSecondTests, PairBothLayoutsAreTheReverseOfHessianPair) {
     if (twoTensor) rev += frob(bars.xbarDot, c.xv) + frob(bars.rxbarDot, c.rxv);
     EXPECT_NEAR(rev, fwd.eddot, 1e-13 * std::max(1.0, std::fabs(fwd.eddot)));
     EXPECT_NEAR(acc.edotU, fwd.edotU, 1e-13 * std::max(1.0, std::fabs(fwd.edotU)));
+  }
+}
+
+// The orbital pair (#202): both legs orbital -- nS = 0, nothing dropped, the
+// orbital energies moving along both (Delta_u and Delta_v per tuple), the
+// second-order set zero. The forward finish's two-leg cross term
+// (hessianSingle / hessianPair with both Delta tangents) against the reverse
+// in v (pcAdjointSecond* with v the direction) paired with u's objects: its
+// row bars against y_u, its mggDot against mK_u and its rDot -- R_t's tangent
+// -- against Delta_u. The rDot share must matter.
+TEST(PcAdjointSecondTests, TheOrbitalPairIsDualWithBothDeltaTangents) {
+  for (const bool pair : {false, true}) {
+    SCOPED_TRACE(pair ? "pair, two tensors" : "single");
+    const AdjointSecondCase c = adjointSecondCase(3, pair ? 0x2021u : 0x2020u);
+    const double factor = 0.5;
+    const std::vector<double> deltaU{0.3, -0.7, 0.45}, deltaV{-0.25, 0.5, 0.35};
+    const std::vector<double> zMM(9, 0.0), zeroRow(3, 0.0);
+    const PcHessianBlocks fb{c.blk.mKu, zMM, c.mKv, zMM, zMM, zMM};
+    const Tensor y = rows(c.y, 3, 3), x = rows(c.x, 3, 3), yu = rows(c.yu, 3, 3),
+                 xu = rows(c.xu, 3, 3), yv = rows(c.yv, 3, 3), xv = rows(c.xv, 3, 3);
+    const Tensor yuv = rows(std::vector<double>(9, 0.0), 3, 3);
+    const Tensor noRv = Tensor::fromFlat({3, 0}, {});
+    PcHessianSums fwd, noDeltaU;
+    double minDen = std::numeric_limits<double>::infinity();
+    if (!pair) {
+      hessianSingle({&y, &yu, &yv, &yuv, &noRv}, c.lambda, c.delta, fb, PcRotationBlocks{},
+                    factor, fwd, minDen, deltaV, deltaU);
+      hessianSingle({&y, &yu, &yv, &yuv, &noRv}, c.lambda, c.delta, fb, PcRotationBlocks{},
+                    factor, noDeltaU, minDen, deltaV);
+    } else {
+      const auto at = [](const std::vector<double>& v, int64_t t) {
+        return std::span<const double>(v.data() + t * 3, 3);
+      };
+      for (int64_t t = 0; t < 3; ++t) {
+        const std::size_t ut = static_cast<std::size_t>(t);
+        const PcHessianRow a{at(c.y, t), at(c.yu, t), at(c.yv, t), zeroRow, {}};
+        const PcHessianRow b{at(c.x, t), at(c.xu, t), at(c.xv, t), zeroRow, {}};
+        hessianPair(a, b, c.lambda, c.delta[ut], fb, PcRotationBlocks{}, true, fwd, minDen,
+                    deltaV[ut], deltaU[ut]);
+        hessianPair(a, b, c.lambda, c.delta[ut], fb, PcRotationBlocks{}, true, noDeltaU, minDen,
+                    deltaV[ut]);
+      }
+    }
+    // Reverse: v is the direction.
+    PcAdjointBlocks blk;
+    blk.m = 3;
+    blk.nd = 0;
+    blk.direction = true;
+    blk.mKu = c.mKv;
+    blk.nSu = zMM;
+    PcAdjointSecond acc = pcAdjointSecondZeros(blk);
+    const PcSlabAdjointSecond bars =
+        pair ? pcAdjointSecondPair(y, &x, &yv, &xv, {}, c.lambda, c.delta, blk, acc, deltaV)
+             : pcAdjointSecondSingle(y, &yv, c.lambda, c.delta, factor, blk, acc, deltaV);
+    double rev = frob(bars.ybarDot, c.yu) + frob(acc.mggDot, c.blk.mKu) + frob(bars.rDot, deltaU);
+    if (pair) rev += frob(bars.xbarDot, c.xu);
+    EXPECT_NEAR(rev, fwd.eddot, 1e-13 * std::max(1.0, std::fabs(fwd.eddot)));
+    EXPECT_NEAR(acc.edotU, fwd.edotV, 1e-13 * std::max(1.0, std::fabs(fwd.edotV)));
+    EXPECT_GT(std::fabs(frob(bars.rDot, deltaU)), 1e-3);
+    EXPECT_GT(std::fabs(fwd.eddot - noDeltaU.eddot), 1e-3);
   }
 }
 

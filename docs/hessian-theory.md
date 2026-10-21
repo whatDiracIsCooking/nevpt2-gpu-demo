@@ -1765,6 +1765,26 @@ enters, the same economy §5.1 states for SC's digests.
 `Delta'_t` of each leg added to that leg's `apply` (an identity block,
 `nS = I` here, scaled per tuple). That is the one per-tuple change.
 
+**In the tree (#202).** The sandwich is `nevpt2.gradient`'s
+`pcOrbitalSandwichDevice`, over one per-class walk (`:pc_classes`'
+`pcClassSandwich`) holding both directions' dotted slabs and `K'` blocks,
+each `K'` with its digests' tangent merged before the similarity transform.
+Forward, each tuple runs `pcQuadSecond` with the two orbital legs
+`(yhat_u, mK_u, Delta'_u)` and `(yhat_v, mK_v, Delta'_v)`, `nS = G = r = 0`
+and the mixed set zero: its `2 cross` term alone. Both legs' `Delta'` go
+through `PcDeltaTangents`, so a frozen mode is `Delta' = 0` on both.
+Reverse, `v` is `pcAdjointSecond*`'s direction (`mK_v`, `nS_v = 0`, no
+dropped block), and its bars are taken to the class's own objects and
+paired with `u`'s first-order inputs: `(dE/dslab)'[v]` with `u`'s dotted
+slabs, `(dE/dK)'[v] = U sym(mggDot) U^T` with `u`'s whole `K'[u]`, and
+`R'_t[v]` (`pcAdjointSecondRow`'s `rDot`) with `Delta'_t[u]`. Sijrs runs
+SC's own `gradientSijrs` on the pair. `pcOrbitalHessianDevice` assembles
+`Eddot_kk = <Ehat'_pc, I''> + the sandwich` in one orbital-energy mode,
+dropping the curvature's `eps` term in the frozen one, and keeps the
+curvature's K2 refusal. The gate is `nevpt2_sc_pseudodensity --pc
+--sc-hessian-kk` ([`testing.md`](testing.md), "PC's orbital block's
+sandwich").
+
 **The mixed inputs, `H_kc`** (`w` orbital, `u` a CI direction; §6.5 has the
 formula):
 
@@ -2398,7 +2418,7 @@ row above, as the tree has it:
 | a PC class the gap or denominator check refuses | the class comes back `PcStatus::Refused` with its reason, through the status the energy, tangent and adjoint use; the run FAILs | the PC Hessian entries' own tables |
 | the PC Schur lift above round-off | `pcHessianDevice` (`P S_u P`, `P S_v P`, `L_uv`, `L_uu`, `L_vv`) and `pcCiHessianVectorDevice` (`P S_u P` and `L_uu`), relative to `s_max` against `PC_LIFT_TOL`, `err_numerical` through the class's status (#152, #155); and `pcMixedHessianDevice` (the CI leg's `P S_u P` and `L_uu`, the same test, #201), which returns the refusal as an `err_numerical` naming each refused class. Each check's negative control — a symmetry-breaking direction — must be refused for its lift, or the run FAILs. The separation the threshold sits in is [`pc-nevpt2.md`](pc-nevpt2.md), "What the cut drops, and how it moves" | `nevpt2_pc_hessian_cas44`, `nevpt2_pc_hessian_vector_cas44` and their `_casscf` twins; `nevpt2_sc_pseudodensity_cas44_pc_hessian_kc` and its fitted twin |
 | PC conditioning | printed, never refused: each PC Hessian table has a `kept s` and a `gap` column, and each PASS line names the smallest kept `s / s_max`, its class, and the smallest gap against `PC_MIN_GAP`. What that conditioning costs is #194's | the PC Hessian entries' regexes ([`testing.md`](testing.md), "The Hessian on CASSCF orbitals") |
-| K2 with neither direction active–active, conventional | `scOrbitalCurvatureDevice` refuses the pair as `err_unsupported`, never K1 alone (#154; a fitted case takes the three-index route instead; widening it is #180). `Eddot_kk` keeps the refusal | `--sc-hessian-kk-int`'s refusal checks |
+| K2 with neither direction active–active, conventional | `scOrbitalCurvatureDevice` refuses the pair as `err_unsupported`, never K1 alone (#154; a fitted case takes the three-index route instead; widening it is #180). `Eddot_kk` keeps the refusal, SC's and PC's (`pcOrbitalHessianDevice`, #202) alike | `--sc-hessian-kk-int`'s refusal checks; `--pc --sc-hessian-kk`'s check 7 |
 | a sidecar missing an array | `GradGoldFile::requireGeneralInventory` (`nevpt2.golden`), which every reader of the general-range inventory — `--kappa-full`, `--source-oracle`, all three orbital Hessian flags — calls before uploading any of it: `err_io` naming the array, the whole sidecar refused | `test/golden`'s `GradGoldCas44Tests` / `GradGoldDfCas44Tests`: the committed sidecars with each array erased in turn |
 | the four guarded-tuple rows | `scOrbitalSandwichDevice` (`nevpt2.gradient_plan`'s `emptyTermPacked`, #190). A small tuple contributes zero and is never scored. An integral-empty tuple both directions populate adds K6 at the ray-limit multipliers. Sijrs takes its own `P = -1/Delta` on every guarded tuple, through an unguarded finish at every order (`sijrsMultipliers`), so its first-order terms are exact too. A (class, pair) whose worst `rho_t` exceeds `kRhoTol` is refused as `err_numerical`, naming the class, the tuple count and the worst `rho_t`, and so is any tuple empty by the state | `--sc-hessian-kk`'s entries, whose PASS line counts the refused pairs; the thresholds and separations are [`testing.md`](testing.md), "The orbital block's sandwich" |
 | Euler with the orbital-energy response on | the one block with a responding mode is `H_kc`: `--sc-hessian-kc` runs its FULL mode (the orbital energies responding to `kappa` and to `c`), prints that Euler is **skipped** there and why, and gates Euler in its EULER mode (held fixed in `c`); its PASS line names both. The `H_cc` flags run at fixed orbital energies only and say so on their PASS lines; `--gradgold` beside them is an invalid configuration, because nothing would read it — `H_cc`'s responding mode is not built | `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kc`'s regex |
@@ -2531,6 +2551,13 @@ in the tree ([`gradients.md`](gradients.md), §1.1).
   §6.8's active-rotation gauge and per-class differences of the three-term
   `y`. The orbital energies are held fixed in `c` (PC's CI side holds them
   there), and a responding-in-`c` mode is refused.
+- **PC's `H_kk` (§6.4, §6.6, §6.8).** Built as derived (#202): the sandwich
+  is one bilinear form per tuple, with no rotation, projector or lift term
+  and no guarded-tuple census, forward against reverse in both orbital-energy
+  modes. The ladders of the PC total converge to the assembled `Eddot_kk` on
+  every block-diagonal pair, virtual x virtual included, which SC refuses,
+  and §6.8's gauge against #201's `H_kc` holds step-free. CAS(8,8) stays a
+  diagnostic, for #194's reason.
 - **PC's second-order licence (§6.2).** The cut is a threshold cut whose
   dropped modes are this state's own null modes, so the null-space terms do
   not drop: the rotation terms are carried, and a (class, pair) along which
