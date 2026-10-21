@@ -206,7 +206,8 @@ int main(int argc, char** argv) {
   // differentiates the energy functional, which does not know how its
   // orbitals were made, so a Hessian sits behind the SOURCE-TERM gate -- which
   // takes a CASSCF golden as readily as a CASCI one -- and never behind the
-  // CASCI-only Lagrangian gate (docs/hessian-theory.md, Sec. 9.1). Before
+  // CASCI-only Lagrangian gate (docs/hessian-theory.md, Sec. 9.1). With --pc
+  // or without: PC's orbital blocks sit behind the same gate (#203). Before
   // DeviceResources::create, so the gate touches no card.
   if (parsedOpts.scHessianKc || parsedOpts.scHessianKkInt || parsedOpts.scHessianKk) {
     if (const nevpt2::Status st = g.requireSourceTermReference(

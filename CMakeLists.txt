@@ -1484,6 +1484,21 @@ if(NEVPT2_BUILD_TESTING)
   _add_casscf_hessian_test(nevpt2_pc_tangent nevpt2_pc_hessian_vector_cas44_casscf
     --pc-hessian-vector
     "PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches .*\\(orbital energies held fixed. smallest kept s/s_max [^ ]+ \\([A-Za-z]+\\), smallest gap [^ ]+ against PC_MIN_GAP")
+  # PC's orbital blocks (#200-#202; #203): the same binary and flags with --pc
+  # as their CAS(4,4) twins, the committed sidecar beside this golden read.
+  # `flag` is a list here ("--pc;<flag>"), expanded unquoted above. Each regex
+  # holds the line to its orbital-energy mode: EULER for the integral
+  # curvature, EULER along a mixed w for H_kc (its FROZEN no-sidecar walk
+  # runs inside, check 7), both modes for the sandwich.
+  _add_casscf_hessian_test(nevpt2_sc_pseudodensity
+    nevpt2_sc_pseudodensity_cas44_casscf_pc_hessian_kc "--pc;--sc-hessian-kc"
+    "${_nevpt2_pc_hessian_kc_pass} to 1e-07 \\(EULER mode along a mixed w")
+  _add_casscf_hessian_test(nevpt2_sc_pseudodensity
+    nevpt2_sc_pseudodensity_cas44_casscf_pc_hessian_kk_int "--pc;--sc-hessian-kk-int"
+    "${_nevpt2_pc_hessian_kk_pass}.*\\(orbital-energy mode: EULER, the orbital energies responding to kappa\\)")
+  _add_casscf_hessian_test(nevpt2_sc_pseudodensity
+    nevpt2_sc_pseudodensity_cas44_casscf_pc_hessian_kk "--pc;--sc-hessian-kk"
+    "${_nevpt2_pc_hessian_kk_full_pass}")
 
   # --- the PC tangent with respect to the CI vector -------------------------------
   #
