@@ -164,11 +164,12 @@ export DEVCONTAINER_CONFIG=.devcontainer/hip/devcontainer.json
 `doctor.sh` prints which config is active; a path that does not exist is a FAIL,
 and every container command refuses until it is fixed.
 
-### Bumping the Claude Code in the image
+### Bumping the agents in the image
 
-The agent is **pinned** (`ARG CLAUDE_CODE_VERSION` in each GPU `Dockerfile`,
-installed by `docker/install-claude-code.sh` as the last layer), not installed
-by a devcontainer feature. So it moves only when you move it:
+Both are **opt-in and pinned** in each GPU `Dockerfile`, not installed by a
+devcontainer feature, so neither moves unless you move it. Claude Code is
+`ARG CLAUDE_CODE_VERSION`, installed by `docker/install-claude-code.sh`
+(`INSTALL_CLAUDE_CODE=1`):
 
 ```bash
 devtools/claude-version.sh                 # pinned / registry / installed here,
@@ -188,10 +189,29 @@ recreates one itself. `up` and `rebuild` print
 a one-line warning when the pin is behind the registry or the three files
 disagree, and `doctor.sh` says the same thing on demand.
 
-**Do not `npm install -g @anthropic-ai/claude-code` inside a container.** It is
-lost on the next rebuild, and `doctor.sh` reports it as *"claude on PATH is A,
-this image pinned B"* — the same class of mistake as `apt-get install`ing the
-LAPACK headers in there.
+The Antigravity CLI is the same shape one layer down — `ARG AGY_RELEASE` plus
+`ARG AGY_SHA512`, installed by `docker/install-agy.sh` (`INSTALL_AGY=1`) — with
+its own script, which takes a **release id**, not a version:
+
+```bash
+devtools/agy-version.sh                 # pinned / upstream / installed here
+devtools/agy-version.sh --apply         # rewrite all three to upstream's current release
+devtools/agy-version.sh --apply 1.4.4-4783783166214144
+devtools/agy-version.sh --rebuild       # ...and rebuild the images already built here
+```
+
+Two lines move together, because `install-agy.sh` *verifies* the sha512 rather
+than recording it: a release bumped without its hash fails every GPU build with
+a checksum error. `--apply` rewrites both in all three files; `up`/`rebuild`
+and `doctor.sh` report a disagreement as one. Rolling back needs a release id
+out of git — upstream publishes no index of older ones — and `--apply <an older
+release>` downloads that tarball (~60MB) to hash it.
+
+**Do not `npm install -g @anthropic-ai/claude-code`, or run `agy update`,
+inside a container.** Both are lost on the next rebuild, and `doctor.sh`
+reports them as *"claude on PATH is A, this image pinned B"* / *"agy on PATH
+is A, this image pinned B"* — the same class of mistake as `apt-get install`ing
+the LAPACK headers in there.
 
 ### Bounding a container's CPU
 

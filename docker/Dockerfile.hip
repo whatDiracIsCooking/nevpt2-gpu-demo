@@ -84,5 +84,46 @@ ENV INSTALL_CLAUDE_CODE=${INSTALL_CLAUDE_CODE}
 RUN --mount=type=bind,source=docker/install-claude-code.sh,target=/tmp/install-claude-code.sh \
     bash /tmp/install-claude-code.sh
 
+# The Antigravity CLI (`agy`), OPT-IN and PINNED -- the same leaf-layer
+# treatment as Claude Code above, and for the same reason: a bump re-runs this
+# layer and nothing before it. docker/install-agy.sh carries the rest -- why not
+# upstream's install.sh, and why the pin is a RELEASE (a version plus an opaque
+# build id) rather than a version: the manifest endpoint serves only the
+# CURRENT release, so a version on its own is not addressable the way
+# `claude-code@2.1.292` is, and an older one would be unfetchable.
+#
+# TWO lines to bump, not one: AGY_SHA512 belongs to the exact tarball
+# AGY_RELEASE names, and install-agy.sh verifies it rather than recording it.
+# This is the fifth version declared in more than one place -- the same two
+# ARGs are in Dockerfile.cuda, .hip and .combined -- so bump them with
+# `devtools/agy-version.sh --apply`, which rewrites all three at once;
+# doctor.sh warns when they have drifted apart.
+#
+# AGY_SHA512 is deliberately NOT an ENV: it is the tarball's hash, consumed by
+# the RUN below and of no use to anything in a running container, so it stays
+# out of the image's environment. AGY_RELEASE is an ENV for the same reason
+# CLAUDE_CODE_VERSION is -- it is what lets doctor.sh tell the image's own
+# pinned copy from something installed over the top of it, which `agy
+# --version` cannot: that prints 1.4.4 and never the build id.
+#
+# AGY_CLI_DISABLE_AUTO_UPDATE is the binary's own opt-out of the background
+# self-update it otherwise runs during normal use -- the counterpart of
+# DISABLE_AUTOUPDATER in .devcontainer/*/devcontainer.json. The install is
+# root-owned and the container runs as uid 1000, so the attempt fails
+# regardless; what this stops is it being attempted behind the image's back.
+ARG AGY_RELEASE=1.4.4-4783783166214144
+ARG AGY_SHA512=7ce149d350344c1046c7b59b6659bcc5d659f351bf3a07c6c085887d93427ceb89d927752e4ccd0844b53ffb91d33d6a49f72835ceb276c7cffdd13cfb8023b8
+ENV AGY_RELEASE=${AGY_RELEASE} \
+    AGY_CLI_DISABLE_AUTO_UPDATE=1
+# OPT-IN: INSTALL_AGY=0, the default, skips the install -- 213MiB of binary
+# that nothing in the build or the tests needs -- so building the container
+# does not install an agent you did not ask for. docker/build.sh forwards it
+# from devtools/config.sh; `INSTALL_AGY=1 docker/build.sh cuda` turns it on.
+# ENV too, so doctor.sh can tell "opted out" from "missing".
+ARG INSTALL_AGY=0
+ENV INSTALL_AGY=${INSTALL_AGY}
+RUN --mount=type=bind,source=docker/install-agy.sh,target=/tmp/install-agy.sh \
+    AGY_SHA512="${AGY_SHA512}" bash /tmp/install-agy.sh
+
 USER ubuntu
 RUN hipconfig --version
