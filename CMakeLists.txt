@@ -1447,6 +1447,35 @@ if(NEVPT2_BUILD_TESTING)
   add_golden_test(nevpt2_cas1010_casscf "${_gold_1010_casscf}" --tiles 3)
   add_pc_golden_test(nevpt2_cas1010_casscf_pc "${_gold_1010_casscf}" --tiles 3)
 
+  # The C1 case (#213): HSOH CAS(6,6)/def2-SVP at its own CASSCF minimum, with
+  # no point-group symmetry, so every Cartesian displacement keeps the group
+  # (docs/reference-data.md, "HSOH, the C1 case"). CASSCF orbitals only -- it
+  # has no CASCI twin. SC, PC (its metric is gapped decades inside the
+  # refusal), and the CI source term's forward-reverse duality with the
+  # orbital energies moving, read from the committed sidecar beside it (which
+  # also carries the re-optimised states' grad_num; the binary reads only the
+  # 24 --gradgold arrays). --tiles 3 is the count every entry here uses, not a
+  # measured floor. Not `small`: the sanitizer tier stays on N2.
+  set(_gold_hsoh66_casscf
+      "${CMAKE_CURRENT_SOURCE_DIR}/golden/hsoh_def2svp_cas66_casscf.nevpt2gold")
+  set(_side_hsoh66_casscf
+      "${CMAKE_CURRENT_SOURCE_DIR}/golden/hsoh_def2svp_cas66_casscf.gradgold")
+  if(NOT EXISTS "${_side_hsoh66_casscf}")
+    message(FATAL_ERROR "nevpt2: committed gradient sidecar missing: ${_side_hsoh66_casscf}")
+  endif()
+  add_golden_test(nevpt2_hsoh_cas66_casscf "${_gold_hsoh66_casscf}" --tiles 3)
+  add_pc_golden_test(nevpt2_hsoh_cas66_casscf_pc "${_gold_hsoh66_casscf}" --tiles 3)
+  _add_golden_test_with(nevpt2_demo nevpt2_gradient_source_hsoh_cas66_casscf
+                        "${_gold_hsoh66_casscf}" --tiles 3 --gradient-source
+                        --gradgold "${_side_hsoh66_casscf}")
+  if(TEST nevpt2_gradient_source_hsoh_cas66_casscf)
+    set_tests_properties(nevpt2_gradient_source_hsoh_cas66_casscf PROPERTIES
+      PASS_REGULAR_EXPRESSION
+        "PASS: the CI source term and the forward tangent agree .*, the orbital energies moving with the active density")
+  endif()
+  unset(_gold_hsoh66_casscf)
+  unset(_side_hsoh66_casscf)
+
   # --- every Hessian flag on CASSCF orbitals (#157) -------------------------------
   #
   # Level 1 differentiates the energy functional, which does not know how its

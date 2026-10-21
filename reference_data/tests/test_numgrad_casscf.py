@@ -172,6 +172,10 @@ def test_reference_kind_match_accepted(kind):
 @pytest.mark.parametrize(("argv", "msg"), [
     (["--reference", "casscf", "--pc", "--npz", "x.npz"], "SC only"),
     (["--reference", "casscf"], "writes no sidecar"),
+    # #213: the C1 case's componentwise sweep writes into its committed
+    # sidecar, but its directional screen never does.
+    (["--case", "hsoh_def2svp_cas66", "--reference", "casscf", "--directional", "4",
+      "--analytic", "x.npz"], "writes no sidecar"),
     (["--reference", "casscf", "--directional", "4", "--no-write"], "needs --analytic"),
     (["--directional", "4"], "belong to --reference casscf"),
     (["--workers", "4", "--warm-probe", "2"], "belong to --reference casscf"),
@@ -182,6 +186,27 @@ def test_refused_flag_combinations(argv, msg, monkeypatch, capsys):
         ng.main()
     assert exc.value.code == 2
     assert msg in capsys.readouterr().err
+
+
+def _casscf_write_args(case: str):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(reference="casscf", case=case, df=False, out=None,
+                           sidecar=ng.REPO / "golden" / f"{case}_casscf.gradgold")
+
+
+def test_casscf_in_place_write_refused_for_a_24_array_sidecar():
+    """N2's committed CASSCF sidecar stays the 24 --gradgold arrays: the
+    in-place grad_num write is refused before any solve."""
+    with pytest.raises(SystemExit, match="--mo-from --gradgold writes"):
+        ng._check_sidecar_write(_casscf_write_args("n2_ccpvdz_cas44"), "n2_ccpvdz_cas44_casscf")
+
+
+def test_casscf_in_place_write_permitted_for_the_c1_case():
+    """#213: the C1 case's sidecar is committed WITH grad_num, so the write
+    into it passes the pre-sweep check (a conventional NEVPT2D1 sidecar)."""
+    ng._check_sidecar_write(_casscf_write_args("hsoh_def2svp_cas66"),
+                            "hsoh_def2svp_cas66_casscf")
 
 
 # --- displacement helpers ----------------------------------------------------

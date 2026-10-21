@@ -84,7 +84,11 @@ and a ``states.json`` manifest stay in ``--states-dir``, so later consumers
 (``pc_on_states.py``'s GPU PC energies, #126's block2 spot-checks) reuse
 this sweep's states rather than optimising their
 own. SC only, and it writes ``--npz`` only: the committed
-``<case>_casscf.gradgold`` stays the 24 ``--gradgold`` arrays. Its PC twin
+``<case>_casscf.gradgold`` stays the 24 ``--gradgold`` arrays -- except for
+the C1 case (``hsoh_def2svp_cas66``, #213), whose sidecar is committed with
+the componentwise sweep's four ``grad_num*`` arrays, written in place as the
+CASCI route writes its own (``sidecar_grad_num_casscf`` in :data:`CASES`).
+Its PC twin
 runs no sweep at all: ``--pc-states NPZ`` differences the GPU's PC energies
 on a finished sweep's states with the same stencil
 (:func:`difference_pc_states`, #126).
@@ -279,6 +283,9 @@ GATE_WALL_BUDGET = {
     # wall (36 states, 20.4 s at --workers 12): the same 600 s.
     "n2_ccpvdz_cas44": 600.0,
     "acrolein_def2svp_cas65": 3600.0,
+    # #213's C1 case, declared before its first sweep from LiF's: 72 states
+    # of a 4-atom CAS(6,6), the same 600 s.
+    "hsoh_def2svp_cas66": 600.0,
 }
 
 #: How many displaced geometries the cold-vs-warm probe re-optimises from the
@@ -308,6 +315,12 @@ WARM_PROBE_DEFAULT = 2
 #: (#166) is held to -- while CAS(8,8)'s stays the 12 arrays ``--df
 #: --gradgold`` writes. A case with no ``_df`` golden has no entry, and
 #: ``--df`` on it is refused.
+#:
+#: ``sidecar_grad_num_casscf`` is the switch for ``--reference casscf``: whether
+#: the case's committed ``golden/<case>_casscf.gradgold`` carries the
+#: re-optimised states' ``grad_num`` (#213). Only the C1 case's does -- the
+#: N2 and LiF CASSCF sidecars stay the 24 arrays ``--gradgold`` writes, so for
+#: them the route writes ``--npz`` only, as before.
 CASES = {
     "lif_def2svp_cas46": dict(
         geometry="reference_data/geometries/lif.xyz",
@@ -326,6 +339,23 @@ CASES = {
         cas_irreps={"A'": 1, 'A"': 4},
         core_irreps=None,
         sidecar_grad_num=True,
+    ),
+    # The C1 case (#213): HSOH at its own CASSCF(6,6)/def2-SVP minimum (the
+    # three sigma bonds and their antibonds), no point-group symmetry, so every
+    # Cartesian displacement keeps the group and all 3N components are
+    # probed. CASSCF orbitals only -- there is no CASCI golden, so the CASCI
+    # route has nothing to difference -- and its committed
+    # golden/hsoh_def2svp_cas66_casscf.gradgold carries grad_num.
+    # docs/reference-data.md, "HSOH, the C1 case" (and why not CAS(4,4)).
+    "hsoh_def2svp_cas66": dict(
+        geometry="reference_data/geometries/hsoh.xyz",
+        basis="def2-svp",
+        ncas=6,
+        nelecas=6,
+        cas_irreps=None,
+        core_irreps=None,
+        sidecar_grad_num=False,
+        sidecar_grad_num_casscf=True,
     ),
     "n2_ccpvdz_cas44": dict(
         geometry="reference_data/geometries/n2.xyz",
@@ -482,15 +512,20 @@ def _check_sidecar_write(args, stem: str) -> None:
     the flavour check with the run's own ``naux`` once it has it)."""
     in_place = args.out is None and args.sidecar.resolve() == (
         REPO / "golden" / f"{stem}.gradgold").resolve()
-    switch = "sidecar_grad_num_df" if args.df else "sidecar_grad_num"
-    if in_place and not CASES.get(args.case, {}).get(switch, True):
+    switch = ("sidecar_grad_num_casscf" if args.reference == "casscf" else
+              "sidecar_grad_num_df" if args.df else "sidecar_grad_num")
+    # A CASSCF sidecar takes a grad_num only where the case says so (#213);
+    # the CASCI switches default to permitting it, as they always have.
+    default = switch != "sidecar_grad_num_casscf"
+    if in_place and not CASES.get(args.case, {}).get(switch, default):
         # Some sidecars are committed holding only the arrays --gradgold
         # writes (N2 CAS(4,4) conventional, CAS(8,8) both flavours). Adding
         # grad_num* to one of those would move a committed golden's bytes,
         # which is never what a run of this script should do silently.
         raise SystemExit(
             f"golden/{stem}.gradgold is committed as the arrays "
-            f"generate_golden.py {'--df ' if args.df else ''}--gradgold writes, "
+            f"generate_golden.py {'--df ' if args.df else ''}"
+            f"{'--mo-from ' if args.reference == 'casscf' else ''}--gradgold writes, "
             "with no grad_num in it, so writing one there would move a committed "
             "file's bytes. Pass --npz PATH (which is what nevpt2_grad.py "
             "--grad-num reads), --out PATH, or --no-write."
@@ -1888,7 +1923,9 @@ def main() -> None:
                          "generate_golden's own optimiser, then the --mo-from "
                          "CASCI on it, differencing golden/<case>_casscf."
                          "nevpt2gold; guarded by the continuity check. SC only; "
-                         "writes no sidecar (use --npz)")
+                         "writes no sidecar (use --npz), except for a case whose "
+                         "golden/<case>_casscf.gradgold is committed with "
+                         "grad_num (hsoh_def2svp_cas66)")
     ap.add_argument("--mo-from", type=Path, default=None,
                     help="--reference casscf: the committed MO sidecar the "
                          "re-optimised reference must reproduce (default: "
@@ -1966,10 +2003,17 @@ def main() -> None:
         if args.pc_states is not None and (args.directional or args.states_dir):
             ap.error("--pc-states differences a finished sweep's PC energies; it runs "
                      "no sweep, so --directional and --states-dir do not apply")
-        if args.npz is None and not args.no_write:
-            ap.error("--reference casscf writes no sidecar (the committed "
+        # A componentwise sweep writes grad_num into the committed
+        # <case>_casscf.gradgold only for a case whose sidecar is committed
+        # with one (sidecar_grad_num_casscf, #213); the screen never does.
+        writes = (CASES.get(args.case, {}).get("sidecar_grad_num_casscf", False)
+                  and not args.directional)
+        if args.npz is None and not args.no_write and not writes:
+            ap.error("--reference casscf writes no sidecar here (the committed "
                      "<case>_casscf.gradgold is the 24 --gradgold arrays and stays "
-                     "byte-identical): pass --npz PATH or --no-write")
+                     "byte-identical; only a componentwise sweep of a case "
+                     "committed with a CASSCF grad_num writes one): pass --npz "
+                     "PATH or --no-write")
         if args.directional and args.analytic is None:
             ap.error("--directional needs --analytic PATH: the screen holds the "
                      "numerical directional derivative to <g, d>")
@@ -1999,7 +2043,9 @@ def main() -> None:
             raise SystemExit(1)
         return
     analytic = load_analytic(args.analytic, args.case) if args.analytic else None
-    if not (casscf or args.pc or args.no_write):
+    casscf_writes = (casscf and not args.no_write and not args.directional
+                     and CASES.get(args.case, {}).get("sidecar_grad_num_casscf", False))
+    if casscf_writes or not (casscf or args.pc or args.no_write):
         # Before the sweep, so a write that would be refused costs nothing.
         _check_sidecar_write(args, stem)
 
@@ -2018,6 +2064,8 @@ def main() -> None:
             print(f"wrote {args.npz} ({len(names) + 3} arrays)")
         if rec.get("screen_pass") is False:
             raise SystemExit(1)
+        if casscf_writes:
+            _write_grad_num(args, rec)
         return
     report(rec)
     if args.npz is not None:
@@ -2037,10 +2085,17 @@ def main() -> None:
     if args.no_write:
         print("--no-write: the sidecar is unchanged")
         return
+    _write_grad_num(args, rec)
+
+
+def _write_grad_num(args, rec: dict) -> None:
+    """The four ``grad_num*`` arrays into the sidecar (``--out`` instead, if
+    given), replacing any already there rather than appending, so the file
+    is a function of the inputs: same order, same bytes. The same for both
+    references; which sidecars may take one is :func:`_check_sidecar_write`'s
+    call, made before the sweep."""
     header, arrays = gf.read_gradgold(args.sidecar)
     _check_sidecar_flavour(args.sidecar, header, args.df, rec.get("naux"))
-    # Replace rather than append on a re-run, so the file is a function of the
-    # inputs: same order, same bytes.
     arrays = {k: v for k, v in arrays.items() if not k.startswith("grad_num")}
     for name in ("grad_num", "grad_num_residual", "grad_num_probed", "grad_num_step"):
         arrays[name] = rec[name]

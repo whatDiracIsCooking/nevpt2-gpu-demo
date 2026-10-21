@@ -365,7 +365,10 @@ CASCI branch has ``Z . F(x)`` and ``<z|H(x)|c>``. Two checks are its own:
 
 Its numerical gradient is ``nevpt2_numgrad.py --reference casscf --npz
 PATH`` (every displaced state re-optimised), read with ``--grad-num PATH``;
-without one, the gate is the residual-independent checks. The measured
+without one, the gate is the residual-independent checks. The C1 case
+(``hsoh_def2svp_cas66``, #213) is the one whose committed
+``<case>_casscf.gradgold`` carries that sweep's ``grad_num``, read by default
+as a CASCI case's sidecar is. The measured
 numbers and the wall-clock budget per case are in docs/reference-data.md,
 "The analytic gradient". ``--source dump`` / ``both`` (SC #125, PC #163) read
 the GPU's ``.gradsrc`` unrotated: the dump is in the golden's basis, and so is
@@ -781,6 +784,8 @@ CASSCF_WALL_BUDGET = {
     "n2_ccpvdz_cas44": 120.0,
     "lif_def2svp_cas46": 300.0,
     "acrolein_def2svp_cas65": 3600.0,
+    # #213's C1 case, declared before its first run from LiF's.
+    "hsoh_def2svp_cas66": 300.0,
 }
 
 #: The same budget for ``--reference casscf --pc`` (#126): one block2 PC solve
@@ -4327,11 +4332,17 @@ def run(args) -> dict:
     # sidecar beside the golden.
     if args.grad_num is not None:
         rec.update(grad_num_source)
-    elif casscf:
+    elif casscf and (args.pc or args.casci_only):
+        # The sidecar's grad_num, where there is one, is the SC NEVPT2
+        # gradient: nothing in it is a PC or a plain-CASSCF one.
+        pass
+    elif casscf and not ngrad.CASES.get(args.case, {}).get("sidecar_grad_num_casscf"):
         # The committed <case>_casscf.gradgold holds no grad_num (it stays the
         # 24 --gradgold arrays), and the CASCI sidecar's is another state's:
         # a casscf numerical gradient comes only from
         # `nevpt2_numgrad.py --reference casscf --npz PATH`, via --grad-num.
+        # The C1 case's sidecar is committed with one (#213), and falls
+        # through to the sidecar read below like a CASCI case's.
         pass
     elif args.casci_only:
         # The sidecar's grad_num is the NEVPT2 gradient; this run's is a plain
@@ -4672,7 +4683,10 @@ def main() -> None:
                          "grad_num_pc or grad_casci array, whichever this run "
                          "differentiates. Default: the grad_num arrays in "
                          "golden/<case>.gradgold (golden/<case>_df.gradgold "
-                         "with --df, which refuses this flag), where there are any (SC "
+                         "with --df, which refuses this flag; "
+                         "golden/<case>_casscf.gradgold with --reference casscf, "
+                         "committed with one for hsoh_def2svp_cas66 only), "
+                         "where there are any (SC "
                          "only; with --casci-only nothing there applies, since "
                          "that grad_num is the NEVPT2 gradient)")
     ap.add_argument("--ci-step", type=float, default=None,

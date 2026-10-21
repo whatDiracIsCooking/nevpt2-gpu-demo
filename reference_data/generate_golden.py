@@ -941,6 +941,7 @@ def optimise_mo(
     ``--mo-from`` would turn around and refuse."""
     out = casscf_optimise(atom, basis, ncas, nelecas, name, auxbasis,
                           cas_irreps=cas_irreps, core_irreps=core_irreps)
+    print(f"[{name}] point group: {_group_text(out['mol'])}")
     return out["meta"], out["arrays"]
 
 
@@ -1199,6 +1200,16 @@ def _build_mol(atom: str, basis: str):
     if sub is not None:
         mol = gto.M(**kw, symmetry_subgroup=sub)
     return mol
+
+
+def _group_text(mol) -> str:
+    """The point group :func:`_build_mol` detected and the one the state is
+    built in, for the log: ``C1`` for a symmetry-free molecule (#213's case,
+    where it is the claim the case rests on), ``Dooh -> D2h`` for a linear
+    one mapped by :data:`LINEAR_SUBGROUP`."""
+    if mol.topgroup == mol.groupname:
+        return f"{mol.groupname} (detected)"
+    return f"{mol.groupname} (detected {mol.topgroup})"
 
 
 def _check_degeneracy(pt) -> None:
@@ -1893,6 +1904,7 @@ def generate(
         f"E_CASCI={mc.e_tot:.10f} E_corr(NEVPT2)={e_corr:.10f} "
         f"E_tot={mc.e_tot + e_corr:.10f}  ({wall:.1f}s to build)"
     )
+    print(f"[{name}] point group: {_group_text(mc.mol)}")
     if cas_irreps is not None:
         print(f"[{name}] active space by irrep: {cas_irreps}, core: {core_irreps}")
     if with_df is not None:

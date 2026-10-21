@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Regenerate the committed N2 CAS(4,4) / CAS(8,8) references with the
-# generators' own settings, into a scratch directory, and compare each with
+# Regenerate the committed N2 CAS(4,4) / CAS(8,8) references, and the C1
+# case's three HSOH CAS(6,6) files (#213), with the generators' own settings, into a scratch directory, and compare each with
 # the committed file BYTE FOR BYTE. The regeneration gate of docs/testing.md,
 # "The golden regeneration gate".
 #
@@ -13,7 +13,7 @@
 # place that re-runs the promise, and the one place a byte comparison is right:
 # everywhere else compares against a tolerance.
 #
-# What it regenerates (twenty files, sixteen generator runs):
+# What it regenerates (twenty-three files, eighteen generator runs):
 #   generate_golden.py     n2_ccpvdz_cas44 / cas88 .nevpt2gold + .gradgold,
 #                          their _df twins (each with its density-fitted
 #                          NEVPT2F1 .gradgold, #164), the two .mogold sidecars (a fresh
@@ -39,6 +39,14 @@
 #                          checked against the COMMITTED _df golden. LiF's and
 #                          acrolein's conventional grad_num sidecars are not
 #                          covered here.
+#   the C1 case (#213)     hsoh_def2svp_cas66_casscf.mogold (a fresh --casscf),
+#                          its golden and .gradgold (--mo-from the COMMITTED
+#                          .mogold, --gradgold), then nevpt2_numgrad.py
+#                          --reference casscf's four grad_num* arrays into
+#                          that sidecar: every displaced state re-optimised
+#                          cold, deterministic like the reference, so the
+#                          sidecar is compared whole
+#                          (docs/reference-data.md, "HSOH, the C1 case").
 #
 # What it deliberately does NOT regenerate: golden/n2_ccpvdz_cas44_casscf.gradgold,
 # the CASSCF-reference gradient sidecar (#120). An orbital optimiser sits
@@ -47,6 +55,9 @@
 # (docs/reference-data.md, "The CASSCF-reference gradient sidecar"). The
 # cas44_casscf run below therefore omits the --gradgold that the docs' command
 # for that sidecar adds; the golden it writes is byte-identical either way.
+# (The HSOH sidecar above is the exception by construction: it is built from
+# the committed .mogold, as every --mo-from file here is, so the byte claim
+# is the same one its golden's is.)
 #
 # The comparison is `cmp` on the whole file, with ONE documented exception
 # (docs/reference-data.md, "Regenerating the golden file"): a committed CASCI
@@ -146,6 +157,21 @@ add_run cas44_casscf_df_mo "n2_ccpvdz_cas44_casscf_df.mogold" \
   "python $gen --df --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_casscf_df --casscf --mo-out $S/n2_ccpvdz_cas44_casscf_df.mogold"
 add_run cas44_casscf_df "n2_ccpvdz_cas44_casscf_df.nevpt2gold" \
   "python $gen --df --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_casscf_df --mo-from $G/n2_ccpvdz_cas44_casscf_df.mogold --out $S/n2_ccpvdz_cas44_casscf_df.nevpt2gold"
+# The C1 case (#213): HSOH CAS(6,6), CASSCF orbitals only. The .mogold is a
+# fresh --casscf; the golden and its gradient sidecar come from --mo-from the
+# COMMITTED .mogold, and the sidecar's grad_num from a --reference casscf
+# sweep run right after it, on the sidecar it just wrote (as cas44_df's
+# post-step does). That sweep re-optimises 72 displaced states, so it runs
+# --workers 12 (bit-identical to one worker); the reference it re-optimises
+# must reproduce the COMMITTED .mogold bit for bit, or it refuses. --atom is
+# the relative path the committed .mogold records (this script runs at the
+# repo root): the sidecar keeps the spec as typed, so another spelling of the
+# same path would move its bytes.
+add_run hsoh_casscf_mo "hsoh_def2svp_cas66_casscf.mogold" \
+  "python $gen --atom reference_data/geometries/hsoh.xyz --basis def2-svp --ncas 6 --nelecas 6 --name hsoh_def2svp_cas66_casscf --casscf --mo-out $S/hsoh_def2svp_cas66_casscf.mogold"
+add_run hsoh_casscf "hsoh_def2svp_cas66_casscf.nevpt2gold hsoh_def2svp_cas66_casscf.gradgold" \
+  "python $gen --atom reference_data/geometries/hsoh.xyz --basis def2-svp --ncas 6 --nelecas 6 --name hsoh_def2svp_cas66_casscf --mo-from $G/hsoh_def2svp_cas66_casscf.mogold --gradgold --out $S/hsoh_def2svp_cas66_casscf.nevpt2gold" \
+  "python $num --case hsoh_def2svp_cas66 --reference casscf --workers 12 --states-dir $S/hsoh_states --sidecar $S/hsoh_def2svp_cas66_casscf.gradgold"
 add_run cas44_src "n2_ccpvdz_cas44.srcgold" \
   "python $src --case n2_ccpvdz_cas44 --out $S/n2_ccpvdz_cas44.srcgold"
 add_run cas44_src_pc "n2_ccpvdz_cas44_pc.srcgold" \
