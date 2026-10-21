@@ -1,8 +1,10 @@
 # PC-NEVPT2
 
 The partially-contracted variant (`--pc`, `src/energy/energy_pc.cpp`): where
-its reference comes from, how the device computes it, how accurate it is and
-what it costs. How the stage fits into a run is
+its reference comes from, how the device computes it, how accurate it is,
+what it costs, and its derivatives on the card: the CI tangent, the source
+terms by reverse mode (#74), and the parameter Hessian's CI (#152, #155),
+mixed (#201) and orbital (#200, #202) blocks. How the stage fits into a run is
 [`implementation.md`](implementation.md), §4; this file holds the derivation
 details and every measured figure. Each figure names the card, the case and
 the flags.

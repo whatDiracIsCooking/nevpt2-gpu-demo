@@ -2323,8 +2323,8 @@ what makes it a different project.
 ## 9. The exactness budget
 
 The first-derivative tier's strength is that it is gated by identities, with
-exactly three finite differences in the whole of it
-([`gradients.md`](gradients.md), §2). Level 1 inherits that, and gains one
+a finite difference only where a convention both modes share would otherwise
+go unseen ([`gradients.md`](gradients.md), §2). Level 1 inherits that, and gains one
 identity the first order does not have:
 
 | check | what it pins | cost |
@@ -2353,7 +2353,15 @@ holds the vector against the reverse walk's own `y` directly, independent of
 check that sees C5. PC's `H_cc u` (#155) has the same kind of ladder, of the
 three-term `y`, per class, and for PC it is not redundant either: the duality
 against `pcHessianDevice` cannot see §6.2's rotation terms, because both sides
-share the blocks they are built from.
+share the blocks they are built from. PC's scalar `Eddot` (#152) carries the
+twin of SC's one difference of `Edot`. The orbital blocks carry the
+Hessian-vector ladders the table plans for: #154's second difference of the
+fixed-pseudodensity pairing along `exp(s u + t v)`, the one check that sees an
+omitted K2, and #158's of the SC total itself, which found §5.6's term; PC's
+three (#200–#202) are the same ladders on PC's pairing, its three-term `y`
+along `kappa` and its total. As built, then, each of level 1's ten modes
+(five SC, five PC) runs a ladder of its own; [`gradients.md`](gradients.md),
+§2 tabulates them with what each pins.
 
 ### 9.1 What a second derivative must refuse, and what it must merely say
 

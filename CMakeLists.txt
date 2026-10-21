@@ -444,7 +444,7 @@ if(NEVPT2_BUILD_TESTING)
                 lif_def2svp_cas46)
     set(_kf_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.nevpt2gold")
     set(_kf_side "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.gradgold")
-    # Both files are committed for these three cases; the sidecar is checked
+    # Both files are committed for these four cases; the sidecar is checked
     # for anyway, as the golden is, so a tree missing one warns instead of
     # registering an entry that cannot run (acrolein's 57 MB sidecar, for
     # instance, is gitignored -- docs/reference-data.md, "The gradient
@@ -1294,7 +1294,8 @@ if(NEVPT2_BUILD_TESTING)
   # exact affine increment (every class), Euler's identity for the three
   # classes whose blocks are purely linear in the RDMs, and a central finite
   # difference of energiesDevice along a seeded CI direction, Richardson
-  # verified. THE ONLY FINITE DIFFERENCE IN THIS TIER, and a one-time one: it
+  # verified. THE SC ENERGY STAGE'S OWN FINITE DIFFERENCE, and a one-time one
+  # (docs/gradients.md, Sec. 1.2, lists the tier's others): it
   # licenses the exact dot-product tests the adjoint will be held to
   # (docs/testing.md, "The SC tangent's finite-difference cross-check", has
   # the measured plateau and the h where round-off takes over). Its PASS line
