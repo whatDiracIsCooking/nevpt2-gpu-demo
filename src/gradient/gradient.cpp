@@ -2142,6 +2142,141 @@ Result<PcMixedHessianVectorResult> pcMixedHessianVectorDevice(const ScMixedHessi
   return out;
 }
 
+// --- PC's orbital block: the solve's sandwich and Eddot_kk (#202) ---------------
+
+Result<std::vector<PcOrbitalSandwichResult>> pcOrbitalSandwichDevice(
+    const PcOrbitalSandwichSetup& s, const std::vector<PcOrbitalSandwichRequest>& pairs,
+    const DeviceResources& res) {
+  // A tangent built from an approximate digest is not the derivative of
+  // anything the energy stage computed; nevpt2.cli refuses the combination.
+  check(!s.opt.cublas && !s.opt.ozaki && !s.opt.fusedDigest,
+        "pcOrbitalSandwichDevice runs the emitted or the native-fp64 BLAS digest (cli refuses "
+        "--cublas / --ozaki / --fused-digest with --sc-hessian-kk)");
+  NEVPT2_TRY(checkGeneralShapes(s.ints, s.gen));
+  const int64_t nmo = s.gen.nmo();
+  const auto norm2 = [](const Tensor& k) {
+    double n = 0.0;
+    for (int64_t i = 0; i < k.size(); ++i) n += k.flat(i) * k.flat(i);
+    return n;
+  };
+  // Every pair is checked before any device work.
+  for (std::size_t q = 0; q < pairs.size(); ++q) {
+    NEVPT2_TRY(checkCurvatureDirection(pairs[q].u, nmo, q, "u"));
+    NEVPT2_TRY(checkCurvatureDirection(pairs[q].v, nmo, q, "v"));
+    if (!(norm2(pairs[q].u) > 0.0) || !(norm2(pairs[q].v) > 0.0))
+      return err_config(std::format("pcOrbitalSandwichDevice: pair {} has a zero direction", q));
+  }
+  if (s.ci.rank() != 2)
+    return err_config(
+        "pcOrbitalSandwichDevice: the state is not an (nstringsA, nstringsB) CI vector");
+
+  FullBlockSource src(s.ints);
+  const ActiveIntegralsDevice ai = activeViewOf(s.ints);
+  const PcRdms rdm{&s.rdm.dm1, &s.rdm.dm2, &s.rdm.dm3, &s.rdm.f3ac, &s.rdm.f3ca};
+  // The integrals the digests' share alone is built at (and Sijrs's walk
+  // state points at), and the zero RDM sets the digests' reference reads.
+  const DeviceTensor zeroH1e = DeviceTensor::zeros(s.ints.h1e.dims, res);
+  const DeviceTensor zeroH2e = DeviceTensor::zeros(s.ints.h2e.dims, res);
+  std::optional<DeviceTensor> z1, z2, z3, zac, zca;
+  for (const PcOrbitalSandwichRequest& r : pairs)
+    if (r.digestReference && !z1) {
+      z1.emplace(DeviceTensor::zeros(s.rdm.dm1.dims, res));
+      z2.emplace(DeviceTensor::zeros(s.rdm.dm2.dims, res));
+      z3.emplace(DeviceTensor::zeros(s.rdm.dm3.dims, res));
+      zac.emplace(DeviceTensor::zeros(s.rdm.f3ac.dims, res));
+      zca.emplace(DeviceTensor::zeros(s.rdm.f3ca.dims, res));
+    }
+
+  std::vector<PcOrbitalSandwichResult> out;
+  out.reserve(pairs.size());
+  for (const PcOrbitalSandwichRequest& r : pairs) {
+    // u and v as the walk's two tangent directions, each with its digests'
+    // tangent attached (the RDM build at its own h2e').
+    ScRotation rot = NEVPT2_TRY(makeGeneralRotation(
+        {ScRotationRequest{r.u, /*tangent=*/true}, ScRotationRequest{r.v, /*tangent=*/true}},
+        ai.h1e, ai.h2e, s.gen, s.rdm.dm1, res));
+    const std::vector<RdmBuildResult> digests =
+        attachDigestTangents(rot, s.opt, s.ci, s.nelecA, s.nelecB, res);
+    // FROZEN: no Delta' on either leg, Sijrs's included (its pair finish
+    // reads each direction's deps directly).
+    if (!s.epsKappa)
+      for (ScRotationDir& d : rot.dirs) {
+        d.epsCoreDot = Tensor(d.epsCoreDot.dims());
+        d.epsVirtDot = Tensor(d.epsVirtDot.dims());
+      }
+    PcSandwichWalk sw;
+    sw.rot = &rot;
+    sw.epsKappa = s.epsKappa;
+    sw.reverse = r.reverse;
+    sw.zeroH1e = &zeroH1e;
+    sw.zeroH2e = &zeroH2e;
+    sw.scaleU = norm2(r.u);
+    sw.scaleV = norm2(r.v);
+
+    PcOrbitalSandwichResult o;
+    o.walk = NEVPT2_TRY(assemblePcSandwichClasses(ai, src, rdm, sw, res));
+    // A refused class has no second derivative along this pair: the term is
+    // not formed, never one with a class missing.
+    if (!o.walk.allDone())
+      return err_numerical(std::format(
+          "PC's orbital sandwich has no value along pair {}: {} refused", out.size(),
+          o.walk.refusals()));
+    for (const PcClassGradient& c : o.walk.classes) o.total += c.sandwich;
+    o.forward = o.total.forward;
+    o.hasReverse = r.reverse;
+    o.reverse = r.reverse ? o.total.reverse : 0.0;
+    o.epsKappa = s.epsKappa;
+    o.h2eDotMaxU = maxAbsDevice(rot.dirs[0].h2eDot, res);
+    o.h2eDotMaxV = maxAbsDevice(rot.dirs[1].h2eDot, res);
+    o.f3DotMaxU = std::max(maxAbsDevice(digests[0].f3ac, res), maxAbsDevice(digests[0].f3ca, res));
+    o.f3DotMaxV = std::max(maxAbsDevice(digests[1].f3ac, res), maxAbsDevice(digests[1].f3ca, res));
+    if (r.digestReference) {
+      // The energy stage's own PC second derivative along the digests'
+      // tangents alone: S_u = S_v = 0 and the second-order set zero, so it is
+      // the two-leg cross term between the digest-only K' blocks, off the
+      // plain digest path's f3'[u], f3'[v] and pcHessianDevice's own walk.
+      const PcRdms zeroSet{&*z1, &*z2, &*z3, &*zac, &*zca};
+      const PcRdms dotU{&*z1, &*z2, &*z3, &digests[0].f3ac, &digests[0].f3ca};
+      const PcRdms dotV{&*z1, &*z2, &*z3, &digests[1].f3ac, &digests[1].f3ca};
+      const PcHessianResult e = NEVPT2_TRY(pcHessianDevice(
+          s.ints, PcHessianSets{rdm, dotU, dotV, &zeroSet, &zeroSet, &zeroSet}, res));
+      for (std::size_t c = 0; c < 8; ++c) {
+        if (e.classes[c].result.status != PcStatus::Done)
+          return err_numerical(std::format(
+              "the digests' reference for pair {} has no value: {} refused ({})", out.size(),
+              CLASSES[c], e.classes[c].result.why));
+        o.digestReference += e.classes[c].eddot;
+      }
+      o.hasDigestReference = true;
+    }
+    out.push_back(std::move(o));
+  }
+  return out;
+}
+
+Result<std::vector<PcOrbitalHessianResult>> pcOrbitalHessianDevice(
+    const ScOrbitalCurvatureSetup& s, const std::vector<ScOrbitalCurvatureRequest>& pairs,
+    const bool epsKappa, const DeviceResources& res) {
+  if (s.ci == nullptr)
+    return err_config(
+        "pcOrbitalHessianDevice: the sandwich's digests' tangents need the state (setup.ci)");
+  // The curvature settles every pair -- and refuses -- before its device work.
+  const std::vector<ScOrbitalCurvatureResult> curv =
+      NEVPT2_TRY(pcOrbitalCurvatureDevice(s, pairs, res));
+  const PcOrbitalSandwichSetup ss{s.ints, s.gen, s.rdm, *s.ci, s.nelecA, s.nelecB, s.opt,
+                                  epsKappa};
+  std::vector<PcOrbitalSandwichRequest> reqs;
+  reqs.reserve(pairs.size());
+  for (const ScOrbitalCurvatureRequest& p : pairs)
+    reqs.push_back(PcOrbitalSandwichRequest{p.u, p.v, p.tangent, false});
+  std::vector<PcOrbitalSandwichResult> sand = NEVPT2_TRY(pcOrbitalSandwichDevice(ss, reqs, res));
+  std::vector<PcOrbitalHessianResult> out;
+  out.reserve(pairs.size());
+  for (std::size_t q = 0; q < pairs.size(); ++q)
+    out.push_back(PcOrbitalHessianResult{curv[q], std::move(sand[q]), epsKappa});
+  return out;
+}
+
 Result<PcFullRotationResult> pcFullRotationDevice(
     const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen, const DeviceTensor& dm1,
     const DeviceTensor& dm2, const DeviceTensor& dm3, const DeviceTensor& f3ac,

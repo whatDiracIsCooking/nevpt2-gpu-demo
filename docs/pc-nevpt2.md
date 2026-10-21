@@ -1079,7 +1079,9 @@ PC's orbital Hessian blocks are derived in
 [`hessian-theory.md`](hessian-theory.md), §6.4–§6.8 (#199). The first term of
 `H_kk`, the integrals' curvature K1 + K2, is in the tree (#200;
 [`testing.md`](testing.md), "PC's orbital curvature"), and so is the mixed
-block `H_kc` (#201; "The mixed block H_kc", below); #202 builds the rest.
+block `H_kc` (#201; "The mixed block H_kc", below), and so is the rest of
+`H_kk`, the sandwich and the assembled `Eddot_kk` (#202; "The orbital
+block's sandwich", below).
 Before any code, three of the theory's
 claims were measured offline:
 
@@ -1255,6 +1257,45 @@ walk-to-walk spread of a CAS(8,8) PC `y` (smallest kept `s / s_max`
 1.0e-10, Sr) sits under every rung, and a finite rotation of the active
 integrals moves the poorly conditioned modes' `lambda` by Hartrees. Both are
 #194's conditioning, not the mixed block's algebra, which the identities pin.
+
+### The orbital block's sandwich
+
+#202 builds the rest of `H_kk` on the card: the sandwich, the solve's
+two-leg cross term per tuple with no rotation term and no guarded tuple,
+and the assembled `Eddot_kk` ([`hessian-theory.md`](hessian-theory.md),
+§6.4–§6.8). Its gated entries are CAS(4,4), conventional and fitted; their
+checks and numbers are [`testing.md`](testing.md), "PC's orbital block's
+sandwich". There every pair is formed, `virtual x virtual` and `full x
+full` included, and every ladder converges, as §6.6 predicts.
+
+**CAS(8,8) is a diagnostic, not an entry**, as #152's, #155's and #201's
+are, until #194. Four runs each of `nevpt2_sc_pseudodensity --golden
+golden/n2_ccpvdz_cas88[_df].nevpt2gold --tiles T --pc --sc-hessian-kk`
+(two at `T` = 1, two at `T` = 3), RTX 3080 (CUDA, `default` preset),
+2026-10-21, about 80 to 90 s each; the worst of the four:
+
+| check | CAS(8,8) | CAS(8,8) DF |
+|---|---|---|
+| the merge, both modes | 9.9e-10 | 8.1e-10 |
+| the duality, both modes, worst pair | 2.0e-12 | 1.2e-12 |
+| the swap: the sandwich / `Eddot_kk` | 8.8e-9 / 8.8e-9 | 3.7e-9 / 1.8e-9 |
+| an intra-space leg's Dyall-block share | 8.7e-15 | 9.3e-16 |
+| the gauge against `H_kc`, worst `v` | 6.3e-9 | 1.5e-8 |
+| the digests alone, against `pcHessianDevice` | **4.3e-3**: both sides are about -1.2e6 on `active x active` (-3.5e5 on `active x full`), the sandwich itself -12.4 | **1.4e-3**, likewise |
+| the ladders along `active x active`, `active x core`, `active x virtual` | **not formed**: at `h = 2^-4` the corner `(+h, +h)`'s Sr solve has a non-positive denominator (`lambda_k + Delta_t` of -67.4, -45.0, -45.0), and each ladder FAILS with that Numerical Error | the same (-67.4, -45.1, -45.1) |
+| the ladders along `core x virtual`, `core x core`, `virtual x virtual`, worst | converge: 3.0e-8 (`core x core`, 8 halvings); `E - L` only (K2 is refused) | converge: 3.8e-9 (`core x virtual`, 5 halvings), `E` and `E - L` |
+
+Every identity between two computations within one walk holds far under
+1e-7; so does the gauge, which compares two walks. Two checks fail, both of
+them #194's conditioning (Sr's and Si's smallest kept `s / s_max` is
+1.0e-10 and 3.1e-10). The digests' share alone is about -1.2e6 along
+`active x active` and cancels against the rest to leave a sandwich of
+-12.4. Two separate walks, the sandwich's and the energy stage's, agree on
+that share to about 4e-9 of it and no closer, the same kind of walk-to-walk
+spread the CAS(8,8) PC `y` shows above. A rotation of the active
+space by a sixteenth of a radian moves Sr's poorly conditioned `lambda` by
+tens of Hartrees, past `-Delta_t`, so the active ladders have no first rung.
+Every pair whose directions leave the active space alone converges.
 
 ## The source terms by reverse mode
 

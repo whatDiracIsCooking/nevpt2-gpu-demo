@@ -160,7 +160,12 @@ struct SwPair {
 // curvature is refused, and then E's ladder is printed and not gated --
 // `wantSandwich` this term; `scale` both gates' denominator -- the magnitudes
 // the differenced values carry. Returns whether the gated ones converge.
-nevpt2::Result<bool> swLadders(const nevpt2::GoldenFile& g, const KkFockParts& fock,
+// `pc`: the corners are PC totals (pcEnergiesDevice, a refused class a
+// Numerical Error) and L is PC's fixed-adjoint pairing (--pc --sc-hessian-kk,
+// #202); `hbar` is then PC's. The steps are h = 2^-k for k from `firstExp`
+// (SC's kSwFdFirstExp) to kKkFdLastExp.
+nevpt2::Result<bool> swLadders(bool pc, int firstExp, const nevpt2::GoldenFile& g,
+                               const KkFockParts& fock,
                                const nevpt2::Tensor& u, const nevpt2::Tensor& v,
                                std::optional<double> want,
                                double wantSandwich, double scale,
@@ -169,10 +174,13 @@ nevpt2::Result<bool> swLadders(const nevpt2::GoldenFile& g, const KkFockParts& f
                                const nevpt2::RdmBuildOptions& opt, std::int64_t nc,
                                std::int64_t na, std::int64_t nv,
                                const nevpt2::DeviceResources& res) {
-  std::array<double, kSwFdSteps> step{}, second{}, floor{};
+  nevpt2::check(firstExp >= kSwFdFirstExp && firstExp < kKkFdLastExp,
+                "swLadders: the first step lies inside SC's ladder");
+  const std::size_t nSteps = static_cast<std::size_t>(kKkFdLastExp - firstExp + 1);
+  std::vector<double> step(nSteps), second(nSteps), floor(nSteps);
   std::vector<nevpt2::NevptIntegralsDevice> combos;
-  for (std::size_t i = 0; i < kSwFdSteps; ++i) {
-    const double h = std::ldexp(1.0, -(kSwFdFirstExp + static_cast<int>(i)));
+  for (std::size_t i = 0; i < nSteps; ++i) {
+    const double h = std::ldexp(1.0, -(firstExp + static_cast<int>(i)));
     step[i] = h;
     std::vector<KkHostInts> corners;
     double e = 0.0, eMax = 0.0;
@@ -189,8 +197,21 @@ nevpt2::Result<bool> swLadders(const nevpt2::GoldenFile& g, const KkFockParts& f
       nevpt2::check(h2e != nullptr, "swLadders: the displaced set carries h2e");
       const nevpt2::RdmBuildResult b =
           nevpt2::buildRdmsDevice(opt, g.get("ci"), g.ncas, g.nelecA, g.nelecB, *h2e, res);
-      const double ec =
-          nevpt2::energiesDevice(d, rdm.dm1, rdm.dm2, rdm.dm3, b.f3ac, b.f3ca, res).total;
+      double ec = 0.0;
+      if (pc) {
+        const nevpt2::PcEnergyResult pe = NEVPT2_TRY(
+            nevpt2::pcEnergiesDevice(d, rdm.dm1, rdm.dm2, rdm.dm3, b.f3ac, b.f3ca, res));
+        for (std::size_t k = 0; k < pe.classes.size(); ++k) {
+          const nevpt2::PcClassResult& r = pe.classes[k];
+          if (r.status != nevpt2::PcStatus::Done)
+            return nevpt2::err_numerical(std::format(
+                "the ladder's corner (s, t) = ({:+g}, {:+g}) has no PC energy: {} is refused ({})",
+                at[c].first, at[c].second, nevpt2::CLASSES[k], r.why));
+          ec += r.energy;
+        }
+      } else {
+        ec = nevpt2::energiesDevice(d, rdm.dm1, rdm.dm2, rdm.dm3, b.f3ac, b.f3ca, res).total;
+      }
       e += sign[c] * ec;
       eMax = std::max(eMax, std::fabs(ec));
       corners.push_back(std::move(ic));
@@ -201,8 +222,8 @@ nevpt2::Result<bool> swLadders(const nevpt2::GoldenFile& g, const KkFockParts& f
   }
   std::vector<const nevpt2::NevptIntegralsDevice*> ptr;
   for (const nevpt2::NevptIntegralsDevice& c : combos) ptr.push_back(&c);
-  const nevpt2::ScFullRotationResult paired =
-      NEVPT2_TRY(nevpt2::scDottedPairingDevice(ints, rdm, &hbar, ptr, /*tangent=*/false, res));
+  const std::vector<nevpt2::ScFullRotationPairing> paired =
+      NEVPT2_TRY(kkPairIncrements(pc, ints, rdm, hbar, ptr, res));
 
   // The second differences of E and of E - L, raw; each is O(h^2) off its
   // limit (the fourfold run on the raw errors is what verifies that), and its
@@ -210,14 +231,14 @@ nevpt2::Result<bool> swLadders(const nevpt2::GoldenFile& g, const KkFockParts& f
   // what the 1e-6 relative gate holds: the raw ladder of a total energy
   // bottoms out at its round-off floor, ~ eps |E| / h^2, before its O(h^2)
   // error is that small for a pair whose Eddot is small against |E|.
-  std::array<double, kSwFdSteps> dE{}, dS{};
-  for (std::size_t i = 0; i < kSwFdSteps; ++i) {
+  std::vector<double> dE(nSteps), dS(nSteps);
+  for (std::size_t i = 0; i < nSteps; ++i) {
     dE[i] = second[i];
-    dS[i] = second[i] - paired.dirs[i].adjoint / (4.0 * step[i] * step[i]);
+    dS[i] = second[i] - paired[i].adjoint / (4.0 * step[i] * step[i]);
   }
   struct Gate {
     const char* label;
-    const std::array<double, kSwFdSteps>* d;
+    const std::vector<double>* d;
     double target;
   };
   std::vector<Gate> gates;
@@ -225,24 +246,24 @@ nevpt2::Result<bool> swLadders(const nevpt2::GoldenFile& g, const KkFockParts& f
   gates.push_back(Gate{"E - L against the sandwich", &dS, wantSandwich});
   bool ok = true;
   for (const Gate& gt : gates) {
-    std::array<double, kSwFdSteps> err{};
-    for (std::size_t i = 0; i < kSwFdSteps; ++i) err[i] = std::fabs((*gt.d)[i] - gt.target);
+    std::vector<double> err(nSteps);
+    for (std::size_t i = 0; i < nSteps; ++i) err[i] = std::fabs((*gt.d)[i] - gt.target);
     std::printf("  %s (%.14e):\n", gt.label, gt.target);
     // The ratio test's errors: a rung within kSwFloorMargin of its floor
     // reads as 0, which longestFourfoldRun never counts (no ratio across it).
-    std::array<double, kSwFdSteps> above{};
-    for (std::size_t i = 0; i < kSwFdSteps; ++i)
+    std::vector<double> above(nSteps);
+    for (std::size_t i = 0; i < nSteps; ++i)
       above[i] = err[i] > kSwFloorMargin * floor[i] ? err[i] : 0.0;
     std::printf("  %5s %12s %22s %10s %6s %22s %10s %10s\n", "k", "h = 2^-k",
                 "second diff / 4h^2", "|err|", "ratio", "Richardson (4D(h/2)-D(h))/3", "rel err",
                 "floor");
     double bestRel = std::numeric_limits<double>::infinity();
     std::size_t bestAt = 0;
-    for (std::size_t i = 0; i < kSwFdSteps; ++i) {
-      const int k = kSwFdFirstExp + static_cast<int>(i);
+    for (std::size_t i = 0; i < nSteps; ++i) {
+      const int k = firstExp + static_cast<int>(i);
       const std::string ratio =
           i == 0 ? std::string("-") : std::format("{:.2f}", err[i] > 0.0 ? err[i - 1] / err[i] : 0.0);
-      if (i + 1 < kSwFdSteps) {
+      if (i + 1 < nSteps) {
         const double r = (4.0 * (*gt.d)[i + 1] - (*gt.d)[i]) / 3.0;
         const double rel = std::fabs(r - gt.target) / std::max(1e-30, scale);
         if (rel < bestRel) {
@@ -613,7 +634,7 @@ nevpt2::Result<bool> checkScHessianKk(const nevpt2::GoldenFile& g, const nevpt2:
     std::printf("\n  [5] the ladders along exp(s u + t v), %s (<u, Y> = %.6e, <v, Y> = %.6e)%s:\n",
                 p.name.c_str(), dirs[p.u].y, dirs[p.v].y,
                 want ? "" : " -- the sandwich's alone: K2, so Eddot_kk, is refused here");
-    const bool fd = NEVPT2_TRY(swLadders(g, fock, dirs[p.u].k, dirs[p.v].k, want,
+    const bool fd = NEVPT2_TRY(swLadders(false, kSwFdFirstExp, g, fock, dirs[p.u].k, dirs[p.v].k, want,
                                          sand[k].forward, scale, ints, rdm, hbar, opt, nc, na, nv,
                                          res));
     ok = ok && fd;

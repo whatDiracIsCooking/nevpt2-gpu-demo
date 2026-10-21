@@ -62,7 +62,10 @@
 // and Eddot_kk(u, v) = <Ehat', I''> + the sandwich against Richardson-verified
 // ladders of the SC total itself along exp(s u + t v), out of the sidecar
 // (required); the partition :hessian_kk_sandwich_check, with its own PASS
-// line.
+// line. With --pc it is PC-NEVPT2's block (#202): the solve's sandwich
+// forward against reverse in both orbital-energy modes, the ladders of the PC
+// total, and the step-free gauge against #201's H_kc (:hessian_kk_pc_check,
+// its own PASS line).
 //
 // A DENSITY-FITTED golden (`generate_golden.py --df`) runs here too (#165),
 // with no flag of its own: it carries its fitted four-index blocks beside the
@@ -95,8 +98,9 @@
 // to the golden's block2 e_pc_total) and, for the oracle, a PC `.srcgold`.
 // --pc means nothing to the identities or --kappa-act / --kappa-full, which
 // are SC's, and nevpt2.cli refuses it there; with --sc-hessian-kk-int it makes
-// the orbital curvature PC's (#200), and with --sc-hessian-kc the mixed block
-// PC's (#201, :hessian_kc_pc_check, its own PASS line).
+// the orbital curvature PC's (#200), with --sc-hessian-kc the mixed block
+// PC's (#201, :hessian_kc_pc_check, its own PASS line), and with
+// --sc-hessian-kk the sandwich and Eddot_kk PC's (#202, :hessian_kk_pc_check).
 
 // A module unit, so each binary is apps/<app>/{main.cppm,CMakeLists.txt}.
 // Nothing imports it. main() is written plainly: clang attaches main to the
@@ -128,6 +132,9 @@ export import :hessian_kk_check;
 // --sc-hessian-kk: the orbital Hessian block's sandwich and the whole block
 // Eddot_kk (#158). Its own PASS line.
 export import :hessian_kk_sandwich_check;
+// --pc --sc-hessian-kk: the same block of the PC energy (#202). Its own PASS
+// line.
+export import :hessian_kk_pc_check;
 
 import std;
 // nevpt2.cli: every flag this binary takes, and the ones it refuses.
@@ -144,8 +151,8 @@ int main(int argc, char** argv) {
   // spans them (nevpt2.cli's parseArgs). A flag this binary does not
   // implement -- --profile, --rdm-tangent -- is refused as Unsupported rather
   // than ignored; a bad value or combination (--pc with anything but
-  // --dump-source-terms, --source-oracle, --sc-hessian-kc or
-  // --sc-hessian-kk-int) is a config Error. Reported once,
+  // --dump-source-terms, --source-oracle, --sc-hessian-kc,
+  // --sc-hessian-kk-int or --sc-hessian-kk) is a config Error. Reported once,
   // here.
   nevpt2::Result<nevpt2::cli::Options> parsed =
       nevpt2::cli::parseArgs(nevpt2::cli::Binary::ScPseudodensity, args);
@@ -450,7 +457,9 @@ int main(int argc, char** argv) {
 
   // --sc-hessian-kk (#158): the orbital Hessian block's sandwich and the
   // whole block (:hessian_kk_sandwich_check). The sidecar is required, as
-  // --sc-hessian-kk-int's is.
+  // --sc-hessian-kk-int's is. With --pc it is PC's (#202,
+  // :hessian_kk_pc_check), on a state the PC energy stage above has already
+  // held to the golden's block2 total.
   if (parsedOpts.scHessianKk) {
     nevpt2::Result<nevpt2::GradGoldFile> sidecar = loadSidecar();
     if (!sidecar) {
@@ -458,7 +467,9 @@ int main(int argc, char** argv) {
       return 1;
     }
     const nevpt2::GradGoldFile gg = *std::move(sidecar);
-    const nevpt2::Result<bool> ok = checkScHessianKk(g, gg, dInts, dDm1, dDm2, rdm, opt.rdm, *res);
+    const nevpt2::Result<bool> ok =
+        opt.pc ? checkPcHessianKk(g, gg, dInts, dDm1, dDm2, rdm, opt.rdm, *res)
+               : checkScHessianKk(g, gg, dInts, dDm1, dDm2, rdm, opt.rdm, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

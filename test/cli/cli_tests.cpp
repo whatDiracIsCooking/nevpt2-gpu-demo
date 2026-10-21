@@ -1063,15 +1063,16 @@ TEST(CliScPseudodensityFlagTests, SourceOracleSetsItsPath) {
   EXPECT_EQ(g->gradgoldPath, "s.gradgold");
 }
 
-// --pc (#74, #200, #201): PC-NEVPT2's source terms, orbital curvature and
-// mixed block, so only the four jobs that assemble them take it; the
-// identities and the two kappa checks are SC's.
+// --pc (#74, #200, #201, #202): PC-NEVPT2's source terms, orbital
+// curvature, mixed block and orbital sandwich, so only the five jobs that
+// assemble them take it; the identities and the two kappa checks are SC's.
 TEST(CliScPseudodensityFlagTests, PcIsTheSourceTermAndHessianJobsAlone) {
   for (const std::vector<std::string_view>& args :
        {std::vector<std::string_view>{"--pc", "--dump-source-terms", "x.gradsrc"},
         std::vector<std::string_view>{"--pc", "--source-oracle", "x_pc.srcgold"},
         std::vector<std::string_view>{"--pc", "--sc-hessian-kk-int"},
-        std::vector<std::string_view>{"--pc", "--sc-hessian-kc"}}) {
+        std::vector<std::string_view>{"--pc", "--sc-hessian-kc"},
+        std::vector<std::string_view>{"--pc", "--sc-hessian-kk"}}) {
     const Result<Options> r = parse(Binary::ScPseudodensity, args);
     ASSERT_TRUE(r.has_value()) << r.error().message;
     EXPECT_TRUE(r->common.pc);
@@ -1083,9 +1084,9 @@ TEST(CliScPseudodensityFlagTests, PcIsTheSourceTermAndHessianJobsAlone) {
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
     EXPECT_EQ(r.error().message,
-              "--pc makes --dump-source-terms, --source-oracle, --sc-hessian-kc and "
-              "--sc-hessian-kk-int PC-NEVPT2's; the identities, --kappa-act and --kappa-full are "
-              "the SC energy's and have no --pc path");
+              "--pc makes --dump-source-terms, --source-oracle, --sc-hessian-kc, "
+              "--sc-hessian-kk-int and --sc-hessian-kk PC-NEVPT2's; the identities, --kappa-act "
+              "and --kappa-full are the SC energy's and have no --pc path");
   }
   // The dump builds the digests' tangent with --pc as without: exact digests.
   const Result<Options> r =
@@ -1222,8 +1223,8 @@ TEST(CliScPseudodensityFlagTests, ScHessianKkIntTakesPcAndRefusesTheApproximateD
 }
 
 // --sc-hessian-kk (#158), nevpt2_sc_pseudodensity alone: the orbital block's
-// sandwich and the whole Eddot_kk, one job at a time, SC only, exact digests
-// only; --gradgold rides on it.
+// sandwich and the whole Eddot_kk, one job at a time, exact digests only
+// (with --pc, PC's, #202); --gradgold rides on it.
 TEST(CliScPseudodensityFlagTests, ScHessianKkSetsItsFieldAndTakesGradgold) {
   const Result<Options> r = parse(Binary::ScPseudodensity, {"--sc-hessian-kk"});
   ASSERT_TRUE(r.has_value()) << r.error().message;
@@ -1254,13 +1255,12 @@ TEST(CliScPseudodensityFlagTests, ScHessianKkRefusesTheOtherJobs) {
   }
 }
 
-TEST(CliScPseudodensityFlagTests, ScHessianKkRefusesPcAndTheApproximateDigests) {
+TEST(CliScPseudodensityFlagTests, ScHessianKkTakesPcAndRefusesTheApproximateDigests) {
+  // With --pc it is PC's sandwich and Eddot_kk (#202).
   const Result<Options> pc = parse(Binary::ScPseudodensity, {"--sc-hessian-kk", "--pc"});
-  ASSERT_FALSE(pc.has_value());
-  EXPECT_EQ(pc.error().kind, ErrorKind::InvalidConfig);
-  EXPECT_EQ(pc.error().message,
-            "--sc-hessian-kk differentiates the strongly-contracted energy twice; PC's orbital "
-            "Hessian has no path");
+  ASSERT_TRUE(pc.has_value()) << pc.error().message;
+  EXPECT_TRUE(pc->scHessianKk);
+  EXPECT_TRUE(pc->common.pc);
   for (const std::vector<std::string_view>& digest :
        {std::vector<std::string_view>{"--cublas"}, std::vector<std::string_view>{"--ozaki"},
         std::vector<std::string_view>{"--fused-digest", "--blas-digest"}}) {

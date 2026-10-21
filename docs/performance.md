@@ -673,6 +673,32 @@ reverse, one slab's pseudodensity tangents; none of it scales with
 its RDM build. Under #158 there were 156, and CAS(8,8) took 28.6 s at
 `--tiles 3`.
 
+**`--pc --sc-hessian-kk` (#202): floor 1 on every case it runs.** Its RDM
+work is `--sc-hessian-kk`'s — the plain build for the state, once per
+direction of every pair for the digests' tangent (twice per pair: EULER and
+FROZEN), the curvature's builds at `h2e''`, one per ladder corner — plus
+#89's transpose for PC's `hbar` and #201's tangent builds for the gauge's
+`H_kc`, at the state's own `ci`. So its floors are the plain build's and
+the tangent build's. Measured: `nevpt2_sc_pseudodensity --golden <case>
+--tiles T --pc --sc-hessian-kk` runs to its last check at `T = 1`, the
+lowest count there is, and at `T = 3`, on the four cases that carry a
+sidecar and PC fields (RTX 3080, CUDA, `default` preset, one run each
+alone on the card, 2026-10-21). The two CAS(8,8) runs end in FAIL, for
+#194's reason ([`pc-nevpt2.md`](pc-nevpt2.md), "The orbital block's
+sandwich"), not for memory:
+
+| case | `--tiles 1`: wall, pool used | `--tiles 3`: wall, pool used |
+|---|---:|---:|
+| N2 CAS(4,4) | 5.3 s, 5.9 MB | 5.6 s, 5.9 MB |
+| N2 CAS(4,4) DF | 5.5 s, 7.3 MB | 5.6 s, 7.3 MB |
+| N2 CAS(8,8) | 83.4 s, 348.0 MB | 81.9 s, 139.1 MB |
+| N2 CAS(8,8) DF | 88.6 s, 348.8 MB | 89.2 s, 139.9 MB |
+
+Beside the builds it holds, per pair and class, the two legs' `K'` blocks
+and their digests' shares (four `d x d` builds, read back as `m x m`) and,
+reverse, one slab's pseudodensity tangents; none of it scales with
+`--tiles`.
+
 **The digests' transpose (#89) has the plain build's per-tile working set.**
 `buildDigestAdjointDevice` (`nevpt2.rdm_build`'s `:adjoint` partition) holds
 the plain build's `R` and `L2` per tile and one `n^2`-by-width `Wbar` in
@@ -720,6 +746,7 @@ live there and are not repeated here:
 | `--pc --sc-hessian-kk-int` (#200) | the plain build and the digests' transpose, beside the PC adjoint walk's buffers | the plain rows and the transpose's, as a lower bound | no; pool high-water at the ctest entries only |
 | `--pc --sc-hessian-kc` (#201) | the tangent build, three times per CI direction (forward: at `(c, u)`, `(u, u)` and `(c, u)` with `h2e'[w]`), and the plain build (reverse) | the `--rdm-tangent` rows, as a lower bound | no; pool high-water at the ctest entries only |
 | `--sc-hessian-kk` (#158, #190) | the plain build and the digests' transpose | the plain rows and the transpose's | **yes**, on the three cases with a sidecar it reads: floor 1 (the table above) |
+| `--pc --sc-hessian-kk` (#202) | the plain build, the digests' transpose, and the gauge's tangent builds (#201's) | the plain rows, the transpose's and the `--rdm-tangent` rows | **yes**, on the four cases with a sidecar and PC fields: floor 1 (the table above) |
 | `--pc-hessian` (#152) | the three-argument build, beside the PC stage's own buffers | the `--sc-hessian` rows, as a lower bound | **no**. Its only entries are CAS(4,4) (`docs/testing.md`, "The Hessian tier's entries") |
 | `--pc-hessian-vector` (#155) | the three-argument build, beside the PC adjoint walk's buffers | the `--sc-hessian` rows, as a lower bound | **no**, likewise |
 

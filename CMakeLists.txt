@@ -992,6 +992,47 @@ if(NEVPT2_BUILD_TESTING)
     set_tests_properties(nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk PROPERTIES
       PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_kk_full_pass} \\(density-fitted\\)")
   endif()
+
+  # --- PC's orbital sandwich and Eddot_kk, --pc --sc-hessian-kk (#202) -----------
+  #
+  # The same binary and flag with --pc (apps/sc_pseudodensity/
+  # hessian_kk_pc_check.cppm; docs/hessian-theory.md, Sec. 6.4-6.8): PC's
+  # sandwich I'^T Ehat''_pc I' -- the solve's two-leg cross term per tuple, S
+  # fixed along kappa so no rotation term, no guarded tuple -- forward against
+  # reverse (1e-7) with the orbital energies responding to kappa and frozen,
+  # each walk's own Edot against the gated first-order Y_pc, the intra-space
+  # exact zeros, the digests' share against pcHessianDevice at the plain
+  # digest path's tangents, Richardson-verified ladders of the PC total along
+  # exp(s u + t v) against Eddot_kk = <Ehat'_pc, I''> + the sandwich (and of
+  # E - L against the sandwich) at --sc-hessian-kk's gate and floor-aware rule
+  # -- virtual x virtual included, which SC refuses -- the step-free gauge
+  # Eddot_kk(v, w) + (1/2) <[v, w], Y_pc> == Eddot_kc(v, what c) against #201's
+  # H_kc, and the refusal of a conventional pair with no K2. The state is held
+  # to block2's PC total first. CAS(4,4), conventional and density-fitted --
+  # the fitted one resting on --pc --sc-hessian-kk-int's gate of PC's
+  # first-order source term over the fitted inventory (#200) -- both `small`.
+  # CAS(8,8) has no entry: it is recorded as a diagnostic, as #152's, #155's
+  # and #201's are, until #194 (docs/pc-nevpt2.md, "The orbital block's
+  # sandwich"; docs/testing.md, "PC's orbital block's sandwich").
+  set(_nevpt2_pc_hessian_kk_full_pass
+      "PASS: the PC orbital Hessian's sandwich I'\\^T Ehat''_pc I' agrees with itself by duality to 1e-07 in both orbital-energy modes.* no pair refused for its empty perturbers \\(Sec. 6.6\\)")
+  foreach(_case cas44 cas44_df)
+    set(_pkkf_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.nevpt2gold")
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.gradgold")
+      message(FATAL_ERROR "nevpt2: committed gradient sidecar missing for n2_ccpvdz_${_case}")
+    endif()
+    _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_${_case}_pc_hessian_kk
+                          "${_pkkf_gold}" --tiles 3 --pc --sc-hessian-kk)
+    if(TEST nevpt2_sc_pseudodensity_${_case}_pc_hessian_kk)
+      set_tests_properties(nevpt2_sc_pseudodensity_${_case}_pc_hessian_kk PROPERTIES
+        PASS_REGULAR_EXPRESSION "${_nevpt2_pc_hessian_kk_full_pass}" LABELS "gpu;small")
+    endif()
+    unset(_pkkf_gold)
+  endforeach()
+  if(TEST nevpt2_sc_pseudodensity_cas44_df_pc_hessian_kk)
+    set_tests_properties(nevpt2_sc_pseudodensity_cas44_df_pc_hessian_kk PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_pc_hessian_kk_full_pass} \\(density-fitted\\)")
+  endif()
   unset(_df_y_gold)
   unset(_df_y_side)
 
