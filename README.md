@@ -281,7 +281,7 @@ ignores it. `test/cli/` holds this matrix against the table:
 | `--golden`, `--tiles`, `--pool-threshold` | ✓ | ✓ | ✓ | ✓ |
 | `--blas-digest`, `--digest-emitted`, `--consume-emitted` | ✓ | ✓ | ✓ | ✓ |
 | `--cublas`, `--mantissa-bits`, `--ozaki`, `--ozaki-pairs`, `--ozaki-check`, `--fused-digest` | ✓ (never with a Hessian flag) | ✓ | ✓ (never with a Hessian flag) | refused |
-| `--pc` | ✓ | ✓ | ✓ (`--dump-source-terms`, `--source-oracle`, `--sc-hessian-kk-int`) | refused |
+| `--pc` | ✓ | ✓ | ✓ (`--dump-source-terms`, `--source-oracle`, `--sc-hessian-kc`, `--sc-hessian-kk-int`) | refused |
 | `--profile` | ✓ | ✓ | refused | refused |
 | `--rdm-tangent` | ✓ | ✓ | refused | refused |
 | `--sc-tangent`, `--gradient-source` | ✓ | ✓ | refused | refused |
@@ -311,8 +311,10 @@ Why the refusals: `nevpt2_pc_tangent` is a tangent path throughout, and the
 tangent RDM build is the emitted or the native-fp64 BLAS digest only; it is
 also PC throughout, so `--pc` would change nothing. `nevpt2_sc_pseudodensity`
 takes `--pc` for its two source-term jobs — they write and compare
-PC-NEVPT2's source terms with it (#74) — and for `--sc-hessian-kk-int`,
-which then checks PC's orbital curvature `<Ehat'_pc, I''>` (#200), and refuses
+PC-NEVPT2's source terms with it (#74) — for `--sc-hessian-kk-int`,
+which then checks PC's orbital curvature `<Ehat'_pc, I''>` (#200), and for
+`--sc-hessian-kc`, which then checks PC's mixed block `H_kc` (#201), on a
+density-fitted sidecar too where SC's refuses; and it refuses
 it with the identities,
 `--kappa-act` and `--kappa-full`, which are the SC energy's. Neither gradient binary prints a profile table or
 runs the `--rdm-tangent` check. `--dump-source-terms` and `--source-oracle`
@@ -326,15 +328,15 @@ cannot run is an *invalid configuration* error (`--sc-tangent` with `--ozaki`,
 digest has no path for,
 `--kappa-act` with `--kappa-full`, `--dump-source-terms` with either,
 `--source-oracle` with any of the three, `--sc-hessian-kc` with any of the
-four or with `--pc` (#184),
+four (#184),
 `--sc-hessian-kk-int` with any of the five (#154),
 `--sc-hessian-kk` with any of the six or with `--pc` (#158),
 `--gradgold` without `--kappa-full`, `--sc-hessian-kc`, `--sc-hessian-kk-int`,
 `--sc-hessian-kk`, `--dump-source-terms` or `--source-oracle`, or in
 `nevpt2_demo` without `--gradient-source`, `--check-blocks` with
 `--sc-tangent` or `--gradient-source`, `--pc` in
-`nevpt2_sc_pseudodensity` without `--dump-source-terms`, `--source-oracle` or
-`--sc-hessian-kk-int`,
+`nevpt2_sc_pseudodensity` without `--dump-source-terms`, `--source-oracle`,
+`--sc-hessian-kc` or `--sc-hessian-kk-int`,
 `--sc-tangent`, `--sc-hessian` or `--sc-hessian-vector` with `--pc`,
 `--sc-hessian` with `--sc-tangent` or `--gradient-source`,
 `--sc-hessian-vector` with any of those three), and

@@ -816,6 +816,47 @@ if(NEVPT2_BUILD_TESTING)
       PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_kc_pass}")
   endif()
 
+  # --- PC's mixed orbital-CI block H_kc, --pc --sc-hessian-kc (#201) --------------
+  #
+  # The same binary and flag with --pc (apps/sc_pseudodensity/
+  # hessian_kc_pc_check.cppm; docs/hessian-theory.md, Sec. 6.4-6.8): PC's
+  # Eddot_kc(w, u) and H_kc^T w (the three-term y differentiated along w),
+  # held to each other by DUALITY (1e-7), with PC's first-order source term
+  # along w re-held and both walks' own Edot(w) against it, Euler in c on PC's
+  # five homogeneous classes against the gated Y_pc, the intra-space zeros of
+  # the one rotation term, Richardson-verified finite differences of the
+  # three-term y PER CLASS (core-core and virtual-virtual with the orbital
+  # energies responding to kappa; active-active frozen, where the rotation
+  # term lives), the step-free active-rotation gauge against pcHessianDevice,
+  # and the refusals (a lifting u, Numerical; the orbital energies responding
+  # to c, Unsupported; no sidecar with a w leaving the active space or a
+  # responding mode, Unsupported). The state is held to block2's PC total
+  # first. CAS(4,4), conventional and density-fitted -- the fitted one resting
+  # on --pc --sc-hessian-kk-int's gate of PC's first-order source term over
+  # the fitted inventory (#200) -- both `small`. CAS(8,8) has no entry: it is
+  # recorded as a diagnostic, as #152's and #155's are, until #194 (docs/
+  # pc-nevpt2.md, "The mixed block H_kc"; docs/testing.md, "PC's mixed Hessian
+  # block's checks").
+  set(_nevpt2_pc_hessian_kc_pass
+      "PASS: the PC mixed Hessian block H_kc's two orientations agree by duality")
+  foreach(_case cas44 cas44_df)
+    set(_pkc_gold "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.nevpt2gold")
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}.gradgold")
+      message(FATAL_ERROR "nevpt2: committed gradient sidecar missing for n2_ccpvdz_${_case}")
+    endif()
+    _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_${_case}_pc_hessian_kc
+                          "${_pkc_gold}" --tiles 3 --pc --sc-hessian-kc)
+    if(TEST nevpt2_sc_pseudodensity_${_case}_pc_hessian_kc)
+      set_tests_properties(nevpt2_sc_pseudodensity_${_case}_pc_hessian_kc PROPERTIES
+        PASS_REGULAR_EXPRESSION "${_nevpt2_pc_hessian_kc_pass}" LABELS "gpu;small")
+    endif()
+    unset(_pkc_gold)
+  endforeach()
+  if(TEST nevpt2_sc_pseudodensity_cas44_df_pc_hessian_kc)
+    set_tests_properties(nevpt2_sc_pseudodensity_cas44_df_pc_hessian_kc PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_pc_hessian_kc_pass}.* \\(density-fitted\\)")
+  endif()
+
   # --- the orbital block's integral curvature, --sc-hessian-kk-int (#154) --------
   #
   # nevpt2_sc_pseudodensity --sc-hessian-kk-int (apps/sc_pseudodensity/

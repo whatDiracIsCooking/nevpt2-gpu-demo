@@ -1388,6 +1388,16 @@ struct PcClassGradient {
   // nothing is dropped or there is no direction).
   double ciEdot = 0.0;
   double lift = 0.0;
+  // The mixed block H_kc along an orbital w and a CI u (#201;
+  // pcMixedHessianDevice / pcMixedHessianVectorDevice): the class's
+  // Eddot_kc(w, u) and, of it, the rotation term -2 rho^T S_u P A_w x alone;
+  // the walk's own Edot(w) (the digests' share merged in K'_w, the orbital
+  // energies' Delta'_w when they respond) and three-term Edot(u). The reverse
+  // walk fills mixedEdotW alone. `lift` above is the CI leg's (u, u) test.
+  double mixedEddot = 0.0;
+  double mixedRotation = 0.0;
+  double mixedEdotW = 0.0;
+  double mixedEdotU = 0.0;
 };
 
 struct PcGradientResult {
@@ -1618,6 +1628,106 @@ Result<double> pcRestoredTracePairingDevice(const NevptIntegralsDevice& ints,
                                             const GeneralIntegralsDevice& gen,
                                             const RdmTensors& rdm, const Tensor& m,
                                             const DeviceResources& res);
+
+// --- PC's mixed orbital-CI block, H_kc (#201) -----------------------------------
+//
+// docs/hessian-theory.md, Sec. 6.4, 6.5 and 6.8: SC's two orientations (#184)
+// for the partially-contracted energy, w an orbital direction and u a CI one,
+//
+//   F   the SCALAR Eddot_kc(w, u) (pcMixedHessianDevice): Sec. 6.1's solve
+//       with one orbital-dotted and one CI-dotted input -- per class, per
+//       tuple, nevpt2.energy_finish's pcQuadSecond with u the CI leg
+//       (pcClassDirection's T_u, mK_u, nS_u, G_u, H_u) and v the orbital leg
+//       (y_w = T^T x'[w] + t_1^T h1'[w] through the PLAIN basis, mK_w =
+//       U^T sym(K'[w]) U, H_w = Vn sym(K'[w]) U, and nS_v = G_v = r_v = 0
+//       since S and S_1 are RDM-only and do not move along kappa), with the
+//       mixed set y_wu = T_u^T x'[w] + t1_u^T h1'[w] and mK_wu = U^T sym(K_wu) U.
+//       K'[w] is the class's K builder at w's dotted integrals with the
+//       digests' tangent along w merged in (attachDigestTangents, before the
+//       similarity transform), and K_wu its bilinear part at u's tangent RDMs
+//       and w's dotted integrals plus the digests' mixed tangent f3^{wu} (the
+//       tangent build at (c, u) handed h2e'[w]). Sec. 6.5's ONE rotation term,
+//       -2 rho^T S_u P A_w x = -2 xhat^T C G_u^T H_w xhat, is pcRotationBlocks'
+//       A1 with G_v = 0; it is reported apart (`mixedRotation`), and it is
+//       present along every w that moves K, not along active-active w alone;
+//   R1  the VECTOR H_kc^T w (pcMixedHessianVectorDevice): the derivative along
+//       w of the THREE-TERM y (pcCiSourceThreeTermDevice's), as a sum of three
+//       sigma calls' worth of coefficient tensors -- the bars of Eddot(w, v)'s
+//       part bilinear in w's and v's first-order sets (pcAdjointSecond* with w
+//       as the direction: mK_w, H_w, y_w, G_w = 0), swept at the plain
+//       integrals; the bars of its part linear in the mixed set (the plain
+//       ybar against the DOTTED slabs, onto T_v; dE/dK through K_wv's
+//       builder, i.e. the class's sweep at h'[w] less the sweep at zero
+//       integrals); and the 4-body sigmas at h2e'[w] with the plain digest
+//       coefficients. The rotation term's adjoint, 2 nu sym(U C xhat xhat^T
+//       H_w^T Vn) onto dE/dS_v, is the first part's gbarDot. No transpose
+//       and no tangent RDM build.
+//
+// Their gate is the duality <H_kc^T w, u> == Eddot_kc(w, u); Euler in c and
+// the step-free active-rotation gauge Eddot_kc(w, u) == Eddot_cc(what c, u)
+// + <y, what u> (the only step-free check that sees the rotation term), the
+// intra-space zeros and a finite difference of the three-term y along kappa
+// are the caller's (apps/sc_pseudodensity/hessian_kc_pc_check.cppm).
+//
+// THE ORBITAL ENERGIES' MODE is the setup's, SC's fields: `epsKappa` lets
+// them respond to kappa (Delta'_w per tuple, out of the sidecar), or both
+// legs hold them fixed. `epsCi` -- the orbital energies responding to the
+// CI vector -- is REFUSED as Unsupported: PC's CI side (pcHessianDevice,
+// pcCiHessianVectorDevice, pcCiSourceThreeTermDevice) holds them fixed in c,
+// so there is no CI leg to pair it with.
+//
+// REFUSALS. A class the gap or the denominator check refuses, or -- forward
+// only, the one place a CI direction enters -- whose dropped modes lift along
+// (u, u) (first-order P S_u P or Sec. 6.2's L_uu above PC_LIFT_TOL relative
+// to s_max, pcCiHessianVectorDevice's test, unchanged; L_ww = L_wu = 0
+// identically since S does not move along kappa), is a NUMERICAL Error naming
+// the class and why -- never an element with a zero in it. A w the setup
+// cannot form (no sidecar and a w leaving the active space, or a responding
+// mode without one) is Unsupported, as SC's. Sijrs reads no RDM, so with the
+// orbital energies fixed in c its share is exactly zero.
+//
+// Integral-direct, one slab per block, on res.stream(), every tensor from
+// res's pool; exact digests only (`setup.opt`, the caller's cli refuses the
+// rest). Valid on a density-fitted case: `setup.gen` is then
+// dfGeneralIntegralsDevice's inventory, and PC's first-order orbital source
+// term over it is gated by --pc --sc-hessian-kk-int (#200).
+struct PcMixedHessianResult {
+  PcGradientResult walk;     // per class: result, mixed*, lift
+  double eddot = 0.0;        // Eddot_kc(w, u), summed
+  double rotation = 0.0;     // of it, the rotation term
+  double edotW = 0.0;        // the walk's own Edot(w)
+  double edotU = 0.0;        // the walk's own three-term Edot(u)
+  double h1eDotMax = 0.0;    // max |h1e'[w]|, max |h2e'[w]|
+  double h2eDotMax = 0.0;
+};
+
+// F along w and each of `us` (each shaped like `ci`): w's dotted inputs and
+// digests' tangent built once, then per u its tangent RDMs, the (u, u) set for
+// the lift test, the mixed digests f3^{wu}, and one pass over the classes.
+Result<std::vector<PcMixedHessianResult>> pcMixedHessianDevice(const ScMixedHessianSetup& setup,
+                                                               const Tensor& w,
+                                                               const std::vector<Tensor>& us,
+                                                               const DeviceResources& res);
+
+// R1 along w. `perClass`: every RDM class sweeps into accumulators of its own
+// and gets its own sigma calls, so `hkcTwClass[c]` is class c's share (Sijrs's
+// zero) -- what a per-class finite difference of pcCiSourceThreeTermDevice's
+// yClass is held to; 4 x 7 coefficient sets of n^2 + n^4 + 3 n^6 doubles, so
+// for small active spaces.
+struct PcMixedHessianVectorResult {
+  PcGradientResult walk;   // per class: result, mixedEdotW
+  Tensor hkcTw;            // H_kc^T w, (nstringsA, nstringsB)
+  Tensor fromWalkTangent;  // sigma(gdot[w], c; h2e)
+  Tensor fromDigests;      // sigma(0, 0, 0, gac, gca; h2e'[w])
+  std::array<Tensor, 8> hkcTwClass{};  // with perClass
+  double edotW = 0.0;
+  double h2eDotMax = 0.0;
+};
+
+Result<PcMixedHessianVectorResult> pcMixedHessianVectorDevice(const ScMixedHessianSetup& setup,
+                                                              const Tensor& w, bool perClass,
+                                                              const SigmaVectorOptions& sigma,
+                                                              const DeviceResources& res);
 
 // The per-class PC table every PC source-term report prints: status (REFUSED
 // with its reason, or the energy), and the total.

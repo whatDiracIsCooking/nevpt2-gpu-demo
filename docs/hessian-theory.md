@@ -1923,6 +1923,31 @@ the cut drops, and how it moves". The terms follow from the kinds:
 | Sijr, Srsi, Srs, Sij | §6.4's terms | §6.4's terms. The rotation term and the lift test are carried generically and vanish where `nd = 0` |
 | Sijrs | SC's Sijrs, unchanged: K1+K2 through its SC pseudodensity (`gradientSijrs`), and §5.6's sandwich with `P = -1/Delta` on every tuple (`sijrsMultipliers`). Exact, never refused | SC's Sijrs, unchanged. It reads no RDM, so in a mode with the orbital energies fixed in `c` its share is zero. In the full mode it is §5.5's C5 through its `Delta` |
 
+In the tree (#201) the forward scalar is `nevpt2.gradient`'s
+`pcMixedHessianDevice` and the reverse vector its
+`pcMixedHessianVectorDevice`, both over one per-class walk
+(`:pc_classes`' `pcClassMixed`). Forward, each class runs
+`pcQuadSecond` per tuple exactly as the table above sets its legs: the CI
+leg's blocks from `pcClassDirection` at `u`'s tangent RDMs, the orbital
+leg's `mK_w` and `H_w` from the class's K builder at `w`'s dotted integrals
+with the digests' tangent along `w` merged in (`attachDigestTangents`,
+before the similarity transform), and `mK_wu` from the builder at `u`'s
+tangent RDMs and `w`'s dotted integrals with `f3^{wu}` in the digest slots,
+less the same builder at the plain RDMs and zero digests. A responding
+mode passes `Delta'_w` per tuple through `pcQuadSecond`'s
+`PcDeltaTangents`. The rotation term is reported apart, as the difference
+from the same finish with no dropped space. Reverse, `w` is
+`pcAdjointSecond*`'s direction (`mK_w`, `H_w`, `y_w`, `G_w = 0`), so its
+bars land on the CI leg's objects: `gbarDot` is the rotation term's
+adjoint above. The mixed set's part is the plain `ybar` against the dotted
+slabs, onto `T_v`, and the plain `dE/dK` swept at `w`'s dotted integrals
+less the same sweep at zero integrals; the 4-body sigmas at `h2e'[w]` take
+the plain digest coefficients. Both orientations refuse a responding-in-`c`
+mode as `err_unsupported`, and the forward one refuses a `u` that lifts
+as `err_numerical`, naming the class. The gate is
+`nevpt2_sc_pseudodensity --pc --sc-hessian-kc`
+([`testing.md`](testing.md), "PC's mixed Hessian block's checks").
+
 ### 6.6 PC has no empty-perturber term and no `rho_t` refusal
 
 **§5.6's pathology does not carry over.** PC's finish evaluates every tuple.
@@ -2371,7 +2396,7 @@ row above, as the tree has it:
 | approximate digest with any Hessian | `nevpt2.cli`'s `checkHessianDigests`, run in `parseArgs` **before** `finalize()`, so the kind is `err_unsupported` whatever else the digest flags would have drawn (`--fused-digest` with no GEMM digest, `--cublas` on HIP). `nevpt2_pc_tangent` implements none of the three, so it refuses the digest flag itself — `err_unsupported` too | `test/cli`'s `CliHessianRefusalTests`, every flag × every digest, both orders |
 | a Hessian flag on the wrong binary | the binary/flag table (`nevpt2.cli:binary_flags`; README.md, "Which binary takes which flag"): `err_unsupported`, "only `<binary>`" | `CliHessianRefusalTests`, `CliMatrixTests` |
 | a PC class the gap or denominator check refuses | the class comes back `PcStatus::Refused` with its reason, through the status the energy, tangent and adjoint use; the run FAILs | the PC Hessian entries' own tables |
-| the PC Schur lift above round-off | `pcHessianDevice` (`P S_u P`, `P S_v P`, `L_uv`, `L_uu`, `L_vv`) and `pcCiHessianVectorDevice` (`P S_u P` and `L_uu`), relative to `s_max` against `PC_LIFT_TOL`, `err_numerical` through the class's status (#152, #155). Each check's negative control — a symmetry-breaking direction — must be refused for its lift, or the run FAILs. The separation the threshold sits in is [`pc-nevpt2.md`](pc-nevpt2.md), "What the cut drops, and how it moves" | `nevpt2_pc_hessian_cas44`, `nevpt2_pc_hessian_vector_cas44` and their `_casscf` twins |
+| the PC Schur lift above round-off | `pcHessianDevice` (`P S_u P`, `P S_v P`, `L_uv`, `L_uu`, `L_vv`) and `pcCiHessianVectorDevice` (`P S_u P` and `L_uu`), relative to `s_max` against `PC_LIFT_TOL`, `err_numerical` through the class's status (#152, #155); and `pcMixedHessianDevice` (the CI leg's `P S_u P` and `L_uu`, the same test, #201), which returns the refusal as an `err_numerical` naming each refused class. Each check's negative control — a symmetry-breaking direction — must be refused for its lift, or the run FAILs. The separation the threshold sits in is [`pc-nevpt2.md`](pc-nevpt2.md), "What the cut drops, and how it moves" | `nevpt2_pc_hessian_cas44`, `nevpt2_pc_hessian_vector_cas44` and their `_casscf` twins; `nevpt2_sc_pseudodensity_cas44_pc_hessian_kc` and its fitted twin |
 | PC conditioning | printed, never refused: each PC Hessian table has a `kept s` and a `gap` column, and each PASS line names the smallest kept `s / s_max`, its class, and the smallest gap against `PC_MIN_GAP`. What that conditioning costs is #194's | the PC Hessian entries' regexes ([`testing.md`](testing.md), "The Hessian on CASSCF orbitals") |
 | K2 with neither direction active–active, conventional | `scOrbitalCurvatureDevice` refuses the pair as `err_unsupported`, never K1 alone (#154; a fitted case takes the three-index route instead; widening it is #180). `Eddot_kk` keeps the refusal | `--sc-hessian-kk-int`'s refusal checks |
 | a sidecar missing an array | `GradGoldFile::requireGeneralInventory` (`nevpt2.golden`), which every reader of the general-range inventory — `--kappa-full`, `--source-oracle`, all three orbital Hessian flags — calls before uploading any of it: `err_io` naming the array, the whole sidecar refused | `test/golden`'s `GradGoldCas44Tests` / `GradGoldDfCas44Tests`: the committed sidecars with each array erased in turn |
@@ -2500,6 +2525,12 @@ in the tree ([`gradients.md`](gradients.md), §1.1).
   (#184): the forward scalar and the reverse determinant vector, gated by
   duality, Euler in `c` and one finite difference of `y` along `kappa`. The
   orbital-vector orientation is not built, on purpose.
+- **PC's `H_kc` (§6.4, §6.5).** Built as derived (#201): the same two
+  orientations, with §6.5's one rotation term in the scalar and its adjoint
+  in the derivative of the three-term `y`, gated by duality, Euler in `c`,
+  §6.8's active-rotation gauge and per-class differences of the three-term
+  `y`. The orbital energies are held fixed in `c` (PC's CI side holds them
+  there), and a responding-in-`c` mode is refused.
 - **PC's second-order licence (§6.2).** The cut is a threshold cut whose
   dropped modes are this state's own null modes, so the null-space terms do
   not drop: the rotation terms are carried, and a (class, pair) along which

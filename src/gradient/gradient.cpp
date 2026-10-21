@@ -1944,6 +1944,204 @@ Result<PcCiHessianResult> pcCiSourceThreeTermDevice(const NevptIntegralsDevice& 
                         /*ddotUU=*/nullptr, perClass, sigma, res);
 }
 
+// --- PC's mixed orbital-CI block, H_kc (#201) -----------------------------------
+
+// The PC setup's own refusal, then SC's prep (the direction, its digests'
+// tangent, h2e'[w]): PC's CI side holds the orbital energies fixed in c.
+Result<ScMixedPrep> preparePcMixed(const ScMixedHessianSetup& s, const Tensor& w,
+                                   const DeviceResources& res) {
+  if (s.epsCi)
+    return err_unsupported(
+        "PC's mixed block H_kc with the orbital energies responding to the CI vector: PC's CI "
+        "side (pcHessianDevice, pcCiHessianVectorDevice, the three-term y) holds them fixed in "
+        "c, so there is no CI leg to pair that mode with -- run it with them fixed in c "
+        "(responding to kappa or not)");
+  return prepareMixed(s, w, res);
+}
+
+// The RDMs plus a tangent set, owning (pcCiWalkDevice's `plus`).
+struct PcSumRdms {
+  DeviceTensor dm1, dm2, dm3, f3ac, f3ca;
+  PcRdms view() const { return {&dm1, &dm2, &dm3, &f3ac, &f3ca}; }
+};
+
+PcSumRdms pcSumOf(const RdmTensors& rdm, const DeviceTensor& dm1, const DeviceTensor& dm2,
+                  const DeviceTensor& dm3, const DeviceTensor& f3ac, const DeviceTensor& f3ca,
+                  const DeviceResources& dr) {
+  return PcSumRdms{sumOfTensors(rdm.dm1, dm1, dr), sumOfTensors(rdm.dm2, dm2, dr),
+                   sumOfTensors(rdm.dm3, dm3, dr), sumOfTensors(rdm.f3ac, f3ac, dr),
+                   sumOfTensors(rdm.f3ca, f3ca, dr)};
+}
+
+Result<std::vector<PcMixedHessianResult>> pcMixedHessianDevice(const ScMixedHessianSetup& s,
+                                                               const Tensor& w,
+                                                               const std::vector<Tensor>& us,
+                                                               const DeviceResources& res) {
+  ScMixedPrep p = NEVPT2_TRY(preparePcMixed(s, w, res));
+  const NevptIntegralsDevice& ints = s.ints;
+  const int64_t norb = ints.h1e.dims[0];
+  Result<HostDm12Builder> builder = HostDm12Builder::create(norb, s.nelecA, s.nelecB);
+  if (!builder) return std::unexpected(builder.error());
+  for (const Tensor& u : us)
+    if (u.dims() != s.ci.dims())
+      return err_config("pcMixedHessianDevice: a CI direction is not shaped like the state");
+  const Tensor h2e = downloadTensor(ints.h2e, res.stream());
+  FullBlockSource src(ints);
+  const ActiveIntegralsDevice ai = activeViewOf(ints);
+  const PcRdms rdm{&s.rdm.dm1, &s.rdm.dm2, &s.rdm.dm3, &s.rdm.f3ac, &s.rdm.f3ca};
+
+  std::vector<PcMixedHessianResult> out;
+  out.reserve(us.size());
+  for (std::size_t q = 0; q < us.size(); ++q) {
+    const Tensor& u = us[q];
+    // u's tangent RDMs (dm1/dm2 on the host, the rest the tangent build at
+    // (c, u)); the (u, u) second-order set the lift test reads; and the
+    // digests' MIXED tangent f3^{wu}, the same build at (c, u) handed h2e'[w]
+    // (linear in h2e). Each as "the RDMs plus", the form every PC builder's
+    // one-subtraction tangent takes; the mixed set's f3 slots hold f3^{wu}
+    // alone (K_wu's subtraction base has zero digests).
+    const HostDm12 dotU = builder->dm12Dot(s.ci, u);
+    const HostDm12 dotUU = builder->dm12Dot(u, u);
+    const DeviceTensor dm1U = uploadTensor(dotU.dm1, res);
+    const DeviceTensor dm2U = uploadTensor(dotU.dm2, res);
+    const DeviceTensor dm1UU = uploadTensor(dotUU.dm1, res);
+    const DeviceTensor dm2UU = uploadTensor(dotUU.dm2, res);
+    const RdmBuildResult tU =
+        buildRdmTangentsDevice(s.opt, s.ci, u, norb, s.nelecA, s.nelecB, h2e, res);
+    const RdmBuildResult tUU =
+        buildRdmTangentsDevice(s.opt, u, u, norb, s.nelecA, s.nelecB, h2e, res);
+    const RdmBuildResult tWU =
+        buildRdmTangentsDevice(s.opt, s.ci, u, norb, s.nelecA, s.nelecB, p.h2eDot, res);
+    const PcSumRdms sumU = pcSumOf(s.rdm, dm1U, dm2U, tU.dm3, tU.f3ac, tU.f3ca, res);
+    const PcSumRdms sumUU = pcSumOf(s.rdm, dm1UU, dm2UU, tUU.dm3, tUU.f3ac, tUU.f3ca, res);
+    PcSumRdms sumWU{sumOfTensors(s.rdm.dm1, dm1U, res), sumOfTensors(s.rdm.dm2, dm2U, res),
+                    sumOfTensors(s.rdm.dm3, tU.dm3, res), tWU.f3ac.view(), tWU.f3ca.view()};
+    const PcRdms vU = sumU.view(), vUU = sumUU.view(), vWU = sumWU.view();
+
+    PcMixedWalk mw;
+    mw.rot = &p.rot;
+    mw.epsKappa = s.epsKappa;
+    mw.sumU = &vU;
+    mw.sumUU = &vUU;
+    mw.sumWU = &vWU;
+    const std::array<ScRdmAdjoint*, 8> none{};
+    PcMixedHessianResult r;
+    r.walk = NEVPT2_TRY(assemblePcMixedClasses(ai, src, rdm, mw, none, none, none, none, res));
+    // A refused class has no mixed derivative along this (w, u): the
+    // element is not formed, never one with a zero in it.
+    if (!r.walk.allDone())
+      return err_numerical(std::format(
+          "PC's mixed block H_kc has no element along CI direction {}: {} refused", q,
+          r.walk.refusals()));
+    for (const PcClassGradient& c : r.walk.classes) {
+      r.eddot += c.mixedEddot;
+      r.rotation += c.mixedRotation;
+      r.edotW += c.mixedEdotW;
+      r.edotU += c.mixedEdotU;
+    }
+    r.h1eDotMax = p.h1eDotMax;
+    r.h2eDotMax = p.h2eDotMax;
+    out.push_back(std::move(r));
+  }
+  return out;
+}
+
+Result<PcMixedHessianVectorResult> pcMixedHessianVectorDevice(const ScMixedHessianSetup& s,
+                                                              const Tensor& w,
+                                                              const bool perClass,
+                                                              const SigmaVectorOptions& sigma,
+                                                              const DeviceResources& res) {
+  ScMixedPrep p = NEVPT2_TRY(preparePcMixed(s, w, res));
+  const wwrStream_t st = res.stream();
+  const NevptIntegralsDevice& ints = s.ints;
+  const int64_t norb = ints.h1e.dims[0];
+  FullBlockSource src(ints);
+  const ActiveIntegralsDevice ai = activeViewOf(ints);
+  const PcRdms rdm{&s.rdm.dm1, &s.rdm.dm2, &s.rdm.dm3, &s.rdm.f3ac, &s.rdm.f3ca};
+  const ScRotationDir& dir = p.rot.dirs[0];
+  // The class sweeps' integrals: w's dotted ones and zero ones (only h1e /
+  // h2e are read by a sweep; the rest is the state's).
+  const ActiveIntegralsDevice aiW{dir.h1eDot.view(),   dir.h2eDot.view(),   ints.e_core.view(),
+                                  ints.e_virt.view(),  ints.h1e_v_Sr.view(), ints.h1e_v_Si.view(),
+                                  ints.h1e_v_Sir.view()};
+  const ActiveIntegralsDevice aiZero{p.zeroH1e.view(),    p.zeroH2e.view(),
+                                     ints.e_core.view(),  ints.e_virt.view(),
+                                     ints.h1e_v_Sr.view(), ints.h1e_v_Si.view(),
+                                     ints.h1e_v_Sir.view()};
+
+  // Four accumulator sets, shared by every class or one per RDM class.
+  const std::size_t nAdj = perClass ? 8 : 1;
+  std::vector<ScRdmAdjoint> adj, adjDot, adjW, adjFree;
+  for (std::size_t k = 0; k < nAdj; ++k) {
+    adj.push_back(ScRdmAdjoint::zeros(norb, res));
+    adjDot.push_back(ScRdmAdjoint::zeros(norb, res));
+    adjW.push_back(ScRdmAdjoint::zeros(norb, res));
+    adjFree.push_back(ScRdmAdjoint::zeros(norb, res));
+  }
+  std::array<ScRdmAdjoint*, 8> pAdj{}, pDot{}, pW{}, pFree{};
+  for (std::size_t c = 0; c < 8; ++c) {
+    const std::size_t k = perClass ? c : 0;
+    pAdj[c] = &adj[k];
+    pDot[c] = &adjDot[k];
+    pW[c] = &adjW[k];
+    pFree[c] = &adjFree[k];
+  }
+  PcMixedWalk mw;
+  mw.rot = &p.rot;
+  mw.epsKappa = s.epsKappa;
+  mw.aiW = &aiW;
+  mw.aiZero = &aiZero;
+  PcMixedHessianVectorResult out;
+  out.walk = NEVPT2_TRY(assemblePcMixedClasses(ai, src, rdm, mw, pAdj, pDot, pW, pFree, res));
+  if (!out.walk.allDone())
+    return err_numerical(std::format("PC's H_kc^T w has no value: {} refused",
+                                     out.walk.refusals()));
+  for (const PcClassGradient& c : out.walk.classes) out.edotW += c.mixedEdotW;
+  out.h2eDotMax = p.h2eDotMax;
+
+  // Per accumulator set: sigma(adjDot + adjW - adjFree, c; h2e) and the 4-body
+  // sigmas at h2e'[w] with the plain digest coefficients (each downloadTensor
+  // synchronizes the stream the sweeps were issued on).
+  const Tensor h2e = downloadTensor(ints.h2e, st);
+  const Tensor zero1({norb, norb});
+  const Tensor zero2({norb, norb, norb, norb});
+  const Tensor zero3({norb, norb, norb, norb, norb, norb});
+  const auto net = [&](const DeviceTensor& a, const DeviceTensor& b, const DeviceTensor& f) {
+    Tensor t = downloadTensor(a, st);
+    const Tensor tb = downloadTensor(b, st);
+    const Tensor tf = downloadTensor(f, st);
+    for (int64_t i = 0; i < t.size(); ++i) t.flatRef(i) += tb.flat(i) - tf.flat(i);
+    return t;
+  };
+  out.hkcTw = Tensor(s.ci.dims());
+  out.fromWalkTangent = Tensor(s.ci.dims());
+  out.fromDigests = Tensor(s.ci.dims());
+  for (std::size_t k = 0; k < nAdj; ++k) {
+    // Sijrs (class 2, per class) was never swept into: its share is zero.
+    if (perClass && k == 2) {
+      out.hkcTwClass[k] = Tensor(s.ci.dims());
+      continue;
+    }
+    const Tensor walk = ciSourceVector(
+        sigma, s.ci, norb, s.nelecA, s.nelecB, net(adjDot[k].dm1, adjW[k].dm1, adjFree[k].dm1),
+        net(adjDot[k].dm2, adjW[k].dm2, adjFree[k].dm2),
+        net(adjDot[k].dm3, adjW[k].dm3, adjFree[k].dm3),
+        net(adjDot[k].f3ac, adjW[k].f3ac, adjFree[k].f3ac),
+        net(adjDot[k].f3ca, adjW[k].f3ca, adjFree[k].f3ca), h2e, res);
+    const Tensor digests =
+        ciSourceVector(sigma, s.ci, norb, s.nelecA, s.nelecB, zero1, zero2, zero3,
+                       downloadTensor(adj[k].f3ac, st), downloadTensor(adj[k].f3ca, st),
+                       p.h2eDot, res);
+    ciSourceAddInto(walk, out.fromWalkTangent);
+    ciSourceAddInto(digests, out.fromDigests);
+    Tensor hk = walk;
+    ciSourceAddInto(digests, hk);
+    ciSourceAddInto(hk, out.hkcTw);
+    if (perClass) out.hkcTwClass[k] = std::move(hk);
+  }
+  return out;
+}
+
 Result<PcFullRotationResult> pcFullRotationDevice(
     const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen, const DeviceTensor& dm1,
     const DeviceTensor& dm2, const DeviceTensor& dm3, const DeviceTensor& f3ac,
