@@ -1933,7 +1933,7 @@ TEST(PcAdjointSecondTests, TheDeltaTangentsStayDual) {
   const AdjointSecondCase c = adjointSecondCase(3, 0x2010u);
   const double factor = 0.5;
   const std::vector<double> deltaU{0.3, -0.7, 0.45};
-  const std::vector<double> zeros(9, 0.0);
+  const std::vector<double> zeroRow(3, 0.0);  // y_uv = 0: the bilinear part alone
   const PcHessianBlocks fb = forwardBlocks(c);
   const PcRotationBlocks rot = forwardRotation(c);
   double fwd = 0.0, fwdU = 0.0, bare = 0.0, minDen = std::numeric_limits<double>::infinity();
@@ -1941,7 +1941,7 @@ TEST(PcAdjointSecondTests, TheDeltaTangentsStayDual) {
     const auto at = [t](const std::vector<double>& v, int64_t len) {
       return std::span<const double>(v.data() + t * len, static_cast<std::size_t>(len));
     };
-    const PcHessianRow row{at(c.y, 3), at(c.yu, 3), at(c.yv, 3), zeros, at(c.rv, 2)};
+    const PcHessianRow row{at(c.y, 3), at(c.yu, 3), at(c.yv, 3), zeroRow, at(c.rv, 2)};
     const double d = c.delta[static_cast<std::size_t>(t)];
     const PcQuadDerivatives q = pcQuadSecond(row, c.lambda, d, fb, rot, true, minDen,
                                              PcDeltaTangents{deltaU[static_cast<std::size_t>(t)]});
@@ -1969,7 +1969,7 @@ TEST(PcAdjointSecondTests, TheDeltaTangentIsSymmetricInTheLegs) {
   const Tensor y = rows(c.y, 3, 3), yu = rows(c.yu, 3, 3), yv = rows(c.yv, 3, 3);
   const Tensor yuv = rows(std::vector<double>(9, 0.0), 3, 3);
   const Tensor noRv = Tensor::fromFlat({3, 0}, {});
-  const std::vector<double> zeros(9, 0.0);
+  const std::vector<double> zeros(9, 0.0), zeroRow(3, 0.0);
   double minDen = std::numeric_limits<double>::infinity();
   // (u, v) with the tangent on v ...
   PcHessianSums onV, without;
@@ -1985,7 +1985,7 @@ TEST(PcAdjointSecondTests, TheDeltaTangentIsSymmetricInTheLegs) {
     const auto at = [t](const std::vector<double>& v) {
       return std::span<const double>(v.data() + t * 3, 3);
     };
-    const PcHessianRow row{at(c.y), at(c.yv), at(c.yu), zeros, {}};
+    const PcHessianRow row{at(c.y), at(c.yv), at(c.yu), zeroRow, {}};
     onU -= pcQuadSecond(row, c.lambda, c.delta[static_cast<std::size_t>(t)], swapped,
                         PcRotationBlocks{}, true, minDen,
                         PcDeltaTangents{deltaDot[static_cast<std::size_t>(t)]})
