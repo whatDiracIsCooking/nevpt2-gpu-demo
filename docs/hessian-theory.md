@@ -2256,9 +2256,15 @@ Three things are needed that the gradient did not need:
 
 1. **Second-derivative integrals** — `d^2 h / dR_A dR_B` and
    `d^2 (pq|rs) / dR_A dR_B`, plus the nuclear-repulsion second derivative.
-   Neither is in the tree nor in the reference data
-   ([`gradients.md`](gradients.md), §1 lists even the *first* derivatives as
-   absent from both).
+   Neither is in the tree ([`gradients.md`](gradients.md), §1 lists even the
+   *first* derivatives as absent from it). For the **CASSCF reference** they
+   are in the reference data: `reference_data/casscf_hessian.py` (#215) builds
+   the perturbed Hamiltonians `dh/dR_A`, `d(pq|rs)/dR_A` in the MO basis
+   along `nevpt2_grad.py`'s frozen orthonormal path, and `L_RR` — the
+   skeleton second-derivative integrals, the nuclear-repulsion term and the
+   path's connection at second order — contracted with the CASSCF densities
+   ([`reference-data.md`](reference-data.md), "The CASSCF skeleton nuclear
+   derivatives").
 2. **The constraints' second derivatives**, §7 — including the CASSCF branch's
    third-derivative term, contracted with the gradient's own `Z`.
 3. **`3N` response solves** of the reference's Hessian. This is the structural

@@ -3409,6 +3409,17 @@ def step_ladder(name: str, f, steps: list[float], ref: float) -> Check:
     ``delta``, so a sweep minimum can sit on that crossing and look like
     agreement."""
     fd = [(f(+h) - f(-h)) / (2.0 * h) for h in steps]
+    return ladder_check(name, fd, steps, ref)
+
+
+def ladder_check(name: str, fd: list[float], steps: list[float], ref: float,
+                 tol: float | None = None) -> Check:
+    """:func:`step_ladder`'s verdict on quotients already taken: ``fd[i]`` is
+    any ``O(h^2)`` difference quotient at ``steps[i]`` -- a central first
+    difference there, a second or a four-point mixed difference in
+    ``casscf_hessian.py``. The same run rule and the same Richardson
+    extrapolant, gated at ``tol`` (default :data:`LADDER_TOL`)."""
+    tol = LADDER_TOL if tol is None else tol
     dif = [abs(fd[i] - fd[i + 1]) for i in range(len(fd) - 1)]
     runs = fourfold_runs(dif)
     good = [r for r in runs if r[0] >= LADDER_RUN]
@@ -3418,7 +3429,7 @@ def step_ladder(name: str, f, steps: list[float], ref: float) -> Check:
         err = abs(value - ref)
     else:
         value, err = float("nan"), float("inf")
-    ok = run >= LADDER_RUN and err <= LADDER_TOL
+    ok = run >= LADDER_RUN and err <= tol
     table = []
     for i, h in enumerate(steps):
         d = f"{dif[i - 1]:10.3e}" if i else f"{'-':>10}"
@@ -3427,7 +3438,7 @@ def step_ladder(name: str, f, steps: list[float], ref: float) -> Check:
         table.append(f"      2^-{round(-np.log2(h)):<3d} {fd[i]:+.12e} {d} {ratio}{mark}")
     summary = (f"{run} consecutive fourfold halvings (need {LADDER_RUN})"
                + (f", ending at h = 2^-{round(-np.log2(steps[end + 1]))}" if run else "")
-               + f"; |Richardson - ref| = {err:.2e} (allowed {LADDER_TOL:g}), "
+               + f"; |Richardson - ref| = {err:.2e} (allowed {tol:g}), "
                f"ref {ref:+.10e}")
     return Check(name, ok, summary, table,
                  dict(ref=ref, value=value, err=err, run=run, steps=np.array(steps),
