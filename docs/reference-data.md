@@ -2268,6 +2268,125 @@ uv run python reference_data/sc_source_oracle.py --case acrolein_def2svp_cas65_c
 cmp /tmp/a.srcgold golden/acrolein_def2svp_cas65_casscf_pc_dir.srcgold    # silent: identical
 ```
 
+### The CASSCF skeleton nuclear derivatives
+
+`reference_data/casscf_hessian.py` (#215) is item 1 of
+[`hessian-theory.md`](hessian-theory.md), §8 for the CASSCF reference: the
+nuclear derivatives with the wavefunction parameters held fixed **in the
+connected sense**. The CI vector is fixed, and the orbitals ride
+`nevpt2_grad.py`'s frozen orthonormal path,
+`C(R) = S(R)^{-1/2} S(R0)^{1/2} C0` (its `frozen_coeff`, imported, not
+re-derived). Along that path the energy is one scalar, `E_nuc + Σ h D +
+½ Σ (pq|rs) Γ`, with the CASSCF state's full-space 1- and 2-RDM. The module
+provides:
+
+- **the perturbed Hamiltonians**, per Cartesian coordinate:
+  `Skeleton.perturbed_h1(k)` (the full `n_mo × n_mo` MO `dh/dR_k`) and
+  `Skeleton.perturbed_eri(k, ranges)` (`d(pq|rs)/dR_k` over any four MO
+  slices). Each is the skeleton term (`hcore_generator`, `-int2e_ip1` on each
+  index position) plus the connection term `t^k = C0^T S0 dC/dR_k`, solved
+  elementwise in `S0`'s eigenbasis from `dS/dR_k`. `Skeleton.gradient()` is
+  their contraction with the densities;
+- **`L_RR`** (`Skeleton.hessian()`), as six named terms:
+  - `nuc`: `hess_nuc`;
+  - `h_skel`: `pyscf.hessian.rhf`'s `hcore_generator`;
+  - `eri_skel`: `int2e_ipip1` / `int2e_ipvip1` / `int2e_ip1ip2`, contracted
+    with the AO 2-RDM at weights 2 / 2 / 4;
+  - `conn2`: the connection's second derivative against the generalized
+    Fock;
+  - `conn_x_skel`: the first-order connection against the skeleton
+    derivative's generalized Fock;
+  - `conn_x_conn`: the connection with itself through the
+    `(n_mo·n_occ)²` matrix the module's docstring writes out.
+
+None of it assumes stationarity, so it holds for any orthonormal `C0` and
+CI vector. Its hand cases run on a state that is not stationary
+([`testing.md`](testing.md), "The oracle's own tests",
+`test_casscf_hessian.py`).
+
+**How it is checked.** `main` rebuilds the case's committed CASSCF state
+(`golden/<case>_casscf.mogold` through `generate_golden._build_state`'s
+`--mo-from` path, every gate included) and checks five things:
+
+- the rebuilt `E(R0)` against the state's own energy;
+- the gradient against a ladder of `E` along every Cartesian coordinate,
+  `h = 2^-3 … 2^-13` bohr;
+- `L_RR` against energy ladders, `h = 2^-1 … 2^-9` bohr: second differences
+  on the diagonal, and four-point mixed differences on three seeded
+  whole-molecule direction pairs `d1ᵀ L d2` (plus every coordinate pair on
+  the diatomics, up to 9 coordinates);
+- **every element** of `L_RR`, column by column, against a ladder of the
+  analytic gradient along that column's coordinate, `h = 2^-3 … 2^-13` bohr.
+  The gradient is re-evaluated on the path at each rung, re-anchored at
+  `C(R)`; the path composes, so this is the path energy's own slope. A
+  column's run rule reads the max-norm change of the whole quotient vector,
+  and its gate is the worst element's `|Richardson − analytic|`;
+- the translational sum rules `Σ_A dE/dR_A = 0` and `Σ_B L_{R_A R_B} = 0`
+  per direction pair, and `L`'s symmetry, all against 1e-9.
+
+Every displaced energy is rebuilt from scratch at the displaced geometry, on
+a symmetry-off molecule in the same frame. Each ladder is judged by
+`nevpt2_grad.ladder_check`, the gradient's own rule: a run of three fourfold
+halvings, with the Richardson value within `LADDER_TOL` = 1e-6 of the
+analytic one. One addition: a component that is **zero by symmetry** has no
+truncation error to walk down, so it passes only if the analytic value is
+under 1e-9 and every rung is under 1e-6. The gradient is also compared with
+`pyscf.grad.casscf`'s. That gradient assumes stationarity, so the comparison
+is informational: the two differ by the orbital gradient's size.
+
+**Measured** (2026-10-21; CPU only, `--workers 12` on the 12-core
+reference box, single-threaded BLAS per process; every ladder passes on all
+three committed CASSCF states):
+
+| | N2 CAS(4,4) | LiF CAS(4,6) | acrolein CAS(6,5) |
+|---|---|---|---|
+| coordinates | 6 | 6 | 24 |
+| `\|E(R0) − E_CASSCF\|` | 8.5e-14 | 1.9e-13 | 1.0e-12 |
+| `max \|Σ_A dE/dR_A\|` | 7.1e-15 | 8.9e-16 | 2.1e-14 |
+| `max \|Σ_B L_AB\|` | 3.1e-12 | 1.4e-11 | 1.4e-11 |
+| `max \|L − Lᵀ\|` | 8.9e-15 | 1.8e-14 | 1.3e-13 |
+| gradient vs `E` ladders: count, worst | 6, 5.2e-10 | 6, 1.3e-9 | 24, 4.3e-9 |
+| `L_RR` vs `E` ladders: count, worst | 30, 2.5e-7 | 30, 1.1e-7 | 33, 4.2e-7 |
+| `L_RR` vs gradient columns: count, worst element | 6, 2.3e-10 | 6, 3.5e-11 | 24, 2.9e-10 |
+| ladders zero by symmetry (of the above) | 16 | 16 | 8 |
+| `max \|dE/dR − pyscf.grad.casscf\|` (informational) | 1.9e-8 | 6.1e-8 | 1.2e-8 |
+| analytic gradient / `L_RR`, one process | 0.2 s / 0.8 s | 0.1 s / 0.3 s | 5.5 s / 26 s |
+| whole run, wall | 8 s | 5 s | 6.6 min |
+
+Units are Eh/bohr for the gradient and Eh/bohr² for `L_RR`. The gate is
+1e-6 for both, and the sum rules' and symmetry's is 1e-9. On acrolein the
+energies take 35 s and the 528 path gradients of the column ladders 5.4
+min. The `pyscf.grad.casscf` difference sits at the size of the committed
+states' orbital gradients (`|g_orb|` 9.2e-8, 5.7e-7, 1.7e-7), as it should:
+PySCF's gradient assumes a stationary point.
+
+**What did not work as a gate on acrolein.** Two element-by-element
+judgements fail the run rule without any element being wrong. A four-point
+`E` ladder on every one of acrolein's 276 coordinate pairs passed 321 of
+324 ladders. The three that failed, `L[e16,e18]`, `L[e16,e21]` and
+`L[e19,e22]` (|L| 9.7e-4, 7.7e-4, 2.2e-2), showed only two consecutive
+fourfold halvings before round-off. Their Richardson values agree with the
+analytic elements to 5.4e-10, 1.1e-9 and 1.1e-8. Judging the gradient
+columns element by element passed 575 of 576. The exception was `L[0,22]`
+(|L| 4.9e-4), whose quotient has converged to 2.3e-13 by `2^-8` with
+halving ratios 7.7, 5.2, 4.3, 4.1. That is an `h⁴` tail, then round-off, so
+the first ratio falls outside the 3.2–4.8 window. Both are small elements,
+with truncation errors too small to walk down three halvings before
+round-off. So the script judges whole columns and gives the four-point `E`
+ladders only seeded pairs above 9 coordinates
+(`casscf_hessian.PAIR_LADDER_MAX_COORDS`).
+
+```bash
+uv run python reference_data/casscf_hessian.py --case n2_ccpvdz_cas44 --workers 12
+uv run python reference_data/casscf_hessian.py --case lif_def2svp_cas46 --workers 12
+uv run python reference_data/casscf_hessian.py --case acrolein_def2svp_cas65 --workers 12
+```
+
+The script writes nothing unless `--out` is given (the gradient, `L_RR` and
+its terms, `.npz`). It is the skeleton half of the analytic CASSCF Hessian:
+the parameter responses that complete
+[`hessian-theory.md`](hessian-theory.md), §8's assembly are #219's.
+
 ## Density fitting
 
 `nevpt2_df_demo` computes SC-NEVPT2 from three-index `(L|pq)` tensors
@@ -2694,6 +2813,7 @@ not used.
 | `reference_data/pc_null_mode_probe.py` | **what PC's singular-metric cut drops and how it moves with the CI vector**: rebuilds every PC class's `S`/`K`/`S_1` from a golden the device's way (reproducing its block2 `pc_class_energies`), classifies the dropped modes (null for every singlet / every vector of the abelian irrep / the state's symmetry family), measures the kept–dropped coupling and the second-order lift per direction kind, and checks the PC second derivative with and without the null-space rotation terms against a difference of the exact first derivative. CPU only, writes nothing ([`pc-nevpt2.md`](pc-nevpt2.md), "What the cut drops, and how it moves") |
 | `reference_data/pc_orbital_hessian_probe.py` | **PC's orbital Hessian blocks before code** (#199): on `pc_null_mode_probe.py`'s class matrices, rotates a golden's active integrals and stored blocks at the fixed CI vector. It checks three things. `H_kk` along two active–active directions, with no rotation term, against an energy ladder and a Baker–Campbell–Hausdorff gauge. `H_kc` with and without its one rotation term, against a difference of the exact orbital derivative and the active-rotation gauge `Eddot_cc(what c, u) + Edot(what u)`. Along intra-space pairs, the PC class energies' mixed derivative against four-point ladders, beside SC's `rho` on the same (class, pair). Reuses `sc_empty_perturber_probe.py`'s rotations. CPU only, writes nothing ([`pc-nevpt2.md`](pc-nevpt2.md), "The orbital blocks, offline"; [`hessian-theory.md`](hessian-theory.md), §6.4–§6.8) |
 | `reference_data/sc_empty_perturber_probe.py` | **what SC's guarded (empty) perturbers do to the orbital Hessian**: transcribes PySCF's eight SC class formulas onto a golden's stored blocks (reproducing its `class_energies`), classifies the guarded tuples as empty by their integrals or merely small, and along seeded intra-space direction pairs evaluates the sixth term, the proportionality defect `rho`, the polarisation a four-point ladder converges to (checked against one, under real rotations), the parallelogram defect, and what the guard drops at first order. Reuses `pc_null_mode_probe.State` for the RDMs. CPU only, writes nothing ([`testing.md`](testing.md), "The empty-perturber term, offline"; [`hessian-theory.md`](hessian-theory.md), §5.6) |
+| `reference_data/casscf_hessian.py` | the **CASSCF reference's skeleton nuclear derivatives** (#215): the perturbed Hamiltonians `dh/dR`, `d(pq\|rs)/dR` in the MO basis along `nevpt2_grad.py`'s frozen orthonormal path (`frozen_coeff`, imported), and the second partial `L_RR` from `pyscf.hessian.rhf`'s integral drivers contracted with the CASSCF densities, plus the connection's second-order terms. Checked against ladders of the path energy and the translational sum rules on a case's committed `_casscf.mogold` state. CPU only; writes nothing unless `--out` (see "The CASSCF skeleton nuclear derivatives" above) |
 | `reference_data/casscf_repro_probe.py` | the **CASSCF reproducibility** measurement: ≥5 back-to-back RHF → symmetry-adapted `mcscf.CASSCF` → orbital-gradient → fresh `mcscf.CASCI` → SC-NEVPT2 runs under `generate_golden`'s own settings (imported, so single-threaded with the same Davidson tolerance), reporting the spread of E_CASSCF / E_corr / ‖g_orb‖ and whether any run changed stationary point. `--perturb EPS` starts the optimiser from a random same-irrep rotation instead. `--case NAME --displace COMP --steps …` runs `nevpt2_numgrad.py --reference casscf`'s own state path along a ladder of displacements and prints the continuity guard's three signals per step (where its thresholds come from). Writes no golden; its output is what "A fresh CASSCF reproduces, measured" above quotes, and where the `--mo-from` gate thresholds come from |
 | `reference_data/sc_source_oracle.py` | **PySCF's exact SC source terms** for N2 CAS(4,4) and LiF, written as `golden/<case>.srcgold` out of `nevpt2_grad.py`'s own machinery at its converged steps; the oracle `nevpt2_sc_pseudodensity --source-oracle` gates the GPU's against (see "The SC source-term oracle" above). With `--pc`, **block2's PC ones** for N2 CAS(4,4), `golden/n2_ccpvdz_cas44_pc.srcgold` ("The PC flavour"). With `--directional`, the **directional flavour** for acrolein, N2 and LiF, `golden/<case>[_pc]_dir.srcgold` ("The directional flavour"). With `--case n2_ccpvdz_cas44_casscf --mo-from FILE`, all four kinds on **converged CASSCF orbitals** ("On CASSCF orbitals"), and with `--case acrolein_def2svp_cas65_casscf --mo-from FILE --directional`, acrolein's directional pair on them (#135), with the sidecar fingerprint-checked as `generate_golden.py --mo-from` checks it. Byte-reproducible |
 | `reference_data/golden_format.py` | the **one Python parser** of the three formats in `golden/` (and of the `.srcgold` oracle, plus its writer `write_srcgold`): the header tables (keyed by magic) the writers pack from and the readers read by, `read_golden` / `read_golden_header` / `read_gradgold` / `read_mo_sidecar` / `read_srcgold`, and `arrays-at FILE` for the regeneration check's `cmp -i`. `struct` and NumPy only, and no thread settings, so the timing script can use it (see "The file format" above) |

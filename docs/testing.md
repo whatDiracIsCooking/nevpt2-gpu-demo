@@ -271,6 +271,22 @@ What they are, all on synthetic inputs, no PySCF solve, no card, no network:
     against `H_kc`.
 
   ([`hessian-theory.md`](hessian-theory.md), §6.4–§6.8.)
+- **`test_casscf_hessian.py`** (#215) — `casscf_hessian.py`'s skeleton
+  nuclear derivatives, on a bent C1 water in STO-3G with a CASCI(4,4) on RHF
+  orbitals: deliberately not a CASSCF stationary point, so the connection's
+  first-order term carries weight and every term of `L_RR` is exercised.
+  Each piece against central differences of the frozen orthonormal path
+  rebuilt from scratch: `dS/dR` and `d²S/dR²`, the connection `t` and its
+  second derivative against `nevpt2_grad.frozen_coeff` itself (and
+  `t + tᵀ = −dS_MO`), the perturbed `h` and `(pq|rs)` over mixed MO ranges,
+  the gradient on every coordinate, `L_RR`'s diagonal and three cross-atom
+  pairs by Richardson-extrapolated second differences, and a column of `L_RR`
+  against a difference of the analytic gradient re-anchored on the path.
+  Also: the translational sum rules, `L_RR`'s and each term's symmetry, the
+  ladder judge's symmetry-zero rule both ways, and the refusal of an
+  incomplete MO basis. A few seconds of CPU, no golden
+  ([`reference-data.md`](reference-data.md), "The CASSCF skeleton nuclear
+  derivatives").
 
 **The thresholds are written into the tests as numbers**, not read from the
 module: a test comparing against `DEGENERACY_TOL` would move with it.
