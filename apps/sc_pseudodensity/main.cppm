@@ -95,7 +95,8 @@
 // to the golden's block2 e_pc_total) and, for the oracle, a PC `.srcgold`.
 // --pc means nothing to the identities or --kappa-act / --kappa-full, which
 // are SC's, and nevpt2.cli refuses it there; with --sc-hessian-kk-int it makes
-// the orbital curvature PC's (#200).
+// the orbital curvature PC's (#200), and with --sc-hessian-kc the mixed block
+// PC's (#201, :hessian_kc_pc_check, its own PASS line).
 
 // A module unit, so each binary is apps/<app>/{main.cppm,CMakeLists.txt}.
 // Nothing imports it. main() is written plainly: clang attaches main to the
@@ -118,6 +119,9 @@ export import :source_oracle;
 // --sc-hessian-kc: the energy's mixed orbital-CI Hessian block H_kc, its two
 // orientations against each other (#184). Its own PASS line.
 export import :hessian_kc_check;
+// --pc --sc-hessian-kc: the same block of the PC energy (#201). Its own PASS
+// line.
+export import :hessian_kc_pc_check;
 // --sc-hessian-kk-int: the orbital Hessian block's integral curvature
 // <Ehat', I''> = K1 + K2 (#154). Its own PASS line.
 export import :hessian_kk_check;
@@ -140,7 +144,8 @@ int main(int argc, char** argv) {
   // spans them (nevpt2.cli's parseArgs). A flag this binary does not
   // implement -- --profile, --rdm-tangent -- is refused as Unsupported rather
   // than ignored; a bad value or combination (--pc with anything but
-  // --dump-source-terms or --source-oracle) is a config Error. Reported once,
+  // --dump-source-terms, --source-oracle, --sc-hessian-kc or
+  // --sc-hessian-kk-int) is a config Error. Reported once,
   // here.
   nevpt2::Result<nevpt2::cli::Options> parsed =
       nevpt2::cli::parseArgs(nevpt2::cli::Binary::ScPseudodensity, args);
@@ -407,8 +412,12 @@ int main(int argc, char** argv) {
       }
       gg.emplace(*std::move(sidecar));
     }
-    const nevpt2::Result<bool> ok = checkScHessianKc(g, gg ? &*gg : nullptr, dInts, dDm1, dDm2,
-                                                     rdm, opt.rdm, *res);
+    // With --pc it is PC's block (#201), on a state the PC energy stage above
+    // has already held to the golden's block2 total; it runs on a
+    // density-fitted sidecar too, where SC's refuses.
+    const nevpt2::Result<bool> ok =
+        opt.pc ? checkPcHessianKc(g, gg ? &*gg : nullptr, dInts, dDm1, dDm2, rdm, opt.rdm, *res)
+               : checkScHessianKc(g, gg ? &*gg : nullptr, dInts, dDm1, dDm2, rdm, opt.rdm, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

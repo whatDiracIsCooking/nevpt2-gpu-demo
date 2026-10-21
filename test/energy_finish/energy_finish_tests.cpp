@@ -1924,6 +1924,77 @@ TEST(PcAdjointSecondTests, TheThirdTermCompletesTheTwoTermAdjoint) {
   EXPECT_GT(std::fabs(third), 1e-3);
 }
 
+// The Delta tangents (#201): a direction along which the orbital energies
+// move, Delta_u per tuple, enters alpha_u as Delta_u I and beta as
+// Delta_u nS_v. Forward (pcQuadSecond's PcDeltaTangents::u) and reverse
+// (pcAdjointSecondSingle's deltaDotDir) must stay each other's dual, and the
+// term must matter.
+TEST(PcAdjointSecondTests, TheDeltaTangentsStayDual) {
+  const AdjointSecondCase c = adjointSecondCase(3, 0x2010u);
+  const double factor = 0.5;
+  const std::vector<double> deltaU{0.3, -0.7, 0.45};
+  const std::vector<double> zeroRow(3, 0.0);  // y_uv = 0: the bilinear part alone
+  const PcHessianBlocks fb = forwardBlocks(c);
+  const PcRotationBlocks rot = forwardRotation(c);
+  double fwd = 0.0, fwdU = 0.0, bare = 0.0, minDen = std::numeric_limits<double>::infinity();
+  for (int64_t t = 0; t < 3; ++t) {
+    const auto at = [t](const std::vector<double>& v, int64_t len) {
+      return std::span<const double>(v.data() + t * len, static_cast<std::size_t>(len));
+    };
+    const PcHessianRow row{at(c.y, 3), at(c.yu, 3), at(c.yv, 3), zeroRow, at(c.rv, 2)};
+    const double d = c.delta[static_cast<std::size_t>(t)];
+    const PcQuadDerivatives q = pcQuadSecond(row, c.lambda, d, fb, rot, true, minDen,
+                                             PcDeltaTangents{deltaU[static_cast<std::size_t>(t)]});
+    fwd -= factor * q.fuv;
+    fwdU -= factor * q.fu;
+    bare -= factor * pcQuadSecond(row, c.lambda, d, fb, rot, true, minDen).fuv;
+  }
+  const Tensor y = rows(c.y, 3, 3), yu = rows(c.yu, 3, 3);
+  PcAdjointSecond acc = pcAdjointSecondZeros(c.blk);
+  const PcSlabAdjointSecond bars =
+      pcAdjointSecondSingle(y, &yu, c.lambda, c.delta, factor, c.blk, acc, deltaU);
+  const double rev = frob(bars.ybarDot, c.yv) + frob(bars.rbarDot, c.rv) + blockPairing(c, acc);
+  EXPECT_NEAR(rev, fwd, 1e-13 * std::max(1.0, std::fabs(fwd)));
+  EXPECT_NEAR(acc.edotU, fwdU, 1e-13 * std::max(1.0, std::fabs(fwdU)));
+  EXPECT_GT(std::fabs(fwd - bare), 1e-3);
+}
+
+// And hessianSingle's v-leg Delta tangent is the u leg's with the two legs'
+// roles swapped, so the orbital leg H_kc hands it is the same arithmetic --
+// held where the finish is symmetric in its legs for any rows (nothing
+// dropped: the rotation's symmetry needs the eigenstate's rows).
+TEST(PcAdjointSecondTests, TheDeltaTangentIsSymmetricInTheLegs) {
+  const AdjointSecondCase c = adjointSecondCase(3, 0x2011u);
+  const std::vector<double> deltaDot{-0.2, 0.6, 0.15};
+  const Tensor y = rows(c.y, 3, 3), yu = rows(c.yu, 3, 3), yv = rows(c.yv, 3, 3);
+  const Tensor yuv = rows(std::vector<double>(9, 0.0), 3, 3);
+  const Tensor noRv = Tensor::fromFlat({3, 0}, {});
+  const std::vector<double> zeros(9, 0.0), zeroRow(3, 0.0);
+  double minDen = std::numeric_limits<double>::infinity();
+  // (u, v) with the tangent on v ...
+  PcHessianSums onV, without;
+  const PcHessianBlocks blk{c.blk.mKu, c.blk.nSu, c.mKv, c.nSv, zeros, zeros};
+  hessianSingle({&y, &yu, &yv, &yuv, &noRv}, c.lambda, c.delta, blk, PcRotationBlocks{}, 1.0,
+                onV, minDen, deltaDot);
+  hessianSingle({&y, &yu, &yv, &yuv, &noRv}, c.lambda, c.delta, blk, PcRotationBlocks{}, 1.0,
+                without, minDen);
+  // ... is (v, u) with it on u.
+  double onU = 0.0;
+  const PcHessianBlocks swapped{c.mKv, c.nSv, c.blk.mKu, c.blk.nSu, zeros, zeros};
+  for (int64_t t = 0; t < 3; ++t) {
+    const auto at = [t](const std::vector<double>& v) {
+      return std::span<const double>(v.data() + t * 3, 3);
+    };
+    const PcHessianRow row{at(c.y), at(c.yv), at(c.yu), zeroRow, {}};
+    onU -= pcQuadSecond(row, c.lambda, c.delta[static_cast<std::size_t>(t)], swapped,
+                        PcRotationBlocks{}, true, minDen,
+                        PcDeltaTangents{deltaDot[static_cast<std::size_t>(t)]})
+               .fuv;
+  }
+  EXPECT_NEAR(onV.eddot, onU, 1e-13 * std::max(1.0, std::fabs(onU)));
+  EXPECT_GT(std::fabs(onV.eddot - without.eddot), 1e-3);
+}
+
 TEST(PcAdjointSecondTests, PairBothLayoutsAreTheReverseOfHessianPair) {
   for (const bool twoTensor : {true, false}) {
     SCOPED_TRACE(twoTensor ? "two tensors" : "partner map");

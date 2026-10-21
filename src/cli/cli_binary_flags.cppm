@@ -31,8 +31,9 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 // What implements what, and why a binary that does not refuses it:
 //   --pc            the demos, and nevpt2_sc_pseudodensity for its two
 //                   source-term jobs (--dump-source-terms and --source-oracle
-//                   write / compare PC-NEVPT2's with it, #74) and for
-//                   --sc-hessian-kk-int (PC's orbital curvature, #200); the
+//                   write / compare PC-NEVPT2's with it, #74), for
+//                   --sc-hessian-kk-int (PC's orbital curvature, #200) and
+//                   for --sc-hessian-kc (PC's mixed block H_kc, #201); the
 //                   identities and --kappa-act / --kappa-full are SC's, so it
 //                   is a config error there. nevpt2_pc_tangent is PC
 //                   throughout, so the switch would change nothing there.
@@ -364,11 +365,8 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
             "--sc-hessian-kc checks the energy's mixed orbital-CI second derivative; "
             "--kappa-act, --kappa-full, --dump-source-terms and --source-oracle are first-order "
             "jobs -- run one at a time");
-      if (c.pc && opt.scHessianKc)
-        return err_config(
-            "--sc-hessian-kc differentiates the strongly-contracted energy twice; PC's half of "
-            "H_kc has no path (it waits on the PC projector terms, #152 / #155)");
-      // --sc-hessian-kk-int (#154) likewise: one job per run, SC only.
+      // With --pc it is PC's mixed block (#201).
+      // --sc-hessian-kk-int (#154) likewise: one job per run.
       if (opt.scHessianKkInt && (opt.kappaAct || opt.kappaFull || opt.scHessianKc ||
                                  !opt.dumpSourceTermsPath.empty() ||
                                  !opt.sourceOraclePath.empty()))
@@ -388,14 +386,15 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
         return err_config(
             "--sc-hessian-kk differentiates the strongly-contracted energy twice; PC's orbital "
             "Hessian has no path");
-      // --pc picks PC-NEVPT2's source terms (#74) and PC's orbital curvature
-      // (#200): only the three jobs that assemble them take it.
+      // --pc picks PC-NEVPT2's source terms (#74), PC's orbital curvature
+      // (#200) and PC's mixed block (#201): only the four jobs that assemble
+      // them take it.
       if (c.pc && opt.dumpSourceTermsPath.empty() && opt.sourceOraclePath.empty() &&
-          !opt.scHessianKkInt)
+          !opt.scHessianKkInt && !opt.scHessianKc)
         return err_config(
-            "--pc makes --dump-source-terms, --source-oracle and --sc-hessian-kk-int "
-            "PC-NEVPT2's; the identities, --kappa-act and --kappa-full are the SC energy's and "
-            "have no --pc path");
+            "--pc makes --dump-source-terms, --source-oracle, --sc-hessian-kc and "
+            "--sc-hessian-kk-int PC-NEVPT2's; the identities, --kappa-act and --kappa-full are "
+            "the SC energy's and have no --pc path");
       if (!opt.gradgoldPath.empty() && !opt.kappaFull && !opt.scHessianKc &&
           !opt.scHessianKkInt && !opt.scHessianKk && opt.dumpSourceTermsPath.empty() &&
           opt.sourceOraclePath.empty())

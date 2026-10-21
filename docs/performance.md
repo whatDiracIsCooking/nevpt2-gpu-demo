@@ -718,6 +718,7 @@ live there and are not repeated here:
 | `--sc-hessian-kc` (#184) | the tangent build (forward) and the plain build (reverse) | the `--rdm-tangent` rows | no; pool high-water at the ctest entries only |
 | `--sc-hessian-kk-int` (#154) | the plain build and the digests' transpose | the plain rows and the transpose's | no; pool high-water at the ctest entries only |
 | `--pc --sc-hessian-kk-int` (#200) | the plain build and the digests' transpose, beside the PC adjoint walk's buffers | the plain rows and the transpose's, as a lower bound | no; pool high-water at the ctest entries only |
+| `--pc --sc-hessian-kc` (#201) | the tangent build, three times per CI direction (forward: at `(c, u)`, `(u, u)` and `(c, u)` with `h2e'[w]`), and the plain build (reverse) | the `--rdm-tangent` rows, as a lower bound | no; pool high-water at the ctest entries only |
 | `--sc-hessian-kk` (#158, #190) | the plain build and the digests' transpose | the plain rows and the transpose's | **yes**, on the three cases with a sidecar it reads: floor 1 (the table above) |
 | `--pc-hessian` (#152) | the three-argument build, beside the PC stage's own buffers | the `--sc-hessian` rows, as a lower bound | **no**. Its only entries are CAS(4,4) (`docs/testing.md`, "The Hessian tier's entries") |
 | `--pc-hessian-vector` (#155) | the three-argument build, beside the PC adjoint walk's buffers | the `--sc-hessian` rows, as a lower bound | **no**, likewise |

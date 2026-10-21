@@ -1078,8 +1078,9 @@ that by up to `1e10`. The fix would be a tighter CI vector, not a looser gate.
 PC's orbital Hessian blocks are derived in
 [`hessian-theory.md`](hessian-theory.md), §6.4–§6.8 (#199). The first term of
 `H_kk`, the integrals' curvature K1 + K2, is in the tree (#200;
-[`testing.md`](testing.md), "PC's orbital curvature"); #201–#202 build the
-rest. Before any code, three of the theory's
+[`testing.md`](testing.md), "PC's orbital curvature"), and so is the mixed
+block `H_kc` (#201; "The mixed block H_kc", below); #202 builds the rest.
+Before any code, three of the theory's
 claims were measured offline:
 
 - `S` does not move along any orbital direction, so `H_kk` needs no rotation
@@ -1221,6 +1222,39 @@ variants:
   ordered tuple), where SC's census counts unordered tuples.
 - **Worst over all 21 (pair, class) rows: 1.0e-6.** That is core × virt's
   Sir, whose value is 4.7e-6, at the ladder's truncation error.
+
+### The mixed block H_kc
+
+#201 builds `H_kc` on the card: the scalar `Eddot_kc(w, u)` and the vector
+`H_kc^T w`, with §6.5's one rotation term
+([`hessian-theory.md`](hessian-theory.md), §6.4–§6.8). Its gated entries are
+CAS(4,4), conventional and fitted; their checks and numbers are
+[`testing.md`](testing.md), "PC's mixed Hessian block's checks". There the
+rotation term is about 1% of Sr's mixed element along a `rot` direction,
+and the offline probe's 100-fold share above was along its `singlet` kind,
+which the device does not run.
+
+**CAS(8,8) is a diagnostic, not an entry**, as #152's and #155's are, until
+#194. One run each of `nevpt2_sc_pseudodensity --golden
+golden/n2_ccpvdz_cas88[_df].nevpt2gold --tiles 3 --pc --sc-hessian-kc`, RTX
+3080 (CUDA, `default` preset), 2026-10-21, about 4 min each:
+
+| check | CAS(8,8) | CAS(8,8) DF |
+|---|---|---|
+| PC's first-order source term along `w` / the walks' `Edot(w)` against it | 3.0e-11 / 2.1e-10 (Sr) | 1.8e-12 / 9.0e-11 (Sr) |
+| the duality, EULER, worst `u` | 3.5e-9 | 8.5e-9 |
+| Euler, worst homogeneous class | 1.8e-9 (Sr) | 8.8e-11 (Sr) |
+| the duality, FROZEN, active–active `w` | 1.1e-8 | 5.0e-9 |
+| the gauge, worst class | 4.0e-9 (Sr) | 1.5e-8 (Sr) |
+| the core–core difference, every class | converges (worst 1.3e-7, Si, 4 halvings) | converges (worst 1.2e-7, Si, 4 halvings) |
+| the virtual–virtual difference | **Sr plateaus** at 9.8e-7 relative (1 halving); Sir at 2.7e-11 with 2; the total at 8.6e-8 with 1 | **Sr plateaus** at 3.9e-7 (1 halving); Sir at 1.1e-9 with 2; the total at 9.8e-8 with 1 |
+| the active–active difference | **not formed**: at `h = 2^-6` Sr's and Si's displaced solves have a non-positive denominator (`lambda_k + Delta_t` of -8.9 and -5.5), and the run ends there with that Numerical Error | the same |
+
+Every identity holds at the tree's 1e-7. The differences do not: the
+walk-to-walk spread of a CAS(8,8) PC `y` (smallest kept `s / s_max`
+1.0e-10, Sr) sits under every rung, and a finite rotation of the active
+integrals moves the poorly conditioned modes' `lambda` by Hartrees. Both are
+#194's conditioning, not the mixed block's algebra, which the identities pin.
 
 ## The source terms by reverse mode
 
