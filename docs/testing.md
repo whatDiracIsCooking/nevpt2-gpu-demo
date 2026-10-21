@@ -391,8 +391,9 @@ no card.
 
 Level 1 of the Hessian differentiates the energy functional, which does not
 know how its orbitals were made, so all seven Hessian flags sit behind the
-source-term gate ([`hessian-theory.md`](hessian-theory.md), §9.1). #157
-registers each on `n2_ccpvdz_cas44_casscf`, the same binary and flags as its
+source-term gate ([`hessian-theory.md`](hessian-theory.md), §9.1), with
+`--pc` or without. #157 registers each on `n2_ccpvdz_cas44_casscf`, and #203
+the three orbital-block flags with `--pc`, the same binary and flags as its
 CASCI-orbital twin, all `gpu;small`:
 
 | entry | binary | flag | the mode its regex holds |
@@ -404,6 +405,9 @@ CASCI-orbital twin, all `gpu;small`:
 | `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kk` | `nevpt2_sc_pseudodensity` | `--sc-hessian-kk` | — (the twin's regex, 2 pairs refused for `rho_t`) |
 | `nevpt2_pc_hessian_cas44_casscf` | `nevpt2_pc_tangent` | `--pc-hessian` | held fixed, with the smallest kept `s / s_max` and gap printed |
 | `nevpt2_pc_hessian_vector_cas44_casscf` | `nevpt2_pc_tangent` | `--pc-hessian-vector` | likewise |
+| `nevpt2_sc_pseudodensity_cas44_casscf_pc_hessian_kk_int` | `nevpt2_sc_pseudodensity` | `--pc --sc-hessian-kk-int` | EULER, the orbital energies responding to `kappa`, off the committed `.gradgold` |
+| `nevpt2_sc_pseudodensity_cas44_casscf_pc_hessian_kc` | `nevpt2_sc_pseudodensity` | `--pc --sc-hessian-kc` | EULER along a mixed `w` (FROZEN runs inside, and FULL is refused as `err_unsupported`) |
+| `nevpt2_sc_pseudodensity_cas44_casscf_pc_hessian_kk` | `nevpt2_sc_pseudodensity` | `--pc --sc-hessian-kk` | both, EULER and FROZEN; no pair refused |
 
 Measured on the RTX 3080 (CUDA, `--tiles 3`, the default digest), #157: all
 seven pass, each in under 3 s. Both PC entries print the smallest kept
@@ -411,6 +415,12 @@ seven pass, each in under 3 s. Both PC entries print the smallest kept
 `PC_MIN_GAP`'s 1e+03 — the conditioning a PC Hessian PASS line now prints
 rather than refuses (#194 owns the conditioning itself). `--sc-hessian-kk`
 refuses the same two pairs for `rho_t` as on the CASCI-orbital twin.
+
+Measured on the RTX 3080 (CUDA, `--tiles 3`, the default digest), #203:
+the three `--pc` orbital entries pass, each held to block2's PC total
+first — `--pc --sc-hessian-kk-int` in 1.5 s, `--pc --sc-hessian-kc` in
+5.6 s (its FULL-in-`c` request refused as `err_unsupported`, as on the
+CASCI twin), `--pc --sc-hessian-kk` in 5.4 s with no pair refused.
 
 ### The source terms on CASSCF orbitals: the wave-0 canary
 
@@ -2040,7 +2050,7 @@ is not.
 
 ## The Hessian tier's entries
 
-Every ctest entry the Hessian milestones added (#150–#158, #184, #190, #200–#202), in
+Every ctest entry the Hessian milestones added (#150–#158, #184, #190, #200–#203), in
 one place: its binary and flag, its gate (the `PASS_REGULAR_EXPRESSION` the
 entry matches) and its labels. What each one checks, and every number it
 comes out at, is in the section the last column names, not here.
@@ -2062,7 +2072,7 @@ exact digests:
 | `nevpt2_sc_pseudodensity_cas44_pc_hessian_kk`, `nevpt2_sc_pseudodensity_cas44_df_pc_hessian_kk` | `nevpt2_sc_pseudodensity --pc --sc-hessian-kk` | `PASS: the PC orbital Hessian's sandwich I'^T Ehat''_pc I' agrees with itself by duality to 1e-07 in both orbital-energy modes … no pair refused for its empty perturbers (Sec. 6.6)`, the fitted entry's line ending `(density-fitted)` | `gpu;small` | "PC's orbital block's sandwich" |
 | `nevpt2_pc_hessian_cas44` | `nevpt2_pc_tangent --pc-hessian` | `PASS: the PC-NEVPT2 Hessian Eddot(u, v) matches Euler` | `gpu;small` | "The PC Hessian against a finite difference of the three-term tangent" |
 | `nevpt2_pc_hessian_vector_cas44` | `nevpt2_pc_tangent --pc-hessian-vector` | `PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches` | `gpu;small` | "The PC Hessian-vector product's checks" |
-| the seven `*_cas44_casscf*` Hessian entries, one per flag | the same seven flags on `n2_ccpvdz_cas44_casscf` | the CASCI twin's PASS line, plus the orbital-energy mode where the line names it, and on the two PC entries the smallest kept `s / s_max` and smallest gap | `gpu;small` | "The Hessian on CASSCF orbitals" |
+| the ten `*_cas44_casscf*` Hessian entries, one per flag and one per orbital-block flag with `--pc` | the same seven flags, and `--pc` with the three orbital-block ones, on `n2_ccpvdz_cas44_casscf` | the CASCI twin's PASS line, plus the orbital-energy mode where the line names it (every `--pc` orbital entry's does), and on the two PC CI-block entries the smallest kept `s / s_max` and smallest gap | `gpu;small` | "The Hessian on CASSCF orbitals" |
 
 There is no CAS(8,8) entry for PC's CI block: there both second-order checks
 converge to a value standing off the analytic one, for a conditioning reason

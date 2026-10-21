@@ -87,8 +87,9 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   --pc-hessian-vector is its too (#155): PC's H_cc u,
 //                   gated against --pc-hessian's Eddot by duality, with the
 //                   same ladder flags; the two are one check at a time.
-//   --gradgold      nevpt2_sc_pseudodensity (--kappa-full, --dump-source-terms,
-//                   --source-oracle)
+//   --gradgold      nevpt2_sc_pseudodensity (--kappa-full, --sc-hessian-kc,
+//                   --sc-hessian-kk-int, --sc-hessian-kk, --dump-source-terms,
+//                   --source-oracle; each with or without --pc where it takes it)
 //                   and nevpt2_demo (--gradient-source, whose y_I and forward
 //                   tangent then carry the orbital energies' CI response,
 //                   #87): the two binaries that read the sidecar.

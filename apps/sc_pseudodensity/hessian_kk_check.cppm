@@ -864,7 +864,8 @@ nevpt2::Result<bool> checkScHessianKkIntegral(const nevpt2::GoldenFile& g,
   std::printf("\n%s: the %s orbital Hessian's integral curvature <Ehat', I''> = K1 + K2 agrees "
               "with itself by duality to %.0e in each term%s, the traced pairs' zero and the "
               "intra-space zeros hold, every refusal holds, and the ladders of the pairing along "
-              "exp(s u + t v) converge to it%s\n",
+              "exp(s u + t v) converge to it (orbital-energy mode: EULER, the orbital energies "
+              "responding to kappa)%s\n",
               ok ? "PASS" : "FAIL", variant, kKkTol,
               pc ? " (PC's first-order source term gated first, both dualities)" : "",
               fitted ? " (density-fitted: K2 by the three-index jets, both routes agree)" : "");

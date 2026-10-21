@@ -30,7 +30,9 @@
 //   CliHessianRefusalTests       every Hessian flag of every binary at once
 //                                (#157): one binary each, refused by the
 //                                others naming it, every approximate digest
-//                                Unsupported beside it, the exact ones taken
+//                                Unsupported beside it, the exact ones taken;
+//                                and the same for each orbital-block flag
+//                                with --pc (#203)
 //
 // TU shape: gtest's header FIRST, then `import std;` and the modules -- every
 // textual std #include before any import.
@@ -658,6 +660,9 @@ TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
       {Binary::ScPseudodensity, {"--tiles", "3", "--sc-hessian-kc"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--sc-hessian-kk-int"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--sc-hessian-kk"}},
+      {Binary::ScPseudodensity, {"--tiles", "3", "--pc", "--sc-hessian-kc"}},
+      {Binary::ScPseudodensity, {"--tiles", "3", "--pc", "--sc-hessian-kk-int"}},
+      {Binary::ScPseudodensity, {"--tiles", "3", "--pc", "--sc-hessian-kk"}},
       {Binary::PcTangent, {"--tiles", "3"}},
       {Binary::PcTangent, {"--tiles", "40", "--fd-steps", "3"}},
       {Binary::PcTangent, {"--tiles", "3", "--pc-hessian"}},
@@ -1111,8 +1116,8 @@ TEST(CliScPseudodensityFlagTests, SourceOracleRefusesTheOtherJobs) {
 }
 
 // --sc-hessian-kc (#184), nevpt2_sc_pseudodensity alone: the mixed block
-// H_kc, one job at a time, SC only, exact digests only, with or without the
-// sidecar (--gradgold rides on it).
+// H_kc, one job at a time, exact digests only (with --pc, PC's, #201), with
+// or without the sidecar (--gradgold rides on it).
 TEST(CliScPseudodensityFlagTests, ScHessianKcSetsItsFieldAndTakesGradgold) {
   const Result<Options> r = parse(Binary::ScPseudodensity, {"--sc-hessian-kc"});
   ASSERT_TRUE(r.has_value()) << r.error().message;
@@ -1170,8 +1175,8 @@ TEST(CliScPseudodensityFlagTests, ScHessianKcTakesPcAndRefusesTheApproximateDige
 }
 
 // --sc-hessian-kk-int (#154), nevpt2_sc_pseudodensity alone: the orbital
-// block's integral curvature, one job at a time, SC only, exact digests only;
-// --gradgold rides on it.
+// block's integral curvature, one job at a time, exact digests only (with
+// --pc, PC's, #200); --gradgold rides on it.
 TEST(CliScPseudodensityFlagTests, ScHessianKkIntSetsItsFieldAndTakesGradgold) {
   const Result<Options> r = parse(Binary::ScPseudodensity, {"--sc-hessian-kk-int"});
   ASSERT_TRUE(r.has_value()) << r.error().message;
@@ -1570,6 +1575,93 @@ TEST(CliHessianRefusalTests, EveryHessianFlagTakesTheExactDigests) {
       args.insert(args.end(), digest.begin(), digest.end());
       const Result<Options> r = parse(h.binary, args);
       EXPECT_TRUE(r.has_value()) << h.flag << ": " << r.error().message;
+    }
+  }
+}
+
+// --- the PC orbital Hessian flags (#200-#203) ------------------------------------
+//
+// --pc with an orbital Hessian flag is PC-NEVPT2's block (#200, #201, #202),
+// on nevpt2_sc_pseudodensity alone; #157's matrix carries over to it whole.
+struct PcOrbitalHessianFlag {
+  std::string_view flag;
+  bool Options::* field;
+};
+const std::array kPcOrbitalHessianFlags{
+    PcOrbitalHessianFlag{"--sc-hessian-kc", &Options::scHessianKc},
+    PcOrbitalHessianFlag{"--sc-hessian-kk-int", &Options::scHessianKkInt},
+    PcOrbitalHessianFlag{"--sc-hessian-kk", &Options::scHessianKk},
+};
+
+// Each one takes --pc, in either order, with every exact digest, and sets
+// both fields.
+TEST(CliHessianRefusalTests, EveryPcOrbitalHessianFlagTakesPcAndTheExactDigests) {
+  for (const PcOrbitalHessianFlag& h : kPcOrbitalHessianFlags) {
+    for (const std::vector<std::string_view>& digest :
+         {std::vector<std::string_view>{}, std::vector<std::string_view>{"--blas-digest"},
+          std::vector<std::string_view>{"--digest-emitted"},
+          std::vector<std::string_view>{"--consume-emitted"}}) {
+      for (const bool pcFirst : {true, false}) {
+        std::vector<std::string_view> args;
+        if (pcFirst) args.push_back("--pc");
+        args.push_back(h.flag);
+        if (!pcFirst) args.push_back("--pc");
+        args.insert(args.end(), digest.begin(), digest.end());
+        const Result<Options> r = parse(Binary::ScPseudodensity, args);
+        ASSERT_TRUE(r.has_value()) << h.flag << ": " << r.error().message;
+        EXPECT_TRUE(r->common.pc) << h.flag;
+        EXPECT_TRUE((*r).*(h.field)) << h.flag;
+      }
+    }
+  }
+}
+
+// With --pc, every approximate digest is still Unsupported, with #157's
+// message, whichever order the three flags come in.
+TEST(CliHessianRefusalTests, EveryPcOrbitalHessianFlagRefusesEveryApproximateDigestAsUnsupported) {
+  const std::vector<std::vector<std::string_view>> digests{
+      {"--cublas"},       {"--cublas", "--mantissa-bits", "40"},
+      {"--ozaki"},        {"--ozaki", "--ozaki-pairs", "5"},
+      {"--fused-digest"}, {"--fused-digest", "--blas-digest"},
+  };
+  for (const PcOrbitalHessianFlag& h : kPcOrbitalHessianFlags) {
+    for (const std::vector<std::string_view>& d : digests) {
+      for (const int order : {0, 1, 2}) {
+        std::vector<std::string_view> args;
+        if (order == 0) args = {"--pc", h.flag};
+        if (order == 1) args = {h.flag, "--pc"};
+        args.insert(args.end(), d.begin(), d.end());
+        if (order == 2) {
+          args.push_back(h.flag);
+          args.push_back("--pc");
+        }
+        const Result<Options> r = parse(Binary::ScPseudodensity, args);
+        ASSERT_FALSE(r.has_value()) << h.flag << " " << d.front();
+        EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << h.flag << " " << d.front();
+        EXPECT_EQ(r.error().message, hessianDigestMessage(h.flag, d.front()));
+      }
+    }
+  }
+}
+
+// On a binary that lacks the flag, --pc does not change the refusal: still
+// Unsupported, naming nevpt2_sc_pseudodensity. The demos take --pc, so it
+// may come first there; nevpt2_pc_tangent refuses --pc itself, so the flag
+// comes first on every binary.
+TEST(CliHessianRefusalTests, ABinaryThatLacksAPcOrbitalHessianFlagRefusesItWithPc) {
+  for (const PcOrbitalHessianFlag& h : kPcOrbitalHessianFlags) {
+    for (const Binary b : kBinaries) {
+      if (b == Binary::ScPseudodensity) continue;
+      std::vector<std::vector<std::string_view>> orders{{h.flag, "--pc"}};
+      if (b != Binary::PcTangent) orders.push_back({"--pc", h.flag});
+      for (const std::vector<std::string_view>& args : orders) {
+        const Result<Options> r = parse(b, args);
+        ASSERT_FALSE(r.has_value()) << binaryName(b) << " accepted " << h.flag;
+        EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << binaryName(b) << " " << h.flag;
+        EXPECT_TRUE(r.error().message.starts_with(std::format(
+            "{} does not implement {} (only nevpt2_sc_pseudodensity)", binaryName(b), h.flag)))
+            << r.error().message;
+      }
     }
   }
 }

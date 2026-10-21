@@ -180,13 +180,15 @@ struct Options {
   bool kappaFull = false;
   // nevpt2_sc_pseudodensity: --sc-hessian-kc, the SC energy's mixed
   // orbital-CI Hessian block H_kc in both its orientations (#184); one job at
-  // a time with the four above, SC only, exact digests only. It reads the
-  // sidecar when there is one (--gradgold PATH, or `<case>.gradgold`).
+  // a time with the four above, exact digests only; with --pc, PC's mixed
+  // block (#201). It reads the sidecar when there is one (--gradgold PATH,
+  // or `<case>.gradgold`).
   bool scHessianKc = false;
   // nevpt2_sc_pseudodensity: --sc-hessian-kk-int, the first term of the SC
   // energy's orbital Hessian block, the integrals' own curvature
-  // <Ehat', I''> = K1 + K2 (#154); one job at a time with the five above, SC
-  // only, exact digests only. It reads the sidecar (required).
+  // <Ehat', I''> = K1 + K2 (#154); one job at a time with the five above,
+  // exact digests only; with --pc, PC's <Ehat'_pc, I''> (#200). It reads the
+  // sidecar (required).
   bool scHessianKkInt = false;
   // nevpt2_sc_pseudodensity: --sc-hessian-kk, the second term of the same
   // block, the energy's own curvature I'^T Ehat'' I' = K3 + K4 + K5, and the
