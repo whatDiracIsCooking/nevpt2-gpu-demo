@@ -356,10 +356,13 @@ Four files chaining by **tag**, not by stage, so build them only with
 `Dockerfile.base` does `COPY pyproject.toml uv.lock` — **both must exist at the
 repo root or the base build fails**, and every other image is downstream of it.
 
-Both agents the images can carry are **opt-in and pinned** in the three GPU
-files (neither is a devcontainer feature), so each version is declared three
-times: Claude Code at `ARG CLAUDE_CODE_VERSION` (`INSTALL_CLAUDE_CODE=1`), the
-Antigravity CLI at `ARG AGY_RELEASE` + `ARG AGY_SHA512` (`INSTALL_AGY=1`, and a
-*release* id rather than a version — upstream serves only the current one).
-Bump all three copies with `devtools/claude-version.sh --apply` and
-`devtools/agy-version.sh --apply`; `doctor.sh` warns when the copies drift.
+Both agents the images can carry are **pinned** in the three GPU files
+(neither is a devcontainer feature), so each version is declared three times:
+Claude Code at `ARG CLAUDE_CODE_VERSION`, the Antigravity CLI at `ARG
+AGY_RELEASE` + `ARG AGY_SHA512` (a *release* id rather than a version —
+upstream serves only the current one). Bump all three copies with
+`devtools/claude-version.sh --apply` and `devtools/agy-version.sh --apply`;
+`doctor.sh` warns when the copies drift. **Both install by default through
+`docker/build.sh`** (`INSTALL_CLAUDE_CODE` / `INSTALL_AGY`, both `1` in
+`devtools/config.sh`, forwarded on every build); the `ARG`s themselves default
+to `0`, so a by-hand `docker build` off a GPU Dockerfile carries neither.

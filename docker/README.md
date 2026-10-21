@@ -108,21 +108,24 @@ tries to *pull* it, and fails with `pull access denied for nevpt2, repository
 does not exist`, which reads like a registry problem rather than a missing local
 build. `docker/Dockerfile.base`'s header has the rest of the reasoning.
 
-### Claude Code is opt-in, pinned, and bumped on purpose
+### Claude Code is pinned, bumped on purpose, and opt-in at the `ARG`
 
 Nothing in the build or the tests needs Claude Code; it is how the maintainer
-works in the container. So it is **off by default**: an image built with a
-plain `docker/build.sh cuda` has neither Claude Code nor Node. Opt in with
+works in the container. So **`docker/build.sh` installs it** —
+`devtools/config.sh` sets `INSTALL_CLAUDE_CODE=1`, and build.sh forwards that
+file's value on every build — while the **`ARG`'s own default stays `0`**, so
+an image built by hand straight off `docker/Dockerfile.cuda` has neither
+Claude Code nor Node. Leave it out of one build.sh build with
 
 ```bash
-INSTALL_CLAUDE_CODE=1 docker/build.sh cuda    # or set it in devtools/config.sh
+INSTALL_CLAUDE_CODE=0 docker/build.sh cuda    # or change devtools/config.sh
 ```
 
-which re-runs only the last layers of the image. The devcontainers still bind
-your host `~/.claude` (JSON cannot make a mount conditional); without the
-opt-in nothing reads it.
+Either way it re-runs only the last layers of the image. The devcontainers
+bind your host `~/.claude` regardless (JSON cannot make a mount conditional);
+with no install, nothing reads it.
 
-With the opt-in, each GPU file ends with `docker/install-claude-code.sh`: Node 22 from
+Each GPU file ends with `docker/install-claude-code.sh`: Node 22 from
 nodesource, then `npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}`,
 then a `test` that what landed is what was asked for — a typo'd dist-tag fails
 the build instead of quietly installing something else.
@@ -152,17 +155,19 @@ the version it installs: measured on this box before the change, four images
 off one lockfile carried claude 2.1.197 (×3, built over three days) and 2.1.289
 — the version was a function of build date, and nothing reported it.
 
-### The Antigravity CLI is opt-in too — and pinned by *release*, not version
+### The Antigravity CLI is pinned by *release*, not version
 
 `agy` gets the same treatment for the same reasons, one layer after Claude
-Code's, and is **off by default** for one reason more: the binary is 213MiB
-(the layer takes `nevpt2:cuda` from 14.5GB to 14.8GB).
+Code's: on in `devtools/config.sh`, so `docker/build.sh` installs it, and `0`
+in the `ARG`, so a by-hand build does not. The binary is 213MiB (the layer
+takes `nevpt2:cuda` from 14.5GB to 14.8GB), which is the one reason more to
+know how to drop it:
 
 ```bash
-INSTALL_AGY=1 docker/build.sh cuda            # or set it in devtools/config.sh
+INSTALL_AGY=0 docker/build.sh cuda            # or change devtools/config.sh
 ```
 
-With the opt-in, each GPU file runs `docker/install-agy.sh`, which installs
+Each GPU file runs `docker/install-agy.sh`, which installs
 Google's Antigravity CLI as `/usr/local/bin/agy`: download the pinned tarball,
 verify its sha512, extract the one binary, then check `agy --version` and that
 `agy` on `PATH` is the copy just installed. A 404 or a renamed archive member
@@ -209,7 +214,8 @@ its parent still gets its own.
 
 `agy` keeps its credentials in `$HOME/.gemini`. The devcontainers bind your
 host copy there, exactly as they bind `~/.claude` — see `//agy` in
-`.devcontainer/cuda/devcontainer.json`; without the opt-in nothing reads it.
+`.devcontainer/cuda/devcontainer.json`; in an image built without the CLI,
+nothing reads it.
 
 ### The `-ci` variants, and the registry
 

@@ -45,15 +45,16 @@
 # run is not the same as not being attempted.
 set -euo pipefail
 
-# OPT-IN, exactly as docker/install-claude-code.sh is. The images build and
-# test this project without any agent in them, so an outside user building the
-# container to reproduce a number should not get one. The maintainer's workflow
-# sets INSTALL_AGY=1 (devtools/config.sh, or the environment of
-# docker/build.sh).
+# OPT-IN AT THIS LAYER, exactly as docker/install-claude-code.sh is. The images
+# build and test this project without any agent in them, so a plain `docker
+# build` of a GPU Dockerfile -- an outside user reproducing a number -- gets
+# none: that ARG's default is 0. THIS project's builds get both, because
+# devtools/config.sh defaults INSTALL_AGY to 1 and docker/build.sh always
+# forwards whatever that file says.
 #
-# The binary is 213MiB, which is the other half of the default: opting out is
-# not a nicety here, it is a ~0.3GB layer (measured: nevpt2:cuda 14.5GB ->
-# 14.8GB).
+# The binary is 213MiB, which is the other half of why the ARG's default is the
+# way round it is: opting out is not a nicety here, it is a ~0.3GB layer
+# (measured: nevpt2:cuda 14.5GB -> 14.8GB).
 if [ "${INSTALL_AGY:-0}" != 1 ]; then
   echo "=== Antigravity CLI not installed (INSTALL_AGY=${INSTALL_AGY:-0}; set 1 to opt in) ==="
   # Dockerfile.combined builds ON TOP OF the `cuda` image. A `combined` built

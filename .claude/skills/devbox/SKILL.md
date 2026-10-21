@@ -166,10 +166,13 @@ and every container command refuses until it is fixed.
 
 ### Bumping the agents in the image
 
-Both are **opt-in and pinned** in each GPU `Dockerfile`, not installed by a
-devcontainer feature, so neither moves unless you move it. Claude Code is
-`ARG CLAUDE_CODE_VERSION`, installed by `docker/install-claude-code.sh`
-(`INSTALL_CLAUDE_CODE=1`):
+Both are **pinned** in each GPU `Dockerfile`, not installed by a devcontainer
+feature, so neither moves unless you move it. Both are also installed by
+default: `devtools/config.sh` sets `INSTALL_CLAUDE_CODE` and `INSTALL_AGY` to
+`1` and `docker/build.sh` forwards them, while the `ARG`s default to `0` so a
+by-hand `docker build` gets neither — drop one from a build.sh build with
+`INSTALL_AGY=0 docker/build.sh cuda`. Claude Code is `ARG
+CLAUDE_CODE_VERSION`, installed by `docker/install-claude-code.sh`:
 
 ```bash
 devtools/claude-version.sh                 # pinned / registry / installed here,
@@ -190,8 +193,8 @@ a one-line warning when the pin is behind the registry or the three files
 disagree, and `doctor.sh` says the same thing on demand.
 
 The Antigravity CLI is the same shape one layer down — `ARG AGY_RELEASE` plus
-`ARG AGY_SHA512`, installed by `docker/install-agy.sh` (`INSTALL_AGY=1`) — with
-its own script, which takes a **release id**, not a version:
+`ARG AGY_SHA512`, installed by `docker/install-agy.sh` — with its own script,
+which takes a **release id**, not a version:
 
 ```bash
 devtools/agy-version.sh                 # pinned / upstream / installed here

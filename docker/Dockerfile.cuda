@@ -107,13 +107,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # container (`printenv CLAUDE_CODE_VERSION`), not merely inferable from the
 # binary: that is what lets doctor.sh tell "pinned and installed" apart from
 # "someone npm-installed over the top".
-ARG CLAUDE_CODE_VERSION=2.1.292
+ARG CLAUDE_CODE_VERSION=2.1.306
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
-# OPT-IN: INSTALL_CLAUDE_CODE=0, the default, skips the install -- Node with
-# it, since nothing else in the image needs Node -- so building the container
-# does not install an agent you did not ask for. docker/build.sh forwards it
-# from devtools/config.sh; `INSTALL_CLAUDE_CODE=1 docker/build.sh cuda` turns
-# it on. ENV too, so doctor.sh can tell "opted out" from "missing".
+# OPT-IN AT THIS LAYER: INSTALL_CLAUDE_CODE=0, this ARG's default, skips the
+# install -- Node with it, since nothing else in the image needs Node -- so a
+# plain `docker build` of this file does not install an agent you did not ask
+# for. docker/build.sh is the other caller, and it ALWAYS forwards the value
+# from devtools/config.sh, where this project sets it to 1: a build driven by
+# build.sh carries the agent, a build driven by hand does not. Turn it off for
+# one build with `INSTALL_CLAUDE_CODE=0 docker/build.sh cuda`. ENV too, so
+# doctor.sh can tell "opted out" from "missing".
 ARG INSTALL_CLAUDE_CODE=0
 ENV INSTALL_CLAUDE_CODE=${INSTALL_CLAUDE_CODE}
 RUN --mount=type=bind,source=docker/install-claude-code.sh,target=/tmp/install-claude-code.sh \
@@ -150,11 +153,13 @@ ARG AGY_RELEASE=1.4.4-4783783166214144
 ARG AGY_SHA512=7ce149d350344c1046c7b59b6659bcc5d659f351bf3a07c6c085887d93427ceb89d927752e4ccd0844b53ffb91d33d6a49f72835ceb276c7cffdd13cfb8023b8
 ENV AGY_RELEASE=${AGY_RELEASE} \
     AGY_CLI_DISABLE_AUTO_UPDATE=1
-# OPT-IN: INSTALL_AGY=0, the default, skips the install -- 213MiB of binary
-# that nothing in the build or the tests needs -- so building the container
-# does not install an agent you did not ask for. docker/build.sh forwards it
-# from devtools/config.sh; `INSTALL_AGY=1 docker/build.sh cuda` turns it on.
-# ENV too, so doctor.sh can tell "opted out" from "missing".
+# OPT-IN AT THIS LAYER, exactly as INSTALL_CLAUDE_CODE above: INSTALL_AGY=0,
+# this ARG's default, skips the install -- 213MiB of binary that nothing in
+# the build or the tests needs -- so a plain `docker build` of this file does
+# not install an agent you did not ask for. docker/build.sh ALWAYS forwards
+# the value from devtools/config.sh, where this project sets it to 1; turn it
+# off for one build with `INSTALL_AGY=0 docker/build.sh cuda`. ENV too, so
+# doctor.sh can tell "opted out" from "missing".
 ARG INSTALL_AGY=0
 ENV INSTALL_AGY=${INSTALL_AGY}
 RUN --mount=type=bind,source=docker/install-agy.sh,target=/tmp/install-agy.sh \

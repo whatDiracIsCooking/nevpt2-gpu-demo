@@ -89,15 +89,27 @@ test -x /usr/local/cuda/bin/nvcc
 #              /usr/lib/<triplet>/libcutensor/<major>/libcutensor.so.2
 #              and NO CMake config package at all -- find_path/find_library.
 #   nvCOMP     /usr/include/libnvcomp<N>-dev-cuda-<major>/{nvcomp.h,nvcomp/…}
-#              /usr/lib/<triplet>/libnvcomp<N>-dev-cuda-<major>/libnvcomp.so
-#              -> ../libnvcomp<N>-cuda-<major>/libnvcomp.so.<N>  (the runtime)
-#              and a real CMake config package, nvcomp-config.cmake.
+#              /usr/lib/<triplet>/libnvcomp<N>-cuda-<major>/, holding the
+#              runtime .so.<N>, the dev libnvcomp.so beside it, the static
+#              archives, and a real CMake config package under cmake/nvcomp.
 #
 # The `<N>` in nvCOMP's paths is the SONAME major, not the CUDA one, so those
 # directory names change under a library bump that this file has no other
 # reason to notice. Hence: DISCOVER the paths here, then publish them at fixed
 # locations, rather than spelling today's names into Dockerfile.cuda's ENV
 # where nothing would catch them going stale.
+#
+# AND THE SHAPE ITSELF MOVES, not just the number in it. nvCOMP 5 split the two
+# packages across two directories -- libnvcomp5-dev-cuda-13/ held the dev
+# symlinks and pointed them across at ../libnvcomp5-cuda-13/ for the runtime --
+# while nvCOMP 6 MERGED them: the dev package now drops libnvcomp.so, the
+# static archives and the CMake package into the RUNTIME package's directory,
+# and leaves only update-alternatives symlinks loose at the top of
+# /usr/lib/<triplet>. So the lib-side discovery below asks for the dev
+# directory and falls back to the runtime one, and which of the two answers is
+# what tells the generations apart. Measured when nvCOMP 6.0.0.12 reached the
+# CUDA 13 repo: before the fallback existed, the -dev find came back empty and
+# every image build died here with `expected directory missing: ''`.
 #
 # The fixed shape is a /opt/nvidia/<lib>/{include,lib} prefix per library --
 # what CMake already expects, so CMAKE_PREFIX_PATH is all Dockerfile.cuda has
@@ -109,8 +121,18 @@ triplet="$(basename "$(find /usr/lib -maxdepth 1 -type d -name '*-linux-gnu' | h
 cutensor_inc="/usr/include/libcutensor/${cuda_major}"
 cutensor_lib="/usr/lib/${triplet}/libcutensor/${cuda_major}"
 nvcomp_inc="$(find /usr/include -maxdepth 1 -type d -name "libnvcomp*-dev-cuda-${cuda_major}" | head -1)"
+# The dev directory (nvCOMP 5), else the runtime one the dev package now lands
+# in (nvCOMP 6) -- see "AND THE SHAPE ITSELF MOVES" above.
 nvcomp_lib="$(find "/usr/lib/${triplet}" -maxdepth 1 -type d -name "libnvcomp*-dev-cuda-${cuda_major}" | head -1)"
-nvcomp_cfg="$(dirname "$(find /usr/lib -name 'nvcomp-config.cmake' -print -quit)")"
+if [ -z "$nvcomp_lib" ]; then
+  nvcomp_lib="$(find "/usr/lib/${triplet}" -maxdepth 1 -type d -name "libnvcomp*-cuda-${cuda_major}" | head -1)"
+fi
+# Two steps, not `dirname "$(find …)"`: dirname of nothing is `.`, which is a
+# directory, so the loop below would pass and publish a CMake package that is
+# really the working directory.
+nvcomp_cfg_file="$(find /usr/lib -name 'nvcomp-config.cmake' -print -quit)"
+[ -n "$nvcomp_cfg_file" ] || { echo "install-cuda.sh: nvcomp-config.cmake not found" >&2; exit 1; }
+nvcomp_cfg="$(dirname "$nvcomp_cfg_file")"
 
 for d in "$cutensor_inc" "$cutensor_lib" "$nvcomp_inc" "$nvcomp_lib" "$nvcomp_cfg"; do
   [ -d "$d" ] || { echo "install-cuda.sh: expected directory missing: '$d'" >&2; exit 1; }
@@ -123,13 +145,20 @@ ln -sfn "$nvcomp_inc" /opt/nvidia/nvcomp/include
 # nvcomp's own config dir is <cmake>/nvcomp, which is the name find_package
 # looks for -- link the directory itself, not its parent.
 ln -sfn "$nvcomp_cfg" /opt/nvidia/nvcomp/lib/cmake/nvcomp
-for f in "$nvcomp_lib"/*; do ln -sfn "$f" "/opt/nvidia/nvcomp/lib/$(basename "$f")"; done
+for f in "$nvcomp_lib"/*; do
+  # `cmake` is linked by name just above. On nvCOMP 6 it is a subdirectory of
+  # THIS directory, so skipping it is what keeps the loop from leaving a
+  # lib/cmake/cmake pointing back at the apt tree.
+  if [ "$(basename "$f")" = cmake ]; then continue; fi
+  ln -sfn "$f" "/opt/nvidia/nvcomp/lib/$(basename "$f")"
+done
 
 # Runtime. Neither directory is on the loader path, and cuTENSOR's .so.2 lives
 # only in its versioned directory, so without this every binary linking either
 # one would need an explicit RPATH. Same reasoning as ROCm's rocm.conf in
-# install-rocm.sh. nvCOMP's dev symlinks point INTO the runtime package's
-# directory, which is the one that has to be listed.
+# install-rocm.sh. For nvCOMP it is the RUNTIME package's directory that has to
+# be listed -- the one holding libnvcomp.so.<N> -- which is where the dev
+# symlinks point on 5 and where they live on 6.
 {
   echo "$cutensor_lib"
   find "/usr/lib/${triplet}" -maxdepth 1 -type d -name "libnvcomp*-cuda-${cuda_major}"
