@@ -29,7 +29,7 @@ sweeps, scaling and negative results live in [`performance.md`](performance.md),
         v                             v
   [5] SC energies                [5'] PC energies   (--pc)
       x^T S x, x^T K x                solve in span(S, K)
-      146 einsums over slabs          one eigensolve pair per class
+      141 einsums over slabs          one eigensolve pair per class
         |                             |
         v                             v
       normToEnergy (host)           E_t = -c sum_k y^2/(lambda+Delta)  (host)
@@ -224,7 +224,7 @@ The eight classes, in the fixed order PySCF evaluates them and
 `generate_golden.py` writes them: `Sr`, `Si`, `Sijrs`, `Sijr`, `Srsi`, `Srs`,
 `Sij`, `Sir`.
 
-### 3.1 One generic einsum, 146 call sites
+### 3.1 One generic einsum, 141 call sites
 
 The reference is a NumPy implementation of ~140 `np.einsum` calls. Rather than
 hand-deriving 140 index loops, there is **one generic device contraction
@@ -236,8 +236,11 @@ deviceEinsumAccum("ipqr,pqra,ia->i", {&h2e_v, &a17, &h1e_v}, ener, 2.0, s);
 deviceEinsumAccum("ip,pa,ia->i",     {&h1e_v, &a19, &h1e_v}, ener, 1.0, s);
 ```
 
-`src/energy/energy.cpp` holds **146** `deviceEinsum*` calls plus **10**
-`deviceTranspose*` ones. The port is therefore a mechanical, checkable
+The SC energy holds **141** `deviceEinsum*` calls plus **10**
+`deviceTranspose*` ones: 92 and 9 in `src/energy/energy.cpp` (the
+active-space intermediates both methods build from, and Sijrs), 49 and 1 in
+`src/energy/energy_sc_classes.cppm` (`nevpt2.energy:sc_classes`, the other
+seven classes and the SC-only `a17`/`a19`/`a23`/`a25`). The port is therefore a mechanical, checkable
 transcription rather than 140 opportunities for a new index bug. (How it
 was validated is "Porting the class energies", below.)
 
@@ -310,12 +313,16 @@ and frees them when the class returns:
 | `Sir` | a 2x2-block form over `dm1`/`dm2` | `a12`, `a13` |
 
 `make_a16` and `make_a22` read the `f3ac`/`f3ca` digests — they are the only
-consumers of stage 1's 4-RDM contractions. Several of these builders are
-declared in the internal partition `nevpt2.energy:shared`
-(`energy_shared.cppm`) — nothing in it is exported, so they have module
-linkage, visible to every unit that does `import :shared;` and to no importer —
-because PC reuses them verbatim (§4): `energy.cpp` and `energy_pc.cpp` both
-import it.
+consumers of stage 1's 4-RDM contractions. The builders both methods use are
+**exported** from `energy.cppm` and defined in `energy.cpp`: PC reuses them
+verbatim (§4), and the gradient (`nevpt2.gradient`) differentiates the very
+einsums they evaluate. The SC-only ones (`a17`, `a19`, `a23`, `a25`) stay in
+the internal partition `nevpt2.energy:sc_classes`
+(`energy_sc_classes.cppm`) beside the seven classes that read them. The
+internal partition `nevpt2.energy:shared` (`energy_shared.cppm`) — nothing in
+it is exported, so it has module linkage, visible to every unit that does
+`import :shared;` and to no importer — now declares only Sijrs, which PC
+reuses whole.
 
 ### 3.3 Slabs: how the external integrals arrive
 
@@ -381,8 +388,7 @@ block2's `H_D`.
 
 **So PC needs no new RDM intermediates.** It calls the *same* `make_a16`,
 `make_a7`, `make_hdm1`, `make_a3`, `make_k27`, `make_a9`, `make_a12`/`make_a13`
-that SC does — that is why they live in the `nevpt2.energy:shared`
-partition, which both `energy.cpp` and `energy_pc.cpp` import. SC's one-body `K`
+that SC does — `nevpt2.energy` exports them (§3.2). SC's one-body `K`
 entries (`a17`, `a19`, `a23`, `a25`) are **not needed**: the one-body part of
 `V|Psi_0>` enters only as its projection onto the span, `S_1 h1_t`.
 
@@ -405,9 +411,11 @@ Then `y_t = T^T x_t + t_1^T h1_t`, so **each slab is one einsum straight into
 the eigenbasis** — `pc_Sr`'s is `"ipqr,pqrk->ik"` against SC's three-operand
 `"ipqr,pqrabc,iabc->i"` — and
 `E_t = -c sum_k y_tk^2 / (lambda_k + Delta_t)` finishes on the host, exactly as
-`normToEnergy` does. `src/energy/energy_pc.cpp` needs **29**
-`deviceEinsum*` calls plus **1** `deviceTransposeAccum` for all eight
-classes.
+`normToEnergy` does. `src/energy/energy_pc.cpp` is the thin driver; the
+classes are the internal partition `nevpt2.energy:pc_classes`
+(`energy_pc_classes.cppm`, **25** `deviceEinsum*` calls) and the per-class
+solve is `nevpt2.energy:pc_solve` (`energy_pc_solve.cppm`, **6** plus **1**
+`deviceTransposeAccum`) — **31** and **1** for all eight classes.
 
 `K` is symmetrised to `(K + K^T)/2`, because `<Phi|[H_D,Phi]>` is Hermitian
 only for an exact eigenfunction and a quadratic form defines only the

@@ -53,8 +53,8 @@ orbitals changes is the **reference**: E_corr moves by tens of millihartree
 different number rather than a noisier one, which is why both kinds are worth
 committing.
 
-**What a CASSCF-orbital golden is not an input for: the gradient work.** The
-gradient derivation has a branch per reference
+**What a CASSCF-orbital golden is not an input for: the GPU's Lagrangian.**
+The gradient derivation has a branch per reference
 ([`gradient-theory.md`](gradient-theory.md), §5): on RHF orbitals the
 orbital constraint is RHF Brillouin plus the active-space selection, solved
 by CPHF; on CASSCF orbitals it is Park's Eq. 23 as written, CASSCF
@@ -62,14 +62,19 @@ stationarity, solved as one coupled CP-CASSCF system (§1.4, §2.7). The
 second branch is built **offline only**, in
 `reference_data/nevpt2_grad.py --reference casscf` (SC-NEVPT2 with PySCF's
 own source terms, or with `--pc` PC-NEVPT2 with block2's; "The CASSCF
-branch" below). Every derivative on the GPU
-implements the first branch only, so `nevpt2_demo --sc-tangent` and
-`--gradient-source` refuse a `casscf` golden
-([`gradient-theory.md`](gradient-theory.md), §1.1), as does
-`reference_data/nevpt2_numgrad.py`'s default `--reference casci` route; its
-`--reference casscf` route re-optimises every displaced state instead ("The
-numerical gradient of a CASSCF reference" below), and on
-the device the energy path is what these files exercise. One more exception
+branch" below). What the GPU computes is the part the two branches share:
+the source terms and the energy's parameter derivatives (tangents and
+Hessian blocks), taken at fixed orbitals and CI vector, which carry no
+reference-kind dependence. Those paths sit behind the source-term gate and
+**take** a `casscf` golden (`nevpt2_demo --sc-tangent` / `--gradient-source`,
+`nevpt2_sc_pseudodensity --dump-source-terms` / `--source-oracle`, and the
+Hessian flags; "The file format" below); only the Lagrangian gate refuses
+one, and no on-card path calls it yet
+([`gradient-theory.md`](gradient-theory.md), §1.1).
+`reference_data/nevpt2_numgrad.py`'s default `--reference casci` route
+refuses a `casscf` golden too; its `--reference casscf` route re-optimises
+every displaced state instead ("The numerical gradient of a CASSCF
+reference" below). One more exception
 is data, not a derivative: `--gradgold` is
 permitted with `--mo-from` (refused with `--casscf`), and writes the
 one-general-index integral arrays on the committed CASSCF orbitals, the
@@ -778,16 +783,19 @@ support. The C++ side has two gates on it. The **source-term** gate
 `y_I` are derivatives of the energy at fixed orbitals and CI vector (Park
 Eqs. 26–28, 36–38, 41–48), so `nevpt2_demo`'s `--sc-tangent` and
 `--gradient-source` and `nevpt2_sc_pseudodensity`'s `--dump-source-terms`
-and `--source-oracle` run on a `casscf` golden. The **Lagrangian** gate
+and `--source-oracle` run on a `casscf` golden, as do the SC and PC Hessian
+flags (#157, #203). The **Lagrangian** gate
 (`GoldenFile::requireLagrangianReference`, an `err_unsupported`) refuses one,
 because the Z-vector → Sylvester → CPHF chain is derived for CASCI on RHF
 orbitals — see [`gradient-theory.md`](gradient-theory.md), §1.2 and §2.2–§2.6;
-the CASSCF branch, §2.7, is not implemented yet — and
-so does `reference_data/nevpt2_numgrad.py` (`_check_reference_kind`). Both
+the CASSCF branch, §2.7, exists offline only, in `nevpt2_grad.py`; no
+on-card path calls this gate yet — and so does
+`reference_data/nevpt2_numgrad.py`'s `--reference casci` route
+(`_check_reference_kind`). Both
 demos print the kind in their header line.
 
 **Two magics, because the field is newer than most of the files.** `NEVPT2G2`
-is the layout with the field, which the three `*_casscf*` goldens are written
+is the layout with the field, which the five `*_casscf*` goldens are written
 in; `NEVPT2G1` is the layout from before it, which every committed **CASCI**
 golden is written in and which means CASCI — the only thing it could mean,
 since until the CASSCF-orbital path a golden had always been a CASCI on RHF
@@ -810,9 +818,11 @@ block2's PC all run exactly as they do on the RHF path.
 
 **The committed pairs** (regeneration commands in "Regenerating the golden
 file" above; the N2 goldens' ctest entries in [`testing.md`](testing.md),
-"The CASSCF-orbital entries"; the LiF and acrolein pair, #123, has no ctest
-entry of its own yet and is described in "LiF and acrolein on CASSCF
-orbitals" below):
+"The CASSCF-orbital entries"; the LiF and acrolein pair, #123, is described
+in "LiF and acrolein on CASSCF orbitals" below — LiF's golden has its energy
+entry, `nevpt2_lif_cas46_casscf`, and a source-term dump (#125), and
+acrolein's is read by the directional source-term oracles (#135), registered
+only where its gitignored gradient sidecar has been regenerated):
 
 | sidecar | golden | E_CASSCF | ‖g_orb‖ at `--casscf` | purity defect | macro |
 |---|---|---|---|---|---:|
@@ -985,9 +995,14 @@ refuses to write a sidecar whose state is not the one the derivation describes
 **What reads it.** `nevpt2_sc_pseudodensity --kappa-full` — the full orbital
 source term `Y_xy`, whose core, virtual and mixed blocks are exactly what the
 general-range blocks are for ([`testing.md`](testing.md), "The full orbital
-source term"). It is the only consumer, and the three `gpu` entries that run
-it are the three committed cases with a sidecar: N2 CAS(4,4), N2 CAS(8,8) and
-LiF CAS(4,6). Its first check is the sidecar against itself and the golden —
+source term"), was the first consumer; its four `gpu` entries are N2
+CAS(4,4), its CASSCF-orbital twin, N2 CAS(8,8) and LiF CAS(4,6). It is no
+longer the only one: `nevpt2_demo --gradient-source [--pc] --gradgold`, and
+`nevpt2_sc_pseudodensity`'s `--dump-source-terms`, `--source-oracle`,
+`--sc-hessian-kc`, `--sc-hessian-kk-int` and `--sc-hessian-kk` (each also
+with `--pc`) read the same sidecar, and the density-fitted flavour has its
+own readers ("The density-fitted gradient sidecar" below). Its first check is
+the sidecar against itself and the golden —
 every one of §3.3's arrays restricted to a slice the golden already holds, and
 `f`'s core/virtual diagonal against `e_core`/`e_virt`, which is (O2) seen from
 the C++ side.
@@ -1105,8 +1120,14 @@ term's forward-reverse duality"), and the density-fitted `Y` (#165):
 `B_cc`, `B_vv` and three full-range matrices to contract the general-range
 inventory, and holds the four tied arrays to what it built
 ([`gradients.md`](gradients.md), §6.2; `nevpt2_sc_pseudodensity_kappa_full_cas44_df`
-and `_cas88_df`). `nevpt2_df_demo`'s own `--gradient-source` (#162) does not
-read it: it holds the orbital energies fixed.
+and `_cas88_df`). The CAS(4,4) one is also read by the fitted dump,
+`nevpt2_sc_pseudodensity_dump_cas44_df` (#168), and by the density-fitted
+orbital and mixed Hessian entries: `--sc-hessian-kk-int` (#154) and
+`--sc-hessian-kk` (#158), and `--pc` with `--sc-hessian-kk-int`,
+`--sc-hessian-kc` and `--sc-hessian-kk` (#200–#202); the CAS(8,8) one by
+`--pc --sc-hessian-kk-int` as well. `nevpt2_df_demo`'s own
+`--gradient-source` (#162) does not read it: it holds the orbital energies
+fixed.
 
 ### The CASSCF-reference gradient sidecar
 
@@ -1183,14 +1204,21 @@ displacement. `nevpt2_numgrad.py --reference casscf` does exactly that
 gradient to an `--npz` only, so this file carries the 24 `--gradgold` arrays
 and no `grad_num`, and stays byte-identical. Permitting
 `--gradgold` to write integral arrays is not permission to difference
-committed orbitals at a displaced geometry. Nothing in the ctest tier reads
-this file yet beyond the layout contract (`golden_layout_check.py` and
-`golden_tests`' `EveryCommittedGradientSidecarLoadsAgainstItsGolden`, which
-glob every `*.gradgold`).
+committed orbitals at a displaced geometry. Beyond the layout contract
+(`golden_layout_check.py` and `golden_tests`'
+`EveryCommittedGradientSidecarLoadsAgainstItsGolden`, which glob every
+`*.gradgold`), the ctest tier reads it wherever its CASCI twin's sidecar is
+read: `nevpt2_demo --gradient-source [--pc]`, `nevpt2_sc_pseudodensity`'s
+`--kappa-full`, `--dump-source-terms [--pc]` and `--source-oracle [--pc]`
+against the full and directional oracles (#121, #160), and the orbital and
+mixed Hessian entries on this golden, SC (#157) and `--pc` (#203).
 
 **LiF and acrolein have one each since #123**, written the same way by
 their `--mo-from … --gradgold` step and under the same contract: LiF's is
-committed, acrolein's (57 MB) gitignored. Their (O2) residuals, (O1)
+committed, acrolein's (57 MB) gitignored. LiF's is read on a card by
+`nevpt2_sc_pseudodensity_dump_lif_def2svp_cas46_casscf` (#125); acrolein's,
+where regenerated, by its directional source-term oracles (#135). Their (O2)
+residuals, (O1)
 records and hashes are in "LiF and acrolein on CASSCF orbitals" below.
 
 ### The numerical gradient
@@ -1772,10 +1800,10 @@ The cost is the `kappa` sweep: one central difference of the SC-NEVPT2 energy
 per non-gauge rotation, `O(n_mo²)` of them — 937 s of acrolein's 1029 s.
 That is what makes the source terms self-contained, and it is what the GPU's
 own dump (`nevpt2_sc_pseudodensity --dump-source-terms`, read with `--source
-dump`) was meant to replace. It cannot yet: the device's `Y` and `y` each hold
-one dependence fixed that the exact energy does not, and a gradient built from
-them misses `grad_num` by orders of magnitude more than the gate allows —
-[`testing.md`](testing.md), "The GPU as the source-term provider".
+dump`) replaces. Since #87 (the orbital energies' response in `y`) and #89
+(the digests' response in `Y`) a gradient built from the dump passes the same
+gate against `grad_num` — [`testing.md`](testing.md), "The GPU as the
+source-term provider", which also keeps the record of how it failed before.
 
 **The comparison against `grad_num` is the gate, and it lives in
 [`testing.md`](testing.md), "The analytic gradient against the numerical
@@ -1882,7 +1910,8 @@ at a time, with the numbers, in [`testing.md`](testing.md),
    It converges over three decades while doing so.
 4. **`y_I` must carry the orbital energies' own CI derivative.**
    `e_core`/`e_virt` are the generalized Fock's diagonal and so are functions
-   of the active density; the device's `y_I` holds them fixed.
+   of the active density. The device's `y_I` held them fixed until #87 put
+   their response in ([`gradients.md`](gradients.md), §5.5).
 
 #### The CASSCF branch (`--reference casscf`, #122)
 
@@ -2677,7 +2706,7 @@ not used.
 | `golden/n2_ccpvdz_cas1012.nevpt2gold` | the 12-orbital **PC** case: CAS(10,12) on the same molecule (both N 1s in the core, n_det = 627k), with SC and PC fields. Exists because CAS(12,12) cannot be a PC golden. Its SC fields pass `nevpt2_demo --tiles 40` (CUDA, \|ΔE_corr\| 4e-15); its ctest entry is the PC one, `nevpt2_cas1012_pc` (`--pc --tiles 40`, `slow`) |
 | `golden/n2_ccpvdz_cas1010_df.nevpt2gold`, `golden/n2_ccpvdz_cas1212_df.nevpt2gold`, `golden/n2_ccpvtz_cas1010_df.nevpt2gold` | the **density-fitted** goldens (`--df`, aux basis `<basis>-jkfit`), the oracle for `nevpt2_df_demo`: PySCF's DF-NEVPT2 as the answer, plus the four three-index `B_*` blocks. A different reference from the conventional files (see "Density fitting" above). The cc-pVTZ one (nvirt = 48) exists for slab boundaries, not memory pressure |
 | `golden/n2_ccpvdz_cas44.nevpt2gold`, `golden/n2_ccpvdz_cas88.nevpt2gold` and their `_df` twins | the **small** cases (see "The small cases" above) |
-| `golden/n2_ccpvdz_cas44_casscf.mogold`, `golden/n2_ccpvdz_cas44_casscf.nevpt2gold` | the **CASSCF-orbital** CAS(4,4) pair: the committed converged `mo_coeff` (6.6 KB) and the golden a deterministic CASCI on it writes (`reference_kind = casscf`, `NEVPT2G2`, 0.24 MB, SC **and** PC). The `small` CASSCF entries run on it, and `test/golden`'s `GoldenCommittedCasscfTests` is the gradient paths' refusal checked against a committed file (see "The MO sidecar: committed CASSCF orbitals" above) |
+| `golden/n2_ccpvdz_cas44_casscf.mogold`, `golden/n2_ccpvdz_cas44_casscf.nevpt2gold` | the **CASSCF-orbital** CAS(4,4) pair: the committed converged `mo_coeff` (6.6 KB) and the golden a deterministic CASCI on it writes (`reference_kind = casscf`, `NEVPT2G2`, 0.24 MB, SC **and** PC). The `small` CASSCF entries run on it, and `test/golden`'s `GoldenCommittedCasscfTests` checks the two reference-kind gates split on a committed file — the source-term gate passing it, the Lagrangian gate refusing it (see "The MO sidecar: committed CASSCF orbitals" above) |
 | `golden/n2_ccpvdz_cas1010_casscf.mogold`, `golden/n2_ccpvdz_cas1010_casscf.nevpt2gold` | the same at the **production size**, CAS(10,10) (1.13 MB, SC and PC; `--tiles 3`). Its sidecar's optimisation takes 16 macro iterations and its golden ~2 min to rebuild, nearly all of it block2's dense 4-RDM |
 | `golden/n2_ccpvdz_cas44_casscf_df.mogold`, `golden/n2_ccpvdz_cas44_casscf_df.nevpt2gold` | the **density-fitted** CASSCF-orbital case, `nevpt2_df_demo`'s CASSCF reference (0.47 MB, SC and PC): fitted throughout, the orbital optimisation included, so the aux basis is part of the sidecar's fingerprint |
 | `golden/n2_ccpvdz_cas44.gradgold`, `golden/n2_ccpvdz_cas88.gradgold` | the **gradient sidecars** for those two cases: the general-range MO-integral blocks an analytic gradient reads, plus the full-range Fock matrices and `mo_coeff` (see "The gradient sidecar" above). Separate files, so the goldens beside them are untouched. `test/golden/gradgold_tests.cpp` round-trips the reader and checks the CAS(4,4) one against the golden beside it. Neither holds a `grad_num`: they stay the 24 arrays `--gradgold` writes, and CAS(4,4)'s numerical gradient goes to an `--npz` instead — `nevpt2_numgrad.py` refuses the in-place write for that case rather than move these bytes ([`testing.md`](testing.md), "The analytic gradient against the numerical one") |

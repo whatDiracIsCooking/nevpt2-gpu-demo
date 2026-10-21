@@ -43,9 +43,10 @@ you try to run it on your own system.
   is too large to commit and has to be regenerated. Two more non-N₂ cases are
   committed for the gradient work: LiF CAS(4,6) and acrolein CAS(6,5), both
   def2-SVP (LiF with no PC reference — see
-  [`docs/reference-data.md`](docs/reference-data.md)). Three of the N₂ cases —
-  CAS(4,4), CAS(10,10) and a DF CAS(4,4) — are committed a second time on
-  converged CASSCF orbitals (next bullet). Anything else is untested.
+  [`docs/reference-data.md`](docs/reference-data.md)). Five cases — N₂
+  CAS(4,4), CAS(10,10) and a DF CAS(4,4), LiF and acrolein — are committed a
+  second time on converged CASSCF orbitals (next bullet). Anything else is
+  untested.
 - **The CI vector is read in, and so are `dm1`/`dm2`.** The GPU builds the
   3-RDM and the 4-RDM intermediates. A real CASSCF code produces the 1- and
   2-RDMs cheaply, and building them here as dense string-algebra operators
@@ -56,9 +57,10 @@ you try to run it on your own system.
 - **Every golden's state is a CASCI diagonalisation, never a fresh CASSCF in
   the regeneration chain** — that is what keeps it reproducible to the last
   bit. Which *orbitals* it runs on is recorded in the file: most committed
-  goldens are a CASCI on RHF orbitals, and three are a CASCI on **converged
+  goldens are a CASCI on RHF orbitals, and five are a CASCI on **converged
   CASSCF orbitals** committed beside them in an MO sidecar (N₂/cc-pVDZ
-  CAS(4,4), CAS(10,10), and a DF CAS(4,4)), so the energy path has
+  CAS(4,4), CAS(10,10) and a DF CAS(4,4), LiF CAS(4,6) and acrolein
+  CAS(6,5)), so the energy path has
   CASSCF-orbital references as well. The optimiser runs once, offline, into
   that sidecar; regenerating the golden from it is deterministic
   (docs/reference-data.md, "What "CASSCF input" means here, and why the golden state is CASCI").
@@ -268,6 +270,7 @@ binary's:
 | `--sc-tangent` | **both demos**: instead of the golden comparison, differentiate the SC total with respect to the CI vector and check that tangent against the class norms' exact affine increment, Euler's identity and a central finite difference of the energy itself. Same digest restriction as `--rdm-tangent`, no `--pc` path, and no `--profile` (it prints no profile tables) |
 | `--gradient-source` | **both demos**: instead of the golden comparison, assemble the SC-NEVPT2 CI source term `y_I = dE/dc_I` (Park Eq. 48) in reverse mode and check it against the forward tangent by duality — `<u, y> = Edot(u)`, exactly, for several seeded directions and for the state itself, plus the full Jacobian column by column where the determinant space is small enough. With `--pc` (integral-direct demo only), the same for PC-NEVPT2's `y_I`: the PC solve's adjoint against its tangent (#74). On the DF demo the orbital energies are held fixed and the PASS line says so. Same digest restriction as `--rdm-tangent`, and no `--profile`; not with `--sc-tangent`, nor (DF demo) with `--check-blocks` |
 | `--sc-hessian` | **integral-direct demo only** (#153): instead of the golden comparison, take the SC total's *second* directional derivative `Eddot(u, v)` with respect to the CI vector, at the golden's fixed orbital energies, and check it against Euler's identity at second order (`Eddot(c, u) = Edot(u)` on the three homogeneous classes), the class norms' exact second-order increment and one central finite difference of `Edot`. Its three-argument tangent RDM build needs more tiles than `--rdm-tangent`'s. Same digest restriction as `--rdm-tangent`, no `--pc` path, no `--profile`, and not with `--sc-tangent` or `--gradient-source` |
+| `--sc-hessian-vector` | **integral-direct demo only** (#156): instead of the golden comparison, build the vector `H_cc u` (the CI block of the SC total's Hessian, by reverse over forward) and check it against `--sc-hessian`'s `Eddot` by duality and against a finite difference of `y`, at the golden's fixed orbital energies. Same digest restriction as `--rdm-tangent`, no `--pc` path, no `--profile`, and not with `--sc-tangent`, `--gradient-source` or `--sc-hessian` |
 | `--batch N` | **DF demo only**: slab length along each integral block's batch index (default 8; `0` = one slab per block; >= 0). A memory lever |
 | `--check-blocks` | **DF demo only**: also compare every DF-built integral block against the file's four-index arrays |
 

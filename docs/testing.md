@@ -123,9 +123,12 @@ and turned it red on `main`. A C++ file that reads a format other than the three
 named, with its reason, in the check's `CPP_NON_GOLDEN_READERS`; it may open a
 file but still fails the scan on a seek or a golden magic.
 
-Measured (no card; the 15 committed goldens — 12 `G1`, 3 `G2` — 3 gradient
-sidecars and 3 MO sidecars): 1.1 s wall, `PASS:`. A scratch field added to
-the `G2` header table fails it on all three `G2` goldens (their array tables
+Measured (no card, 2026-10-21; the 17 committed goldens — 12 `G1`, 5 `G2` —
+7 gradient sidecars — 5 `D1`, 2 `F1` — 5 MO sidecars and 14 source-term
+oracles — 3 `S1`, 2 `P1`, 5 `SD`, 4 `PD`): 1.2 s wall, `PASS:`. The negative
+controls below were run when only the three N2 `G2` goldens were committed: a
+scratch field added to the `G2` header table fails it on all three `G2`
+goldens (their array tables
 misread: a non-ASCII array name) and on the "both layouts present" check; a
 field added to `write_golden` alone fails the three `G2` byte round trips and
 both freshly written goldens; a hand-rolled `f.seek(52)` added to a script
@@ -182,6 +185,25 @@ What they are, all on synthetic inputs, no PySCF solve, no card, no network:
   block. The one exception to "no solve": each refusal case runs N2's RHF
   first, because the fingerprint is checked after the RHF and before the
   CASCI.
+- **`test_cp_casscf.py`** — `nevpt2_grad.py --reference casscf`'s dense
+  CP-CASSCF solve, on the committed N2 CAS(4,4) CASSCF state rebuilt through
+  `--mo-from` (a few seconds of CPU, the second exception to "no solve"). The
+  Hessian-vector product is the Jacobian of `gen_g_hop`'s own gradient, and
+  the check fails on a scaled operator or one with its orbital–CI coupling
+  dropped; the solve's basis is orthonormal in sector and orthogonal to `c`;
+  the dense operator is symmetric and positive. A PC or SC dump is taken in
+  its own basis, a `grad_num` written for the other reference is refused,
+  and `--energy-ordered`, `--edot-check` with a dump, and `--mo-from` /
+  `--cp-solve` on the CASCI branch are refused.
+- **`test_numgrad_casscf.py`** — `nevpt2_numgrad.py --reference casscf`'s
+  own logic, synthetic only. The continuity guard trips on each signal at its
+  threshold (written out, as in `test_refusal_guards.py`) and on an
+  unevaluable one, and names every refused state; the overlap signals are
+  blind to the active gauge but see a swapped active orbital and a root flip.
+  The reference kind is refused both ways, the displacement helpers
+  round-trip to the bit, `--pc-states` differences with the sweep's stencil
+  and refuses a guard-refused state, an incomplete stencil or another case,
+  and the flag combinations `main` refuses are refused.
 - **`test_pc_on_states.py`** (#138) — the plumbing from a CASSCF sweep's
   kept states to the GPU's PC energies. `golden_format.read_states_manifest`
   splits kept states from tripped or refused ones. It refuses a doubled
@@ -205,6 +227,20 @@ What they are, all on synthetic inputs, no PySCF solve, no card, no network:
   `--df --reference casscf` and bare `--auxbasis` flags. The committed
   CAS(4,4) `_df` sidecar carries its four `grad_num*` arrays after the
   twelve, read through `golden_format` only.
+- **`test_grad_df.py`** (#166) — `nevpt2_grad.py --df`, on the committed
+  N2 CAS(4,4) state (a few seconds of CPU). The fitted state is
+  `golden/n2_ccpvdz_cas44_df`'s and visibly not the conventional one's;
+  every `Functional`, at the reference and at a displaced geometry, runs on
+  fitted integrals; a dump of the other flavour is refused by its
+  fingerprint; and `--df` with `--pc`, `--reference casscf`, `--casci-only`
+  or `--grad-num`, and a bare `--auxbasis`, are refused before any SCF.
+- **`test_pc_null_mode_probe.py`** (#186) — `pc_null_mode_probe.py`'s
+  algebra, on a synthetic Gram family built with PC's structure: `S`'s rank
+  is constant while its null space rotates, `K` annihilates it at the base
+  point only, `b` stays in `S`'s range. The second-order lift sees a rank
+  rise; the restricted inverse's first derivative needs its third term off
+  the eigenstate, and its second derivative needs the rotation terms
+  ([`pc-nevpt2.md`](pc-nevpt2.md), "What the cut drops, and how it moves").
 - **`test_sc_empty_perturber_probe.py`** — `sc_empty_perturber_probe.py`'s
   algebra, on a synthetic tuple family (random positive semi-definite metric,
   random Dyall block, first-order vectors). The four-point mixed difference
@@ -570,9 +606,14 @@ energies ("The CI source term's forward-reverse duality"), but not on the
 CASSCF golden, and it takes neither `--dump-source-terms` nor
 `--source-oracle` (the `nevpt2.cli:binary_flags` table refuses them). The
 two small `_df` cases do carry a density-fitted `.gradgold` since #164
-(reference-data.md, "The density-fitted gradient sidecar"), which only
-`nevpt2_demo`'s `nevpt2_gradient_source_cas44_df` reads so far; no `_df`
-`.srcgold` exists for either reference kind.
+(reference-data.md, "The density-fitted gradient sidecar"), which
+`nevpt2_demo`'s `nevpt2_gradient_source_cas44_df` reads, and so do
+`nevpt2_sc_pseudodensity`'s fitted entries: `_kappa_full_cas44_df` and
+`_cas88_df`, `_dump_cas44_df`, `_cas44_df_sc_hessian_kk_int`,
+`_cas44_df_sc_hessian_kk`, `_cas44_df_pc_hessian_kc`,
+`_cas44_df_pc_hessian_kk`, and `_cas44_df_pc_hessian_kk_int` and
+`_cas88_df_pc_hessian_kk_int`; no `_df` `.srcgold` exists for either
+reference kind.
 
 ## The SC pseudodensity identities
 
@@ -616,10 +657,11 @@ card-free.
 `nevpt2_cas44_sc_tangent` and `nevpt2_cas88_sc_tangent` (`gpu`; the CAS(4,4)
 one `small`) run `nevpt2_demo --golden <case> --tiles 3 --sc-tangent` and
 match `PASS: the SC tangent matches Euler`. They are **the SC energy
-stage's own finite difference, and a one-time one** — the golden tier has
-three in all, and they are the three conventions no identity can pin
-(`docs/gradients.md`, §2): this one, the `--kappa-act` entries' third number
-(the device kappa action against the exponential map, below) and the PC
+stage's own finite difference, and a one-time one** — one of the golden
+tier's first-order ladders, each pinning a convention no identity can
+(`docs/gradients.md`, §1.2): this one, the `--kappa-act` entries' third
+number (the device kappa action against the exponential map, below),
+`--kappa-full`'s core, virtual and digest-term differences, and the PC
 tangent's (a derivative of a solve, which has no identity at all). One order
 up, `--sc-hessian` adds the Hessian's own, a difference of `Edot`
 itself ("The SC Hessian's finite-difference cross-check", below), and
@@ -631,8 +673,11 @@ fixed-pseudodensity pairing along `exp(s u + t v)` against the orbital
 block's integral curvature ("The orbital block's integral curvature",
 below), and `--sc-hessian-kk` Richardson-extrapolated second
 differences of the SC total itself along the same family against the
-whole orbital block ("The orbital block's sandwich", below). It
-validates `energiesTangentDevice` (`nevpt2.energy`'s `:sc_tangent`
+whole orbital block ("The orbital block's sandwich", below); PC has the
+same five ("The PC Hessian against a finite difference of the three-term
+tangent", "The PC Hessian-vector product's checks", "PC's mixed Hessian
+block's checks", "PC's orbital curvature" and "PC's orbital block's
+sandwich", below). It validates `energiesTangentDevice` (`nevpt2.energy`'s `:sc_tangent`
 partition) so that
 every later check of the reverse-mode assembly can be an exact dot-product
 identity against the tangent at this tree's usual 1e-7, with no step size
@@ -4818,10 +4863,11 @@ uv run python reference_data/generate_golden.py --ncas 8 --nelecas 8 --name n2_c
 uv run python reference_data/generate_golden.py --ncas 8 --nelecas 8 --df --name n2_ccpvdz_cas88_df
 ```
 
-The two conventional cases also carry a gradient sidecar, which the committed
-commands add with `--gradgold`
-([`reference-data.md`](reference-data.md), "The gradient sidecar"); the flag
-writes a separate `*.gradgold` file and leaves these goldens' bytes alone.
+All four carry a gradient sidecar, which the committed commands add with
+`--gradgold` ([`reference-data.md`](reference-data.md), "The gradient
+sidecar"; the two DF ones are `NEVPT2F1` since #164, "The density-fitted
+gradient sidecar"); the flag writes a separate `*.gradgold` file and leaves
+these goldens' bytes alone.
 
 | case | ncore | n_det | E_corr (conventional / DF) |
 |---|---:|---:|---|
@@ -4856,15 +4902,21 @@ fastest smoke case, and every path variant runs on CAS(8,8):
 | `nevpt2_cas44_sc_hessian` | `--sc-hessian`: the three-argument tangent RDM build (three `L2`/`R` blocks per tile) and the SC energy's second derivative over four RDM sets, against Euler at second order, the norms' second-order increment and a finite difference of `Edot` ("The SC Hessian's finite-difference cross-check", below). `nevpt2_cas88_sc_hessian` runs the same at CAS(8,8) and is **not** `small` |
 | `nevpt2_cas44_sc_hessian_vector` | `--sc-hessian-vector`: the gradient walk carrying a CI direction (a second set of block tangents and accumulators per class, swept beside the plain ones), three sigma calls, and `H_cc` materialised over 36 Hessian-vector products against as many three-argument builds ("The SC Hessian-vector product's checks", above). `nevpt2_cas88_sc_hessian_vector` runs the duality and the difference at CAS(8,8) and is **not** `small` |
 | `nevpt2_sc_pseudodensity_cas44`, `nevpt2_sc_pseudodensity_cas88` | the SC gradient's pseudodensity assembly and its identities ("The SC pseudodensity identities", above) |
+| `nevpt2_sc_pseudodensity_kappa_cas44` | `--kappa-act`: the active-rotation source term's adjoint against its tangent and the device kappa action against the exponential map ("The active-rotation source term", above) |
+| `nevpt2_sc_pseudodensity_cas44_df`, `nevpt2_sc_pseudodensity_kappa_cas44_df` | the identities and `--kappa-act` on the **density-fitted** golden, its four-index blocks read unchanged (#165; "The density-fitted orbital source term", above) |
 | `nevpt2_sc_pseudodensity_cas44_sc_hessian_kc` | `--sc-hessian-kc`: the gradient walk carrying a mixed direction (an orbital `w` with its digests' tangent merged, a CI `u`'s tangent blocks and the mixed blocks; or the walk's tangent along `w` with three sweeps more per class), the tangent RDM build at `h2e'[w]`, the sigma calls at `h2e'[w]`, and 36 columns ("The SC mixed Hessian block's checks", above). `nevpt2_sc_pseudodensity_cas88_sc_hessian_kc` runs the same at CAS(8,8) less the columns and is **not** `small` |
 | `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk_int`, `nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk_int` | `--sc-hessian-kk-int`: the gradient walk over dotted input sets (whole-block second-order inputs, four per pair), their generators — the promotion rule at a symmetric matrix with the traced pairs restored, the composition, and on the fitted case the three-index jets over the whole `B` — the digests' transpose and a plain RDM build per term per pair, and the ladders' pairings ("The orbital block's integral curvature", above). `nevpt2_sc_pseudodensity_cas88_sc_hessian_kk_int` runs the same at CAS(8,8) and is **not** `small` |
 | `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk`, `nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk` | `--sc-hessian-kk`: the gradient walk carrying two orbital directions with their digests' tangents merged (two tangent block sets per class, the cross tables, and the pseudodensities' tangent along one of them), one plain RDM build per direction, the curvature's walks, `energiesHessianDevice` at the digests' tangents, and the ladders' corner energies, each with its RDM build ("The orbital block's sandwich", above). `nevpt2_sc_pseudodensity_cas88_sc_hessian_kk` runs the same at CAS(8,8) and is **not** `small` |
 | `nevpt2_pc_tangent_cas44`, `nevpt2_pc_tangent_cas88` | the PC tangent: a second solve per class, the tangent slab einsums and the `(m, m)` blocks' GEMMs, plus ten RDM builds and PC stages per entry ("The PC tangent against a finite difference", above) |
 | `nevpt2_pc_hessian_cas44` | the PC Hessian: the dropped eigenvectors kept from the solve, their `(d, nd)` projections and slab einsums, the three-argument RDM build and five more tangent builds ("The PC Hessian against a finite difference of the three-term tangent", above) |
 | `nevpt2_pc_hessian_vector_cas44` | the PC Hessian-vector product: the PC adjoint walk carrying a CI direction (the dropped eigenvectors, the tangent slab einsums against `T_u`, the `(d, nd)` bar accumulators and their sandwiches, a second sweep per class), per-class sigma calls, four Hessian-vector products, the three-term `y` at eight displaced states, and four `pcHessianDevice` runs for the duality ("The PC Hessian-vector product's checks", above) |
-| `nevpt2_cas44_casscf_sc_hessian`, `nevpt2_cas44_casscf_sc_hessian_vector`, `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kc`, `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kk_int`, `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kk`, `nevpt2_pc_hessian_cas44_casscf`, `nevpt2_pc_hessian_vector_cas44_casscf` | the seven Hessian flags on **CASSCF orbitals** (#157; "The Hessian on CASSCF orbitals", above), the three orbital flags reading the CASSCF sidecar. Their CASCI twins' shape |
+| `nevpt2_sc_pseudodensity_cas44_pc_hessian_kk_int`, `nevpt2_sc_pseudodensity_cas44_df_pc_hessian_kk_int` | `--pc --sc-hessian-kk-int`: PC's fixed-pseudodensity pairing on the orbital block's dotted inputs, PC's first-order source term gated first (#200; "PC's orbital curvature", above). No sanitizer run recorded yet |
+| `nevpt2_sc_pseudodensity_cas44_pc_hessian_kc`, `nevpt2_sc_pseudodensity_cas44_df_pc_hessian_kc` | `--pc --sc-hessian-kc`: PC's mixed block `Eddot_kc(w, u)` and `H_kc^T w` (#201; "PC's mixed Hessian block's checks", above). No sanitizer run recorded yet |
+| `nevpt2_sc_pseudodensity_cas44_pc_hessian_kk`, `nevpt2_sc_pseudodensity_cas44_df_pc_hessian_kk` | `--pc --sc-hessian-kk`: PC's sandwich and the assembled `Eddot_kk` (#202; "PC's orbital block's sandwich", above). No sanitizer run recorded yet |
+| `nevpt2_cas44_casscf_sc_hessian`, `nevpt2_cas44_casscf_sc_hessian_vector`, `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kc`, `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kk_int`, `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kk`, `nevpt2_pc_hessian_cas44_casscf`, `nevpt2_pc_hessian_vector_cas44_casscf`, `nevpt2_sc_pseudodensity_cas44_casscf_pc_hessian_kc`, `nevpt2_sc_pseudodensity_cas44_casscf_pc_hessian_kk_int`, `nevpt2_sc_pseudodensity_cas44_casscf_pc_hessian_kk` | the seven Hessian flags on **CASSCF orbitals** (#157), and the three orbital ones again with `--pc` (#203; "The Hessian on CASSCF orbitals", above), the orbital flags reading the CASSCF sidecar. Their CASCI twins' shape; the three `--pc` ones with no sanitizer run recorded yet |
 | `nevpt2_cas44_casscf`, `nevpt2_cas44_casscf_pc`, `nevpt2_df_cas44_casscf`, `nevpt2_df_cas44_casscf_pc` | the same four paths on **CASSCF orbitals** — a `NEVPT2G2` golden whose `reference_kind` is CASSCF ("The CASSCF-orbital entries", above). Same CAS(4,4) shape, so the same cost |
 | `nevpt2_cas44_casscf_sc_tangent`, `nevpt2_sc_pseudodensity_kappa_cas44_casscf` | the two source-term canaries on **CASSCF orbitals** (`--sc-tangent`, `--kappa-act`; "The source terms on CASSCF orbitals: the wave-0 canary", above). Their CASCI twins' cost |
+| `nevpt2_gradient_source_cas44`, `nevpt2_gradient_source_cas88`, `nevpt2_gradient_source_pc_cas44`, `nevpt2_gradient_source_pc_cas88` | `--gradient-source`, SC and PC: the CI source term `y_I` against the forward tangent by the duality, with the case's sidecar ("The CI source term's forward-reverse duality", above) |
 | `nevpt2_gradient_source_cas44_casscf`, `nevpt2_gradient_source_pc_cas44_casscf` | the SC and PC CI source terms' duality on **CASSCF orbitals**, with the CASSCF sidecar ("The source terms on CASSCF orbitals, measured", above). Their CASCI twins' cost |
 | `nevpt2_gradient_source_cas44_df` | the SC CI source term's duality on the **density-fitted** CAS(4,4) golden with its density-fitted sidecar (#164; "The CI source term's forward-reverse duality", above). Its CASCI twin's shape; not yet run under any sanitizer preset |
 | `nevpt2_df_gradient_source_cas44`, `nevpt2_df_gradient_source_cas88`, `nevpt2_df_cas44_sc_tangent` | the CI source term's duality and the SC tangent over **density-fitted** slabs (#162): the gradient walk and the tangent on owning, freed-per-slab DF slabs ("The CI source term's forward-reverse duality", above). Not yet measured under any sanitizer preset |

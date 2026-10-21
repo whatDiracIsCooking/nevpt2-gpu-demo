@@ -38,8 +38,10 @@ once:
 
 **Both branches' Z-vector solves are offline Python only**
 ([`gradients.md`](gradients.md), §1): the CASCI branch's, and the CASSCF
-branch's coupled system (`nevpt2_grad.py --reference casscf`). Every
-derivative path on the GPU refuses a `casscf` golden (§1.1).
+branch's coupled system (`nevpt2_grad.py --reference casscf`). What the GPU
+computes — source terms and the parameter Hessian — carries no reference-kind
+dependence and takes either kind of golden; only the Lagrangian gate, which no
+GPU path reaches yet, refuses a `casscf` one (§1.1).
 
 This document is **derivation only**. It describes no code and names no file
 that does not yet exist; what gets built, and how it is checked, belongs in the
@@ -1338,7 +1340,7 @@ validation rule stand as written.
 | What can make the derivative ill-defined? | The selection: a reordering or a lost point group puts a kink in the energy; a small gap across an active-space boundary makes the selection multipliers large (§4.1–§4.2). | Not a selection. A near-singular CASSCF Hessian (§2.7), and a displaced optimisation landing on a different stationary branch (§4.4). |
 | How is numerical validation set up? | In-plane displacements of a planar `Cs` molecule, refusing any displacement whose detected point group changes; out-of-plane components checked against zero instead (§4.3). | The same rule (§4.3). |
 | Does Park's SC non-invariance apply? | Yes, through `z^c` (§4.4). | Yes, identically: it is a property of the SC functional, not of the reference (§4.4). |
-| Is it implemented? | The source terms in `src/`; the Z-vector solve offline only ([`gradients.md`](gradients.md), §1). | The coupled solve offline only (`nevpt2_grad.py --reference casscf`, [`gradients.md`](gradients.md), §1); every derivative path in the tree refuses a `casscf` golden (§1.1). |
+| Is it implemented? | The source terms in `src/`; the Z-vector solve offline only ([`gradients.md`](gradients.md), §1). | The coupled solve offline only (`nevpt2_grad.py --reference casscf`, [`gradients.md`](gradients.md), §1); the source terms and parameter Hessian in `src/` take a `casscf` golden, and the Lagrangian gate refuses one (§1.1). |
 
 ## References
 

@@ -6,7 +6,9 @@ each of the two references a golden can carry (CASCI on RHF orbitals, and on
 CASSCF orbitals), their constraints, Z-vector equations and solve orders, the
 integral inventory they share — is [`gradient-theory.md`](gradient-theory.md);
 this document describes the **code**, and cites that one rather than
-restating it. All of the code is on the CASCI branch.
+restating it. The code in `src/` is the part the two branches share — source
+terms and the parameter Hessian, which take either kind of golden (§1, §1.1);
+each branch's Lagrangian solve is offline Python (§1).
 
 Like [`architecture.md`](architecture.md), it quotes **no measured numbers**.
 Every tolerance, residual, plateau and timing lives in
@@ -145,8 +147,8 @@ which classes, and why the two sets differ, is in §4.2 and §4.3. The RDMs'
 own tangents obey it too (a form quadratic in `c` has tangent `2 x` along
 `c`), which is what `--rdm-tangent` checks against the plain build.
 
-**Where a finite difference is still unavoidable: three places in the golden
-tier, and no more.** An identity can only check a path against *itself*; a
+**Where a finite difference is still unavoidable: one ladder per shared
+convention, and no more.** An identity can only check a path against *itself*; a
 convention shared by both modes cancels and stays invisible. So each shared
 convention is pinned once, by differencing the unmodified energy stage:
 
@@ -154,12 +156,18 @@ convention is pinned once, by differencing the unmodified energy stage:
 |---|---|
 | `nevpt2_demo --sc-tangent` | that `energiesTangentDevice` is the derivative of `energiesDevice` at all. Run once, to license every later dot-product identity against the tangent |
 | `nevpt2_sc_pseudodensity --kappa-act`'s third number | the device kappa action against `nevpt2.kappa_rotation`'s exponential map. The adjoint and the tangent *share* that convention, so they cannot check it |
+| `nevpt2_sc_pseudodensity --kappa-full` | the core and virtual promotion rules against `nevpt2.kappa_rotation`'s exponential map, by differencing the energy along a core–core and a virtual–virtual rotation, as `--kappa-act` pins the active block; and the digests' own orbital term (§6) against its own difference along an active direction |
 | `nevpt2_pc_tangent` | the PC tangent, which differentiates a **solve** and has no algebraic identity short of differentiating the eigendecomposition — exactly what that code avoids (§4.3) |
 | `nevpt2_demo --sc-hessian` | one order up (#153): that `energiesHessianDevice`'s `Eddot(u, v)` is the derivative of `Edot(u)` at all — a difference of `energiesTangentDevice` itself ([`hessian-theory.md`](hessian-theory.md), §9) |
 | `nevpt2_demo --sc-hessian-vector` | the vector `H_cc u` against a difference of the GPU's own `y`, the orbital-energy mode matched on both legs (#156). Not a convention the duality leaves open — `Eddot`'s difference already licenses what the duality holds `H_cc u` to — but the vector against the reverse walk directly ([`hessian-theory.md`](hessian-theory.md), §9) |
 | `nevpt2_sc_pseudodensity --sc-hessian-kc` | the mixed block `H_kc^T w` against a difference of the GPU's own `y` along `exp(s w)`, dotted with `u` (#184): the one check that sees the orbital energies' mixed response C5, which the duality's two sides share and Euler runs without ([`hessian-theory.md`](hessian-theory.md), §5.5) |
 | `nevpt2_sc_pseudodensity --sc-hessian-kk-int` | the orbital block's integral curvature `<Ehat', I''[u, v]>` against a second difference of the fixed-pseudodensity pairing along `exp(s u + t v)`, the displaced blocks rotated on the host (#154): the one check that sees an omitted or mis-promoted K2, which the duality's two modes would share ([`hessian-theory.md`](hessian-theory.md), §5.4) |
 | `nevpt2_sc_pseudodensity --sc-hessian-kk` | the SC total itself differenced along `exp(s u + t v)`, the digests rebuilt at every corner, against `Eddot_kk`, and less the fixed-pseudodensity pairing against the sandwich alone, both Richardson-extrapolated (#158): the one check that sees a term both of the sandwich's modes omit ([`hessian-theory.md`](hessian-theory.md), §5.6 is what it found) |
+| `nevpt2_pc_tangent --pc-hessian` | PC's `Eddot(u, v)` against a difference of `Edot(v)` (#152), SC's `--sc-hessian` twin: that the solve differentiated twice, rotation terms of the turning null space included, is the derivative of the PC tangent at all ([`hessian-theory.md`](hessian-theory.md), §6.2) |
+| `nevpt2_pc_tangent --pc-hessian-vector` | PC's `H_cc u` against a per-class difference of the three-term `y` (#155). Not redundant, unlike SC's: the duality against `pcHessianDevice` cannot see §6.2's rotation terms, because both sides share the blocks they are built from ([`hessian-theory.md`](hessian-theory.md), §9) |
+| `nevpt2_sc_pseudodensity --pc --sc-hessian-kk-int` | #154's ladders on PC's fixed-pseudodensity pairing `<Ehat'_pc, I''>` (#200) |
+| `nevpt2_sc_pseudodensity --pc --sc-hessian-kc` | PC's `H_kc^T w` against per-class differences of the three-term `y` along `exp(s w)` (#201) |
+| `nevpt2_sc_pseudodensity --pc --sc-hessian-kk` | #158's ladders of the total, on the PC total, against PC's `Eddot_kk` (#202) |
 
 Each is a Richardson table, judged on its *shape* — a run of halvings whose
 error falls fourfold — rather than on any single step, because the RDM
@@ -171,7 +179,7 @@ and "The active-rotation source term", and — for PC, where the rest of PC's
 numbers live — in [`pc-nevpt2.md`](pc-nevpt2.md), "The tangent with respect
 to the CI vector" and, for the gate values and wall times of the PC entries
 themselves, [`testing.md`](testing.md), "The PC tangent against a finite
-difference". The unit tier differences more than those three — each sigma
+difference". The unit tier differences more than these — each sigma
 vector against a host construction, and the tangent RDM build against the
 plain device build, both card-side — but they are component checks, not the
 gradient path end to end.
@@ -345,8 +353,10 @@ the energy stage already runs, including its vanishing-norm guard. Its three
 derivatives are Park Eqs. 36–38 (`P_k = dE/dN_k`, `Q_k = dE/dH_k`,
 `R_k = dE/dDelta_k`), and the identity `P_k N_k + Q_k H_k = E_k` (Eq. 40) is
 what every assembled pseudodensity is checked against. `R_k` is the
-multiplier of an orbital-energy sum; nothing consumes it yet
-([`gradient-theory.md`](gradient-theory.md), §2.3 says what will).
+multiplier of an orbital-energy sum; the reverse walk contracts it against
+the orbital energies' response (`deltaAdjointInto`) in `y_I` (§5.5), PC's
+classes (§5.6) and the full orbital source term (§6), and the tangent side
+does the same through `normToEnergyDeltaTangent`.
 
 ### 5.2 One routine differentiates every class
 
@@ -1025,6 +1035,11 @@ its own, and each prints one `PASS:` line a ctest entry matches
 | `nevpt2_sc_pseudodensity --source-oracle PATH` | the dump's two terms checked against an **independent** provider: PySCF's exact `A = Y − Y^T` and `P y`, committed as `golden/<case>.srcgold` for N2 CAS(4,4) and LiF (`reference_data/sc_source_oracle.py`), compared block by block. Every block must meet the measured tolerance: `source_compare.cppm`'s `kKnownGaps`, which pinned the §6 digest omission's blocks until #89, is empty (docs/testing.md, "The SC source terms against PySCF's, on a card"). Refused on a `*_df` golden: there is no fitted oracle (§6.2) |
 | `nevpt2_sc_pseudodensity --pc --dump-source-terms PATH` / `--pc --source-oracle PATH` | the same two jobs for PC-NEVPT2's `Y` and `y` (§5.6, §6.1, #74): the dump marked `pc`, its four checks plus a fifth — the PC integral halves' duality on the six directions — and the oracle against block2's `golden/n2_ccpvdz_cas44_pc.srcgold`. Both require the golden's PC fields and first hold the PC energy to them |
 | `nevpt2_pc_tangent` | the PC tangent: Euler, and a Richardson-verified central difference. `--fd-steps` and `--fd-start-pow` set the sweep |
+| `nevpt2_pc_tangent --pc-hessian` | PC's CI block, the scalar `Eddot(u, v)` (#152; [`hessian-theory.md`](hessian-theory.md), §6.1–§6.2) at fixed orbital energies, the rotation terms of the turning null space included, against a Richardson-verified difference of `Edot(v)`; a direction along which the dropped modes lift is refused, and run as the negative control |
+| `nevpt2_pc_tangent --pc-hessian-vector` | PC's `H_cc u` (#155) by `pcCiHessianVectorDevice`, against `pcHessianDevice` by duality and against a per-class difference of the three-term `y` |
+| `nevpt2_sc_pseudodensity --pc --sc-hessian-kk-int` | `--sc-hessian-kk-int`'s checks on PC's curvature `<Ehat'_pc, I''>` (#200; [`hessian-theory.md`](hessian-theory.md), §6.7), after gating PC's first-order orbital source term on seeded directions; K2's refusal is SC's, and a `*_df` golden runs too |
+| `nevpt2_sc_pseudodensity --pc --sc-hessian-kc` | PC's mixed block (#201; [`hessian-theory.md`](hessian-theory.md), §6.5): `Eddot_kc(w, u)` and `H_kc^T w` against each other by duality, Euler in `c`, the step-free active-rotation gauge and per-class differences of the three-term `y`; orbital energies fixed in `c` (responding to `c` is refused as Unsupported), and a lifting CI direction refused as Numerical |
+| `nevpt2_sc_pseudodensity --pc --sc-hessian-kk` | PC's orbital sandwich and assembled `Eddot_kk` (#202; [`hessian-theory.md`](hessian-theory.md), §6.4–§6.8): forward against reverse, both orbital-energy modes, ladders of the PC total, and `H_kc` by §6.8's gauge; K2's refusal as for SC, and no `rho_t` refusal |
 
 `--sc-tangent` and `--gradient-source` run on both demos (#162): `y_I` and
 `Edot(u)` differentiate the CI vector at **fixed** integrals, so nothing in
@@ -1051,8 +1066,8 @@ combination), by `nevpt2_sc_pseudodensity`'s `--kappa-full` and
 `--dump-source-terms` (as a combination: both build the digests' tangent along
 a rotation, §6), by every Hessian flag — `--sc-hessian`,
 `--sc-hessian-vector`, `--sc-hessian-kc`, `--sc-hessian-kk-int`,
-`--sc-hessian-kk` — as *unsupported*, before any other check on the digest
-flags (#157; [`hessian-theory.md`](hessian-theory.md), §9.1), and by
+`--sc-hessian-kk`, and with `--pc` (#203) — as *unsupported*, before any
+other check on the digest flags (#157; [`hessian-theory.md`](hessian-theory.md), §9.1), and by
 `nevpt2_pc_tangent` (as flags it does not implement, `--pc-hessian` and
 `--pc-hessian-vector` included), because a tangent built from an approximate digest is not the
 derivative of anything the energy stage computed. `nevpt2_sc_pseudodensity`'s
