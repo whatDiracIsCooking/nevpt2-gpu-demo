@@ -476,7 +476,11 @@ if(NEVPT2_BUILD_TESTING)
   # y's walk ran on this state (its E_corr against energiesDevice, 1e-7), that
   # each written Edot direction's exact value -- frozen-digest tangent plus the
   # digests' term -- is <kappa, Y> off the written matrix, which carries the
-  # digests' transpose (#89, 1e-7), and that the file reads back bit for bit. Its
+  # digests' transpose (#89, 1e-7), and that the file reads back bit for bit.
+  # Since #246 it also writes the integral adjoint (the `ibar_*` members) and
+  # gates it as check 9: its pairing with a seeded integral perturbation against
+  # a ladder of this binary's own energy (1e-7, the fourfold rule; docs/
+  # testing.md, "The integral adjoint") -- every dump entry, SC and PC. Its
   # PASS line is its own. The written Edot -- frozen-digest tangent plus the
   # digests' term -- against PySCF's exact directional derivative is
   # nevpt2_grad.py --edot-check, the same manual gate as below.

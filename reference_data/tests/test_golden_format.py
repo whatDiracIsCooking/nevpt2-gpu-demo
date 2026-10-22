@@ -476,3 +476,66 @@ def test_generate_golden_mo_sidecar_refusals(tmp_path):
 def test_write_golden_refuses_an_unknown_reference_kind(tmp_path):
     with pytest.raises(SystemExit, match="reference_kind 'rhf'"):
         _write_golden(tmp_path / "g", reference_kind="rhf")
+
+
+# --- the .gradsrc dump (#73; the integral adjoint, #246) ---------------------
+
+
+def _gradsrc(*, pc: bool = False, edot: bool = True, ibar: bool = True) -> dict:
+    """A dump on n_core 3, n_act 4, n_virt 3, a (6,) CI vector, two directions."""
+    rng = np.random.default_rng(246)
+    sizes = dict(n=10, c=3, a=4, v=3, d=2)
+    m = {"kappa_source": rng.standard_normal((10, 10)), "ci_source": rng.standard_normal(6),
+         "ci": rng.standard_normal(6), "ncore": np.array(3), "nact": np.array(4),
+         "nvirt": np.array(3), "e_corr": np.array(-0.21)}
+    if pc:
+        m["pc"] = np.array(1)
+    groups = ([gf.GRADSRC_EDOT] if edot else []) + ([gf.GRADSRC_IBAR] if ibar else [])
+    for group in groups:
+        for name, axes, _t in group:
+            m[name] = rng.standard_normal(tuple(sizes[c] for c in axes))
+    return m
+
+
+@pytest.mark.parametrize("pc", [False, True])
+@pytest.mark.parametrize("ibar", [False, True])
+def test_gradsrc_round_trips_byte_for_byte(tmp_path, pc, ibar):
+    m = _gradsrc(pc=pc, ibar=ibar)
+    p, q = tmp_path / "a.gradsrc", tmp_path / "b.gradsrc"
+    gf.write_gradsrc(p, m)
+    back = gf.read_gradsrc(p)
+    assert set(back) == set(m)
+    assert all(np.array_equal(back[n], m[n]) for n in m)
+    with np.load(p) as z:  # the consumer reads it as written
+        assert all(np.array_equal(z[n], m[n]) for n in m)
+    gf.write_gradsrc(q, back)
+    assert q.read_bytes() == p.read_bytes()
+
+
+def test_gradsrc_integral_adjoint_is_the_pertgold_inventory():
+    """``ibar_<name>`` for each array a ``.pertgold`` stacks per coordinate,
+    in its order and of its per-coordinate shape: what #247 contracts."""
+    pert = [(n, s[1:]) for n, s in gf.PERTGOLD_ARRAYS if n != "mo_coeff"]
+    letters = {"nmo": "n", "ncore": "c", "nact": "a", "nvirt": "v"}
+    assert [(n.removeprefix("ibar_"), a) for n, a, _t in gf.GRADSRC_IBAR] == [
+        (n, "".join(letters[x] for x in s)) for n, s in pert]
+
+
+@pytest.mark.parametrize("what", ["partial", "shape", "stray", "pc", "core"])
+def test_gradsrc_refusals(tmp_path, what):
+    m = _gradsrc()
+    if what == "partial":
+        del m["ibar_g_xa_aa"]
+    elif what == "shape":
+        m["ibar_heff"] = np.zeros((10, 9))
+    elif what == "stray":
+        m["ibar_mo_coeff"] = np.zeros((10, 10))
+    elif what == "pc":
+        m["pc"] = np.array(2)
+    else:
+        del m["e_corr"]
+    with pytest.raises(gf.FormatError):
+        gf.write_gradsrc(tmp_path / "x.gradsrc", m)
+    np.savez(tmp_path / "y.npz", **m)  # a file numpy wrote, read by ours
+    with pytest.raises(gf.FormatError):
+        gf.read_gradsrc(tmp_path / "y.npz")

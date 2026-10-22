@@ -55,6 +55,20 @@
 //                                      energies' response, f3ac/f3ca fixed
 //   edot_digest   (n_dir,)             the f3ac/f3ca digests' own term; the
 //                                      exact Edot is the sum of the two
+//
+// and, as a set of 21 or not at all, the INTEGRAL ADJOINT (#246): dE/d(each
+// array of the gradient sidecar's general-range inventory), at fixed orbitals,
+// CI vector and RDMs, of the same E the file's `e_corr` is (SC's, or PC's in a
+// PC dump), in the golden's basis -- what an integral perturbation sidecar's
+// dotted inventory (#220, `*.pertgold`, the same names, shapes and frame per
+// coordinate) is contracted with: dE/dR_k = sum_n <ibar_n, Idot_n[k]>
+// (nevpt2.gradient's IntegralAdjointDevice, "The integral adjoint"):
+//
+//   ibar_<name>   the inventory array <name>'s shape, for each name of
+//                 kIntegralAdjointNames below: (n_mo, n_mo) for h, heff and f
+//                 (h's is zero: no block reads h itself; f's lives on its
+//                 core and virtual diagonals), (n_mo, P, Q, R) for a row
+//                 g_xP_QR, (n_mo, P, Q) for the four tied rows
 module;
 
 #include "error_handling/error_macros.h"  // NEVPT2_TRY: a macro, which no import carries
@@ -66,6 +80,27 @@ export import nevpt2.error_handling;
 export import nevpt2.tensor;
 
 export namespace nevpt2 {
+
+// The integral adjoint's arrays (#246), in the gradient sidecar's inventory
+// order, each with its shape as one letter per axis: n = n_mo, c / a / v =
+// n_core / n_act / n_virt. Written as `ibar_<name>`.
+struct IntegralAdjointArray {
+  std::string_view name;
+  std::string_view axes;
+};
+inline constexpr std::array<IntegralAdjointArray, 21> kIntegralAdjointNames{{
+    {"h", "nn"},          {"heff", "nn"},       {"f", "nn"},
+    {"g_xa_aa", "naaa"},  {"g_xv_aa", "nvaa"},  {"g_xc_aa", "ncaa"},
+    {"g_xa_va", "nava"},  {"g_xv_va", "nvva"},  {"g_xc_va", "ncva"},
+    {"g_xa_ca", "naca"},  {"g_xv_ca", "nvca"},  {"g_xc_ca", "ncca"},
+    {"g_xa_cv", "nacv"},  {"g_xv_cv", "nvcv"},  {"g_xc_cv", "nccv"},
+    {"g_xa_cc", "nacc"},  {"g_xv_cc", "nvcc"},  {"g_xc_cc_j", "ncc"},
+    {"g_xc_cc_k", "ncc"}, {"g_xa_vv", "nav"},   {"g_xc_vv", "ncv"},
+}};
+
+// The shape `axes` spells for a partition.
+std::vector<int64_t> integralAdjointShape(std::string_view axes, int64_t ncore, int64_t nact,
+                                          int64_t nvirt);
 
 // One `.gradsrc`'s contents. The three tensors are host copies; the shapes are
 // the caller's (kappaSource square, ciSource and ci the same shape).
@@ -87,20 +122,26 @@ struct GradSrc {
   Tensor edotFrozen;
   Tensor edotDigest;
   bool hasDirections() const { return edotKappa.size() > 0; }
+  // The integral adjoint (#246): empty for a dump without it, else one tensor
+  // per kIntegralAdjointNames entry, in that order and of those shapes.
+  std::vector<Tensor> integralAdjoint;
+  bool hasIntegralAdjoint() const { return !integralAdjoint.empty(); }
 };
 
 // Writes `src` to `path`. A shape that does not fit -- kappaSource not
 // (n_mo, n_mo) for the partition, ciSource and ci not the same shape, the
 // three direction members not all empty or not (n_dir, n_mo, n_mo) / (n_dir)
-// / (n_dir) -- is the caller's bug (check()); a file that cannot be opened or
-// written is an IO Error.
+// / (n_dir), the integral adjoint not empty or 21 tensors of
+// kIntegralAdjointNames' shapes -- is the caller's bug (check()); a file that
+// cannot be opened or written is an IO Error.
 Status writeGradSrc(const std::string& path, const GradSrc& src);
 
 // Reads a `.gradsrc` as writeGradSrc writes one. A missing or unreadable file,
 // a corrupt archive (bad signature, CRC mismatch, truncation), a member it does
-// not write, a missing member, or the direction members present only in part
-// or with mismatched shapes is an IO Error naming the file. A dump with no
-// direction members reads with the three left empty.
+// not write, a missing member, or the direction members or the integral
+// adjoint's present only in part or with mismatched shapes is an IO Error
+// naming the file. A dump with no direction members reads with the three left
+// empty, and one with no integral adjoint with it empty.
 Result<GradSrc> readGradSrc(const std::string& path);
 
 }  // namespace nevpt2

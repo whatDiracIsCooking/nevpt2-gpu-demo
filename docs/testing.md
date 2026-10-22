@@ -4463,6 +4463,75 @@ seeded directions, are 3.1e-11 and 1.6e-10 (against 1e-13 or below on the
 other cases). It is inside the bound, and the bound was not moved. Wall times are
 [`performance.md`](performance.md), "The one-pass `Y`".
 
+## The integral adjoint
+
+Every `--dump-source-terms` (SC and `--pc`) also writes the integral adjoint,
+`dE_corr/d(integrals)` on the gradient sidecar's 21 inventory arrays (#246;
+docs/gradients.md, §6.3), and gates it as check 9 before writing. The
+perturbation it is checked along scales every integral of the state by a
+seeded factor in ±0.1 (one factor per canonical index, so both symmetries
+hold), with its dotted inventory built by `integral_perturbation.py`'s
+definitions:
+
+- **9a**, that dotted inventory rebuilds its own `h^eff` and `f`: ≤5.3e-15
+  relative on every case below, both cards (gate 1e-10);
+- **9b**, the pairing on the inventory against the pairing on the stored
+  blocks derived from it: ≤2.1e-17 relative (gate 1e-10);
+- **9c**, the pairing against central differences of the binary's own
+  `E_corr` at `I + h Idot`, `h = 2^-6 … 2^-22`, the best rung within 1e-7 of
+  `max(1, |pairing|)` on a run of at least three fourfold halvings.
+
+Measured 2026-10-22 on every dump case, both cards, `--tiles 3`, Release:
+
+| case | scheme | 9c best, RTX 3080 | run | 9c best, RX 9060 XT | run |
+|---|---|---|---|---|---|
+| N2 CAS(4,4) | SC | 1.0e-10 | 10 | 2.9e-11 | 10 |
+| N2 CAS(4,4) | PC | 4.1e-12 | 11 | 2.2e-12 | 10 |
+| N2 CAS(4,4) `_casscf` | SC | 5.0e-12 | 9 | 1.4e-11 | 9 |
+| N2 CAS(4,4) `_casscf` | PC | 1.8e-12 | 10 | 7.3e-12 | 9 |
+| LiF CAS(4,6) | SC | 8.8e-11 | 8 | 1.9e-11 | 7 |
+| LiF CAS(4,6) `_casscf` | SC | 1.7e-11 | 8 | 2.3e-11 | 9 |
+| HSOH CAS(6,6) `_casscf` | SC | 6.8e-11 | 8 | 3.2e-11 | 8 |
+| HSOH CAS(6,6) `_casscf` | PC | 3.8e-11 | 7 | 4.3e-10 | 7 |
+| N2 CAS(4,4) `_df` | SC | 3.1e-11 | 9 | 5.3e-12 | 10 |
+| N2 CAS(8,8) | SC | 2.3e-11 | 8 | 9.1e-12 | 8 |
+| N2 CAS(8,8) | PC | 1.7e-11 | 10 | 1.1e-10 | 10 |
+
+Five more HSOH runs on the RTX 3080 (three through the `slow` ctest entries)
+ran 8 to 9 halvings for SC and 7 to 9 for PC.
+
+- **Why the integrals are scaled, not drawn whole.** The first version drew
+  every element of `(hdot, (pq|rs)dot)` uniformly in ±0.1, whatever the
+  integral. Along that direction HSOH SC's ladder was erratic down to
+  `h ~ 1e-4` (relative error by rung `2^-7 … 2^-13`: 1.1e-5, 1.4e-6, 1.8e-6,
+  9.4e-7, 1.4e-8, 6.5e-8, 2.1e-8) and then `h²` for only three or four
+  halvings before round-off: three halvings on both cards, and two in a
+  later run on the RTX 3080, which failed the check. A draw over
+  every element populates the perturbers the state's integrals leave empty,
+  and SC's energy along such a direction is smooth only on a very small scale
+  (the empty-perturber trait of docs/hessian-theory.md, §5.6). A nuclear
+  coordinate that keeps the point group populates none. Scaling each integral
+  keeps a zero integral zero, as such a coordinate does. With that change the
+  same case runs eight clean halvings (ratios 3.79–4.14 from `2^-7` to
+  `2^-14`), and no tolerance or rule changed.
+- **HSOH PC refuses its coarse rungs:** from `2^-6` to `2^-10` a `Sr`
+  denominator `lambda_k + Delta_t` turns negative at `I ± h Idot`. Those
+  rungs have no quotient (printed REFUSED, an infinite error that breaks any
+  run). From `2^-11` the ladder is clean.
+- **LiF has no PC row:** its goldens carry no PC answer ("LiF has no PC
+  gradient, and that is the answer"), so `--pc` stops before any dump.
+
+The ctest entries are the dump entries that already exist: every
+`nevpt2_sc_pseudodensity_dump_*` (SC and PC) gates check 9 through its PASS
+line. HSOH's two run as the `--probed-y` entries (`slow`). **One of those,
+`nevpt2_sc_pseudodensity_dump_probed_pc_hsoh_def2svp_cas66_casscf`, fails on
+the RTX 3080 independently of this work.** Its #240 check 8 (one-pass `Y` against probed,
+1e-9) straddles the bound on that card. On `origin/main` (988eddc), seven
+runs gave 3.8e-10 to 1.75e-9, four of them above the bound. With #246, five
+runs gave 5.5e-10 to 1.47e-9. That is the PC solve's conditioning ("The
+one-pass `Y` against the probed one" above; 5.8e-10 on the RX 9060 XT), now
+seen on the other card. It is left as found; the bound was not moved.
+
 ## The SC source terms against PySCF's, on a card
 
 `nevpt2_sc_pseudodensity --source-oracle golden/<case>.srcgold` (#92) is the
@@ -5219,6 +5288,68 @@ round-off, not a wrong gradient, but it is a check the kept steps pass and
 the SC ones do not. So the PC steps stay where every PC figure in this file
 was measured, and **acrolein PC's 6.3 h pair is not re-run**: none of its
 steps changed.
+
+### Where `gradient_at`'s ~1e-8 noise comes from (#246, step 0)
+
+#217's seminumerical Hessian saw two symptoms of ~1e-8 Eh/bohr noise in
+`gradient_at`'s SC gradient on HSOH CAS(6,6) `_casscf`: translational sums
+of 4e-9 to 2.4e-8, and 1.9e-8 between two orbital guesses at one geometry.
+#246 was to replace `NUC_STEP`'s quotient on the suspicion that both are its
+round-off. Measured here, and **only the first one is**.
+
+The method: one `gradient_at` call per (scheme, guess) at the reference
+geometry, guess A the committed `.mogold` and guess B those orbitals rotated
+by a seeded antisymmetric `kappa` (`|kappa|_max` 1e-3, seed 246), both
+re-converged (`|g_orb|` 1.6e-11 and 2.3e-11, `E_CASSCF` equal to 1e-12); then
+the solved instance's nuclear term re-run in process at each step, with and
+without the Richardson pass. Dumps on the RX 9060 XT; everything else CPU.
+
+| SC, `NUC_STEP` | Richardson | transl. sum A | transl. sum B | max \|g_A − g_B\| | its `<dH/dx>` part | its `L . J_nuc` part |
+|---|---|---|---|---|---|---|
+| `2^-9` | no | 1.1e-7 | 1.1e-7 | 1.5e-8 | 1.8e-10 | 1.5e-8 |
+| `2^-9` | yes | 7.6e-10 | 1.1e-9 | 1.4e-8 | 5.4e-10 | 1.5e-8 |
+| `2^-10` | yes | 1.4e-9 | 1.1e-9 | 1.5e-8 | 5.3e-10 | 1.5e-8 |
+| `2^-11` | yes | 2.5e-9 | 3.5e-9 | 1.6e-8 | 2.0e-9 | 1.5e-8 |
+| `2^-12` | yes | 1.2e-8 | 1.1e-8 | 1.3e-8 | 2.7e-9 | 1.5e-8 |
+| **`2^-13`** (kept) | yes | **2.3e-8** | **2.5e-8** | 1.2e-8 | 6.0e-9 | 1.5e-8 |
+| `2^-14` | yes | 3.5e-8 | 1.2e-8 | 1.5e-8 | 1.0e-8 | 1.5e-8 |
+
+| PC, `NUC_STEP_PC` | Richardson | transl. sum A | transl. sum B | max \|g_A − g_B\| | `<dH/dx>` | `L . J_nuc` |
+|---|---|---|---|---|---|---|
+| 0.0025 (kept) | no | 1.9e-7 | 1.9e-7 | 9.7e-10 | 8.0e-11 | 1.0e-9 |
+| 0.0025 (kept) | yes | 7.6e-10 | 4.7e-10 | 9.1e-10 | 3.2e-10 | 1.0e-9 |
+| 0.00125 | yes | 1.8e-9 | 1.3e-9 | 1.6e-9 | 7.9e-10 | 1.0e-9 |
+| 0.000625 | yes | 4.1e-9 | 4.9e-9 | 2.0e-9 | 1.5e-9 | 1.0e-9 |
+
+- **The translational sum is the nuclear quotient's round-off.** With the
+  Richardson pass it grows as the step shrinks, roughly as `1/h` — 7.6e-10 at
+  `2^-9` to 3.5e-8 at `2^-14` on SC — and without it the large steps are
+  truncation (1.1e-7 → 2.8e-8, ratio 4). The analytic nuclear term (#247)
+  removes it.
+- **The guess-to-guess spread is not.** It is 1.5e-8 on SC at every step,
+  with and without Richardson, and all of it is the multipliers' term
+  `L . J_nuc`; the `<dH/dx>` part's spread is round-off that scales with the
+  step. On PC it is 1.0e-9, also step-independent.
+- **What it tracks: the `kappa` sweep's quotient, through the CP-CASSCF
+  solve.** Split at `2^-10` with Richardson, the SC spread is (S1)'s `Z` 1.2e-8,
+  (C1)'s `z` 6.1e-9, (O2)'s `z^c` 2.8e-9. The two states agree (CI vector
+  1.8e-12, orbitals 1.6e-9 after the sign, `E_corr` 2e-13), and so do the
+  GPU's dumped `Y` (2e-11). What differs is the right-hand side's other half,
+  the sweep's `dE_CASCI/dkappa` at `KAPPA_STEP = 2^-17`: its stationarity
+  residual is 6.0e-8 / 5.2e-8 on the two guesses (`E_CASCI` ≈ −473 Eh, so
+  ~1e-13 of round-off over `2^-17`), the source term `A` differs by 4.5e-8,
+  and the coupled system (condition number 5.5e4, smallest eigenvalue 7.0e-3)
+  turns that into multipliers 3.1e-6 apart and a gradient 1.5e-8 apart. PC
+  differences at `KAPPA_STEP_PC = 1e-4`, whose round-off is ~1e-9: its 1.0e-9.
+
+**So the guess-to-guess spread is the `kappa` sweep's, `KAPPA_STEP`'s
+round-off, and #246 and #247 do not fix it.** The integral adjoint (#246, "The
+integral adjoint" above) and the analytic nuclear term built on it (#247)
+replace `NUC_STEP`'s quotient, which removes the translational sum; #217's
+ladder still sees the 1.5e-8 spread until the CASSCF branch's
+`dE_CASCI/dkappa` is taken analytically — on a converged state it is
+`gen_g_hop`'s `g_orb`, ~1e-11 here — rather than from the sweep. That is a
+separate piece of work.
 
 ### A ladder can converge, cleanly, to the wrong branch
 

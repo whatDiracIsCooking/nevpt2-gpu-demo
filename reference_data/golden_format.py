@@ -670,6 +670,147 @@ def read_erigold(path) -> tuple[dict, dict[str, np.ndarray]]:
     return header, arrays
 
 
+# --------------------------------------------------------------------------
+# The .gradsrc dump (#73; the integral adjoint, #246)
+# --------------------------------------------------------------------------
+
+#: The GPU's source-term dump (``nevpt2_sc_pseudodensity --dump-source-terms``,
+#: written by ``apps/sc_pseudodensity/gradsrc.cpp``): a NumPy ``.npz`` of
+#: STORED NPY v1.0 members, which ``numpy.load`` reads as it is. Its members
+#: in file order, each with its shape as one letter per axis (``n`` = n_mo,
+#: ``c`` / ``a`` / ``v`` = n_core / n_act / n_virt, ``d`` = n_dir, ``*`` the
+#: CI vector's shape, ``0`` a 0-d scalar), and its dtype. ``pc`` is present
+#: (= 1) only in a PC dump; the three ``edot_*`` members are a set, and so are
+#: the 21 ``ibar_*`` ones -- the integral adjoint, dE/d(each array of the
+#: gradient sidecar's inventory), in :data:`PERTGOLD_ARRAYS`' order and the
+#: golden's frame, what a ``.pertgold``'s per-coordinate dotted inventory is
+#: contracted with (docs/gradients.md, "The integral adjoint").
+GRADSRC_CORE = (
+    ("kappa_source", "nn", "<f8"),
+    ("ci_source", "*", "<f8"),
+    ("ci", "*", "<f8"),
+    ("ncore", "0", "<i8"),
+    ("nact", "0", "<i8"),
+    ("nvirt", "0", "<i8"),
+    ("e_corr", "0", "<f8"),
+)
+GRADSRC_PC = (("pc", "0", "<i8"),)
+GRADSRC_EDOT = (
+    ("edot_kappa", "dnn", "<f8"),
+    ("edot_frozen", "d", "<f8"),
+    ("edot_digest", "d", "<f8"),
+)
+#: The integral adjoint's arrays, ``ibar_<name>``: each the inventory array's
+#: shape (:data:`PERTGOLD_ARRAYS` less its leading ``ncoord`` axis).
+GRADSRC_IBAR = tuple(
+    (f"ibar_{name}",
+     "".join({"nmo": "n", "ncore": "c", "nact": "a", "nvirt": "v"}[s] for s in shape[1:]),
+     "<f8")
+    for name, shape in PERTGOLD_ARRAYS if name != "mo_coeff")
+
+#: Every member a dump may carry, in the order the C++ writer emits them.
+GRADSRC_MEMBERS = GRADSRC_CORE + GRADSRC_PC + GRADSRC_EDOT + GRADSRC_IBAR
+
+#: A fixed DOS date (1980-01-01) and time (00:00): the archive is a function of
+#: its contents, as the C++ writer's is.
+_ZIP_DOS_DATE = (0 << 9) | (1 << 5) | 1
+_ZIP_VERSION = 20
+
+
+def _gradsrc_shape(path, axes: str, sizes: dict, ci_shape) -> tuple:
+    if axes == "0":
+        return ()
+    if axes == "*":
+        return tuple(ci_shape)
+    return tuple(sizes[c] for c in axes)
+
+
+def _check_gradsrc(path, members: dict[str, np.ndarray]) -> None:
+    """The dump's own rules, both directions: the core members, the two sets
+    whole or absent, every shape and dtype, and no member it does not write."""
+    known = {n for n, _a, _t in GRADSRC_MEMBERS}
+    stray = sorted(set(members) - known)
+    if stray:
+        raise FormatError(f"{path}: members a .gradsrc does not carry: {stray}")
+    for n, _a, _t in GRADSRC_CORE:
+        if n not in members:
+            raise FormatError(f"{path}: no '{n}' member -- not a gradient source dump")
+    for label, group in (("edot", GRADSRC_EDOT), ("integral adjoint", GRADSRC_IBAR)):
+        have = [n for n, _a, _t in group if n in members]
+        if have and len(have) != len(group):
+            raise FormatError(f"{path}: the {label} members are a set of {len(group)}, and "
+                              f"{len(have)} of them are here")
+    if "pc" in members and int(members["pc"]) != 1:
+        raise FormatError(f"{path}: 'pc' is {int(members['pc'])}, and a dump writes it only as 1")
+    nc, na, nv = (int(members[k]) for k in ("ncore", "nact", "nvirt"))
+    sizes = dict(n=nc + na + nv, c=nc, a=na, v=nv)
+    if "edot_kappa" in members:
+        sizes["d"] = int(np.asarray(members["edot_kappa"]).shape[0])
+    ci_shape = np.asarray(members["ci"]).shape
+    for n, axes, dtype in GRADSRC_MEMBERS:
+        if n not in members:
+            continue
+        a = np.asarray(members[n])
+        want = _gradsrc_shape(path, axes, sizes, ci_shape)
+        if a.shape != want or a.dtype != np.dtype(dtype):
+            raise FormatError(f"{path}: '{n}' is {a.dtype}{a.shape}, expected {dtype}{want}")
+
+
+def read_gradsrc(path) -> dict[str, np.ndarray]:
+    """A ``.gradsrc`` dump's members, by name (0-d members as 0-d arrays),
+    held to :func:`_check_gradsrc`'s rules. ``numpy.load`` reads the archive:
+    numpy is the format's consumer, so its reading is the one that counts."""
+    with np.load(path) as z:
+        members = {n: np.array(z[n]) for n in z.files}
+    _check_gradsrc(path, members)
+    return members
+
+
+def _npy_bytes(a: np.ndarray) -> bytes:
+    """One member as the C++ writer emits it: NPY v1.0, the header dict in
+    numpy's spelling, padded with spaces to a 64-byte data offset."""
+    shape = a.shape
+    spelt = "()" if not shape else (f"({shape[0]},)" if len(shape) == 1
+                                     else "(" + ", ".join(str(s) for s in shape) + ")")
+    header = f"{{'descr': '{a.dtype.str}', 'fortran_order': False, 'shape': {spelt}, }}"
+    fixed = 6 + 2 + 2
+    total = (fixed + len(header) + 1 + 63) // 64 * 64
+    header = header + " " * (total - fixed - len(header) - 1) + "\n"
+    return (b"\x93NUMPY" + bytes([1, 0]) + struct.pack("<H", len(header))
+            + header.encode("latin1") + np.ascontiguousarray(a).tobytes())
+
+
+def write_gradsrc(path, members: dict[str, np.ndarray]) -> None:
+    """Writes a ``.gradsrc`` byte for byte as ``gradsrc.cpp``'s
+    ``writeGradSrc`` does -- the members in :data:`GRADSRC_MEMBERS`' order,
+    a stored zip with a fixed timestamp -- after :func:`_check_gradsrc`."""
+    import zlib
+
+    _check_gradsrc(path, members)
+    out = bytearray()
+    central = bytearray()
+    n = 0
+    for name, _axes, dtype in GRADSRC_MEMBERS:
+        if name not in members:
+            continue
+        data = _npy_bytes(np.asarray(members[name], dtype=np.dtype(dtype)))
+        fname = f"{name}.npy".encode()
+        crc = zlib.crc32(data) & 0xFFFFFFFF
+        offset = len(out)
+        # flags, method (stored), time, date, crc, csize, usize, name length
+        common = struct.pack("<HHHHIIIH", 0, 0, 0, _ZIP_DOS_DATE, crc, len(data), len(data),
+                             len(fname))
+        out += struct.pack("<IH", 0x04034B50, _ZIP_VERSION) + common + struct.pack("<H", 0)
+        out += fname + data
+        central += (struct.pack("<IHH", 0x02014B50, _ZIP_VERSION, _ZIP_VERSION) + common
+                    + struct.pack("<HHHHII", 0, 0, 0, 0, 0, offset) + fname)
+        n += 1
+    at = len(out)
+    out += central
+    out += struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, n, n, len(central), at, 0)
+    Path(path).write_bytes(bytes(out))
+
+
 def srcgold_name(case: str, scheme: str, flavour: str) -> str:
     """The file name an oracle of ``case`` and this kind is committed under,
     ``<case>[_pc][_dir].srcgold``; :func:`srcgold_case` inverts it."""

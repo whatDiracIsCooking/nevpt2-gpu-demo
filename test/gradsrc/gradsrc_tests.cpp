@@ -12,8 +12,9 @@
 //                          included -- and the same contents always give the
 //                          same bytes; the optional forward-Edot direction
 //                          members (#88) round-trip too, and a dump without
-//                          them reads them back empty
-//   GradSrcFormatTests     the bytes, read by an INDEPENDENT parser written
+//                          them reads them back empty; so do the 21 ibar_*
+//                          members of the integral adjoint (#246)
+//   GradSrcFormatTests    the bytes, read by an INDEPENDENT parser written
 //                          here: a zip archive of stored members whose CRC-32s
 //                          (recomputed bitwise, not by the writer's table) are
 //                          right, whose names are the seven nevpt2_grad.py's
@@ -219,6 +220,39 @@ TEST_F(GradSrcRoundTripTests, AVectorShapedCiVectorKeepsItsShape) {
   EXPECT_TRUE(sameBits(back->ciSource, s.ciSource));
 }
 
+// What a dump carrying the integral adjoint (#246) looks like: one patterned
+// tensor per inventory array, of its shape for sample()'s partition.
+GradSrc sampleWithIntegralAdjoint() {
+  GradSrc s = sampleWithDirections();
+  double scale = 0.01;
+  for (const nevpt2::IntegralAdjointArray& a : nevpt2::kIntegralAdjointNames) {
+    s.integralAdjoint.push_back(
+        patterned(nevpt2::integralAdjointShape(a.axes, s.ncore, s.nact, s.nvirt), scale));
+    scale *= 1.1;
+  }
+  return s;
+}
+
+TEST_F(GradSrcRoundTripTests, TheIntegralAdjointComesBackBitForBit) {
+  const GradSrc s = sampleWithIntegralAdjoint();
+  ASSERT_TRUE(writeGradSrc(path("i.gradsrc"), s).has_value());
+  const nevpt2::Result<GradSrc> back = readGradSrc(path("i.gradsrc"));
+  ASSERT_TRUE(back.has_value()) << back.error().message;
+  ASSERT_TRUE(back->hasIntegralAdjoint());
+  ASSERT_EQ(back->integralAdjoint.size(), s.integralAdjoint.size());
+  for (std::size_t i = 0; i < s.integralAdjoint.size(); ++i)
+    EXPECT_TRUE(sameBits(back->integralAdjoint[i], s.integralAdjoint[i]))
+        << nevpt2::kIntegralAdjointNames[i].name;
+  EXPECT_TRUE(back->hasDirections());
+}
+
+TEST_F(GradSrcRoundTripTests, ADumpWithoutTheIntegralAdjointReadsItBackEmpty) {
+  ASSERT_TRUE(writeGradSrc(path("x.gradsrc"), sampleWithDirections()).has_value());
+  const nevpt2::Result<GradSrc> back = readGradSrc(path("x.gradsrc"));
+  ASSERT_TRUE(back.has_value()) << back.error().message;
+  EXPECT_FALSE(back->hasIntegralAdjoint());
+}
+
 // --- GradSrcFormatTests ---------------------------------------------------------
 
 class GradSrcFormatTests : public GradSrcTempDir {};
@@ -261,6 +295,27 @@ TEST_F(GradSrcFormatTests, TheDirectionMembersFollowTheSevenAsNpyFiles) {
                                              "ncore.npy", "nact.npy", "nvirt.npy",
                                              "e_corr.npy", "edot_kappa.npy", "edot_frozen.npy",
                                              "edot_digest.npy"}));
+}
+
+TEST_F(GradSrcFormatTests, TheIntegralAdjointFollowsAsIbarNpyFiles) {
+  ASSERT_TRUE(writeGradSrc(path("i.gradsrc"), sampleWithIntegralAdjoint()).has_value());
+  const std::vector<std::uint8_t> b = readBytes(path("i.gradsrc"));
+  const std::vector<Member> members = walkLocalHeaders(b);
+  ASSERT_EQ(members.size(), 10u + nevpt2::kIntegralAdjointNames.size());
+  // sample()'s partition: 28 MOs = 5 core + 4 active + 19 virtual.
+  const std::map<std::string, std::string> spot{{"ibar_h.npy", "(28, 28)"},
+                                                {"ibar_g_xv_cv.npy", "(28, 19, 5, 19)"},
+                                                {"ibar_g_xc_cc_k.npy", "(28, 5, 5)"},
+                                                {"ibar_g_xa_vv.npy", "(28, 4, 19)"}};
+  for (std::size_t i = 0; i < nevpt2::kIntegralAdjointNames.size(); ++i) {
+    const Member& m = members[10 + i];
+    EXPECT_EQ(m.name, std::format("ibar_{}.npy", nevpt2::kIntegralAdjointNames[i].name));
+    EXPECT_EQ(crcBitwise(b.data() + m.dataAt, m.size), m.crc) << m.name;
+    if (!spot.contains(m.name)) continue;
+    const std::size_t hlen = le(b, m.dataAt + 8, 2);
+    const std::string header(reinterpret_cast<const char*>(b.data()) + m.dataAt + 10, hlen);
+    EXPECT_NE(header.find("'shape': " + spot.at(m.name)), std::string::npos) << header;
+  }
 }
 
 TEST_F(GradSrcFormatTests, EachMemberIsAnNpyV1FileNumpyCanRead) {
@@ -338,6 +393,28 @@ TEST_F(GradSrcErrorTests, AFlippedDataByteFailsTheCrc) {
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error().kind, nevpt2::ErrorKind::IO);
   EXPECT_NE(r.error().message.find("CRC"), std::string::npos) << r.error().message;
+}
+
+TEST_F(GradSrcErrorTests, APartialIntegralAdjointIsAnIoError) {
+  // Rename ibar_h to a same-length name the reader does not know, in both the
+  // local and the central header (the CRC covers the data, not the name):
+  // 20 of the 21 ibar_* members remain, and a partial set is refused.
+  ASSERT_TRUE(writeGradSrc(path("i.gradsrc"), sampleWithIntegralAdjoint()).has_value());
+  std::vector<std::uint8_t> b = readBytes(path("i.gradsrc"));
+  const std::string from = "ibar_h.npy", to = "ibar_q.npy";
+  int renamed = 0;
+  for (std::size_t at = 0; at + from.size() <= b.size(); ++at)
+    if (std::equal(from.begin(), from.end(), b.begin() + static_cast<std::ptrdiff_t>(at),
+                   [](char c, std::uint8_t u) { return static_cast<std::uint8_t>(c) == u; })) {
+      std::copy(to.begin(), to.end(), b.begin() + static_cast<std::ptrdiff_t>(at));
+      ++renamed;
+    }
+  ASSERT_EQ(renamed, 2);
+  writeBytes(path("p.gradsrc"), b);
+  const nevpt2::Result<GradSrc> r = readGradSrc(path("p.gradsrc"));
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().kind, nevpt2::ErrorKind::IO);
+  EXPECT_NE(r.error().message.find("are a set"), std::string::npos) << r.error().message;
 }
 
 TEST_F(GradSrcErrorTests, AnUnwritablePathIsAnIoError) {

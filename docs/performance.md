@@ -864,6 +864,28 @@ CAS(4,4) (378 directions) the probe is about 2.0 s and the one pass
 against 0.6 s at the larger acrolein on the RTX 3080 has not been separated
 (HSOH was not run on the RTX 3080, nor acrolein on the RX 9060 XT).
 
+**With the integral adjoint (#246)**, the same pass also returns
+`dE_corr/d(integrals)` and the dump gates it against a 17-rung ladder of the
+energy (check 9; [`testing.md`](testing.md), "The integral adjoint").
+2026-10-22, one run per row, under the card lock, `--tiles 3`, Release:
+
+| case | one pass, RTX 3080 | check 9, RTX 3080 | one pass, RX 9060 XT | check 9, RX 9060 XT |
+|---|---:|---:|---:|---:|
+| N2 CAS(4,4) `_casscf` SC | 0.01 s | 0.08 s | 0.03 s | 0.22 s |
+| N2 CAS(4,4) `_casscf` PC | 0.01 s | 0.33 s | 0.04 s | 0.58 s |
+| LiF CAS(4,6) SC | 0.03 s | 0.36 s | 0.37 s | 3.30 s |
+| HSOH CAS(6,6) `_casscf` SC | 0.06 s | 0.55 s | 7.91 s | 55.29 s |
+| HSOH CAS(6,6) `_casscf` PC | 0.10 s | 1.62 s | 6.29 s | 3.90 s |
+| N2 CAS(8,8) SC | 0.26 s | 3.21 s | 1.42 s | 8.50 s |
+| N2 CAS(8,8) PC | 0.44 s | 5.35 s | 12.81 s | 8.21 s |
+
+HSOH's one pass is 0.07 s on the RTX 3080 against 7.9 s on the RX 9060 XT,
+so the gap above is the card's (or the HIP build's), not the case's. Check 9
+is 34 energy evaluations at displaced integrals, each an RDM build and an
+energy stage, plus the perturbation's host build. HSOH SC's 55 s on the
+RX 9060 XT is out of line with every other row (and with HSOH PC's 3.9 s);
+where it goes has not been separated.
+
 ### The density-fitted orbital source term
 
 `nevpt2_sc_pseudodensity --kappa-full` on a `*_df` golden (#165;

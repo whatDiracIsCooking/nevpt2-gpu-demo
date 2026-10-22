@@ -1851,6 +1851,101 @@ std::vector<BlockTransposeDuality> pcBlockTransposeDuality(const DeviceTensor& d
                                                            std::uint64_t seed,
                                                            const DeviceResources& res);
 
+// --- the integral adjoint, dE/d(integrals) (#246) ------------------------------
+//
+// The same reverse pass, stopped one step before kappa: E_corr's gradient
+// with respect to the INTEGRALS it reads, at fixed orbitals, fixed CI vector
+// and fixed RDMs -- what a nuclear coordinate's frozen-path integral
+// derivative Idot (#220's `.pertgold`) is contracted with to give the
+// energy's skeleton derivative along it, dE/dR_k = <Ibar, Idot_k>, with no
+// finite difference (#247). In two layouts, the second derived from the first:
+//
+//   stored     every NevptIntegralsDevice field the energy reads: the twelve
+//              external blocks (the walk's D_X, untransposed; V2tr's spread
+//              over Sir2's active pair), the active h1e / h2e (the Dyall
+//              blocks' M_G through their builders' transposes, plus the
+//              digests' hbar on h2e) and e_core / e_virt (the classes' R_t);
+//   inventory  the same pulled back onto the gradient sidecar's general-range
+//              inventory (h, heff, f and the eighteen rows) through
+//              storedBlockFrom / storedEpsFrom transposed: each stored block
+//              is a slice of ONE inventory array (h^eff for the one-electron
+//              blocks, less the active trace on g_xa_aa for h1e_v_Sr; f's
+//              diagonal for e_core / e_virt), so the pullback is a scatter.
+//              `h`'s adjoint is zero (no block reads h itself).
+//
+// The inventory is what an integral perturbation sidecar carries (in the same
+// order and shapes, per coordinate), so <inventory, Idot_k> summed over the
+// 21 arrays is dE/dR_k, and the pairing on the stored layout at
+// integralPerturbationDevice's derived blocks is the same number
+// (integralAdjointPairing / inventoryAdjointPairing: the scatter's duality).
+// Same inputs, refusals and walk as the one-pass Y, whose matrix comes back
+// beside it: one reverse pass serves both.
+struct IntegralAdjointDevice {
+  NevptIntegralsDevice stored;
+  GeneralIntegralsDevice inventory;
+};
+
+struct OnePassSourceTerms {
+  Tensor y;  // the one-pass Y, as scFullRotationMatrixOnePass returns it
+  IntegralAdjointDevice adjoint;
+};
+
+Result<OnePassSourceTerms> scOnePassSourceTerms(const NevptIntegralsDevice& ints,
+                                                const GeneralIntegralsDevice& gen,
+                                                const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                                const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                                const DeviceTensor& f3ca,
+                                                const DeviceTensor* digestAdjoint,
+                                                const DeviceResources& res);
+Result<OnePassSourceTerms> pcOnePassSourceTerms(const NevptIntegralsDevice& ints,
+                                                const GeneralIntegralsDevice& gen,
+                                                const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                                const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                                const DeviceTensor& f3ca,
+                                                const DeviceTensor* digestAdjoint,
+                                                const DeviceResources& res);
+
+// <stored adjoint, dot>: every stored field the energy reads, e_core / e_virt
+// included, against a dotted set of the same shapes (an
+// IntegralPerturbationDevice's `d`).
+double integralAdjointPairing(const NevptIntegralsDevice& bar, const NevptIntegralsDevice& dot,
+                              const DeviceResources& res);
+// <inventory adjoint, dot>: the 21 inventory arrays against a dotted
+// inventory of the same shapes (an IntegralPerturbationDevice's `gen`).
+double inventoryAdjointPairing(const GeneralIntegralsDevice& bar,
+                               const GeneralIntegralsDevice& dot, const DeviceResources& res);
+
+// The inventory's 21 arrays by name, in the gradient sidecar's (and an
+// integral perturbation sidecar's) order: what --dump-source-terms writes the
+// inventory adjoint as (`ibar_<name>`), and the member each name is.
+struct InventoryArray {
+  const char* name;
+  DeviceTensor GeneralIntegralsDevice::* member;
+};
+inline constexpr std::array<InventoryArray, 21> kInventoryArrays{{
+    {"h", &GeneralIntegralsDevice::h},
+    {"heff", &GeneralIntegralsDevice::heff},
+    {"f", &GeneralIntegralsDevice::f},
+    {"g_xa_aa", &GeneralIntegralsDevice::g_xa_aa},
+    {"g_xv_aa", &GeneralIntegralsDevice::g_xv_aa},
+    {"g_xc_aa", &GeneralIntegralsDevice::g_xc_aa},
+    {"g_xa_va", &GeneralIntegralsDevice::g_xa_va},
+    {"g_xv_va", &GeneralIntegralsDevice::g_xv_va},
+    {"g_xc_va", &GeneralIntegralsDevice::g_xc_va},
+    {"g_xa_ca", &GeneralIntegralsDevice::g_xa_ca},
+    {"g_xv_ca", &GeneralIntegralsDevice::g_xv_ca},
+    {"g_xc_ca", &GeneralIntegralsDevice::g_xc_ca},
+    {"g_xa_cv", &GeneralIntegralsDevice::g_xa_cv},
+    {"g_xv_cv", &GeneralIntegralsDevice::g_xv_cv},
+    {"g_xc_cv", &GeneralIntegralsDevice::g_xc_cv},
+    {"g_xa_cc", &GeneralIntegralsDevice::g_xa_cc},
+    {"g_xv_cc", &GeneralIntegralsDevice::g_xv_cc},
+    {"g_xc_cc_j", &GeneralIntegralsDevice::g_xc_cc_j},
+    {"g_xc_cc_k", &GeneralIntegralsDevice::g_xc_cc_k},
+    {"g_xa_vv", &GeneralIntegralsDevice::g_xa_vv},
+    {"g_xc_vv", &GeneralIntegralsDevice::g_xc_vv},
+}};
+
 // hbar = dE_pc/d(h2e) THROUGH THE DIGESTS: the PC sweep's dE/d(f3ac),
 // dE/d(f3ca) (Sr's a16 and Si's a22 read them) taken back onto h2e by
 // nevpt2.rdm_build's transpose -- scDigestAdjointDevice's two steps, PC's

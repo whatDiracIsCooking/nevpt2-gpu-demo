@@ -836,4 +836,62 @@ DeviceTensor storedEpsFrom(bool core, const GeneralIntegralsDevice& gen,
   return deviceEinsumNew("ii->i", {&fPP}, 1.0, res);
 }
 
+// --- and the same two maps TRANSPOSED (#246) ---------------------------------
+//
+// The integral adjoint's pullback onto the inventory: `bar` is dE/d(stored
+// block), and what lands in `out` (an inventory of zeros-or-partial sums,
+// shaped as the sidecar's) is d<bar, storedBlockFrom(b, I)>/dI -- the slice
+// read the other way. Every write lands in an axis-0 slice of an inventory
+// array, which is contiguous, so the einsum's row-major output is honoured;
+// a column restriction is a selector matrix's contraction. `inventoryAdjoint
+// Pairing` against `integralAdjointPairing` is the duality that holds it.
+
+// (n, n_mo) with E[j, lo + j] = 1: column j of a block placed at lo.
+DeviceTensor columnSelector(int64_t n, int64_t lo, int64_t nmo, const DeviceResources& res) {
+  Tensor e({n, nmo});
+  for (int64_t j = 0; j < n; ++j) e(j, lo + j) = 1.0;
+  return uploadTensor(e, res);
+}
+
+void storedBlockAdjoint(RotBlock b, const DeviceTensor& bar, const GeneralIntegralsDevice& out,
+                        const DeviceResources& res) {
+  const RotBlockInfo info = rotBlockInfo(b);
+  if (info.rank == 4) {
+    const PromotionPlan pl = promotionPlan(b, 0);
+    const auto [lo, hi] = spanOf(out, pl.promoted.space);
+    const DeviceTensor rows = sliceAxis(generalArray(out, pl.pick.array), 0, lo, hi);
+    std::string subs(kAxisLabels);
+    subs += "->";
+    subs += kAxisLabels[static_cast<std::size_t>(pl.promoted.axis)];
+    subs += kAxisLabels[static_cast<std::size_t>(pl.partner.axis)];
+    subs += kAxisLabels[static_cast<std::size_t>(pl.firstAxis)];
+    subs += kAxisLabels[static_cast<std::size_t>(pl.lastAxis)];
+    deviceEinsumAccum(subs, {&bar}, rows, 1.0, res.stream());
+    return;
+  }
+  check(info.rank == 2,
+        std::format("storedBlockAdjoint: {} is not a stored block", rotBlockName(b)));
+  const auto [pLo, pHi] = spanOf(out, info.roles[0].space);
+  const auto [qLo, qHi] = spanOf(out, info.roles[1].space);
+  if (pHi <= pLo || qHi <= qLo) return;
+  const DeviceTensor sel = columnSelector(qHi - qLo, qLo, out.nmo(), res);
+  const DeviceTensor heffRows = sliceAxis(out.heff, 0, pLo, pHi);
+  deviceEinsumAccum("ij,jx->ix", {&bar, &sel}, heffRows, 1.0, res.stream());
+  if (info.trace) {
+    // out -= sum_m g_xa_aa[z, m, m, j] on rows z of the p span.
+    const DeviceTensor eye = deviceEye(out.nact, res);
+    const DeviceTensor tRows = sliceAxis(out.g_xa_aa, 0, pLo, pHi);
+    deviceEinsumAccum("zj,mn->zmnj", {&bar, &eye}, tRows, -1.0, res.stream());
+  }
+}
+
+void storedEpsAdjoint(bool core, const DeviceTensor& bar, const GeneralIntegralsDevice& out,
+                      const DeviceResources& res) {
+  const auto [lo, hi] = spanOf(out, core ? RotSpace::Core : RotSpace::Virt);
+  if (hi <= lo) return;
+  const DeviceTensor sel = columnSelector(hi - lo, lo, out.nmo(), res);
+  const DeviceTensor fRows = sliceAxis(out.f, 0, lo, hi);
+  deviceEinsumAccum("i,ix->ix", {&bar, &sel}, fRows, 1.0, res.stream());
+}
+
 }  // namespace nevpt2

@@ -59,6 +59,15 @@ different times, the last by luck (issue #71). Since then there is one parser,
    ``pc_on_states.py`` writes it (NaN PC placeholders) must read back through
    every golden reader -- and a golden under ``golden/`` holding any NaN or
    infinity is refused, so such a file can never be committed.
+5. **The ``.gradsrc`` dump** (#73, with the integral adjoint of #246). None
+   is committed, so every flavour (SC / PC, with and without the ``edot_*``
+   and ``ibar_*`` sets) is synthesised, written by
+   ``golden_format.write_gradsrc``, read back by ``read_gradsrc`` and by a
+   bare ``numpy.load``, and rewritten byte for byte; a partial ``ibar_*``
+   set, a wrong shape and a stray member are refused; and the C++ writer's
+   ``kIntegralAdjointNames`` table (``apps/sc_pseudodensity/gradsrc.cppm``)
+   must be ``GRADSRC_IBAR``. ``--gradsrc DUMP...`` adds dumps the C++ writer
+   wrote: each must be ``write_gradsrc``'s bytes exactly.
 
 The C++ half is ``test/golden``'s ``GoldenLayoutContractTests``, which loads
 every committed golden and sidecar with ``loadGolden`` / ``loadGradGold`` /
@@ -583,7 +592,95 @@ def states_hand_off(fail: Failures, tmp: Path) -> None:
               flush=True)
 
 
-def main() -> int:
+#: The C++ writer's integral-adjoint table (#246), read off its source: the
+#: names and axis letters must be golden_format.GRADSRC_IBAR's, in order.
+GRADSRC_CPP = REPO / "apps" / "sc_pseudodensity" / "gradsrc.cppm"
+GRADSRC_CPP_ENTRY = re.compile(r'\{"(\w+)", "([ncav]+)"\}')
+
+
+def synthetic_gradsrc(seed: int, *, pc: bool, edot: bool, ibar: bool) -> dict:
+    """A small dump with every member drawn from ``seed``: n_core 2, n_act 3,
+    n_virt 4, a (3, 3) CI vector, two Edot directions."""
+    rng = np.random.default_rng(seed)
+    sizes = dict(n=9, c=2, a=3, v=4, d=2)
+    m: dict[str, np.ndarray] = {}
+    groups = [gf.GRADSRC_CORE] + ([gf.GRADSRC_PC] if pc else []) \
+        + ([gf.GRADSRC_EDOT] if edot else []) + ([gf.GRADSRC_IBAR] if ibar else [])
+    for group in groups:
+        for name, axes, dtype in group:
+            if axes == "0":
+                # the integers are pc's 1 here; the partition is set below
+                m[name] = np.array(1 if dtype == "<i8" else rng.standard_normal(), dtype=dtype)
+            elif axes == "*":
+                m[name] = rng.standard_normal((3, 3))
+            else:
+                m[name] = rng.standard_normal(tuple(sizes[c] for c in axes))
+    m["ncore"], m["nact"], m["nvirt"] = (np.array(v, dtype="<i8") for v in (2, 3, 4))
+    return m
+
+
+def gradsrc_dumps(fail: Failures, tmp: Path, paths: list[Path]) -> None:
+    """The ``.gradsrc`` dump (#73, #246): no file of it is committed, so the
+    contract is held on synthetic dumps of every flavour -- written by
+    ``golden_format.write_gradsrc``, read back by ``read_gradsrc`` and by a
+    bare ``numpy.load`` (the consumer), and written again byte for byte -- plus
+    any dump the C++ writer produced that is named on the command line (read,
+    re-written, compared byte for byte: the two writers are one layout). The
+    refusals: a partial integral-adjoint set, a wrong shape, a stray member.
+    And the C++ table of the integral adjoint's arrays against this one."""
+    cpp = GRADSRC_CPP_ENTRY.findall(GRADSRC_CPP.read_text())
+    py = [(n.removeprefix("ibar_"), a) for n, a, _t in gf.GRADSRC_IBAR]
+    fail.check(cpp == py, f"{GRADSRC_CPP.relative_to(REPO)}'s kIntegralAdjointNames is not "
+               f"golden_format.GRADSRC_IBAR: {cpp} != {py}")
+    flavours = [dict(pc=pc, edot=edot, ibar=ibar)
+                for pc in (False, True) for edot in (False, True) for ibar in (False, True)]
+    for k, fl in enumerate(flavours):
+        name = "synthetic " + "/".join(f for f, on in fl.items() if on) if any(fl.values()) \
+            else "synthetic core"
+        m = synthetic_gradsrc(246 + k, **fl)
+        p = tmp / f"synthetic_{k}.gradsrc"
+        if fail.run(f"{name}: write_gradsrc", gf.write_gradsrc, p, m) is None and not p.exists():
+            continue
+        back = fail.run(f"{name}: read_gradsrc", gf.read_gradsrc, p)
+        if back is None:
+            continue
+        fail.check(set(back) == set(m) and all(np.array_equal(back[n], m[n]) for n in m),
+                   f"{name}: read_gradsrc does not return what was written")
+        with np.load(p) as z:
+            fail.check(set(z.files) == set(m) and all(np.array_equal(z[n], m[n]) for n in m),
+                       f"{name}: numpy.load does not read what was written")
+        q = tmp / f"synthetic_{k}_again.gradsrc"
+        gf.write_gradsrc(q, back)
+        fail.check(q.read_bytes() == p.read_bytes(), f"{name}: not byte-identical rewritten")
+        print(f"  {name}: {len(m)} members round-trip, byte for byte", flush=True)
+    full = synthetic_gradsrc(1, pc=False, edot=True, ibar=True)
+    for what, bad in (
+            ("a partial integral-adjoint set", {n: v for n, v in full.items() if n != "ibar_f"}),
+            ("a mis-shaped ibar_heff", {**full, "ibar_heff": np.zeros((3, 3))}),
+            ("a stray member", {**full, "ibar_mo_coeff": np.zeros((9, 9))})):
+        try:
+            gf.write_gradsrc(tmp / "refused.gradsrc", bad)
+            fail.add(f"write_gradsrc accepted {what}")
+        except gf.FormatError:
+            print(f"  refused: {what}", flush=True)
+    for path in paths:
+        got = fail.run(f"{path.name}: read_gradsrc", gf.read_gradsrc, path)
+        if got is None:
+            continue
+        q = tmp / "cpp_again.gradsrc"
+        gf.write_gradsrc(q, got)
+        fail.check(q.read_bytes() == path.read_bytes(),
+                   f"{path.name}: the C++ writer's bytes are not golden_format's")
+        print(f"  {path}: {len(got)} members, C++ writer == golden_format.write_gradsrc, "
+              "byte for byte", flush=True)
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    gradsrc_paths = [Path(a) for a in argv[1:]] if argv[:1] == ["--gradsrc"] else []
+    if argv and not gradsrc_paths:
+        print("usage: golden_layout_check.py [--gradsrc DUMP...]")
+        return 2
     fail = Failures()
     print("stray parsers (reference_data/, src/, apps/):", flush=True)
     stray_parsers(fail)
@@ -601,6 +698,8 @@ def main() -> int:
         fresh_writer(fail, tmp)
         print("the CASSCF sweep's hand-off:", flush=True)
         states_hand_off(fail, tmp)
+        print("the .gradsrc dump:", flush=True)
+        gradsrc_dumps(fail, tmp, gradsrc_paths)
     if fail.items:
         print(f"FAIL: {len(fail.items)} layout-contract failure(s)")
         for item in fail.items:
@@ -608,7 +707,7 @@ def main() -> int:
         return 1
     print("PASS: every golden, gradient sidecar, MO sidecar, source-term oracle, "
           "response sidecar, integral perturbation sidecar and full MO-integral tensor "
-          "sidecar round-trips through "
+          "sidecar, and the .gradsrc dump's every flavour, round-trips through "
           f"every reader, layouts {sorted(m.decode() for m in layouts)}")
     return 0
 

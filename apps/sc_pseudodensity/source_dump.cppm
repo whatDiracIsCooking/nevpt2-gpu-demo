@@ -59,7 +59,13 @@
 //      reads, class by class against the builders by duality on seeded
 //      inputs, 1e-10 relative -- SC's or, with --pc, PC's K's;
 //   8  (#240, --probed-y only) the one-pass Y against the probed one, element
-//      by element, within kDumpMatrixTol of max(1, |Y_probed|).
+//      by element, within kDumpMatrixTol of max(1, |Y_probed|);
+//   9  (#246) the INTEGRAL ADJOINT, dE/d(integrals) off the same reverse pass
+//      as Y, which the file also carries (the 21 `ibar_*` members, on the
+//      gradient sidecar's inventory): its scatter onto the inventory against
+//      the stored blocks' pairing, and its pairing with a seeded integral
+//      perturbation against a ladder of this binary's own energy at
+//      I + h Idot, 1e-7 on the fourfold rule (:integral_adjoint_check).
 //
 // WITH --pc (#74) IT WRITES PC-NEVPT2'S instead: Y and y by the PC solve's
 // adjoint (pcFullRotationMatrix, pcCiSourceDevice -- nevpt2.gradient's PC
@@ -100,6 +106,8 @@ import nevpt2.golden;
 import nevpt2.gradsrc;         // the .gradsrc writer and its reader
 // generalIntegrals: the sidecar as --kappa-full reads it, either flavour.
 import :kappa_full_check;
+// checkIntegralAdjoint: check 9, the integral adjoint's (#246).
+import :integral_adjoint_check;
 
 // How many basis directions share one slab walk while Y is probed -- the
 // number --kappa-full's Eqs. 56-57 probe uses.
@@ -149,6 +157,9 @@ double frobenius(const nevpt2::Tensor& t) {
 // (energiesDevice's, or pcEnergiesDevice's), what y's walk is held to.
 struct GpuSourceTerms {
   nevpt2::Tensor kappa;   // Y_xy, [n_mo, n_mo], in the golden's basis
+  // dE/d(integrals) (#246), off the same reverse pass as Y: the stored blocks'
+  // and the inventory's (nevpt2.gradient, "The integral adjoint").
+  nevpt2::IntegralAdjointDevice adjoint;
   nevpt2::Tensor ci;      // y_I, [n_det]
   double walkGap = 0.0;   // |E_corr from y's walk - energiesDevice's|
   double epsGap = 0.0;    // e_core / e_virt rebuilt from the sidecar, relative
@@ -183,11 +194,13 @@ nevpt2::Result<GpuSourceTerms> assembleSourceTerms(
 
   // --- Y over every pair, in one reverse pass (#240) ---------------------------
   const auto tY = std::chrono::steady_clock::now();
-  out.kappa =
-      pc ? NEVPT2_TRY(nevpt2::pcFullRotationMatrixOnePass(ints, gen, dm1, dm2, dm3, f3ac, f3ca,
-                                                          &hbar, res))
-         : NEVPT2_TRY(nevpt2::scFullRotationMatrixOnePass(ints, gen, dm1, dm2, dm3, f3ac, f3ca,
-                                                          &hbar, res));
+  nevpt2::OnePassSourceTerms onePass =
+      pc ? NEVPT2_TRY(nevpt2::pcOnePassSourceTerms(ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar,
+                                                   res))
+         : NEVPT2_TRY(nevpt2::scOnePassSourceTerms(ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar,
+                                                   res));
+  out.kappa = std::move(onePass.y);
+  out.adjoint = std::move(onePass.adjoint);
   const double onePassSeconds = secondsSince(tY);
   double yMax = 0.0;
   for (std::int64_t i = 0; i < out.kappa.size(); ++i)
@@ -348,6 +361,21 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
               duality.size(), pc ? "PC" : "SC", dualityGap, dualityWorst.c_str(), kDualityTol,
               dualityOk ? "ok" : "FAILED");
 
+  // 9. the integral adjoint (#246), off the same reverse pass as Y: its scatter
+  // onto the inventory, and its pairing with a seeded integral perturbation
+  // against a ladder of this binary's own energy (:integral_adjoint_check).
+  double ibarMax = 0.0;
+  for (const nevpt2::InventoryArray& a : nevpt2::kInventoryArrays) {
+    const nevpt2::Tensor t =
+        nevpt2::downloadTensor(terms.adjoint.inventory.*a.member, res.stream());
+    for (std::int64_t i = 0; i < t.size(); ++i) ibarMax = std::max(ibarMax, std::fabs(t.flat(i)));
+  }
+  std::printf("  9. the integral adjoint dE/d(integrals) on the sidecar's inventory: max "
+              "|ibar| = %.6e\n",
+              ibarMax);
+  const bool adjointOk = NEVPT2_TRY(
+      checkIntegralAdjoint(g, pc, ints, gen, terms.adjoint, dm1, dm2, rdmOpt, res));
+
   // The scheme's full-rotation pairing: SC's or PC's (#74), the same fields.
   const auto fullRotation =
       [&](const std::vector<nevpt2::ScRotationRequest>& req) -> nevpt2::Result<
@@ -463,6 +491,14 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
     out.edotFrozen(d) = frozen.dirs[du].tangent;
     out.edotDigest(d) = digest[du].total;
   }
+  for (std::size_t i = 0; i < nevpt2::kInventoryArrays.size(); ++i) {
+    if (std::string_view(nevpt2::kInventoryArrays[i].name) != nevpt2::kIntegralAdjointNames[i].name)
+      return nevpt2::err_config(std::format(
+          "the integral adjoint: the inventory's array {} is not the .gradsrc's {}",
+          nevpt2::kInventoryArrays[i].name, nevpt2::kIntegralAdjointNames[i].name));
+    out.integralAdjoint.push_back(nevpt2::downloadTensor(
+        terms.adjoint.inventory.*nevpt2::kInventoryArrays[i].member, res.stream()));
+  }
   NEVPT2_TRY(nevpt2::writeGradSrc(path, out));
   const nevpt2::GradSrc back = NEVPT2_TRY(nevpt2::readGradSrc(path));
   // 3. the round trip, bit for bit.
@@ -475,12 +511,14 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
                          back.pc == out.pc &&
                          sameTensor(back.edotKappa, out.edotKappa) &&
                          sameTensor(back.edotFrozen, out.edotFrozen) &&
-                         sameTensor(back.edotDigest, out.edotDigest);
+                         sameTensor(back.edotDigest, out.edotDigest) &&
+                         back.integralAdjoint.size() == out.integralAdjoint.size() &&
+                         std::ranges::equal(back.integralAdjoint, out.integralAdjoint, sameTensor);
   std::printf("  3. %s read back: %s\n", path.c_str(),
               roundTrip ? "every member identical, bit for bit" : "DIFFERS from what was written");
 
   const bool ok = matrixOk && walkOk && epsOk && roundTrip && edotOk && halvesOk && viaBOk &&
-                  dualityOk && terms.probedOk;
+                  dualityOk && terms.probedOk && adjointOk;
   if (fitted)
     std::printf("\n%s: the GPU's source terms Y_xy and y_I were assembled, written to %s and "
                 "read back unchanged, with Edot(kappa) along %zu seeded directions in its "
