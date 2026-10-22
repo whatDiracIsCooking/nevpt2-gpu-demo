@@ -75,8 +75,8 @@ bijection), so stationarity is one square linear system::
 
     sum_m lambda_m (dG_m / dkappa_k) = -B_k        for every non-gauge pair k
 
-whose matrix is assembled once, in the same sweep that takes the source term,
-and solved directly. The three stages fall out of it rather than being imposed
+whose matrix is assembled once, with the source term (analytically since
+#250, below), and solved directly. The three stages fall out of it rather than being imposed
 on it. :meth:`Gradients.get_Aop_Adiag` exposes the same operator to an
 iterative solve, so a second residual is reported beside the direct one;
 neither is assumed.
@@ -144,12 +144,27 @@ multiple of it moves no residual, and a Jacobi preconditioner puts one there.
 :meth:`Gradients.solve_lagrange` projects both inside the preconditioner and
 after the solve, and reports ``z.c``.
 
-What still is a difference quotient is the ``kappa`` sweep's (the source
-term ``A``'s ``E_CASCI`` half, the constraint Jacobian and ``Q``) and the
-source terms' when PySCF provides them; the nuclear term's frozen-path
-quotient is a check and an opt-in A/B, not the number. The quotients are of
-a *scalar along a frozen path*, so their own error is measurable, and it is
-measured: the Richardson bar is on by default and printed with the gradient
+**The** ``kappa`` **direction is analytic too (#250).** A rotation ``C
+exp(kappa)`` moves the MO integrals linearly at first order, ``dI/dkappa =
+[I, kappa]``, so every object the ``kappa`` sweep used to difference is
+exact: ``E_CASCI``'s slope ``A`` is its generalized Fock matrix
+(:func:`rotation_gradient`; on the CASSCF branch ``gen_g_hop``'s
+``g_orb``), the constraint Jacobian is the Fock matrices' rotation
+derivative with the index-space density's response
+(:func:`fock_rotation_derivatives`), and ``Q = d(H c)/dkappa`` is ``H c`` at
+the integrals' derivative (:func:`kappa_analytic`). ``E_corr``'s half is the
+dump's ``Y``, one reverse pass on the GPU (#240), held every run to its own
+integral adjoint's rotation derivative. That removes ``KAPPA_STEP``'s
+round-off, which CP-CASSCF amplified into ``gradient_at``'s guess-to-guess
+spread (docs/testing.md, "The analytic kappa terms"). ``--kappa-quotient``
+keeps the sweep for the A/B.
+
+What still is a difference quotient is the source terms' when PySCF
+provides them (``y`` always, ``Y`` through a sweep of ``E_corr`` alone), and
+the checks; the nuclear term's frozen-path quotient is a check and an
+opt-in A/B, not the number. The quotients are of a *scalar along a frozen
+path*, so their own error is measurable, and it is measured: the
+Richardson bar is on by default and printed with the gradient
 (``--no-richardson`` turns it off).
 
 SC OR PC: ONE LAGRANGIAN, TWO CORRELATION ENERGIES
@@ -194,9 +209,11 @@ Four things ``--pc`` does need:
   it) is in docs/testing.md, "The analytic gradient against the
   numerical one".
 
-It is far slower than the SC run, and the whole cost is in the ``kappa``
-sweep: one block2 PC solve per non-gauge rotation, each one orders of
-magnitude above PySCF's per-class sum. The measured walls are in
+With PySCF's (block2's) source terms it is far slower than the SC run, and
+the whole cost is in the ``kappa`` sweep of ``E_corr``: one block2 PC solve
+per non-gauge rotation, each one orders of magnitude above PySCF's
+per-class sum. The GPU's PC dump (``--source dump``) supplies ``Y`` and runs
+no sweep. The measured walls are in
 docs/testing.md, "The analytic gradient against the numerical one".
 
 WHAT VALIDATES IT
@@ -546,14 +563,16 @@ CASES = ngrad.CASES
 
 #: The orbital-rotation step for the ``Y_xy`` difference quotients (and the
 #: constraint Jacobian ``M`` and ``Q`` the same sweep produces), SC, in the
-#: dimensionless ``kappa``. A Givens rotation by ``h`` is exact to machine
-#: precision, so the errors are the quotient's truncation and the energies'
-#: round-off divided by ``2h``. ``2^-17``: on N2 CAS(4,4) SC the gradient's
-#: change between neighbouring rungs falls from 7.3e-6 at ``2^-9`` to 2.0e-8
-#: at ``2^-17``, and is round-off from there down; the shipped 1e-4 before
-#: #77 left ~1e-6 on the table (docs/testing.md, "The step constants,
-#: measured"). Gated by the orbital-stationarity ladder
-#: (:func:`check_orbital_stationarity`).
+#: dimensionless ``kappa``. Since #250 those objects are analytic
+#: (:data:`KAPPA_TERMS`), so this step is ``--kappa-quotient``'s, PySCF's
+#: ``E_corr`` half of ``Y`` (which has no adjoint) and the gauge identity's.
+#: A Givens rotation by ``h`` is exact to machine precision, so the errors
+#: are the quotient's truncation and the energies' round-off divided by
+#: ``2h``. ``2^-17``: on N2 CAS(4,4) SC the gradient's change between
+#: neighbouring rungs falls from 7.3e-6 at ``2^-9`` to 2.0e-8 at ``2^-17``,
+#: and is round-off from there down; the shipped 1e-4 before #77 left ~1e-6
+#: on the table (docs/testing.md, "The step constants, measured"). Gated by
+#: the orbital-stationarity ladder (:func:`check_orbital_stationarity`).
 KAPPA_STEP = 2.0 ** -17
 
 #: The same step for ``--pc``: unchanged at 1e-4, because the PC gradient
@@ -641,6 +660,18 @@ NUC_STEP_PC = ngrad.STEP_BOHR
 #: #247, kept for the A/B (``--nuclear-quotient``, which computes the analytic
 #: one beside it).
 NUCLEAR_TERMS = ("analytic", "quotient")
+
+#: How the ``kappa``-direction objects are taken (#250): ``E_CASCI``'s slope
+#: ``A_casci``, the constraint Jacobian ``M`` and ``Q = d(H c)/dkappa``.
+#: ``analytic``, the default: each is linear in the MO Hamiltonian's rotation
+#: derivative ``dI/dkappa = [I, kappa]`` (:func:`kappa_analytic`), and
+#: ``E_corr``'s half is the dump's ``Y`` -- no rotated evaluation at all.
+#: ``quotient``: :func:`kappa_sweep`'s central differences at
+#: :data:`KAPPA_STEP`, the objects before #250, kept for the A/B
+#: (``--kappa-quotient``, which computes the analytic ones beside it).
+#: PySCF's source terms have no adjoint, so their ``E_corr`` half stays the
+#: sweep's quotient under either.
+KAPPA_TERMS = ("analytic", "quotient")
 
 #: How far the analytic term's densities may miss ``Phi``'s linear part
 #: rebuilt by :meth:`Functional.evaluate` at a displaced geometry, Eh
@@ -1792,7 +1823,9 @@ def load_source_terms(path: Path, st: State, *, pc: bool = False) -> SourceTerms
 def kappa_sweep(fn: Functional, st: State, cons: list, *, with_corr: bool,
                 step: float, log=print, workers: int = 1) -> dict:
     """One central-difference pass along every non-gauge ``kappa`` pair,
-    returning everything that depends on that direction:
+    returning everything that depends on that direction. Since #250 only
+    ``--kappa-quotient`` (the A/B) and PySCF's ``E_corr`` half of ``A`` run
+    it; the default objects are :func:`kappa_analytic`'s:
 
     ``A``
         ``(n_mo, n_mo)`` antisymmetric: ``A_pq = dE/dkappa_pq -
@@ -1908,6 +1941,206 @@ def _sweep_rows(ks: list[int]) -> tuple[list[tuple], int]:
     n0 = fn.nevals
     rows = [_sweep_pair(_SWEEP_CTX, k) for k in ks]
     return rows, fn.nevals - n0
+
+
+# --------------------------------------------------------------------------
+# The kappa-direction objects analytically (#250)
+# --------------------------------------------------------------------------
+
+
+def full_mo_hamiltonian(fn: Functional, C: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(h, (pq|rs))`` over the whole MO range of ``C`` at ``fn``'s geometry:
+    the one-electron matrix and the full chemists'-order tensor -- the fitted
+    one on a density-fitted state (``integral_perturbation.full_eri``, in the
+    state's auxiliary basis), so every quantity below is the one
+    :meth:`Functional.evaluate` builds."""
+    import integral_perturbation as ip
+
+    return C.T @ fn.hcore @ C, ip.full_eri(fn.mol, C, fn.state.auxbasis)
+
+
+def full_range_densities(st: State, ci: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``E_CASCI``'s density pair over the whole MO range:
+    ``casscf_hessian.full_rdms`` on the occupied range, zero-padded, with
+    ``E_CASCI = E_nuc + sum P h + 1/2 sum Gamma (pq|rs)``."""
+    import casscf_hessian as ch
+
+    D, G = ch.full_rdms(st.ncore, st.nact, st.nelecas, ci)
+    n, o = st.nmo, D.shape[0]
+    P = np.zeros((n, n))
+    P[:o, :o] = D
+    Gamma = np.zeros((n,) * 4)
+    Gamma[:o, :o, :o, :o] = G
+    return P, Gamma
+
+
+def rotation_gradient(h: np.ndarray, g: np.ndarray, P: np.ndarray,
+                      Gamma: np.ndarray) -> np.ndarray:
+    """``A[p, q] = d/dt E(C exp(t (E_pq - E_qp)))`` at ``t = 0`` -- the
+    derivative :func:`kappa_sweep` differences along :func:`givens` -- for
+    ``E = sum P h + 1/2 sum Gamma (pq|rs)``, ``P`` symmetric and ``Gamma``
+    eightfold symmetric, at fixed densities.
+
+    A rotation ``C exp(kappa)`` moves the MO integrals linearly at first
+    order, ``dI/dkappa = [I, kappa]`` on every index, so the slope is the
+    generalized Fock matrix ``X = 2 h P + 2 sum_qrs (tq|rs) Gamma_pqrs``
+    against ``kappa``: ``sum_tp kappa_tp X_tp``, which for ``kappa = E_pq -
+    E_qp`` is ``X_pq - X_qp``. The same ``X``
+    ``integral_perturbation.path_gradient`` contracts with the frozen path's
+    connection; exact, with no step."""
+    X = 2.0 * h @ P + 2.0 * np.tensordot(g, Gamma, axes=([1, 2, 3], [1, 2, 3]))
+    return X - X.T
+
+
+def fock_rotation_derivatives(h: np.ndarray, g: np.ndarray, D: np.ndarray,
+                              pairs: list, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+    """``out[k, m] = d/dt Fock_D[rows[m], cols[m]]`` along :func:`givens`'
+    rotation of ``pairs[k]``, for the Fock matrix of a density FIXED in MO
+    index space, ``Fock_D = h + J(D) - 1/2 K(D)`` with ``J(D)_ab = sum
+    (ab|rs) D_rs`` and ``K(D)_ab = sum (ar|sb) D_rs``.
+
+    Every orbital constraint here is one: the RHF ``F`` (``D`` twice the RHF
+    occupied projector), the generalized ``f`` (``D = 2 P_core + gamma``) and
+    ``h^eff`` (``D = 2 P_core``). Under ``C -> C U``, ``U = exp(kappa)``,
+    ``Fock_D -> U^T Fock_{U D U^T} U``, so its slope is::
+
+        dFock = [Fock_D, kappa] + J([kappa, D]) - 1/2 K([kappa, D])
+
+    -- the commutator from the orbitals, and the response to the density's
+    index-space projector moving with them. That second term is why the
+    Jacobian is not ``[f, kappa]`` across the core/active boundary
+    (:func:`kappa_sweep`). For ``kappa = E_pq - E_qp`` the density's change is
+    ``e_p d_q^T - e_q d_p^T - d_p e_q^T + d_q e_p^T`` (``d_p`` = ``D``'s
+    column ``p``), so ``J`` and ``K`` of it are slices of ``g`` contracted
+    once with ``D``, gathered at the requested entries only."""
+    n = h.shape[0]
+    fock = (h + np.einsum("abrs,rs->ab", g, D, optimize=True)
+            - 0.5 * np.einsum("arsb,rs->ab", g, D, optimize=True))
+    rows = np.asarray(rows, dtype=int)
+    cols = np.asarray(cols, dtype=int)
+    p = np.array([pq[0] for pq in pairs], dtype=int)
+    q = np.array([pq[1] for pq in pairs], dtype=int)
+    # [Fock, kappa]_ab = F_ap d_bq - F_aq d_bp - d_ap F_qb + d_aq F_pb
+    a, b = rows[None, :], cols[None, :]
+    pk, qk = p[:, None], q[:, None]
+    out = (fock[a, pk] * (b == qk) - fock[a, qk] * (b == pk)
+           - (a == pk) * fock[qk, b] + (a == qk) * fock[pk, b])
+    # TJ[m, r, t] = sum_s (a_m b_m | r s) D_st;  TK[m, r, t] = sum_s (a_m r | s b_m) D_st
+    tj = g[rows, cols] @ D
+    out += 2.0 * (tj[:, p, q] - tj[:, q, p]).T
+    tk_ab = g[rows, :, :, cols] @ D
+    tk_ba = g[cols, :, :, rows] @ D
+    out -= 0.5 * (tk_ab[:, p, q] - tk_ab[:, q, p] - tk_ba[:, q, p] + tk_ba[:, p, q]).T
+    assert out.shape == (len(pairs), rows.size) and n == g.shape[0]
+    return out
+
+
+def kappa_analytic(fn: Functional, st: State, cons: list, *, log=print) -> dict:
+    """:func:`kappa_sweep`'s ``E_CASCI``-side objects with no difference
+    quotient (#250): ``A_casci``, ``E_CASCI``'s slope along every ``kappa``
+    pair (:func:`rotation_gradient` at the state's own densities); ``M``, the
+    constraint Jacobian (:func:`fock_rotation_derivatives`, column by
+    constraint kind); and on the CASCI branch ``Q = d(H c)/dkappa``, every
+    piece of ``H c`` -- the inactive constant, ``h^eff``'s active block and
+    the active integrals -- linear in the MO Hamiltonian, so each row is
+    ``H c`` at that Hamiltonian's rotation derivative.
+
+    The constraints are linear in the integrals at fixed CI vector, so their
+    quotient's only error was round-off over ``2 KAPPA_STEP`` (``F``'s core
+    entries are tens of Eh); ``E_CASCI``'s is ~1e-13 of a few hundred Eh over
+    ``2^-16``, which CP-CASSCF amplified into #246's guess-to-guess spread
+    (docs/testing.md, "Where `gradient_at`'s ~1e-8 noise comes from").
+
+    On the CASSCF branch ``M`` keeps (O2)'s columns alone, as the sweep's
+    does there, and ``Q`` is built but unread: (S1)'s and (C1)'s Jacobian is
+    ``gen_g_hop``'s ``h_op``."""
+    t0 = time.perf_counter()
+    pairs = kappa_pairs(st)
+    C = st.mo_coeff
+    h, g = full_mo_hamiltonian(fn, C)
+    P, Gamma = full_range_densities(st, st.ci)
+    A_casci = rotation_gradient(h, g, P, Gamma)
+    gamma = fn.reference_dm1(st)
+    nmo, ncore = st.nmo, st.ncore
+    core, act = st.core, st.act
+    d_core = np.zeros((nmo, nmo))
+    d_core[core, core] = 2.0 * np.eye(ncore)
+    d_f = d_core.copy()
+    d_f[act, act] = gamma
+    dens = {"F": 2.0 * st.occ_projector(), "f": d_f}
+    M = np.zeros((len(pairs), len(cons)))
+    for kind, D in dens.items():
+        if kind == "F" and st.casscf:
+            continue
+        idx = [m for m, (k, _p, _q) in enumerate(cons) if k == kind]
+        if not idx:
+            continue
+        rows = np.array([cons[m][1] for m in idx])
+        cols = np.array([cons[m][2] for m in idx])
+        M[:, idx] = fock_rotation_derivatives(h, g, D, pairs, rows, cols)
+    Q = _hvec_rotation_derivatives(st, h, g, d_core, pairs)
+    seconds = time.perf_counter() - t0
+    log(f"  the kappa-direction objects analytically (#250): A_casci, the {len(pairs)} x "
+        f"{len(cons)} Jacobian M and Q in {seconds:.1f}s")
+    return {"A_casci": A_casci, "M": M, "Q": Q, "seconds": seconds, "h": h, "g": g}
+
+
+def analytic_sweep(an: dict, sw: dict | None, with_corr: bool, workers: int) -> dict:
+    """:func:`kappa_analytic`'s objects in :func:`kappa_sweep`'s dict shape,
+    ``E_corr``'s half of ``A`` from the sweep ``sw`` when one ran for it
+    (PySCF's source terms), else zero (the dump's ``Y`` is added by
+    :meth:`Gradients.prepare`)."""
+    a_corr = sw["A_corr"] if sw is not None else np.zeros_like(an["A_casci"])
+    return {"A": an["A_casci"] + a_corr, "A_corr": a_corr, "A_casci": an["A_casci"],
+            "M": an["M"], "Q": an["Q"],
+            "seconds": an["seconds"] + (sw["seconds"] if sw is not None else 0.0),
+            "corr_sweep_seconds": sw["seconds"] if sw is not None else 0.0,
+            "with_corr": bool(with_corr), "workers": max(1, workers), "kappa": "analytic"}
+
+
+def _hvec_rotation_derivatives(st: State, h: np.ndarray, g: np.ndarray, d_core: np.ndarray,
+                               pairs: list) -> np.ndarray:
+    """``Q[k] = d(H c)/dkappa_k`` for :func:`kappa_analytic`. ``H c =
+    E_inactive c + H_act c`` with ``E_inactive = E_nuc + sum_i (h_ii +
+    h^eff_ii)`` and ``H_act`` from ``h^eff``'s active block and ``(tu|vw)``
+    -- each linear in ``(h, (pq|rs))``, and ``absorb_h1e`` / ``contract_2e``
+    linear in what they are handed. So a row is the same construction at
+    the rotation derivative of each piece: ``h^eff``'s from
+    :func:`fock_rotation_derivatives` (``D = 2 P_core``), ``h``'s the bare
+    commutator ``[h, kappa]``, and ``(tu|vw)``'s ``sum_m kappa_mt (mu|vw)``
+    on each of the four indices -- nonzero only for a pair that touches the
+    active space."""
+    nmo, ncore, nact = st.nmo, st.ncore, st.nact
+    a0 = ncore
+    act_t, act_u = np.meshgrid(np.arange(a0, a0 + nact), np.arange(a0, a0 + nact),
+                               indexing="ij")
+    core_i = np.arange(ncore)
+    rows = np.concatenate([act_t.ravel(), core_i])
+    cols = np.concatenate([act_u.ravel(), core_i])
+    dheff = fock_rotation_derivatives(h, g, d_core, pairs, rows, cols)
+    dh_core = fock_rotation_derivatives(h, g, np.zeros((nmo, nmo)), pairs, core_i, core_i)
+    na2 = nact * nact
+    d_ecore = dheff[:, na2:].sum(axis=1) + dh_core.sum(axis=1)
+    g_xaaa = g[:, a0:a0 + nact, a0:a0 + nact, a0:a0 + nact]
+    c = st.ci
+    Q = np.zeros((len(pairs), c.size))
+    for k, (p, q) in enumerate(pairs):
+        dh1 = dheff[k, :na2].reshape(nact, nact)
+        # d(tu|vw) along kappa = E_pq - E_qp, first index: d_tq (pu|vw) - d_tp (qu|vw)
+        t1 = np.zeros((nact,) * 4)
+        if a0 <= q < a0 + nact:
+            t1[q - a0] += g_xaaa[p]
+        if a0 <= p < a0 + nact:
+            t1[p - a0] -= g_xaaa[q]
+        if np.any(t1):
+            t1 = t1 + t1.transpose(1, 0, 2, 3)
+            dg = t1 + t1.transpose(2, 3, 0, 1)
+            h2 = fci.direct_spin1.absorb_h1e(dh1, dg, nact, st.nelecas, 0.5)
+            hc = fci.direct_spin1.contract_2e(h2, c, nact, st.nelecas)
+        else:
+            hc = fci.direct_spin1.contract_1e(dh1, c, nact, st.nelecas)
+        Q[k] = d_ecore[k] * c.ravel() + np.asarray(hc).ravel()
+    return Q
 
 
 def allowed_determinants(st: State) -> np.ndarray:
@@ -2423,9 +2656,13 @@ class Gradients(lagrange.Gradients):
     def __init__(self, st: State, src: SourceTerms, *, with_corr: bool = True,
                  step: float | None = None, richardson: bool = True,
                  pc: bool = False, kappa_step: float | None = None, workers: int = 1,
-                 nuclear: str = "analytic"):
+                 nuclear: str = "analytic", kappa: str = "analytic"):
         if nuclear not in NUCLEAR_TERMS:
             raise SystemExit(f"nuclear={nuclear!r} is not one of {NUCLEAR_TERMS}")
+        if kappa not in KAPPA_TERMS:
+            raise SystemExit(f"kappa={kappa!r} is not one of {KAPPA_TERMS}")
+        #: how the kappa-direction objects are taken (:data:`KAPPA_TERMS`)
+        self.kappa = kappa
         self.st = st
         #: how the nuclear term is taken (:data:`NUCLEAR_TERMS`)
         self.nuclear = nuclear
@@ -2935,8 +3172,7 @@ class Gradients(lagrange.Gradients):
         if sweep is None:
             if sweep_corr is None:
                 sweep_corr = self.with_corr and not self.src.from_dump
-            sweep = kappa_sweep(self.fn, st, self.cons, with_corr=sweep_corr,
-                                step=self.kappa_step, log=log, workers=self.workers)
+            sweep = self.kappa_objects(sweep_corr, log=log)
         if self.with_corr and not self.src.from_dump and not sweep["with_corr"]:
             raise SystemExit("prepare: PySCF's source term needs a sweep that "
                              "differentiated E_corr")
@@ -2949,10 +3185,74 @@ class Gradients(lagrange.Gradients):
             ci=self.src.ci, origin=self.src.origin, from_dump=self.src.from_dump,
             ibar=self.src.ibar,
         )
-        log(f"  one kappa sweep over {len(self.pairs)} pairs in "
-            f"{sweep['seconds']:.0f}s: the source term A (max |A| = "
-            f"{np.abs(self.src.kappa).max():.6e}), the {len(self.pairs)} x "
-            f"{self.n_constraint} constraint Jacobian M, and Q = d(H c)/dkappa")
+        if sweep.get("kappa") == "analytic":
+            log(f"  the kappa-direction objects over {len(self.pairs)} pairs, ANALYTIC (#250) "
+                f"in {sweep['seconds']:.1f}s: the source term A (max |A| = "
+                f"{np.abs(self.src.kappa).max():.6e}; E_CASCI's half from the integrals' "
+                f"rotation, E_corr's "
+                + ("the dump's Y" if self.src.from_dump else
+                   ("a KAPPA_STEP sweep of E_corr alone, no adjoint" if self.with_corr
+                    else "dropped"))
+                + f"), the {len(self.pairs)} x {self.n_constraint} constraint Jacobian M, "
+                "and Q = d(H c)/dkappa")
+        else:
+            log(f"  one kappa sweep over {len(self.pairs)} pairs in "
+                f"{sweep['seconds']:.0f}s: the source term A (max |A| = "
+                f"{np.abs(self.src.kappa).max():.6e}), the {len(self.pairs)} x "
+                f"{self.n_constraint} constraint Jacobian M, and Q = d(H c)/dkappa")
+
+    def kappa_objects(self, sweep_corr: bool, log=print) -> dict:
+        """The ``kappa``-direction objects :meth:`prepare` reads -- ``A``
+        (``A_casci`` + ``A_corr``), ``M`` and ``Q`` -- in :func:`kappa_sweep`'s
+        dict shape, from :attr:`kappa` (:data:`KAPPA_TERMS`).
+
+        ``analytic`` (the default, #250): ``A_casci``, ``M`` and ``Q`` from
+        :func:`kappa_analytic`; ``E_corr``'s half is the dump's ``Y`` (#240's
+        one reverse pass) and no sweep runs, unless ``sweep_corr`` asks for
+        ``E_corr``'s quotients -- PySCF's source terms, which have no adjoint,
+        or ``--source both``'s comparison -- when the sweep runs for
+        ``A_corr`` alone. ``quotient``: the sweep's every object, as before
+        #250, with the analytic ones taken beside it for the A/B
+        (:attr:`residuals`' ``kappa_ab_*``, max ``|analytic - quotient|``).
+
+        Either way, a dump carrying the integral adjoint (#246) has its ``Y``
+        held to the adjoint's own rotation derivative,
+        ``rotation_gradient`` at :meth:`corr_densities` -- the two are one
+        reverse pass read two ways, so their gap (``kappa_adjoint_gap``) is
+        round-off, and is reported."""
+        st = self.st
+        an = kappa_analytic(self.fn, st, self.cons, log=log)
+        h, g = an.pop("h"), an.pop("g")
+        if self.with_corr and self.src.from_dump and self.src.ibar is not None:
+            y_ad = rotation_gradient(h, g, *self.corr_densities())
+            self.residuals["kappa_adjoint_gap"] = float(max(
+                (abs(y_ad[p, q] - self.src.kappa[p, q]) for p, q in self.pairs),
+                default=0.0))
+            self.residuals["kappa_adjoint_max"] = float(np.abs(self.src.kappa).max())
+            gap = self.residuals["kappa_adjoint_gap"]
+            log(f"  the dump's Y against its integral adjoint's rotation derivative "
+                f"(#246, dI/dkappa = [I, kappa]): max gap {gap:.2e} over the "
+                f"{len(self.pairs)} pairs (max |Y - Y^T| "
+                f"{self.residuals['kappa_adjoint_max']:.2e})")
+        del h, g
+        sw = None
+        if self.kappa == "quotient" or sweep_corr:
+            sw = kappa_sweep(self.fn, st, self.cons, with_corr=sweep_corr,
+                             step=self.kappa_step, log=log, workers=self.workers)
+        if self.kappa == "quotient":
+            o2 = [m for m, (kind, _p, _q) in enumerate(self.cons)
+                  if kind == "f" or not st.casscf]
+            self.residuals.update(
+                kappa_ab_A_casci=float(np.abs(an["A_casci"] - sw["A_casci"]).max()),
+                kappa_ab_M=float(np.abs(an["M"][:, o2] - sw["M"][:, o2]).max()),
+                kappa_ab_Q=float(np.abs(an["Q"] - sw["Q"]).max()),
+                kappa_analytic_seconds=an["seconds"])
+            log(f"  the analytic objects beside the sweep (the A/B): max |analytic - "
+                f"quotient| A_casci {self.residuals['kappa_ab_A_casci']:.2e}, M "
+                f"{self.residuals['kappa_ab_M']:.2e}, Q {self.residuals['kappa_ab_Q']:.2e}")
+            return dict(sw, kappa="quotient", analytic=analytic_sweep(an, sw, sweep_corr,
+                                                                       self.workers))
+        return analytic_sweep(an, sw, sweep_corr, self.workers)
 
     def solve_lagrange(self, Lvec_guess=None, level_shift=None, log=print, **kwargs):
         """The base class's own method, overridden -- and the reason is
@@ -3139,17 +3439,25 @@ class Gradients(lagrange.Gradients):
         which is **not** zero, since ``f``'s active sum is not covariant at
         fixed ``gamma`` -- is not part of this sweep. So a small number here
         is reassurance and a large one is a question, not a verdict; what
-        settles it is the comparison against ``grad_num``."""
+        settles it is the comparison against ``grad_num``.
+
+        With the dump's ``Y`` (#250) ``E_corr``'s slope along each gauge
+        rotation is read off it rather than differenced, so the quotient
+        evaluates no ``E_corr`` -- on ``--pc`` that was a block2 solve per
+        rung and most of a GPU-sourced gradient's wall."""
         st = self.st
         worst = 0.0
         gauge = [(p, q) for p in range(st.ncore, st.nocc)
                  for q in range(p + 1, st.nocc)
                  if st.space_of(p) == st.space_of(q)]
+        corr_from_dump = self.with_corr and self.src.from_dump
+        y_corr = (self.src.kappa - self.sweep["A_casci"]) if corr_from_dump else None
         for p, q in gauge:
             vals = []
             for sign in (+1.0, -1.0):
                 b = self.fn.evaluate(givens(st.mo_coeff, p, q, sign * self.kappa_step),
-                                     st.ci, with_corr=self.with_corr, with_g=st.casscf)
+                                     st.ci, with_corr=self.with_corr and not corr_from_dump,
+                                     with_g=st.casscf)
                 val = b["e_casci"] + b["e_corr"] + self.ci_term(b)
                 if st.casscf:
                     # The CASSCF branch's constraints are covariant under an
@@ -3160,7 +3468,10 @@ class Gradients(lagrange.Gradients):
                     # Lagrangian's gauge derivative (CasscfGradients).
                     val += float(self.lam @ constraint_vector(b, self.cons))
                 vals.append(val)
-            worst = max(worst, abs((vals[0] - vals[1]) / (2.0 * self.kappa_step)))
+            slope = (vals[0] - vals[1]) / (2.0 * self.kappa_step)
+            if y_corr is not None:
+                slope += y_corr[p, q]
+            worst = max(worst, abs(slope))
         return worst
 
     def kernel(self, **kwargs) -> np.ndarray:
@@ -3226,7 +3537,8 @@ class CasscfGradients(Gradients):
     def __init__(self, st: State, src: SourceTerms, *, with_corr: bool = True,
                  step: float | None = None, richardson: bool = True,
                  kappa_step: float | None = None, cp_solve: str = "dense",
-                 pc: bool = False, workers: int = 1, nuclear: str = "analytic"):
+                 pc: bool = False, workers: int = 1, nuclear: str = "analytic",
+                 kappa: str = "analytic"):
         if not st.casscf:
             raise SystemExit("CasscfGradients needs a --reference casscf state")
         # ``pc`` changes E_corr and nothing else (#126): the source terms Y, y
@@ -3234,7 +3546,8 @@ class CasscfGradients(Gradients):
         # the PC guard at every displaced CI vector; (S1), (C1), (O2) and the
         # coupled operator are the reference's and do not see it.
         super().__init__(st, src, with_corr=with_corr, step=step, richardson=richardson,
-                         pc=pc, kappa_step=kappa_step, workers=workers, nuclear=nuclear)
+                         pc=pc, kappa_step=kappa_step, workers=workers, nuclear=nuclear,
+                         kappa=kappa)
         if cp_solve not in CP_SOLVES:
             raise SystemExit(f"--cp-solve {cp_solve!r} is not one of {CP_SOLVES}")
         self.cp_solve = cp_solve
@@ -3355,14 +3668,17 @@ class CasscfGradients(Gradients):
     # -- the driver -------------------------------------------------------
 
     def prepare(self, log=print, **kwargs) -> None:
-        """:meth:`Gradients.prepare`'s sweep, which here supplies ``Y`` and
-        (O2)'s Jacobian, then ``gen_g_hop`` at the reference point.
+        """:meth:`Gradients.prepare`'s ``kappa`` objects (analytic since #250,
+        or ``--kappa-quotient``'s sweep), which here supply ``Y`` and (O2)'s
+        Jacobian, then ``gen_g_hop`` at the reference point.
 
-        With ``E_corr`` dropped the source terms are **exactly zero**, not the
-        sweep's ``dE_CASCI/dkappa``: a CASSCF reference is stationary in
-        ``kappa`` and ``c`` (section 1.4), so ``Y = 0`` and ``y = 0`` by
-        construction. What the sweep measures for it is the residual
-        stationarity of the converged orbitals, and that is reported."""
+        With ``E_corr`` dropped the source terms are **exactly zero**, not
+        ``dE_CASCI/dkappa``: a CASSCF reference is stationary in ``kappa`` and
+        ``c`` (section 1.4), so ``Y = 0`` and ``y = 0`` by construction. What
+        ``dE_CASCI/dkappa`` measures for it is the residual stationarity of
+        the converged orbitals -- ``g_orb`` itself when analytic, the
+        quotient's round-off on top of it when not -- and that is
+        reported."""
         super().prepare(log=log, **kwargs)
         st = self.st
         a_casci = self.sweep["A_casci"]
@@ -3381,10 +3697,11 @@ class CasscfGradients(Gradients):
         self.nlag = self._basis.shape[1]
         log(f"  gen_g_hop at the reference ({time.perf_counter() - t0:.1f}s): "
             f"|g_orb| = {self.residuals['casscf_g_orb']:.3e}, |g_ci| = "
-            f"{self.residuals['casscf_g_ci']:.3e}; the sweep's max |dE_CASCI/dkappa| over "
+            f"{self.residuals['casscf_g_ci']:.3e}; max |dE_CASCI/dkappa| "
+            f"({self.sweep.get('kappa', 'quotient')}) over "
             f"(S1)'s rotations = {self.residuals['stationarity_kappa']:.3e} (the "
             "converged orbitals' residual stationarity)")
-        log("  (on this branch the sweep's M holds (O2)'s columns alone, and Q is unread: "
+        log("  (on this branch M holds (O2)'s columns alone, and Q is unread: "
             "(S1)'s and (C1)'s Jacobian is gen_g_hop's h_op)")
         log(f"  the coupled space: {self.nvar} orbital variables (core-active, "
             f"core-virtual, active-virtual) + {self.nlag - self.nvar} CI directions "
@@ -4056,8 +4373,10 @@ def check_orbital_stationarity(g: Gradients) -> list[Check]:
     is stationary along every NON-GAUGE rotation -- the set
     :func:`non_gauge_rotations` derives from the RHF occupied projector, not
     the solve's own :func:`kappa_pairs`. Step-laddered along a seeded
-    rotation ``C exp(t kappa)``, so ``KAPPA_STEP``'s single-step quotients
-    (the source term, the Jacobian and ``Q``) are gated by a ladder too.
+    rotation ``C exp(t kappa)``, so the ``kappa``-direction objects -- the
+    source term, the Jacobian and ``Q``, analytic since #250 or
+    ``--kappa-quotient``'s single-step quotients -- are gated by a ladder
+    too.
 
     A solve whose bookkeeping drops a direction (#40's first error: the
     act_O-act_V block taken for a gauge) converges to round-off on the
@@ -4231,7 +4550,7 @@ def solve_gradient(st: State, src: SourceTerms, *, pc: bool, with_corr: bool = T
                    step: float | None = None, richardson: bool = True,
                    kappa_step: float | None = None, cp_solve: str = "dense",
                    workers: int = 1, sweep: dict | None = None, log=print,
-                   nuclear: str = "analytic") -> Gradients:
+                   nuclear: str = "analytic", kappa: str = "analytic") -> Gradients:
     """The gradient from given source terms, end to end: the branch's
     Lagrangian (:class:`CasscfGradients` on a CASSCF state, :class:`Gradients`
     otherwise), its ``kappa`` sweep (or ``sweep``, another instance's), the
@@ -4243,10 +4562,10 @@ def solve_gradient(st: State, src: SourceTerms, *, pc: bool, with_corr: bool = T
     if st.casscf:
         g = CasscfGradients(st, src, with_corr=with_corr, step=step, richardson=richardson,
                             kappa_step=kappa_step, cp_solve=cp_solve, pc=pc, workers=workers,
-                            nuclear=nuclear)
+                            nuclear=nuclear, kappa=kappa)
     else:
         g = Gradients(st, src, with_corr=with_corr, step=step, richardson=richardson, pc=pc,
-                      kappa_step=kappa_step, workers=workers, nuclear=nuclear)
+                      kappa_step=kappa_step, workers=workers, nuclear=nuclear, kappa=kappa)
     g.prepare(log=log, sweep=sweep)
     g.solve_multipliers(log=log)
     g.kernel()
@@ -4537,17 +4856,19 @@ def run(args) -> dict:
     rec["source_origin"] = src.origin
 
     nuclear = "quotient" if args.nuclear_quotient else "analytic"
+    kappa = "quotient" if args.kappa_quotient else "analytic"
     if casscf:
         g = CasscfGradients(st, src, with_corr=with_corr, step=args.step,
                             richardson=args.richardson, kappa_step=args.kappa_step,
                             cp_solve=args.cp_solve, pc=args.pc, workers=args.workers,
-                            nuclear=nuclear)
+                            nuclear=nuclear, kappa=kappa)
     else:
         g = Gradients(st, src, with_corr=with_corr, step=args.step,
                       richardson=args.richardson, pc=args.pc, kappa_step=args.kappa_step,
-                      workers=args.workers, nuclear=nuclear)
+                      workers=args.workers, nuclear=nuclear, kappa=kappa)
     rec["workers"] = args.workers
     rec["nuclear"] = nuclear
+    rec["kappa"] = kappa
     print("\nthe frozen orthonormal path, and one kappa sweep")
     # Under --source both the one sweep differentiates E_corr too, so PySCF's
     # half of A exists to compare the dump's with -- and to solve with.
@@ -4625,6 +4946,23 @@ def run(args) -> dict:
     rec["ldotjnuc"] = g.ldotjnuc
     rec["zero_axes"] = np.array(g.zero_axes, dtype=int)
     rec["point_group"] = g.point_group
+    if kappa == "quotient":
+        # #250's A/B, on the same source terms: the gradient re-solved on the
+        # analytic kappa objects taken beside the sweep, and the sweep's own
+        # error bar -- the gradient re-solved on a sweep at half the step,
+        # since a single-step quotient carries no bar of its own.
+        print("\nthe kappa A/B (#250): the same solve on the analytic objects, and on a "
+              f"sweep at half the step ({args.kappa_step / 2:g}) for the quotient's bar")
+        t_ab = time.perf_counter()
+        common = dict(pc=args.pc, with_corr=with_corr, step=args.step,
+                      richardson=args.richardson, cp_solve=args.cp_solve,
+                      log=lambda *a: None, nuclear=nuclear)
+        ga = solve_gradient(st, src, sweep=g.sweep["analytic"], **common)
+        gh = solve_gradient(st, src, kappa="quotient", kappa_step=args.kappa_step / 2,
+                            workers=args.workers, **common)
+        rec["grad_kappa_analytic"] = ga.de
+        rec["grad_kappa_half"] = gh.de
+        rec["kappa_ab_seconds"] = time.perf_counter() - t_ab
     if both:
         # The other provider through the SAME sweep, Jacobian and Q: the two
         # gradients then differ only through the source terms, which is the
@@ -4637,7 +4975,7 @@ def run(args) -> dict:
             gx = solve_gradient(st, terms, pc=args.pc, step=args.step,
                                 richardson=args.richardson, kappa_step=args.kappa_step,
                                 cp_solve=args.cp_solve, sweep=g.sweep, log=lambda *a: None,
-                                nuclear=nuclear)
+                                nuclear=nuclear, kappa=kappa)
             return gx.de, dict(gx.residuals)
 
         rec["grad_pyscf"], rec["residuals_pyscf"] = solve_with(src_pyscf)
@@ -4943,6 +5281,27 @@ def _report_gradient(rec: dict, scheme: str) -> None:
               f"{np.abs(rec['grad_analytic'].sum(axis=0)).max():.1e}, quotient "
               f"{np.abs(grad.sum(axis=0)).max():.1e}")
 
+    res = rec["residuals"]
+    if res.get("kappa_adjoint_gap") is not None:
+        print(f"\nthe dump's Y against its integral adjoint's rotation derivative (#250): "
+              f"max gap {res['kappa_adjoint_gap']:.2e} (max |Y - Y^T| "
+              f"{res['kappa_adjoint_max']:.2e})")
+    if "grad_kappa_analytic" in rec:
+        # #250's A/B: the analytic kappa objects beside the sweep, one source.
+        d_an = np.abs(rec["grad_kappa_analytic"] - grad)
+        bar = np.abs(rec["grad_kappa_half"] - grad)
+        floor = np.maximum(bar, AB_BAR_FLOOR)
+        print(f"\nthe kappa A/B (#250, {rec['kappa_ab_seconds']:.1f}s): the objects "
+              f"themselves, max |analytic - quotient| A_casci {res['kappa_ab_A_casci']:.2e}, "
+              f"M {res['kappa_ab_M']:.2e}, Q {res['kappa_ab_Q']:.2e}")
+        print(f"  the gradient: max |analytic - quotient| = {d_an.max():.3e}; the sweep's "
+              f"bar (|g(h) - g(h/2)|) per component, max {bar.max():.1e}; "
+              f"{int(np.sum(d_an > floor))} of {d_an.size} components outside their bar "
+              f"(floored at {AB_BAR_FLOOR:g}; worst |delta| / bar "
+              f"{float(np.max(d_an / floor)):.2f})")
+    elif rec.get("kappa") == "analytic":
+        print("\nthe kappa-direction objects: analytic (#250; --kappa-quotient for the sweep)")
+
     # The second verdict, independent of the first: every residual above can
     # read round-off on a wrong answer, and these do not read one.
     checks = rec["checks"]
@@ -5040,6 +5399,13 @@ def main() -> None:
                          "The default is analytic (E_corr's half through the dump's "
                          "integral adjoint, #246); with this flag the analytic one is "
                          "computed beside the quotient and the A/B is reported")
+    ap.add_argument("--kappa-quotient", action="store_true",
+                    help="take the kappa-direction objects (E_CASCI's slope A, the "
+                         "constraint Jacobian M, Q = d(H c)/dkappa) as before #250: "
+                         "central differences along every kappa pair at --kappa-step. "
+                         "The default is analytic (the integrals' rotation derivative "
+                         "[I, kappa]); with this flag the analytic ones are computed "
+                         "beside the sweep and the A/B is reported")
     ap.add_argument("--step", type=float, default=None,
                     help=f"nuclear central-difference step in bohr (default "
                          f"{NUC_STEP:g}, or {NUC_STEP_PC:g} with --pc; "
@@ -5087,11 +5453,12 @@ def main() -> None:
                          "not truncation -- see CI_STEP_PC). Only here so the "
                          "measured ladder in docs/testing.md can be rerun")
     ap.add_argument("--kappa-step", type=float, default=None,
-                    help="the step for the Y_xy / constraint-Jacobian / Q "
-                         f"quotients along each kappa rotation (default "
-                         f"{KAPPA_STEP:g}, or {KAPPA_STEP_PC:g} with --pc). "
-                         "Only here so the measured ladders in docs/testing.md "
-                         "can be rerun")
+                    help="the step for the kappa sweep's quotients (default "
+                         f"{KAPPA_STEP:g}, or {KAPPA_STEP_PC:g} with --pc): "
+                         "--kappa-quotient's Y_xy / constraint-Jacobian / Q, and "
+                         "E_corr's half of Y with PySCF's source terms, which "
+                         "have no integral adjoint. Only here so the measured "
+                         "ladders in docs/testing.md can be rerun")
     ap.add_argument("--tol", type=float, default=GRAD_NUM_TOL,
                     help="what max |g - grad_num| has to be under, per "
                          f"component, to PASS (default {GRAD_NUM_TOL:g}). NOT "
