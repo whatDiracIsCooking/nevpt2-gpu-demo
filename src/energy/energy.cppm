@@ -309,10 +309,16 @@ EnergyTangentResult energiesTangentDevice(const NevptIntegralsDevice& ints,
 // own, formed here side by side because the second sum needs both at once.
 // NO NEW CONTRACTION AND NO NEW KERNEL: four RDM sets through one slab walk.
 //
-// THE ORBITAL ENERGIES ARE HELD FIXED (Deltadot = Delta'' = 0): the
-// functional --sc-tangent licenses, and the one in which the Euler identity
-// Eddot(c, u) == Edot(u) holds for the three homogeneous classes
-// (docs/hessian-theory.md, Sec. 4.3). Their response is later work.
+// THE ORBITAL ENERGIES ARE AN OPTIONAL INPUT (#214). Null holds them fixed
+// (Deltadot = Delta'' = 0): the functional --sc-tangent licenses, and the one
+// in which the Euler identity Eddot(c, u) == Edot(u) holds for the three
+// homogeneous classes (docs/hessian-theory.md, Sec. 4.3). Handed their
+// derivatives (`eps`, OrbitalEnergyHessianDots below), the FULL functional:
+// every class's Delta is affine in dm1, so Delta'[u] and Delta''[u, v] are
+// the class's own Delta construction read at e'[u] and e''[u, v], and the
+// finish adds R Delta'' to the first sum and carries (Ndot, Hdot, Deltadot)
+// through the 3x3 -- Sijrs included, whose Delta is four orbital energies.
+// Euler does not hold there.
 
 // One RDM set, as the energy's class walks read it: the plain RDMs, a
 // first-order tangent set, or the second-order one. References to tensors the
@@ -323,6 +329,18 @@ struct RdmTensors {
   const DeviceTensor& dm3;
   const DeviceTensor& f3ac;
   const DeviceTensor& f3ca;
+};
+
+// The orbital energies' derivatives along a CI direction pair, host-resident
+// (#214): e'[u] = <dm1'[u], W>, e'[v] = <dm1'[v], W> and e''[u, v] =
+// <dm1''[u, v], W>. The generalized Fock's diagonal is affine in the active
+// 1-RDM, which is quadratic in the CI vector, so its second derivative is the
+// 1-RDM's second-order set read through the same W (nevpt2.gradient_plan's
+// orbitalEnergyDot builds each). What every FULL-mode CI Hessian reads.
+struct OrbitalEnergyHessianDots {
+  OrbitalEnergyDot u;
+  OrbitalEnergyDot v;
+  OrbitalEnergyDot uv;
 };
 
 struct EnergyHessianResult {
@@ -348,11 +366,13 @@ struct EnergyHessianResult {
 // sets live per class, against the tangent's two), every read-back a
 // downloadTensor, so all work is complete when this returns. `batch` bounds
 // every slab as in energiesDevice. Sijrs reads no RDM, so at fixed orbital
-// energies its every derivative is exactly zero.
+// energies its every derivative is exactly zero; with `eps` it moves through
+// its Delta alone. `eps` null holds the orbital energies fixed.
 EnergyHessianResult energiesHessianDevice(const ActiveIntegralsDevice& active,
                                           IntegralSource& source, int64_t batch,
                                           const RdmTensors& rdm, const RdmTensors& dotU,
                                           const RdmTensors& dotV, const RdmTensors& ddot,
+                                          const OrbitalEnergyHessianDots* eps,
                                           const DeviceResources& res);
 
 // --- the class metrics and Dyall Hamiltonians -------------------------------
@@ -686,9 +706,15 @@ PcDroppedBase pcDroppedBase(const PcClassSolve& cs, const PcMatrices& base,
 // reads no RDM, so at fixed orbital energies every derivative of it is
 // exactly zero (status Done).
 //
-// THE ORBITAL ENERGIES ARE HELD FIXED: Deltadot = Delta'' = 0. That is the
-// functional in which Euler's identity Eddot(c, u) == Edot(u) holds for the
-// five homogeneous classes (Sec. 4.3), and the only one implemented.
+// THE ORBITAL ENERGIES' MODE is `sets.eps` (#214). Null holds them fixed,
+// Deltadot = Delta'' = 0: the functional in which Euler's identity
+// Eddot(c, u) == Edot(u) holds for the five homogeneous classes (Sec. 4.3).
+// Non-null is the FULL functional: each tuple's Delta'[u], Delta'[v] and
+// Delta''[u, v] are its Delta construction read at e'[u], e'[v], e''[u, v],
+// entering the solve as nevpt2.energy_finish's PcDeltaTangents (A_u gains
+// Delta_u S, A_uv gains Delta_uv S + Delta_u S_v + Delta_v S_u; on S's
+// dropped space P S = 0, so no rotation term gains anything). Sijrs, SC's
+// class, then moves through its Delta alone. Euler does not hold there.
 //
 // One stream (res.stream()), every intermediate from res's pool and freed
 // when its class returns, the one eigensolve per class on res.solver() and
@@ -701,12 +727,15 @@ struct PcHessianResult {
 };
 
 // The RDM sets pcHessianDevice reads; every pointer non-owning. `ddotUU` and
-// `ddotVV` are required with `ddot` and ignored without it.
+// `ddotVV` are required with `ddot` and ignored without it. `eps`: the
+// orbital energies' derivatives along (u, v) (#214), null to hold them
+// fixed; its `uv` is read only with `ddot`.
 struct PcHessianSets {
   PcRdms rdm, dotU, dotV;
   const PcRdms* ddot = nullptr;
   const PcRdms* ddotUU = nullptr;
   const PcRdms* ddotVV = nullptr;
+  const OrbitalEnergyHessianDots* eps = nullptr;
 };
 
 Result<PcHessianResult> pcHessianDevice(const ActiveIntegralsDevice& active,

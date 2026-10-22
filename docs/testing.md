@@ -519,6 +519,10 @@ first — `--pc --sc-hessian-kk-int` in 1.5 s, `--pc --sc-hessian-kc` in
 5.6 s (its FULL-in-`c` request refused as `err_unsupported`, as on the
 CASCI twin), `--pc --sc-hessian-kk` in 5.4 s with no pair refused.
 
+#214 adds four more on this golden: the four `H_cc` flags in FULL mode,
+with the committed `n2_ccpvdz_cas44_casscf.gradgold` beside them
+(`*_casscf*_full`; "The CI block in FULL mode", below, has their numbers).
+
 ### The source terms on CASSCF orbitals: the wave-0 canary
 
 The CASSCF-gradient milestone rests on one claim: the source terms are
@@ -1241,8 +1245,10 @@ checks"):
   `0x5eed3201`: an orbital rotation of the state, any irrep, along which
   the dropped modes turn but do not lift), and the state. So there is no
   column-by-column duality: `u = e_I` lifts.
-- **No FULL mode.** PC's CI side holds the orbital energies fixed in `c`,
-  and a responding-in-`c` mode is refused as Unsupported (check 6). Euler
+- **No FULL mode.** The mixed block's CI leg holds the orbital energies
+  fixed in `c` (PC's CI block `H_cc` has a FULL mode, #214, which this block
+  does not pair with), and a responding-in-`c` mode is refused as
+  Unsupported (check 6). Euler
   and the duality run in the EULER mode along a seeded fully mixed `w`
   (`0x5eed0201`), the gauge and the active–active difference in the FROZEN
   mode along `0x5eed0903`.
@@ -2154,9 +2160,61 @@ symmetry-breaking direction, `H_cc w` refuses exactly the classes
 three-term `y` is the gradient of the three-term `Edot` and the two-term `y`
 is not.
 
+## The CI block in FULL mode
+
+#214's eight entries run the four `H_cc` flags with the committed gradient
+sidecar beside the golden (`--gradgold golden/<case>.gradgold`), on
+`n2_ccpvdz_cas44` and its `_casscf` twin, `--tiles 3`, all `gpu;small`:
+`nevpt2_cas44_sc_hessian_full`, `nevpt2_cas44_sc_hessian_vector_full`,
+`nevpt2_pc_hessian_cas44_full`, `nevpt2_pc_hessian_vector_cas44_full`, and
+the four `*_cas44_casscf*_full`. The orbital energies respond to the CI
+vector on every side of every check ([`hessian-theory.md`](hessian-theory.md),
+§4.3, "As built"), each displaced state of a ladder runs at its own orbital
+energies, and Euler is skipped — each PASS line says `orbital-energy mode:
+FULL, the orbital energies responding to c`, and each regex holds it to that.
+The checks are the frozen-mode entries' ("The SC Hessian's finite-difference
+cross-check", "The SC Hessian-vector product's checks", "The PC Hessian
+against a finite difference of the three-term tangent", "The PC
+Hessian-vector product's checks"), less Euler, at the same gates. The
+sidecar is first held to the golden as `--gradient-source` holds it: its
+`h^eff + <dm1, W>` rebuilds `e_core` / `e_virt` to 8.5e-15 (CASCI) and
+1.6e-14 (CASSCF) relative.
+
+Measured on the RTX 3080 (CUDA, `default` preset), one run each:
+
+| check | SC, CASCI | SC, CASSCF | gate |
+|---|---|---|---|
+| `--sc-hessian`: the walk's `E`, `Edot(u)`, `Edot(v)` vs `energiesDevice` / `energiesTangentDevice` (FULL) | 6.4e-16, 6.0e-15, 2.7e-15 | 0, 4.8e-16, 9.2e-16 | 1e-10 |
+| `--sc-hessian`: the difference of `Edot(u)` along `v`, plateau (relative) | 3.8e-10 (1.4e-8) at 2^-18, 5 fourfold halvings | 8.7e-11 (3.2e-9) at 2^-18, 6 | 1e-6 relative, 4 halvings |
+| `--sc-hessian-vector`: `<u, y>` vs `Edot(u)` | 2.5e-16 | 3.8e-16 | 1e-7 |
+| the duality, worst of four seeded `v` / `v` = the state | 8.4e-13 / 6.1e-12 | 4.9e-14 / 7.6e-13 | 1e-7 |
+| column by column, worst of 36 | 3.3e-12 | 2.8e-13 | 1e-7 |
+| `H_cc`'s symmetry, relative to `max|H_IJ|` | 1.3e-11 | 3.4e-13 | 1e-9 |
+| the difference of the gated `y` along `u`, plateau (relative) | 3.2e-7 (3.5e-7) at 2^-18, 6 fourfold halvings | 1.5e-7 (2.8e-7) at 2^-17, 7 | 1e-5 relative, 4 halvings |
+
+`|H_cc u|` on the CASCI golden is 0.90179 in FULL mode against the frozen
+mode's 0.86090 ("The SC Hessian-vector product's checks"): the response is
+not small. The CAS(4,4) ladder shows the empty-perturber row at k = 9 here
+too, and the Richardson run starts after it.
+
+| check | PC, CASCI | PC, CASSCF | gate |
+|---|---|---|---|
+| `--pc-hessian`: Richardson of the difference of the three-term `Edot(v)` vs `Eddot(u, v)` | 3.8e-11 (`Eddot` 5.2381240117) | 1.6e-11 (`Eddot` 5.4799613368) | 1e-8 |
+| `--pc-hessian-vector`: worst duality, per class and summed | 1.1e-13 | 1.3e-13 | 1e-9 |
+| the symmetry `<v, H_cc u>` vs `<u, H_cc v>` | 5.3e-15 | 2.2e-14 | 1e-9 |
+| the per-class difference of the three-term `y`, worst Richardson relative error (total) | 1.8e-10, Sij (1.2e-10) | 1.8e-10, Sijrs (5.3e-11) | 1e-8 |
+
+Every PC ratio is 4.000 ± 0.09, and every displaced state's gap is above
+`PC_MIN_GAP`. Sijrs, whose `H_cc u` is exactly zero at fixed orbital energies,
+now has one (its `Delta` is four orbital energies), and its class difference
+converges like the others'. The ladders start at the binary's default 2^-12:
+from `--fd-start-pow 4` the first displaced state, `c + 2^-4 u` on the CASCI
+golden, is refused (Sir's `lambda_k + Delta_t` = -0.98, not positive), so no
+difference can be formed there.
+
 ## The Hessian tier's entries
 
-Every ctest entry the Hessian milestones added (#150–#158, #184, #190, #200–#203), in
+Every ctest entry the Hessian milestones added (#150–#158, #184, #190, #200–#203, #214), in
 one place: its binary and flag, its gate (the `PASS_REGULAR_EXPRESSION` the
 entry matches) and its labels. What each one checks, and every number it
 comes out at, is in the section the last column names, not here.
@@ -2179,6 +2237,10 @@ exact digests:
 | `nevpt2_pc_hessian_cas44` | `nevpt2_pc_tangent --pc-hessian` | `PASS: the PC-NEVPT2 Hessian Eddot(u, v) matches Euler` | `gpu;small` | "The PC Hessian against a finite difference of the three-term tangent" |
 | `nevpt2_pc_hessian_vector_cas44` | `nevpt2_pc_tangent --pc-hessian-vector` | `PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches` | `gpu;small` | "The PC Hessian-vector product's checks" |
 | the ten `*_cas44_casscf*` Hessian entries, one per flag and one per orbital-block flag with `--pc` | the same seven flags, and `--pc` with the three orbital-block ones, on `n2_ccpvdz_cas44_casscf` | the CASCI twin's PASS line, plus the orbital-energy mode where the line names it (every `--pc` orbital entry's does), and on the two PC CI-block entries the smallest kept `s / s_max` and smallest gap | `gpu;small` | "The Hessian on CASSCF orbitals" |
+| `nevpt2_cas44_sc_hessian_full`, `nevpt2_cas44_casscf_sc_hessian_full` | `nevpt2_demo --sc-hessian --gradgold <sidecar>` | `PASS: the SC Hessian matches the exact norm increment … (orbital-energy mode: FULL, the orbital energies responding to c, Euler skipped there)` | `gpu;small` | "The CI block in FULL mode" |
+| `nevpt2_cas44_sc_hessian_vector_full`, `nevpt2_cas44_casscf_sc_hessian_vector_full` | `nevpt2_demo --sc-hessian-vector --gradgold <sidecar>` | `PASS: the SC Hessian-vector product matches … (orbital-energy mode: FULL, the orbital energies responding to c on both legs)` | `gpu;small` | "The CI block in FULL mode" |
+| `nevpt2_pc_hessian_cas44_full`, `nevpt2_pc_hessian_cas44_casscf_full` | `nevpt2_pc_tangent --pc-hessian --gradgold <sidecar>` | `PASS: the PC-NEVPT2 Hessian Eddot(u, v) matches the central difference of Edot (orbital-energy mode: FULL, …`, with the smallest kept `s / s_max` and gap | `gpu;small` | "The CI block in FULL mode" |
+| `nevpt2_pc_hessian_vector_cas44_full`, `nevpt2_pc_hessian_vector_cas44_casscf_full` | `nevpt2_pc_tangent --pc-hessian-vector --gradgold <sidecar>` | `PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches … (orbital-energy mode: FULL, …`, likewise | `gpu;small` | "The CI block in FULL mode" |
 
 There is no CAS(8,8) entry for PC's CI block: there both second-order checks
 converge to a value standing off the analytic one, for a conditioning reason

@@ -43,10 +43,14 @@
 // derivative of the PC_TAU threshold, not of a smooth function. Both come
 // back as PcStatus::Refused with the reason, never as a zero.
 //
-// THE ORBITAL ENERGIES ARE HELD FIXED (Deltadot = Delta'' = 0): the
-// functional in which Euler's identity Eddot(c, u) == Edot(u) holds on the
-// five homogeneous classes (Sec. 4.3). Their response is not implemented.
-// And the second derivative is Sec. 6.2's at the EIGENSTATE (P A = 0); the
+// THE ORBITAL ENERGIES' TWO MODES (#214). Held fixed (no `eps`; Deltadot =
+// Delta'' = 0): the functional in which Euler's identity Eddot(c, u) ==
+// Edot(u) holds on the five homogeneous classes (Sec. 4.3). FULL (`eps`):
+// each tuple's Delta'[u], Delta'[v], Delta''[u, v] are its own Delta formula
+// read at e'[u], e'[v], e''[u, v], and enter pcQuadSecond as its
+// PcDeltaTangents -- A_u = K_u + Delta_u S + Delta S_u and A_uv's three Delta
+// terms; P S = 0 keeps every rotation block as it is. Euler does not hold
+// there. And the second derivative is Sec. 6.2's at the EIGENSTATE (P A = 0); the
 // first derivatives are exact at any state, which is what a finite
 // difference of Edot at displaced states needs.
 //
@@ -76,7 +80,33 @@ struct PcHessianBundles {
   const PcRdms* sumUV = nullptr;
   const PcRdms* sumUU = nullptr;
   const PcRdms* sumVV = nullptr;
+  // The orbital energies' derivatives along (u, v), or null (held fixed).
+  const OrbitalEnergyHessianDots* eps = nullptr;
 };
+
+// One slab's Delta derivatives, per tuple in the class's own order (#214):
+// the class's Delta formula `fn(e_core, e_virt)` read at e'[u], e'[v] and
+// e''[u, v]. All three empty (zeros, to hessianSingle) with the orbital
+// energies held fixed.
+struct PcDeltaDots {
+  std::vector<double> u, v, uv;
+};
+
+template <class DeltaFn>
+PcDeltaDots pcDeltaDots(const OrbitalEnergyHessianDots* eps, DeltaFn&& fn) {
+  if (eps == nullptr) return {};
+  return {fn(eps->u.core, eps->u.virt), fn(eps->v.core, eps->v.virt),
+          fn(eps->uv.core, eps->uv.virt)};
+}
+
+// One tuple's three, for the pair classes (whose Delta is formed per tuple):
+// `fn(e_core, e_virt)` the tuple's Delta formula, a double.
+template <class DeltaFn>
+std::array<double, 3> pcDeltaDotsAt(const OrbitalEnergyHessianDots* eps, DeltaFn&& fn) {
+  if (eps == nullptr) return {0.0, 0.0, 0.0};
+  return {fn(eps->u.core, eps->u.virt), fn(eps->v.core, eps->v.virt),
+          fn(eps->uv.core, eps->uv.virt)};
+}
 
 // One tangent set's projections on S's dropped space (nd = the dropped
 // count; everything empty when nd = 0).
@@ -310,8 +340,10 @@ Result<PcClassHessian> pcHessSr(const ActiveIntegralsDevice& ai, IntegralSource&
           deviceEinsumAccum("ia,ak->ik", {&h1, &t1}, Y, 1.0, s);
           return downloadTensor(Y, s);  // (nr, k)
         });
+    const PcDeltaDots dd =
+        pcDeltaDots(b.eps, [&](const Tensor&, const Tensor& v) { return pcSlice(v, b0, b1); });
     hessianSingle(slabOf(rows), p.cs.lambda, pcSlice(ev, b0, b1), p.blk, p.rot, 1.0, acc,
-                  minDen);
+                  minDen, dd.v, dd.u, dd.uv);
   });
   return pcHessianResult(p, acc, minDen);
 }
@@ -339,8 +371,11 @@ Result<PcClassHessian> pcHessSi(const ActiveIntegralsDevice& ai, IntegralSource&
           deviceEinsumAccum("ai,ak->ik", {&h1, &t1}, Y, 1.0, s);
           return downloadTensor(Y, s);  // (ni, k)
         });
+    const PcDeltaDots dd = pcDeltaDots(b.eps, [&](const Tensor& c, const Tensor&) {
+      return pcSlice(c, b0, b1, /*negate=*/true);
+    });
     hessianSingle(slabOf(rows), p.cs.lambda, pcSlice(ec, b0, b1, /*negate=*/true), p.blk, p.rot,
-                  1.0, acc, minDen);
+                  1.0, acc, minDen, dd.v, dd.u, dd.uv);
   });
   return pcHessianResult(p, acc, minDen);
 }
@@ -375,10 +410,14 @@ Result<PcClassHessian> pcHessSijr(const ActiveIntegralsDevice& ai, IntegralSourc
     for (int64_t r = 0; r < nr; ++r)
       for (int64_t j = 0; j < nc; ++j)
         for (int64_t i = 0; i < nc; ++i) {
-          const double delta = ev.flat(b0 + r) - ec.flat(j) - ec.flat(i);
+          const auto deltaOf = [&](const Tensor& c, const Tensor& v) {
+            return v.flat(b0 + r) - c.flat(j) - c.flat(i);
+          };
+          const double delta = deltaOf(ec, ev);
+          const std::array<double, 3> dd = pcDeltaDotsAt(b.eps, deltaOf);
           hessianPair(pairRowAt(rows, (r * nc + j) * nc + i, m, p.nd),
                       pairRowAt(rows, (r * nc + i) * nc + j, m, p.nd), p.cs.lambda, delta,
-                      p.blk, p.rot, p.second, acc, minDen);
+                      p.blk, p.rot, p.second, acc, minDen, dd[1], dd[0], dd[2]);
         }
   });
   return pcHessianResult(p, acc, minDen);
@@ -414,10 +453,14 @@ Result<PcClassHessian> pcHessSrsi(const ActiveIntegralsDevice& ai, IntegralSourc
     for (int64_t r = 0; r < nr; ++r)
       for (int64_t ss = 0; ss < nv; ++ss)
         for (int64_t i = 0; i < nc; ++i) {
-          const double delta = ev.flat(b0 + r) + ev.flat(ss) - ec.flat(i);
+          const auto deltaOf = [&](const Tensor& c, const Tensor& v) {
+            return v.flat(b0 + r) + v.flat(ss) - c.flat(i);
+          };
+          const double delta = deltaOf(ec, ev);
+          const std::array<double, 3> dd = pcDeltaDotsAt(b.eps, deltaOf);
           const int64_t t = (r * nv + ss) * nc + i;
           hessianPair(pairRowAt(rows, t, m, p.nd), pairRowAt(rowsT, t, m, p.nd), p.cs.lambda,
-                      delta, p.blk, p.rot, p.second, acc, minDen);
+                      delta, p.blk, p.rot, p.second, acc, minDen, dd[1], dd[0], dd[2]);
         }
   });
   return pcHessianResult(p, acc, minDen);
@@ -443,10 +486,15 @@ Result<PcClassHessian> pcHessSrs(const ActiveIntegralsDevice& ai, IntegralSource
       DeviceTensor Y = deviceEinsumNew("rsqp,pqk->rsk", {&slab, &T3}, 1.0, dr);
       return downloadTensor(Y, s);  // (nr, v, k): (nr * v) tuples
     });
-    std::vector<double> delta;
-    for (int64_t r = b0; r < b1; ++r)
-      for (int64_t ss = 0; ss < nv; ++ss) delta.push_back(ev.flat(r) + ev.flat(ss));
-    hessianSingle(slabOf(rows), p.cs.lambda, delta, p.blk, p.rot, 0.5, acc, minDen);
+    const auto deltaOf = [&](const Tensor&, const Tensor& v) {
+      std::vector<double> delta;
+      for (int64_t r = b0; r < b1; ++r)
+        for (int64_t ss = 0; ss < nv; ++ss) delta.push_back(v.flat(r) + v.flat(ss));
+      return delta;
+    };
+    const PcDeltaDots dd = pcDeltaDots(b.eps, deltaOf);
+    hessianSingle(slabOf(rows), p.cs.lambda, deltaOf(/*unread=*/ev, ev), p.blk, p.rot, 0.5,
+                  acc, minDen, dd.v, dd.u, dd.uv);
   });
   return pcHessianResult(p, acc, minDen);
 }
@@ -471,10 +519,15 @@ Result<PcClassHessian> pcHessSij(const ActiveIntegralsDevice& ai, IntegralSource
       DeviceTensor Y = deviceEinsumNew("qpij,pqk->ijk", {&slab, &T3}, 1.0, dr);
       return downloadTensor(Y, s);  // (ni, c, k): (ni * c) tuples
     });
-    std::vector<double> delta;
-    for (int64_t i = b0; i < b1; ++i)
-      for (int64_t j = 0; j < nc; ++j) delta.push_back(-(ec.flat(i) + ec.flat(j)));
-    hessianSingle(slabOf(rows), p.cs.lambda, delta, p.blk, p.rot, 0.5, acc, minDen);
+    const auto deltaOf = [&](const Tensor& c, const Tensor&) {
+      std::vector<double> delta;
+      for (int64_t i = b0; i < b1; ++i)
+        for (int64_t j = 0; j < nc; ++j) delta.push_back(-(c.flat(i) + c.flat(j)));
+      return delta;
+    };
+    const PcDeltaDots dd = pcDeltaDots(b.eps, deltaOf);
+    hessianSingle(slabOf(rows), p.cs.lambda, deltaOf(ec, /*unread=*/ec), p.blk, p.rot, 0.5,
+                  acc, minDen, dd.v, dd.u, dd.uv);
   });
   return pcHessianResult(p, acc, minDen);
 }
@@ -507,10 +560,15 @@ Result<PcClassHessian> pcHessSir(const ActiveIntegralsDevice& ai, IntegralSource
           deviceEinsumAccum("ri,k->rik", {&h1, &t1v}, Y, 1.0, s);
           return downloadTensor(Y, s);  // (nr, c, k): (nr * c) tuples
         });
-    std::vector<double> delta;
-    for (int64_t r = b0; r < b1; ++r)
-      for (int64_t i = 0; i < nc; ++i) delta.push_back(ev.flat(r) - ec.flat(i));
-    hessianSingle(slabOf(rows), p.cs.lambda, delta, p.blk, p.rot, 1.0, acc, minDen);
+    const auto deltaOf = [&](const Tensor& c, const Tensor& v) {
+      std::vector<double> delta;
+      for (int64_t r = b0; r < b1; ++r)
+        for (int64_t i = 0; i < nc; ++i) delta.push_back(v.flat(r) - c.flat(i));
+      return delta;
+    };
+    const PcDeltaDots dd = pcDeltaDots(b.eps, deltaOf);
+    hessianSingle(slabOf(rows), p.cs.lambda, deltaOf(ec, ev), p.blk, p.rot, 1.0, acc, minDen,
+                  dd.v, dd.u, dd.uv);
   });
   return pcHessianResult(p, acc, minDen);
 }

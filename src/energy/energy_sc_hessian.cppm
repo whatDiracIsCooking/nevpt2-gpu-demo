@@ -2,7 +2,8 @@
 // SC class energies with respect to the CI vector, Eddot(u, v)
 // (energiesHessianDevice, declared in energy.cppm; docs/hessian-theory.md,
 // Sec. 4.1). An internal partition: nothing here is exported, so no importer
-// of nevpt2.energy sees anything but energiesHessianDevice.
+// of nevpt2.energy sees anything but energiesHessianDevice. (energy_pc.cpp
+// imports it for hessian_Sijrs: PC's Sijrs is SC's.)
 //
 // NO NEW CONTRACTION LOGIC, BY CONSTRUCTION -- the forward tangent's argument
 // (:sc_tangent) one order up. At fixed integrals each class's per-perturber
@@ -22,19 +23,23 @@
 //
 // THE ONE NEW EXPRESSION is the finish's, per perturber (Sec. 4.1):
 //
-//   Eddot_k = P_k N''_k + Q_k H''_k
-//           + (Ndot_k[v], Hdot_k[v], 0) . Hess f_k . (Ndot_k[u], Hdot_k[u], 0)
+//   Eddot_k = P_k N''_k + Q_k H''_k + R_k Delta''_k
+//           + (Ndot_k[v], Hdot_k[v], Ddot_k[v]) . Hess f_k . (Ndot_k[u], Hdot_k[u], Ddot_k[u])
 //
-// the first sum normToEnergyTangent at the second-order vectors, the second
-// nevpt2.energy_finish's normToEnergyHessianSandwich over #150's 3x3. The
-// second needs u's and v's per-perturber tangents AT THE SAME TIME, which is
-// why the walk carries all three tangent sets rather than being run twice.
+// the first sum normToEnergyTangent (and normToEnergyDeltaTangent) at the
+// second-order vectors, the second nevpt2.energy_finish's
+// normToEnergyHessianSandwich over #150's 3x3. The second needs u's and v's
+// per-perturber tangents AT THE SAME TIME, which is why the walk carries all
+// three tangent sets rather than being run twice.
 //
-// FROZEN ORBITAL ENERGIES ONLY: every Deltadot and Delta'' is zero here. That
-// is the functional --sc-tangent licenses and the one the Euler identity
-// Eddot(c, u) == Edot(u) holds in (Sec. 4.3); with the orbital energies
-// responding, Delta is affine in dm1 and so has a second derivative of its
-// own, which this file does not carry.
+// THE ORBITAL ENERGIES' TWO MODES (#214). Frozen (`eps` null): every Deltadot
+// and Delta'' is zero, the functional --sc-tangent licenses and the one the
+// Euler identity Eddot(c, u) == Edot(u) holds in (Sec. 4.3). FULL (`eps`
+// non-null): the generalized Fock is affine in dm1, so Delta is too, and its
+// derivatives along u, along v and at (u, v) are the class's own Delta
+// construction read at e'[u], e'[v] and e''[u, v] -- Delta is a signed sum of
+// orbital energies, linear and homogeneous in them. Sijrs, which reads no
+// RDM, then has derivatives through its Delta alone.
 //
 // COST: four copies of every class's blocks (the tangent holds two), each
 // built once before the walk and freed when the class returns; four chains
@@ -45,7 +50,7 @@ module nevpt2.energy:sc_hessian;
 import std;
 import nevpt2.energy;
 import nevpt2.profile;
-import :shared;      // energy_Sijrs: the one class with no RDM, hence no derivative
+import :shared;      // energy_Sijrs: the one class with no RDM
 import :sc_classes;  // the per-slab chains, the Delta vectors and the packings
 import :sc_finish;   // sliceHost
 import :sc_tangent;  // ScRdms, BlockOrder and the shared block builders
@@ -92,22 +97,50 @@ struct PerturberVectors {
   std::vector<double> h;
 };
 
+// One slab's Delta derivatives in the perturbers' own order (#214): Delta'[u],
+// Delta'[v] and Delta''[u, v], each the class's Delta construction read at
+// e'[u], e'[v], e''[u, v].
+struct DeltaDots {
+  std::vector<double> u, v, uv;
+};
+
+// A class's Delta derivatives, or nothing when the orbital energies are held
+// fixed: `fn(core, virt)` is the class's own Delta construction.
+template <class DiffFn>
+std::optional<DeltaDots> deltaDotsOf(const OrbitalEnergyHessianDots* eps, DiffFn&& fn) {
+  if (eps == nullptr) return std::nullopt;
+  return DeltaDots{fn(eps->u.core, eps->u.virt), fn(eps->v.core, eps->v.virt),
+                   fn(eps->uv.core, eps->uv.virt)};
+}
+
+const DeltaDots* ptrOf(const std::optional<DeltaDots>& d) { return d ? &*d : nullptr; }
+
 // The finish, from one slab's (or one packed class's) four sets of vectors
 // and the base Delta: normToEnergy, both first-order tangents, and Eddot's
-// two sums. Delta is held fixed, so every Deltadot is zero.
+// two sums. `dd` null holds the orbital energies fixed (every Deltadot zero);
+// otherwise R Delta'' joins the first sum, R Deltadot each first derivative,
+// and the Delta tangents the 3x3 sandwich.
 ScHessianSums hessianFinish(const std::array<PerturberVectors, kSets>& v,
-                            const std::vector<double>& diff) {
+                            const std::vector<double>& diff, const DeltaDots* dd) {
   const PerturberVectors& b = v[kBase];
   const std::vector<double> zeros(b.norm.size(), 0.0);
+  const std::vector<double>& dU = dd ? dd->u : zeros;
+  const std::vector<double>& dV = dd ? dd->v : zeros;
   const auto [n, e] = normToEnergy(b.norm, b.h, diff);
   const auto [nU, eU] = normToEnergyTangent(b.norm, b.h, diff, v[kU].norm, v[kU].h);
   const auto [nV, eV] = normToEnergyTangent(b.norm, b.h, diff, v[kV].norm, v[kV].h);
-  // The first sum, P.N'' + Q.H'', is the tangent's expression at the
-  // second-order vectors; the second is the 3x3 between u's and v's.
+  // The first sum, P.N'' + Q.H'' (+ R.Delta''), is the tangent's expression at
+  // the second-order vectors; the second is the 3x3 between u's and v's.
   const auto [nUV, eFirst] = normToEnergyTangent(b.norm, b.h, diff, v[kUV].norm, v[kUV].h);
   const double eSecond = normToEnergyHessianSandwich(b.norm, b.h, diff, v[kU].norm, v[kU].h,
-                                                     zeros, v[kV].norm, v[kV].h, zeros);
-  return {n, e, nU, eU, nV, eV, nUV, eFirst + eSecond};
+                                                     dU, v[kV].norm, v[kV].h, dV);
+  double eUDelta = 0.0, eVDelta = 0.0, eUVDelta = 0.0;
+  if (dd != nullptr) {
+    eUDelta = normToEnergyDeltaTangent(b.norm, b.h, diff, dd->u);
+    eVDelta = normToEnergyDeltaTangent(b.norm, b.h, diff, dd->v);
+    eUVDelta = normToEnergyDeltaTangent(b.norm, b.h, diff, dd->uv);
+  }
+  return {n, e, nU, eU + eUDelta, nV, eV + eVDelta, nUV, eFirst + eUVDelta + eSecond};
 }
 
 // One slab's four (norm, H) device vectors read back. No synchronization
@@ -126,7 +159,8 @@ PerturberVectors downloadPerturbers(const DeviceTensor& norm, const DeviceTensor
 // unchanged.
 
 ScHessianSums hessian_Sr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
-                         const Tensor& hostEVirt, const ScRdmSets& sets, int64_t norb,
+                         const Tensor& hostEVirt, const ScRdmSets& sets,
+                         const OrbitalEnergyHessianDots* eps, int64_t norb,
                          const DeviceResources& dr) {
   const std::array<SrBlocks, kSets> blk = {
       srBlocks(ai, *sets[0], norb, dr), srBlocks(ai, *sets[1], norb, dr),
@@ -144,13 +178,16 @@ ScHessianSums hessian_Sr(const ActiveIntegralsDevice& ai, IntegralSource& src, i
       const DeviceTensor h = srHSlab(h2e_v, h1e_v, blk[i].a16, blk[i].a17, blk[i].a19, dr);
       v[i] = downloadPerturbers(norm, h, dr);
     }
-    addHessianSlab(acc, hessianFinish(v, sliceHost(hostEVirt, b0, b1)));
+    const auto dd =
+        deltaDotsOf(eps, [&](const Tensor&, const Tensor& ev) { return sliceHost(ev, b0, b1); });
+    addHessianSlab(acc, hessianFinish(v, sliceHost(hostEVirt, b0, b1), ptrOf(dd)));
   });
   return acc;
 }
 
 ScHessianSums hessian_Si(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
-                         const Tensor& hostECore, const ScRdmSets& sets, int64_t norb,
+                         const Tensor& hostECore, const ScRdmSets& sets,
+                         const OrbitalEnergyHessianDots* eps, int64_t norb,
                          const DeviceResources& dr) {
   const std::array<SiBlocks, kSets> blk = {siBlocks(ai, *sets[0], norb, orderOf(0), dr),
                                            siBlocks(ai, *sets[1], norb, orderOf(1), dr),
@@ -169,33 +206,69 @@ ScHessianSums hessian_Si(const ActiveIntegralsDevice& ai, IntegralSource& src, i
       const DeviceTensor h = siHSlab(h2e_v, h1e_v, b.a22, b.a23, b.a25, dr);
       v[i] = downloadPerturbers(norm, h, dr);
     }
-    addHessianSlab(acc, hessianFinish(v, siDiff(hostECore, b0, b1)));
+    const auto dd =
+        deltaDotsOf(eps, [&](const Tensor& ec, const Tensor&) { return siDiff(ec, b0, b1); });
+    addHessianSlab(acc, hessianFinish(v, siDiff(hostECore, b0, b1), ptrOf(dd)));
   });
   return acc;
 }
 
 // Sijrs reads no RDM: its value is energy_Sijrs', and at fixed orbital
-// energies every derivative of it is exactly zero.
+// energies every derivative of it is exactly zero. With `eps` its Delta (four
+// orbital energies) moves, and its derivatives are the finish's in Delta
+// alone: R Delta'[u], R Delta'[v], and R Delta''[u, v] + Delta'[v] E_DeltaDelta
+// Delta'[u] -- from its per-tuple norms, theta = 2 g - g(a <-> b) and
+// N = g theta, built as tangent_Sijrs builds them. H is identically zero.
+// PC's Sijrs is this class (energy_pc.cpp).
 ScHessianSums hessian_Sijrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
-                            const DeviceResources& dr) {
+                            const OrbitalEnergyHessianDots* eps, const DeviceResources& dr) {
   const auto [n, e] = energy_Sijrs(ai, src, batch, dr);
   ScHessianSums out;
   out.norm = n;
   out.energy = e;
+  const int64_t ncore = ai.e_core.size(), nvirt = ai.e_virt.size();
+  if (eps == nullptr || ncore == 0 || nvirt == 0) return out;
+  const wwrStream_t s = dr.stream();
+  const Tensor hostECore = downloadTensor(ai.e_core, s);
+  const Tensor hostEVirt = downloadTensor(ai.e_virt, s);
+  ScHessianSums acc;
+  forBatches(src.extent(ExtBlock::Sijrs), batch, [&](int64_t b0, int64_t b1) {
+    DeviceTensor slab = src.slab(ExtBlock::Sijrs, b0, b1, dr);  // (ni, v, c, v)
+    const DeviceTensor theta = deviceTransposeNew(slab, {0, 3, 2, 1}, -1.0, dr);
+    deviceEinsumAccum("iajb->iajb", {&slab}, theta, 2.0, s);
+    const DeviceTensor norm = deviceEinsumNew("iajb,iajb->iajb", {&slab, &theta}, 1.0, dr);
+    // No sync before the download: it is enqueued behind the einsums that
+    // wrote `norm`, and downloadTensor synchronizes the stream itself.
+    const Tensor hostNorm = downloadTensor(norm, s);
+    const std::vector<double> zero(static_cast<std::size_t>(hostNorm.size()), 0.0);
+    // Every RDM set's N and H are zero: Sijrs moves through Delta alone.
+    const std::array<PerturberVectors, kSets> v = {
+        PerturberVectors{hostNorm.data(), zero}, PerturberVectors{zero, zero},
+        PerturberVectors{zero, zero}, PerturberVectors{zero, zero}};
+    const auto dd = deltaDotsOf(eps, [&](const Tensor& ec, const Tensor& ev) {
+      return sijrsDiff(ec, ev, b0, b1);
+    });
+    addHessianSlab(acc, hessianFinish(v, sijrsDiff(hostECore, hostEVirt, b0, b1), ptrOf(dd)));
+  });
+  out.energyDotU = acc.energyDotU;
+  out.energyDotV = acc.energyDotV;
+  out.energyDDot = acc.energyDDot;
   return out;
 }
 
 // The packed classes: one TriVectors per set out of the same (linear)
-// packing, whose base `diff` is the one Delta.
-ScHessianSums hessianFinishPacked(const std::array<TriVectors, kSets>& t) {
+// packing, whose base `diff` is the one Delta; `dd` the same packing's Delta
+// read at the orbital energies' derivatives, or null.
+ScHessianSums hessianFinishPacked(const std::array<TriVectors, kSets>& t, const DeltaDots* dd) {
   std::array<PerturberVectors, kSets> v;
   for (std::size_t i = 0; i < kSets; ++i) v[i] = {t[i].norm, t[i].h};
-  return hessianFinish(v, t[kBase].diff);
+  return hessianFinish(v, t[kBase].diff, dd);
 }
 
 ScHessianSums hessian_Sijr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                            const Tensor& hostECore, const Tensor& hostEVirt,
-                           const ScRdmSets& sets, const DeviceResources& dr) {
+                           const ScRdmSets& sets, const OrbitalEnergyHessianDots* eps,
+                           const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const std::array<SijrBlocks, kSets> blk = {
       sijrBlocks(ai, *sets[0], orderOf(0), dr), sijrBlocks(ai, *sets[1], orderOf(1), dr),
@@ -206,19 +279,27 @@ ScHessianSums hessian_Sijr(const ActiveIntegralsDevice& ai, IntegralSource& src,
     DeviceTensor slab = src.slab(ExtBlock::Sijr, b0, b1, dr);  // (nr, a, c, c)
     const DeviceTensor& h2e_v = slab;
     std::array<TriVectors, kSets> t;
+    std::array<Tensor, 2> base;  // the base set's raw tables, for the Delta packings
     for (std::size_t i = 0; i < kSets; ++i) {
       const DeviceTensor normT = sijrSlab(h2e_v, blk[i].hdm1, dr);
       const DeviceTensor hT = sijrSlab(h2e_v, blk[i].a3, dr);
-      t[i] = sijrPack(downloadTensor(normT, s), downloadTensor(hT, s), hostECore, hostEVirt, b0);
+      Tensor hostNormT = downloadTensor(normT, s);
+      Tensor hostHT = downloadTensor(hT, s);
+      t[i] = sijrPack(hostNormT, hostHT, hostECore, hostEVirt, b0);
+      if (i == kBase) base = {std::move(hostNormT), std::move(hostHT)};
     }
-    addHessianSlab(acc, hessianFinishPacked(t));
+    const auto dd = deltaDotsOf(eps, [&](const Tensor& ec, const Tensor& ev) {
+      return sijrPack(base[0], base[1], ec, ev, b0).diff;
+    });
+    addHessianSlab(acc, hessianFinishPacked(t, ptrOf(dd)));
   });
   return acc;
 }
 
 ScHessianSums hessian_Srsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                            const Tensor& hostECore, const Tensor& hostEVirt,
-                           const ScRdmSets& sets, const DeviceResources& dr) {
+                           const ScRdmSets& sets, const OrbitalEnergyHessianDots* eps,
+                           const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const int64_t nvirt = hostEVirt.size(), ncore = hostECore.size();
   // k27 has no RDM-free term: the same builder at every set.
@@ -247,14 +328,20 @@ ScHessianSums hessian_Srsi(const ActiveIntegralsDevice& ai, IntegralSource& src,
   });
 
   std::array<TriVectors, kSets> t;
-  for (std::size_t i = 0; i < kSets; ++i)
+  const Tensor baseNormT = downloadTensor(normT[kBase], s);
+  const Tensor baseHT = downloadTensor(hT[kBase], s);
+  t[kBase] = srsiPack(baseNormT, baseHT, hostECore, hostEVirt);
+  for (std::size_t i = 1; i < kSets; ++i)
     t[i] = srsiPack(downloadTensor(normT[i], s), downloadTensor(hT[i], s), hostECore, hostEVirt);
-  return hessianFinishPacked(t);
+  const auto dd = deltaDotsOf(eps, [&](const Tensor& ec, const Tensor& ev) {
+    return srsiPack(baseNormT, baseHT, ec, ev).diff;
+  });
+  return hessianFinishPacked(t, ptrOf(dd));
 }
 
 ScHessianSums hessian_Srs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                           const Tensor& hostEVirt, const ScRdmSets& sets,
-                          const DeviceResources& dr) {
+                          const OrbitalEnergyHessianDots* eps, const DeviceResources& dr) {
   if (hostEVirt.size() == 0) return {};
   // make_a7 has no RDM-free term: the same builder at every set.
   std::array<std::pair<DeviceTensor, DeviceTensor>, kSets> blk;
@@ -271,14 +358,16 @@ ScHessianSums hessian_Srs(const ActiveIntegralsDevice& ai, IntegralSource& src, 
       const DeviceTensor h = srsHSlab(h2e_v, blk[i].second, dr);
       v[i] = downloadPerturbers(norm, h, dr);
     }
-    addHessianSlab(acc, hessianFinish(v, srsDiff(hostEVirt, b0, b1)));
+    const auto dd =
+        deltaDotsOf(eps, [&](const Tensor&, const Tensor& ev) { return srsDiff(ev, b0, b1); });
+    addHessianSlab(acc, hessianFinish(v, srsDiff(hostEVirt, b0, b1), ptrOf(dd)));
   });
   return acc;
 }
 
 ScHessianSums hessian_Sij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                           const Tensor& hostECore, const ScRdmSets& sets,
-                          const DeviceResources& dr) {
+                          const OrbitalEnergyHessianDots* eps, const DeviceResources& dr) {
   if (hostECore.size() == 0) return {};
   const std::array<SijBlocks, kSets> blk = {
       sijBlocks(ai, *sets[0], orderOf(0), dr), sijBlocks(ai, *sets[1], orderOf(1), dr),
@@ -294,14 +383,17 @@ ScHessianSums hessian_Sij(const ActiveIntegralsDevice& ai, IntegralSource& src, 
       const DeviceTensor h = sijSlab(h2e_v, blk[i].a9, dr);
       v[i] = downloadPerturbers(norm, h, dr);
     }
-    addHessianSlab(acc, hessianFinish(v, sijDiff(hostECore, b0, b1)));
+    const auto dd =
+        deltaDotsOf(eps, [&](const Tensor& ec, const Tensor&) { return sijDiff(ec, b0, b1); });
+    addHessianSlab(acc, hessianFinish(v, sijDiff(hostECore, b0, b1), ptrOf(dd)));
   });
   return acc;
 }
 
 ScHessianSums hessian_Sir(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t batch,
                           const Tensor& hostECore, const Tensor& hostEVirt,
-                          const ScRdmSets& sets, const DeviceResources& dr) {
+                          const ScRdmSets& sets, const OrbitalEnergyHessianDots* eps,
+                          const DeviceResources& dr) {
   const std::array<SirBlocks, kSets> blk = {sirBlocks(ai, *sets[0], dr),
                                             sirBlocks(ai, *sets[1], dr),
                                             sirBlocks(ai, *sets[2], dr),
@@ -322,7 +414,10 @@ ScHessianSums hessian_Sir(const ActiveIntegralsDevice& ai, IntegralSource& src, 
       const DeviceTensor h = sirHSlab(slab1, slab2, blk[i].a12, blk[i].a13, dr);
       v[i] = downloadPerturbers(norm, h, dr);
     }
-    addHessianSlab(acc, hessianFinish(v, sirDiff(hostECore, hostEVirt, b0, b1)));
+    const auto dd = deltaDotsOf(eps, [&](const Tensor& ec, const Tensor& ev) {
+      return sirDiff(ec, ev, b0, b1);
+    });
+    addHessianSlab(acc, hessianFinish(v, sirDiff(hostECore, hostEVirt, b0, b1), ptrOf(dd)));
   });
   return acc;
 }
@@ -332,7 +427,9 @@ ScHessianSums hessian_Sir(const ActiveIntegralsDevice& ai, IntegralSource& src, 
 EnergyHessianResult energiesHessianDevice(const ActiveIntegralsDevice& ai, IntegralSource& src,
                                           int64_t batch, const RdmTensors& rdm,
                                           const RdmTensors& dotU, const RdmTensors& dotV,
-                                          const RdmTensors& ddot, const DeviceResources& dr) {
+                                          const RdmTensors& ddot,
+                                          const OrbitalEnergyHessianDots* eps,
+                                          const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   // --profile: the launches below report in the energy table, like
   // energiesDevice's (the same einsums, run four times).
@@ -340,18 +437,24 @@ EnergyHessianResult energiesHessianDevice(const ActiveIntegralsDevice& ai, Integ
   const int64_t norb = rdm.dm1.dims[0];
   const Tensor hostECore = downloadTensor(ai.e_core, s);
   const Tensor hostEVirt = downloadTensor(ai.e_virt, s);
+  // The orbital energies' derivatives must be the golden's lengths: our bug
+  // if not (every caller builds them from the same W).
+  if (eps != nullptr)
+    for (const OrbitalEnergyDot* d : {&eps->u, &eps->v, &eps->uv})
+      check(d->core.size() == hostECore.size() && d->virt.size() == hostEVirt.size(),
+            "energiesHessianDevice: an orbital-energy derivative is not e_core / e_virt long");
   const ScRdmSets sets = {&rdm, &dotU, &dotV, &ddot};
 
   // CLASSES order, as energiesDevice.
   const std::array<ScHessianSums, 8> cls = {
-      hessian_Sr(ai, src, batch, hostEVirt, sets, norb, dr),
-      hessian_Si(ai, src, batch, hostECore, sets, norb, dr),
-      hessian_Sijrs(ai, src, batch, dr),
-      hessian_Sijr(ai, src, batch, hostECore, hostEVirt, sets, dr),
-      hessian_Srsi(ai, src, batch, hostECore, hostEVirt, sets, dr),
-      hessian_Srs(ai, src, batch, hostEVirt, sets, dr),
-      hessian_Sij(ai, src, batch, hostECore, sets, dr),
-      hessian_Sir(ai, src, batch, hostECore, hostEVirt, sets, dr),
+      hessian_Sr(ai, src, batch, hostEVirt, sets, eps, norb, dr),
+      hessian_Si(ai, src, batch, hostECore, sets, eps, norb, dr),
+      hessian_Sijrs(ai, src, batch, eps, dr),
+      hessian_Sijr(ai, src, batch, hostECore, hostEVirt, sets, eps, dr),
+      hessian_Srsi(ai, src, batch, hostECore, hostEVirt, sets, eps, dr),
+      hessian_Srs(ai, src, batch, hostEVirt, sets, eps, dr),
+      hessian_Sij(ai, src, batch, hostECore, sets, eps, dr),
+      hessian_Sir(ai, src, batch, hostECore, hostEVirt, sets, eps, dr),
   };
 
   EnergyHessianResult out;

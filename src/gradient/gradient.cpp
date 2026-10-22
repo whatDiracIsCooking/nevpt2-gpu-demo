@@ -72,8 +72,10 @@ ScGradientResult assembleClasses(const ActiveIntegralsDevice& ai, IntegralSource
       c.dEdCore.assign(static_cast<std::size_t>(hostECore.size()), 0.0);
       c.dEdVirt.assign(static_cast<std::size_t>(hostEVirt.size()), 0.0);
     }
-    // dE/de's tangent along the mixed direction's w (#184).
-    if (mix != nullptr && mix->reverse && mix->epsCi) {
+    // dE/de's tangent along the mixed direction's w (#184), or along a CI
+    // direction with the orbital energies responding to it (#214).
+    if ((mix != nullptr && mix->reverse && mix->epsCi) ||
+        (ci != nullptr && ci->epsCoreU != nullptr)) {
       c.dEdCoreDot.assign(static_cast<std::size_t>(hostECore.size()), 0.0);
       c.dEdVirtDot.assign(static_cast<std::size_t>(hostEVirt.size()), 0.0);
     }
@@ -83,12 +85,15 @@ ScGradientResult assembleClasses(const ActiveIntegralsDevice& ai, IntegralSource
   gradientSi(ai, src, batch, hostECore, hostEVirt, dm1, dm2, dm3, f3ac, f3ca, norb, rot,
              r.classes[1], adj, ci, mix, dr);
   // Sijrs contracts no RDM at all, so it has nothing to sweep and takes no
-  // `adj` -- nor `ci`: its every CI derivative is exactly zero at fixed
-  // orbital energies. It DOES take `rot`: every one of cvcv's four labels is
-  // core or virtual, so an ACTIVE rotation moves nothing it reads while a
-  // GENERAL one moves all of it, and its Delta_t is four orbital energies
-  // (gradient_sc_classes.cppm).
-  gradientSijrs(src, batch, hostECore, hostEVirt, rot, r.classes[2], mix, dr);
+  // `adj` -- nor `ci`'s RDMs: its every CI derivative is exactly zero at fixed
+  // orbital energies, and with them responding (#214) it moves through its
+  // Delta alone, which is all of `ci` it reads. It DOES take `rot`: every one
+  // of cvcv's four labels is core or virtual, so an ACTIVE rotation moves
+  // nothing it reads while a GENERAL one moves all of it, and its Delta_t is
+  // four orbital energies (gradient_sc_classes.cppm).
+  gradientSijrs(src, batch, hostECore, hostEVirt, rot, r.classes[2], mix,
+                ci != nullptr ? ci->epsCoreU : nullptr, ci != nullptr ? ci->epsVirtU : nullptr,
+                dr);
   gradientSijr(ai, src, batch, hostECore, hostEVirt, dm1, dm2, rot, r.classes[3], adj, ci,
                mix, dr);
   gradientSrsi(ai, src, batch, hostECore, hostEVirt, dm1, dm2, rot, r.classes[4], adj, ci,
@@ -164,21 +169,30 @@ ScCiHessianResult scCiHessianVectorDevice(const ActiveIntegralsDevice& ai, Integ
                                           int64_t nelecA, int64_t nelecB, const RdmTensors& rdm,
                                           const RdmTensors& dotU,
                                           const SigmaVectorOptions& sigma,
+                                          const OrbitalEnergyResponse* eps,
                                           const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const int64_t norb = rdm.dm1.dims[0];
   check(u.dims() == ci.dims(), "scCiHessianVectorDevice: u is not shaped like the CI vector");
+  // FULL mode (#214): the orbital energies' tangent along u, e'[u] =
+  // <dm1'[u], W>, from the very dm1 tangent the walk's blocks read.
+  std::optional<OrbitalEnergyDot> epsU;
+  if (eps != nullptr) epsU.emplace(orbitalEnergyDot(*eps, downloadTensor(dotU.dm1, s)));
   // g and its tangent along u, zero-filled and accumulated over the eight
   // classes by ONE walk: the plain sweep into `adj`, the tangent's into
-  // `adjDot`. The orbital energies are held fixed (epsAdjoint off, and the
-  // multiplier tangents' Deltadot = 0).
+  // `adjDot`. With the orbital energies held fixed, epsAdjoint is off and the
+  // multiplier tangents' Deltadot = 0; in FULL mode each class also scatters R
+  // onto dE/de and Rdot onto its tangent.
   ScRdmAdjoint adj = ScRdmAdjoint::zeros(norb, dr);
   ScRdmAdjoint adjDot = ScRdmAdjoint::zeros(norb, dr);
-  const ScCiDirection dir{dotU, adjDot};
+  const ScCiDirection dir{dotU, adjDot, epsU ? &epsU->core : nullptr,
+                          epsU ? &epsU->virt : nullptr};
   ScCiHessianResult out;
+  out.orbitalEnergiesMove = eps != nullptr;
   out.pseudodensities =
       assembleClasses(ai, src, batch, rdm.dm1, rdm.dm2, rdm.dm3, rdm.f3ac, rdm.f3ca,
-                      ScRotation{}, &adj, /*epsAdjoint=*/false, &dir, /*mix=*/nullptr, dr);
+                      ScRotation{}, &adj, /*epsAdjoint=*/eps != nullptr, &dir, /*mix=*/nullptr,
+                      dr);
   for (std::size_t c = 0; c < out.edotU.size(); ++c) {
     out.edotU[c] = out.pseudodensities.classes[c].ciTangent;
     out.edotUTotal += out.edotU[c];
@@ -186,7 +200,7 @@ ScCiHessianResult scCiHessianVectorDevice(const ActiveIntegralsDevice& ai, Integ
 
   // Read back (downloadTensor synchronizes the stream the sweeps' einsums
   // were issued on), then the three sigma calls -- the only GPU work left.
-  const Tensor g1 = downloadTensor(adj.dm1, s);
+  Tensor g1 = downloadTensor(adj.dm1, s);
   const Tensor g2 = downloadTensor(adj.dm2, s);
   const Tensor g3 = downloadTensor(adj.dm3, s);
   const Tensor gac = downloadTensor(adj.f3ac, s);
@@ -194,6 +208,30 @@ ScCiHessianResult scCiHessianVectorDevice(const ActiveIntegralsDevice& ai, Integ
   out.gDot = ScRdmCoefficients{downloadTensor(adjDot.dm1, s), downloadTensor(adjDot.dm2, s),
                                downloadTensor(adjDot.dm3, s), downloadTensor(adjDot.f3ac, s),
                                downloadTensor(adjDot.f3ca, s)};
+  // FULL mode: dE/de and its tangent, summed over the classes, folded onto
+  // dm1 through W -- y's fold (scCiSourceDevice's) and its derivative along u
+  // (W is constant in c).
+  if (eps != nullptr) {
+    const std::size_t nc = static_cast<std::size_t>(eps->core.dim(2));
+    const std::size_t nv = static_cast<std::size_t>(eps->virt.dim(2));
+    std::vector<double> dEdCore(nc, 0.0), dEdVirt(nv, 0.0), dotCore(nc, 0.0), dotVirt(nv, 0.0);
+    for (const ScClassGradient& c : out.pseudodensities.classes) {
+      check(c.dEdCore.size() == nc && c.dEdVirt.size() == nv && c.dEdCoreDot.size() == nc &&
+                c.dEdVirtDot.size() == nv,
+            "scCiHessianVectorDevice: a class's dE/de does not match the orbital-energy "
+            "response");
+      for (std::size_t i = 0; i < nc; ++i) {
+        dEdCore[i] += c.dEdCore[i];
+        dotCore[i] += c.dEdCoreDot[i];
+      }
+      for (std::size_t r = 0; r < nv; ++r) {
+        dEdVirt[r] += c.dEdVirt[r];
+        dotVirt[r] += c.dEdVirtDot[r];
+      }
+    }
+    ciSourceAddInto(orbitalEnergyDm1Coefficient(*eps, dEdCore, dEdVirt), g1);
+    ciSourceAddInto(orbitalEnergyDm1Coefficient(*eps, dotCore, dotVirt), out.gDot.dm1);
+  }
   const Tensor h2e = downloadTensor(ai.h2e, s);
   const ScRdmCoefficients& gd = out.gDot;
   out.y = ciSourceVector(sigma, ci, norb, nelecA, nelecB, g1, g2, g3, gac, gca, h2e, dr);
@@ -1706,7 +1744,8 @@ Result<std::vector<ScOrbitalSandwichResult>> scOrbitalSandwichDevice(
       const RdmTensors dotU{*z1, *z2, *z3, digests[0].f3ac, digests[0].f3ca};
       const RdmTensors dotV{*z1, *z2, *z3, digests[1].f3ac, digests[1].f3ca};
       const EnergyHessianResult e =
-          energiesHessianDevice(ai, src, /*batch=*/0, s.rdm, dotU, dotV, zeroSet, res);
+          energiesHessianDevice(ai, src, /*batch=*/0, s.rdm, dotU, dotV, zeroSet,
+                                /*eps=*/nullptr, res);
       o.hasDigestReference = true;
       o.digestReference = e.totalDDot;
     }
@@ -1837,11 +1876,17 @@ Result<PcCiHessianResult> pcCiWalkDevice(const NevptIntegralsDevice& ints, const
                                          const int64_t nelecB, const RdmTensors& rdm,
                                          const RdmTensors* dotU, const RdmTensors* ddotUU,
                                          const bool perClass, const SigmaVectorOptions& sigma,
+                                         const OrbitalEnergyResponse* eps,
                                          const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const int64_t norb = rdm.dm1.dims[0];
   check(u == nullptr || (u->dims() == ci.dims() && dotU != nullptr && ddotUU != nullptr),
         "pcCiHessianVectorDevice: u must be shaped like the CI vector, with its two RDM sets");
+  // FULL mode (#214): e'[u] = <dm1'[u], W>, from the dm1 tangent the walk's
+  // matrices read.
+  std::optional<OrbitalEnergyDot> epsU;
+  if (eps != nullptr && u != nullptr)
+    epsU.emplace(orbitalEnergyDot(*eps, downloadTensor(dotU->dm1, s)));
   FullBlockSource src(ints);
   const ActiveIntegralsDevice ai = activeViewOf(ints);
   const PcRdms base{&rdm.dm1, &rdm.dm2, &rdm.dm3, &rdm.f3ac, &rdm.f3ca};
@@ -1881,12 +1926,42 @@ Result<PcCiHessianResult> pcCiWalkDevice(const NevptIntegralsDevice& ints, const
   }
 
   PcCiHessianResult out;
-  out.walk = NEVPT2_TRY(assemblePcCiClasses(ai, src, /*batch=*/0, base,
-                                            u != nullptr ? &viewU : nullptr,
-                                            u != nullptr ? &viewUU : nullptr, pAdj, pAdjDot, dr));
+  out.orbitalEnergiesMove = eps != nullptr;
+  out.walk = NEVPT2_TRY(assemblePcCiClasses(
+      ai, src, /*batch=*/0, base, u != nullptr ? &viewU : nullptr,
+      u != nullptr ? &viewUU : nullptr, pAdj, pAdjDot, /*epsAdjoint=*/eps != nullptr,
+      epsU ? &epsU->core : nullptr, epsU ? &epsU->virt : nullptr, dr));
   out.ok = out.walk.allDone();
   // A refused class has no derivative: no vector is formed.
   if (!out.ok) return out;
+
+  // FULL mode: each accumulator's dE/de and its tangent, summed over the
+  // classes that sweep into it, folded onto its dm1 coefficient through W
+  // (pcCiSourceDevice's fold, and its derivative along u: W is constant).
+  // Sijrs's go to its own accumulator per class, or the shared one.
+  std::vector<Tensor> fold(nAdj), foldDot(nAdj);
+  if (eps != nullptr) {
+    const std::size_t nc = static_cast<std::size_t>(eps->core.dim(2));
+    const std::size_t nv = static_cast<std::size_t>(eps->virt.dim(2));
+    for (std::size_t k = 0; k < nAdj; ++k) {
+      std::vector<double> core(nc, 0.0), virt(nv, 0.0), coreDot(nc, 0.0), virtDot(nv, 0.0);
+      for (std::size_t c = 0; c < 8; ++c) {
+        if ((perClass ? c : 0) != k) continue;
+        const PcClassGradient& cg = out.walk.classes[c];
+        check(cg.dEdCore.size() == nc && cg.dEdVirt.size() == nv &&
+                  (u == nullptr || (cg.dEdCoreDot.size() == nc && cg.dEdVirtDot.size() == nv)),
+              "pcCiHessianVectorDevice: a class's dE/de does not match the orbital-energy "
+              "response");
+        for (std::size_t i = 0; i < nc; ++i) core[i] += cg.dEdCore[i];
+        for (std::size_t r = 0; r < nv; ++r) virt[r] += cg.dEdVirt[r];
+        if (u == nullptr) continue;
+        for (std::size_t i = 0; i < nc; ++i) coreDot[i] += cg.dEdCoreDot[i];
+        for (std::size_t r = 0; r < nv; ++r) virtDot[r] += cg.dEdVirtDot[r];
+      }
+      fold[k] = orbitalEnergyDm1Coefficient(*eps, core, virt);
+      if (u != nullptr) foldDot[k] = orbitalEnergyDm1Coefficient(*eps, coreDot, virtDot);
+    }
+  }
 
   const Tensor h2e = downloadTensor(ai.h2e, s);
   const auto sigmaOf = [&](const ScRdmCoefficients& g, const Tensor& at) {
@@ -1900,19 +1975,23 @@ Result<PcCiHessianResult> pcCiWalkDevice(const NevptIntegralsDevice& ints, const
     out.fromDirection = Tensor(ci.dims());
   }
   for (std::size_t k = 0; k < nAdj; ++k) {
-    // Sijrs's accumulators (class 2, per class) were never swept into: its
-    // share of y and of H_cc u is exactly zero, and no sigma is run for it.
-    if (perClass && k == 2) {
+    // Sijrs's accumulators (class 2, per class) were never swept into: with
+    // the orbital energies held fixed its share of y and of H_cc u is exactly
+    // zero, and no sigma is run for it. In FULL mode it is its fold alone.
+    if (perClass && k == 2 && eps == nullptr) {
       out.yClass[k] = Tensor(ci.dims());
       if (u != nullptr) out.huClass[k] = Tensor(ci.dims());
       continue;
     }
-    const ScRdmCoefficients g = coefficientsOf(adj[k], s);
+    ScRdmCoefficients g = coefficientsOf(adj[k], s);
+    if (eps != nullptr) ciSourceAddInto(fold[k], g.dm1);
     const Tensor yk = sigmaOf(g, ci);
     ciSourceAddInto(yk, out.y);
     if (perClass) out.yClass[k] = yk;
     if (u == nullptr) continue;
-    const Tensor walkTangent = sigmaOf(coefficientsOf(adjDot[k], s), ci);
+    ScRdmCoefficients gDot = coefficientsOf(adjDot[k], s);
+    if (eps != nullptr) ciSourceAddInto(foldDot[k], gDot.dm1);
+    const Tensor walkTangent = sigmaOf(gDot, ci);
     const Tensor direction = sigmaOf(g, *u);
     ciSourceAddInto(walkTangent, out.fromWalkTangent);
     ciSourceAddInto(direction, out.fromDirection);
@@ -1930,8 +2009,10 @@ Result<PcCiHessianResult> pcCiHessianVectorDevice(const NevptIntegralsDevice& in
                                                   const RdmTensors& rdm, const RdmTensors& dotU,
                                                   const RdmTensors& ddotUU, const bool perClass,
                                                   const SigmaVectorOptions& sigma,
-                                                  const DeviceResources& res) {
-  return pcCiWalkDevice(ints, ci, &u, nelecA, nelecB, rdm, &dotU, &ddotUU, perClass, sigma, res);
+                                                  const DeviceResources& res,
+                                                  const OrbitalEnergyResponse* eps) {
+  return pcCiWalkDevice(ints, ci, &u, nelecA, nelecB, rdm, &dotU, &ddotUU, perClass, sigma, eps,
+                        res);
 }
 
 Result<PcCiHessianResult> pcCiSourceThreeTermDevice(const NevptIntegralsDevice& ints,
@@ -1939,23 +2020,26 @@ Result<PcCiHessianResult> pcCiSourceThreeTermDevice(const NevptIntegralsDevice& 
                                                     const int64_t nelecB, const RdmTensors& rdm,
                                                     const bool perClass,
                                                     const SigmaVectorOptions& sigma,
-                                                    const DeviceResources& res) {
+                                                    const DeviceResources& res,
+                                                    const OrbitalEnergyResponse* eps) {
   return pcCiWalkDevice(ints, ci, /*u=*/nullptr, nelecA, nelecB, rdm, /*dotU=*/nullptr,
-                        /*ddotUU=*/nullptr, perClass, sigma, res);
+                        /*ddotUU=*/nullptr, perClass, sigma, eps, res);
 }
 
 // --- PC's mixed orbital-CI block, H_kc (#201) -----------------------------------
 
 // The PC setup's own refusal, then SC's prep (the direction, its digests'
-// tangent, h2e'[w]): PC's CI side holds the orbital energies fixed in c.
+// tangent, h2e'[w]): PC's mixed block holds the orbital energies fixed in c.
+// (PC's CI block has a FULL mode, #214; its mixed block does not carry that
+// response, so it is refused here rather than paired with a leg that lacks it.)
 Result<ScMixedPrep> preparePcMixed(const ScMixedHessianSetup& s, const Tensor& w,
                                    const DeviceResources& res) {
   if (s.epsCi)
     return err_unsupported(
-        "PC's mixed block H_kc with the orbital energies responding to the CI vector: PC's CI "
-        "side (pcHessianDevice, pcCiHessianVectorDevice, the three-term y) holds them fixed in "
-        "c, so there is no CI leg to pair that mode with -- run it with them fixed in c "
-        "(responding to kappa or not)");
+        "PC's mixed block H_kc with the orbital energies responding to the CI vector: PC's "
+        "mixed block holds them fixed in c (its CI leg does not carry their response; only the "
+        "CI block H_cc has that FULL mode) -- run it with them fixed in c (responding to kappa "
+        "or not)");
   return prepareMixed(s, w, res);
 }
 

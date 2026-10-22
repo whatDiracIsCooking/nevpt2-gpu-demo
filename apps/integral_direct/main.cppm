@@ -267,10 +267,13 @@ int main(int argc, char** argv) {
   // nevpt2.ci_checks' checkScHessian; like --sc-tangent, its own PASS line is
   // the gate and the golden comparison below does not run. The three-argument
   // build holds three L2 blocks per tile, so its tile floors are its own
-  // (docs/performance.md, "Tile floors").
+  // (docs/performance.md, "Tile floors"). With --gradgold, both H_cc checks
+  // run in FULL mode (#214): the orbital energies responding to the CI
+  // vector, read from that sidecar, and Euler skipped.
   if (scHessianArg) {
-    const nevpt2::Result<bool> ok = nevpt2::checkScHessian(g, opt.rdm, checkInts, rdm,
-                                                           kTangentSeed, kHessianSeedV, *res);
+    const nevpt2::Result<bool> ok =
+        nevpt2::checkScHessian(g, opt.rdm, checkInts, rdm, kTangentSeed, kHessianSeedV,
+                               parsedOpts.gradgoldPath, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;
@@ -285,7 +288,7 @@ int main(int argc, char** argv) {
   // line is the gate; the golden comparison below does not run.
   if (scHessianVectorArg) {
     const nevpt2::Result<bool> ok = nevpt2::checkScHessianVector(
-        g, opt.rdm, checkInts, rdm, kTangentSeed, kHessianSeedV, *res);
+        g, opt.rdm, checkInts, rdm, kTangentSeed, kHessianSeedV, parsedOpts.gradgoldPath, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;
