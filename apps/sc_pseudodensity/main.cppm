@@ -369,7 +369,7 @@ int main(int argc, char** argv) {
     }
     const nevpt2::Result<bool> ok =
         dumpSourceTerms(g, gg, opt.pc, energyTotal, dInts, dDm1, dDm2, rdm.dm3, rdm.f3ac,
-                        rdm.f3ca, opt.rdm, dumpPath, *res);
+                        rdm.f3ca, opt.rdm, dumpPath, parsedOpts.probedY, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

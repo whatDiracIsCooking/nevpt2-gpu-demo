@@ -189,9 +189,50 @@ GeneralPick generalPick(const GeneralIntegralsDevice& gen, RotSpace p, RotSpace 
 
 // --- the general action on one block ----------------------------------------
 
-// Accumulates the general-range part of `dkappa`'s action on a two-electron
-// block into `out` (shaped like the block): one einsum per slot, over the
-// WHOLE general index, with kappa's columns for that slot's space.
+// THE KAPPA-LINEAR EINSUMS, WRITTEN ONCE (#240). Every einsum of the general
+// action -- and of the orbital energies' response below -- is linear in ONE
+// kappa column block, which it reads as its LAST operand. Each is spelled
+// once, as `emit(subs, operands-before-kappa, space, coef)`, and two emitters
+// read the same list: the FORWARD one appends kappa[:, space] and accumulates
+// into the block's tangent (what every entry point before #240 ran: the same
+// einsums, in the same order); the TRANSPOSE one appends the tangent's
+// adjoint instead and accumulates d<bar, tangent>/dkappa[:, space] -- the
+// einsum rewritten for its kappa operand by derivativeSubscripts, as
+// :rdm_adjoint rewrites a block's chain for an RDM operand. So the one-pass Y
+// (gradient.cppm, "Y in one reverse pass") and the probed one read the SAME
+// transcription of the promotion rule, and no derivative is written twice.
+using KappaOperands = std::vector<const DeviceTensor*>;
+
+// The forward emitter: kappa[:, space] appended, `out` accumulated.
+template <class KappaFn>
+auto forwardEmitter(KappaFn& kappaFor, const DeviceTensor& out, wwrStream_t stream) {
+  return [&kappaFor, &out, stream](const std::string& subs, KappaOperands ops, RotSpace s,
+                                   double coef) {
+    ops.push_back(kappaFor(s));
+    deviceEinsumAccum(subs, ops, out, coef, stream);
+  };
+}
+
+// The transpose emitter (#240): `bar` -- the adjoint of what the forward one
+// accumulates into -- appended in kappa's place, and the einsum rewritten for
+// its kappa operand (the LAST one), accumulated into *kbarFor(space), the
+// adjoint of that column block. A column block of an empty space has nothing
+// to receive.
+template <class KbarFn>
+auto transposeEmitter(KbarFn& kbarFor, const DeviceTensor& bar, wwrStream_t stream) {
+  return [&kbarFor, &bar, stream](const std::string& subs, KappaOperands ops, RotSpace s,
+                                  double coef) {
+    const DeviceTensor& dst = *kbarFor(s);
+    if (dst.size() == 0) return;
+    const int slot = static_cast<int>(ops.size());
+    ops.push_back(&bar);
+    deviceEinsumAccum(derivativeSubscripts(subs, slot), ops, dst, coef, stream);
+  };
+}
+
+// The general-range part of `dkappa`'s action on a two-electron block: one
+// einsum per slot, over the WHOLE general index, with kappa's columns for
+// that slot's space.
 //
 // `kappaFor` hands back the column block kappa[:, space] to use -- and for an
 // ACTIVE slot that block has its active ROWS zeroed, because the x in active
@@ -199,26 +240,29 @@ GeneralPick generalPick(const GeneralIntegralsDevice& gen, RotSpace p, RotSpace 
 // did. So the two halves partition the sum with no overlap, and an
 // active-restricted kappa makes every einsum here an exactly-zero tensor
 // (which is what keeps the active block's answer bit-for-bit #36's).
-template <class KappaFn>
-void accumGeneralTwoElectron(RotBlock b, const GeneralIntegralsDevice& gen, KappaFn&& kappaFor,
-                             const DeviceTensor& out, wwrStream_t stream) {
+template <class EmitFn>
+void emitGeneralTwoElectron(RotBlock b, const GeneralIntegralsDevice& gen, EmitFn&& emit) {
   // promotionPlan (nevpt2.gradient_plan) has the slot bookkeeping: the
   // promoted slot's partner, the other distribution, the array, its labels.
   for (int slot = 0; slot < 4; ++slot) {
     const PromotionPlan pl = promotionPlan(b, slot);
-    deviceEinsumAccum(promotionSubscripts(pl),
-                      {&generalArray(gen, pl.pick.array), kappaFor(pl.promoted.space)}, out, 1.0,
-                      stream);
+    emit(promotionSubscripts(pl), KappaOperands{&generalArray(gen, pl.pick.array)},
+         pl.promoted.space, 1.0);
   }
+}
+
+template <class KappaFn>
+void accumGeneralTwoElectron(RotBlock b, const GeneralIntegralsDevice& gen, KappaFn&& kappaFor,
+                             const DeviceTensor& out, wwrStream_t stream) {
+  emitGeneralTwoElectron(b, gen, forwardEmitter(kappaFor, out, stream));
 }
 
 // The same for a one-electron (h^eff) block: the two index transformations of
 // h^eff itself, the core dressing's response, and -- for h1e_v_Sr -- the four
 // promotions of its subtracted active trace. See the header for the algebra.
-template <class KappaFn>
-void accumGeneralOneElectron(RotBlock b, const GeneralIntegralsDevice& gen, KappaFn&& kappaFor,
-                             const DeviceTensor& out, const DeviceResources& res) {
-  const wwrStream_t stream = res.stream();
+template <class EmitFn>
+void emitGeneralOneElectron(RotBlock b, const GeneralIntegralsDevice& gen, EmitFn&& emit,
+                            const DeviceResources& res) {
   const RotBlockInfo info = rotBlockInfo(b);
   const RotRole p = info.roles[0], q = info.roles[1];
   const auto [pLo, pHi] = spanOf(gen, p.space);
@@ -228,8 +272,8 @@ void accumGeneralOneElectron(RotBlock b, const GeneralIntegralsDevice& gen, Kapp
   // to read both halves as columns of the same matrix.
   const DeviceTensor heffQ = sliceAxis(gen.heff, 1, qLo, qHi);  // (nmo, |space(q)|)
   const DeviceTensor heffP = sliceAxis(gen.heff, 1, pLo, pHi);  // (nmo, |space(p)|)
-  deviceEinsumAccum("zj,zi->ij", {&heffQ, kappaFor(p.space)}, out, 1.0, stream);
-  deviceEinsumAccum("zi,zj->ij", {&heffP, kappaFor(q.space)}, out, 1.0, stream);
+  emit("zj,zi->ij", KappaOperands{&heffQ}, p.space, 1.0);
+  emit("zi,zj->ij", KappaOperands{&heffP}, q.space, 1.0);
 
   // (2) the core dressing. Its two core labels are TIED, so each of them is
   // promoted in turn and the four resulting terms are
@@ -252,8 +296,8 @@ void accumGeneralOneElectron(RotBlock b, const GeneralIntegralsDevice& gen, Kapp
   // exchange pair's non-collapse card-free (test/gradient_plan's
   // HeffDressingTests, #64). Do not "simplify" the pair to twice one term.
   for (const HeffDressingTerm& t : heffDressingPlan(p.space, q.space))
-    deviceEinsumAccum(t.subscripts, {&generalArray(gen, t.pick.array), kappaFor(RotSpace::Core)},
-                      out, t.coeff, stream);
+    emit(t.subscripts, KappaOperands{&generalArray(gen, t.pick.array)}, RotSpace::Core,
+         t.coeff);
 
   if (!info.trace) return;
   // (3) h1e_v_Sr is h^eff[v,a] - T with T_rt = sum_b (r b | b t), so every
@@ -264,10 +308,44 @@ void accumGeneralOneElectron(RotBlock b, const GeneralIntegralsDevice& gen, Kapp
   // and so uses the same active columns as every other active slot.
   const DeviceTensor tTr = deviceEinsumNew("zmmj->zj", {&gen.g_xa_aa}, 1.0, res);
   const DeviceTensor tVr = deviceEinsumNew("zmim->zi", {&gen.g_xa_va}, 1.0, res);
-  deviceEinsumAccum("zj,zi->ij", {&tTr, kappaFor(p.space)}, out, -1.0, stream);
-  deviceEinsumAccum("zi,zj->ij", {&tVr, kappaFor(q.space)}, out, -1.0, stream);
-  deviceEinsumAccum("zimj,zm->ij", {&gen.g_xv_aa, kappaFor(RotSpace::Act)}, out, -1.0, stream);
-  deviceEinsumAccum("zjim,zm->ij", {&gen.g_xa_va, kappaFor(RotSpace::Act)}, out, -1.0, stream);
+  emit("zj,zi->ij", KappaOperands{&tTr}, p.space, -1.0);
+  emit("zi,zj->ij", KappaOperands{&tVr}, q.space, -1.0);
+  emit("zimj,zm->ij", KappaOperands{&gen.g_xv_aa}, RotSpace::Act, -1.0);
+  emit("zjim,zm->ij", KappaOperands{&gen.g_xa_va}, RotSpace::Act, -1.0);
+}
+
+template <class KappaFn>
+void accumGeneralOneElectron(RotBlock b, const GeneralIntegralsDevice& gen, KappaFn&& kappaFor,
+                             const DeviceTensor& out, const DeviceResources& res) {
+  emitGeneralOneElectron(b, gen, forwardEmitter(kappaFor, out, res.stream()), res);
+}
+
+// A block the general action is asked about must be WHOLE: its extents the
+// sidecar's spaces (a slab is our bug -- the entry points that supply a
+// sidecar walk one slab per block). Returns the block's rank, 0 for one the
+// general half does not reach (V2tr).
+int checkWholeBlock(RotBlock b, const GeneralIntegralsDevice& gen,
+                    const std::vector<int64_t>& dims, const char* who,
+                    std::source_location loc) {
+  const RotBlockInfo info = rotBlockInfo(b);
+  if (info.rank == 0) return 0;
+  if (std::ssize(dims) != info.rank)
+    check(false,
+          std::format("{}: {} is a rank-{} block, given rank {}", who, rotBlockName(b),
+                      info.rank, std::ssize(dims)),
+          loc);
+  for (int k = 0; k < info.rank; ++k) {
+    const RotRole role = info.roles[static_cast<std::size_t>(k)];
+    const auto [lo, hi] = spanOf(gen, role.space);
+    if (dims[static_cast<std::size_t>(role.axis)] != hi - lo)
+      check(false,
+            std::format("{}: {} axis {} has extent {}, the sidecar's space has "
+                        "{} -- the general action needs whole blocks, not slabs",
+                        who, rotBlockName(b), role.axis,
+                        dims[static_cast<std::size_t>(role.axis)], hi - lo),
+            loc);
+  }
+  return info.rank;
 }
 
 // `kappa`'s general-range action on `block`, as a fresh tensor from res's
@@ -281,30 +359,34 @@ DeviceTensor generalBlockAction(RotBlock b, const GeneralIntegralsDevice& gen,
                                 KappaFn&& kappaFor, const std::vector<int64_t>& dims,
                                 const DeviceResources& res,
                                 std::source_location loc = std::source_location::current()) {
-  const RotBlockInfo info = rotBlockInfo(b);
-  if (info.rank == 0) return DeviceTensor();
-  if (std::ssize(dims) != info.rank)
-    check(false,
-          std::format("generalBlockAction: {} is a rank-{} block, given rank {}",
-                      rotBlockName(b), info.rank, std::ssize(dims)),
-          loc);
-  for (int k = 0; k < info.rank; ++k) {
-    const RotRole role = info.roles[static_cast<std::size_t>(k)];
-    const auto [lo, hi] = spanOf(gen, role.space);
-    if (dims[static_cast<std::size_t>(role.axis)] != hi - lo)
-      check(false,
-            std::format("generalBlockAction: {} axis {} has extent {}, the sidecar's space has "
-                        "{} -- the general action needs whole blocks, not slabs",
-                        rotBlockName(b), role.axis, dims[static_cast<std::size_t>(role.axis)],
-                        hi - lo),
-            loc);
-  }
+  const int rank = checkWholeBlock(b, gen, dims, "generalBlockAction", loc);
+  if (rank == 0) return DeviceTensor();
   DeviceTensor out = DeviceTensor::zeros(dims, res);
-  if (info.rank == 4)
+  if (rank == 4)
     accumGeneralTwoElectron(b, gen, kappaFor, out, res.stream());
   else
     accumGeneralOneElectron(b, gen, kappaFor, out, res);
   return out;
+}
+
+// ITS TRANSPOSE (#240): given `bar`, the adjoint of block `b`'s general-range
+// tangent (shaped like the whole block), accumulates d<bar, action(kappa)>/
+// dkappa into the column-block adjoints *kbarFor(space) -- (n_mo, |space|)
+// each, the same index order as the column blocks the forward reads. The
+// ACTIVE one receives every row, including the active rows the forward's
+// column block has zeroed: the caller drops those rows when it assembles Y
+// (that half is the intra-active action's, transposed on its own). Nothing
+// for a block the general half does not reach.
+template <class KbarFn>
+void generalBlockActionAdjoint(RotBlock b, const GeneralIntegralsDevice& gen, KbarFn&& kbarFor,
+                               const DeviceTensor& bar, const DeviceResources& res,
+                               std::source_location loc = std::source_location::current()) {
+  const int rank = checkWholeBlock(b, gen, bar.dims, "generalBlockActionAdjoint", loc);
+  if (rank == 0) return;
+  if (rank == 4)
+    emitGeneralTwoElectron(b, gen, transposeEmitter(kbarFor, bar, res.stream()));
+  else
+    emitGeneralOneElectron(b, gen, transposeEmitter(kbarFor, bar, res.stream()), res);
 }
 
 // --- the orbital energies' response -----------------------------------------
@@ -325,51 +407,74 @@ struct ScEpsDot {
   Tensor virt;  // (nvirt)
 };
 
-ScEpsDot generalEpsResponse(const GeneralIntegralsDevice& gen, const DeviceTensor& gamma,
-                            const DeviceTensor& kC, const DeviceTensor& kA,
-                            const DeviceTensor& kV, const DeviceResources& res) {
-  const wwrStream_t stream = res.stream();
+// The three terms, once per space, through the emitters above (#240): every
+// einsum reads one kappa column block LAST -- here the active one is the FULL
+// block, so RotSpace::Act names kA and not the row-dropped kAct. `emitCore`
+// receives the core energies' einsums, `emitVirt` the virtual ones'; a space
+// with no orbital emits nothing.
+template <class EmitCore, class EmitVirt>
+void emitEpsResponse(const GeneralIntegralsDevice& gen, const DeviceTensor& gamma,
+                     EmitCore&& emitCore, EmitVirt&& emitVirt, const DeviceResources& res) {
   const auto [cLo, cHi] = spanOf(gen, RotSpace::Core);
   const auto [vLo, vHi] = spanOf(gen, RotSpace::Virt);
-  ScEpsDot out;
-
   if (cHi > cLo) {
     const DeviceTensor fC = sliceAxis(gen.f, 1, cLo, cHi);  // f[x, i]
-    DeviceTensor d = DeviceTensor::zeros({cHi - cLo}, res);
     // 2 sum_x kappa_xi f_xi
-    deviceEinsumAccum("zi,zi->i", {&fC, &kC}, d, 2.0, stream);
+    emitCore("zi,zi->i", KappaOperands{&fC}, RotSpace::Core, 2.0);
     // the core dressing: (ii|xj) = g_xc_cc_j[x, j, i], (i x|j i) = (x i|i j)
     // = g_xc_cc_k[x, i, j]
-    deviceEinsumAccum("zmi,zm->i", {&gen.g_xc_cc_j, &kC}, d, 4.0, stream);
-    deviceEinsumAccum("zim,zm->i", {&gen.g_xc_cc_k, &kC}, d, -2.0, stream);
+    emitCore("zmi,zm->i", KappaOperands{&gen.g_xc_cc_j}, RotSpace::Core, 4.0);
+    emitCore("zim,zm->i", KappaOperands{&gen.g_xc_cc_k}, RotSpace::Core, -2.0);
     // the active density: (ii|xt) = g_xa_cc[x, t, i, i], (i x|t i) = (x i|i t)
     // = g_xc_ca[x, i, i, t] -- both read on their tied core pair.
     const DeviceTensor cou = deviceEinsumNew("ztii->zti", {&gen.g_xa_cc}, 1.0, res);
     const DeviceTensor exc = deviceEinsumNew("zmmt->zmt", {&gen.g_xc_ca}, 1.0, res);
-    deviceEinsumAccum("zti,ut,zu->i", {&cou, &gamma, &kA}, d, 2.0, stream);
-    deviceEinsumAccum("zit,ut,zu->i", {&exc, &gamma, &kA}, d, -1.0, stream);
-    out.core = downloadTensor(d, stream);
-  } else {
-    out.core = Tensor({0});
+    emitCore("zti,ut,zu->i", KappaOperands{&cou, &gamma}, RotSpace::Act, 2.0);
+    emitCore("zit,ut,zu->i", KappaOperands{&exc, &gamma}, RotSpace::Act, -1.0);
   }
-
   if (vHi > vLo) {
     const DeviceTensor fV = sliceAxis(gen.f, 1, vLo, vHi);  // f[x, r]
-    DeviceTensor d = DeviceTensor::zeros({vHi - vLo}, res);
-    deviceEinsumAccum("zr,zr->r", {&fV, &kV}, d, 2.0, stream);
+    emitVirt("zr,zr->r", KappaOperands{&fV}, RotSpace::Virt, 2.0);
     // (rr|xj) = g_xc_vv[x, j, r], (r x|j r) = (x r|j r) = g_xv_cv[x, r, j, r]
     const DeviceTensor excC = deviceEinsumNew("zrmr->zrm", {&gen.g_xv_cv}, 1.0, res);
-    deviceEinsumAccum("zmr,zm->r", {&gen.g_xc_vv, &kC}, d, 4.0, stream);
-    deviceEinsumAccum("zrm,zm->r", {&excC, &kC}, d, -2.0, stream);
+    emitVirt("zmr,zm->r", KappaOperands{&gen.g_xc_vv}, RotSpace::Core, 4.0);
+    emitVirt("zrm,zm->r", KappaOperands{&excC}, RotSpace::Core, -2.0);
     // (rr|xt) = g_xa_vv[x, t, r], (r x|t r) = (x r|r t) = g_xv_va[x, r, r, t]
     const DeviceTensor excA = deviceEinsumNew("zrrt->zrt", {&gen.g_xv_va}, 1.0, res);
-    deviceEinsumAccum("ztr,ut,zu->r", {&gen.g_xa_vv, &gamma, &kA}, d, 2.0, stream);
-    deviceEinsumAccum("zrt,ut,zu->r", {&excA, &gamma, &kA}, d, -1.0, stream);
-    out.virt = downloadTensor(d, stream);
-  } else {
-    out.virt = Tensor({0});
+    emitVirt("ztr,ut,zu->r", KappaOperands{&gen.g_xa_vv, &gamma}, RotSpace::Act, 2.0);
+    emitVirt("zrt,ut,zu->r", KappaOperands{&excA, &gamma}, RotSpace::Act, -1.0);
   }
+}
+
+ScEpsDot generalEpsResponse(const GeneralIntegralsDevice& gen, const DeviceTensor& gamma,
+                            const DeviceTensor& kC, const DeviceTensor& kA,
+                            const DeviceTensor& kV, const DeviceResources& res) {
+  const wwrStream_t stream = res.stream();
+  const auto kappaFor = [&](RotSpace s) -> const DeviceTensor* {
+    return s == RotSpace::Core ? &kC : s == RotSpace::Act ? &kA : &kV;
+  };
+  const DeviceTensor dC = DeviceTensor::zeros({gen.ncore}, res);
+  const DeviceTensor dV = DeviceTensor::zeros({gen.nvirt}, res);
+  emitEpsResponse(gen, gamma, forwardEmitter(kappaFor, dC, stream),
+                  forwardEmitter(kappaFor, dV, stream), res);
+  ScEpsDot out;
+  out.core = gen.ncore > 0 ? downloadTensor(dC, stream) : Tensor({0});
+  out.virt = gen.nvirt > 0 ? downloadTensor(dV, stream) : Tensor({0});
   return out;
+}
+
+// ITS TRANSPOSE (#240): given the orbital energies' adjoints `barCore` (n_core)
+// and `barVirt` (n_virt) -- dE/de, summed over the classes -- accumulates
+// d(<barCore, deps_core> + <barVirt, deps_virt>)/dkappa into the column-block
+// adjoints *kbarFor(space), the active one being the FULL block's (every row
+// counts here, as in the forward).
+template <class KbarFn>
+void generalEpsResponseAdjoint(const GeneralIntegralsDevice& gen, const DeviceTensor& gamma,
+                               KbarFn&& kbarFor, const DeviceTensor& barCore,
+                               const DeviceTensor& barVirt, const DeviceResources& res) {
+  const wwrStream_t stream = res.stream();
+  emitEpsResponse(gen, gamma, transposeEmitter(kbarFor, barCore, stream),
+                  transposeEmitter(kbarFor, barVirt, stream), res);
 }
 
 // --- the generalized Fock's response to gamma, off the diagonal (#184) -------

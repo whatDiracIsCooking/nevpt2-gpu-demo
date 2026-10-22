@@ -102,6 +102,7 @@ import :rotation;     // ScRotation, ScRotationDir
 import :general;      // addTensorInto
 import :terms;        // slabDots, pairSlabDots, dotTensors
 import :sc_classes;   // gradientSijrs: PC's Sijrs IS SC's
+import :block_transpose;  // K's transpose in the integrals: the one-pass Y (#240)
 
 namespace nevpt2 {
 
@@ -469,7 +470,7 @@ Status pcClassAdjoint(const PcClassWalk& w, const ActiveIntegralsDevice& ai, Int
         }
       }
     }
-    if (rot.empty()) return;
+    if (rot.empty() && rot.bars == nullptr) return;
 
     // dE/dslab: this slab's pseudodensity in each external operand.
     std::vector<DeviceTensor> dExt;
@@ -479,6 +480,10 @@ Status pcClassAdjoint(const PcClassWalk& w, const ActiveIntegralsDevice& ai, Int
                         {&basis[static_cast<std::size_t>(t.basis)],
                          &bar[static_cast<std::size_t>(t.target)]},
                         dExt[static_cast<std::size_t>(t.ext)], 1.0, s);
+    // The one-pass Y (#240): the pseudodensities through their slabs' dots,
+    // transposed once. (A class refused below leaves these half-built; the
+    // one-pass entry point then refuses the whole Y, as the probed one does.)
+    if (rot.bars != nullptr) addExternalBars(*rot.bars, extPtr, ops.kinds, dExt, dr);
     for (std::size_t k = 0; k < rot.size(); ++k) {
       const ScRotationDir& dir = rot.dirs[k];
       const ScSlabDots dots = slabDots(extPtr, ops.kinds, dir, rot.gen, dr);
@@ -508,6 +513,13 @@ Status pcClassAdjoint(const PcClassWalk& w, const ActiveIntegralsDevice& ai, Int
   const DeviceTensor gK = sandwich(cs.Ut, symHost(mgg, m), m, dr);
   for (std::size_t k = 0; k < rot.size(); ++k)
     acc.rotAct[k] += dotTensors(gK, reshapeView(kDot[k], {d, d}), dr);
+  // The one-pass Y (#240): dE/dK through the class's K builder, transposed in
+  // the integrals -- <gK, Kdot> for every direction at once.
+  if (rot.bars != nullptr) {
+    const DyallOperandSet set = dyallOperandSet(*rdm.dm1, *rdm.dm2, *rdm.dm3, dr);
+    pcKIntegralTranspose(w.cls, gK, set.operands(),
+                         ScIntegralBars{rot.bars->h1e, rot.bars->h2e}, dr);
+  }
 
   if (adj == nullptr) return {};
   // dE/dS = sym(U (dE/dT)^T) + U sym(mggDelta) U^T, and dE/dS_1 = U (dE/dt_1)^T.

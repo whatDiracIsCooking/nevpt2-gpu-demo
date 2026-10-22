@@ -66,7 +66,8 @@ add_cxx_module_library(
 # pairs restored, and the cross-slot term from the sidecar or, fitted, from
 # the three-index B), :sc_classes (the eight classes), :rdm_adjoint
 # (the chain rule from the metric / Dyall blocks down to the five RDMs),
-# :ci_source (Park Eq. 48's sigma assembly) and :pc_classes (PC-NEVPT2's
+# :block_transpose (#240: the same Dyall blocks run backwards onto the active
+# integrals instead, for the one-pass Y), :ci_source (Park Eq. 48's sigma assembly) and :pc_classes (PC-NEVPT2's
 # reverse mode, #74: the PC solve's adjoint over SC's own rotation machinery
 # and block sweeps). PARTITIONS is in dependency order.
 #
@@ -90,7 +91,7 @@ add_cxx_module_library(
   PRIMARY_INTERFACE gradient.cppm
   PARTITIONS gradient_general.cppm gradient_rotation.cppm gradient_terms.cppm
              gradient_curvature.cppm gradient_sc_classes.cppm gradient_rdm_adjoint.cppm
-             gradient_ci_source.cppm gradient_pc_classes.cppm
+             gradient_block_transpose.cppm gradient_ci_source.cppm gradient_pc_classes.cppm
   IMPLEMENTATION gradient.cpp gradient_df.cpp
   LINK_PUBLIC nevpt2::energy nevpt2::sc_amplitudes nevpt2::gradient_plan
               nevpt2::sigma_vector nevpt2::rdm_build

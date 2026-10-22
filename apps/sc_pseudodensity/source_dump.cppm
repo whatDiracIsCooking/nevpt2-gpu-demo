@@ -7,8 +7,11 @@
 // WHAT IS WRITTEN. The two derivatives nevpt2.gradient already computes and
 // the other modes of this binary and nevpt2_demo already gate, assembled whole:
 //
-//   Y_xy  over EVERY pair of MOs -- scFullRotationMatrix, one basis direction
-//         per pair, out of the gradient sidecar (as --kappa-full reads it).
+//   Y_xy  over EVERY pair of MOs -- scFullRotationMatrixOnePass, one reverse
+//         pass out of the gradient sidecar (as --kappa-full reads it; #240,
+//         docs/gradients.md Sec. 6). Until #240 it was scFullRotationMatrix,
+//         one basis direction per pair, which --probed-y still runs as its
+//         oracle.
 //         Its forward/reverse duality, the sidecar's promotion table and the
 //         two intra-space finite differences are --kappa-full's checks
 //         (docs/testing.md, "The full orbital source term");
@@ -38,7 +41,7 @@
 // elsewhere: that what is written is what was computed, and that the matrix
 // is the pairing.
 //
-//   1  the probed matrix against the direct pairing, on one seeded FULL
+//   1  the written matrix against the direct pairing, on one seeded FULL
 //      antisymmetric direction: sum_pq kappa_pq Y_pq vs <kappa, Y> from one
 //      scFullRotationDevice call -- the same functional summed in a different
 //      order, so reassociation noise;
@@ -51,7 +54,12 @@
 //   4  each direction's EXACT forward Edot -- edot_frozen + edot_digest --
 //      against sum_pq kappa_pq Y_pq off the matrix being written: the full
 //      duality (#89), across the file's own members, so the Y written is the
-//      derivative whose directional values the file also carries.
+//      derivative whose directional values the file also carries;
+//   7  (#240) the Dyall blocks' transposes in the integrals the one-pass Y
+//      reads, class by class against the builders by duality on seeded
+//      inputs, 1e-10 relative -- SC's or, with --pc, PC's K's;
+//   8  (#240, --probed-y only) the one-pass Y against the probed one, element
+//      by element, within kDumpMatrixTol of max(1, |Y_probed|).
 //
 // WITH --pc (#74) IT WRITES PC-NEVPT2'S instead: Y and y by the PC solve's
 // adjoint (pcFullRotationMatrix, pcCiSourceDevice -- nevpt2.gradient's PC
@@ -106,9 +114,15 @@ constexpr double kDumpWalkTol = 1e-7;
 constexpr double kDumpEpsTol = 1e-10;
 // Check 1's direction, distinct from every seed --kappa-full and --kappa-act use.
 constexpr std::uint64_t kDumpSeed = 0x5eed'0073u;
-// Check 4's: the duality's own 1e-7 (exact arithmetic), across the probed
+// Check 4's: the duality's own 1e-7 (exact arithmetic), across the written
 // matrix and the direct tangent -- reassociation over n_mo^2 terms on top.
 constexpr double kDumpEdotTol = 1e-7;
+// Check 7's (#240): each class's block transposes against its builders, one
+// seeded draw, relative to max(1, |<M, B(Idot)>|) -- exact arithmetic, so
+// reassociation over the builders' n^6-sized sums is all that is left.
+constexpr double kDualityTol = 1e-10;
+// Check 7's draw, distinct from kDumpSeed and every other seed in this binary.
+constexpr std::uint64_t kDualitySeed = 0x5eed'0240u;
 
 // Every element of `a` and `b` identical, bit for bit, and the shapes equal.
 bool sameTensor(const nevpt2::Tensor& a, const nevpt2::Tensor& b) {
@@ -140,37 +154,80 @@ struct GpuSourceTerms {
   double epsGap = 0.0;    // e_core / e_virt rebuilt from the sidecar, relative
   bool walkOk = false;
   bool epsOk = false;
+  // --probed-y (#240): the one-pass Y against the probed one, element by
+  // element; probedOk stays true when it was not asked for.
+  bool probed = false;
+  double probedGap = 0.0;  // max |Y_onepass - Y_probed| / max(1, |Y_probed|)
+  bool probedOk = true;
 };
+
+// Wall seconds since `t0`.
+double secondsSince(const std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
 
 // Assembles GpuSourceTerms. `gen` is the sidecar's uploaded general integrals
 // (generalIntegrals), which the caller keeps for whatever else it probes.
+// Y is the ONE-PASS matrix (#240); `probedY` also probes it, one basis
+// direction per MO pair, and holds the two to each other element by element.
 nevpt2::Result<GpuSourceTerms> assembleSourceTerms(
     const nevpt2::GoldenFile& g, const nevpt2::GradGoldFile& gg, const bool pc,
     const double energyTotal, const nevpt2::NevptIntegralsDevice& ints,
     const nevpt2::GeneralIntegralsDevice& gen, const nevpt2::DeviceTensor& dm1,
     const nevpt2::DeviceTensor& dm2, const nevpt2::DeviceTensor& dm3,
     const nevpt2::DeviceTensor& f3ac, const nevpt2::DeviceTensor& f3ca,
-    const nevpt2::DeviceTensor& hbar, std::int64_t sigmaTiles,
+    const nevpt2::DeviceTensor& hbar, std::int64_t sigmaTiles, const bool probedY,
     const nevpt2::DeviceResources& res) {
   const std::int64_t nmo = gg.nmo;
   GpuSourceTerms out;
 
-  // --- Y over every pair ------------------------------------------------------
-  std::vector<std::pair<std::int64_t, std::int64_t>> pairs;
-  for (std::int64_t p = 0; p < nmo; ++p)
-    for (std::int64_t q = p + 1; q < nmo; ++q) pairs.emplace_back(p, q);
+  // --- Y over every pair, in one reverse pass (#240) ---------------------------
   const auto tY = std::chrono::steady_clock::now();
-  out.kappa = pc ? NEVPT2_TRY(nevpt2::pcFullRotationMatrix(ints, gen, dm1, dm2, dm3, f3ac, f3ca,
-                                                           &hbar, pairs, kDumpChunk, res))
-                 : NEVPT2_TRY(nevpt2::scFullRotationMatrix(ints, gen, dm1, dm2, dm3, f3ac, f3ca,
-                                                           &hbar, pairs, kDumpChunk, res));
+  out.kappa =
+      pc ? NEVPT2_TRY(nevpt2::pcFullRotationMatrixOnePass(ints, gen, dm1, dm2, dm3, f3ac, f3ca,
+                                                          &hbar, res))
+         : NEVPT2_TRY(nevpt2::scFullRotationMatrixOnePass(ints, gen, dm1, dm2, dm3, f3ac, f3ca,
+                                                          &hbar, res));
+  const double onePassSeconds = secondsSince(tY);
   double yMax = 0.0;
   for (std::int64_t i = 0; i < out.kappa.size(); ++i)
     yMax = std::max(yMax, std::fabs(out.kappa.flat(i)));
-  std::printf("  Y: %zu basis directions in chunks of %lld, %.2fs; max|Y| = %.6e, |Y| = %.6e\n",
-              pairs.size(), static_cast<long long>(kDumpChunk),
-              std::chrono::duration<double>(std::chrono::steady_clock::now() - tY).count(),
-              yMax, frobenius(out.kappa));
+  std::printf("  Y: one reverse pass, %.2fs; max|Y| = %.6e, |Y| = %.6e\n", onePassSeconds, yMax,
+              frobenius(out.kappa));
+
+  // --- the probed Y, the one-pass route's oracle (--probed-y) -----------------
+  if (probedY) {
+    std::vector<std::pair<std::int64_t, std::int64_t>> pairs;
+    for (std::int64_t p = 0; p < nmo; ++p)
+      for (std::int64_t q = p + 1; q < nmo; ++q) pairs.emplace_back(p, q);
+    const auto tP = std::chrono::steady_clock::now();
+    const nevpt2::Tensor probed =
+        pc ? NEVPT2_TRY(nevpt2::pcFullRotationMatrix(ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar,
+                                                     pairs, kDumpChunk, res))
+           : NEVPT2_TRY(nevpt2::scFullRotationMatrix(ints, gen, dm1, dm2, dm3, f3ac, f3ca, &hbar,
+                                                     pairs, kDumpChunk, res));
+    const double probedSeconds = secondsSince(tP);
+    std::int64_t worstP = 0, worstQ = 0;
+    for (std::int64_t p = 0; p < nmo; ++p)
+      for (std::int64_t q = 0; q < nmo; ++q) {
+        const double gap = std::fabs(out.kappa(p, q) - probed(p, q)) /
+                           std::max(1.0, std::fabs(probed(p, q)));
+        if (gap > out.probedGap) {
+          out.probedGap = gap;
+          worstP = p;
+          worstQ = q;
+        }
+      }
+    out.probed = true;
+    out.probedOk = out.probedGap <= kDumpMatrixTol;
+    std::printf("  Y probed (--probed-y): %zu basis directions in chunks of %lld, %.2fs "
+                "(one pass: %.2fs)\n",
+                pairs.size(), static_cast<long long>(kDumpChunk), probedSeconds, onePassSeconds);
+    std::printf("  8. the one-pass Y vs the probed Y, element by element: max |delta| / "
+                "max(1, |Y_probed|) = %.2e at (%lld, %lld) (<= %.1e: %s)\n",
+                out.probedGap, static_cast<long long>(worstP), static_cast<long long>(worstQ),
+                kDumpMatrixTol, out.probedOk ? "ok" : "FAILED");
+  }
 
   // --- y over every determinant ----------------------------------------------
   const nevpt2::Tensor& ci = g.get("ci");
@@ -246,7 +303,7 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
                                      const nevpt2::DeviceTensor& f3ac,
                                      const nevpt2::DeviceTensor& f3ca,
                                      const nevpt2::RdmBuildOptions& rdmOpt,
-                                     const std::string& path,
+                                     const std::string& path, const bool probedY,
                                      const nevpt2::DeviceResources& res) {
   const bool fitted = gg.densityFitted();
   // checkAgainst and the arrays the inventory reads, uploaded from a
@@ -265,9 +322,31 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
                                                     ints, dm1, dm2, dm3, f3ac, f3ca, res))
          : nevpt2::scDigestAdjointDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB, ints, dm1,
                                          dm2, dm3, f3ac, f3ca, res);
-  const GpuSourceTerms terms = NEVPT2_TRY(assembleSourceTerms(
-      g, gg, pc, energyTotal, ints, gen, dm1, dm2, dm3, f3ac, f3ca, hbar, rdmOpt.nTiles, res));
+  const GpuSourceTerms terms = NEVPT2_TRY(assembleSourceTerms(g, gg, pc, energyTotal, ints, gen,
+                                                              dm1, dm2, dm3, f3ac, f3ca, hbar,
+                                                              rdmOpt.nTiles, probedY, res));
   const nevpt2::Tensor& y = terms.kappa;
+
+  // 7. the block transposes the one-pass Y reads (#240), each class's against
+  // its own builders by duality, on seeded inputs: exact arithmetic.
+  const std::vector<nevpt2::BlockTransposeDuality> duality =
+      pc ? nevpt2::pcBlockTransposeDuality(dm1, dm2, dm3, kDualitySeed, res)
+         : nevpt2::scBlockTransposeDuality(dm1, dm2, dm3, kDualitySeed, res);
+  double dualityGap = 0.0;
+  std::string dualityWorst;
+  for (const nevpt2::BlockTransposeDuality& d : duality) {
+    const double gap = std::fabs(d.forward - d.transpose) / std::max(1.0, std::fabs(d.forward));
+    if (gap >= dualityGap) {
+      dualityGap = gap;
+      dualityWorst = d.cls;
+    }
+  }
+  const bool dualityOk = dualityGap <= kDualityTol;
+  std::printf("  7. the Dyall blocks' transposes in the integrals, %zu %s classes by duality "
+              "(<B^T(M), Idot> vs <M, B(Idot)>): max relative |delta| = %.2e (%s) (<= %.0e: "
+              "%s)\n",
+              duality.size(), pc ? "PC" : "SC", dualityGap, dualityWorst.c_str(), kDualityTol,
+              dualityOk ? "ok" : "FAILED");
 
   // The scheme's full-rotation pairing: SC's or PC's (#74), the same fields.
   const auto fullRotation =
@@ -400,7 +479,8 @@ nevpt2::Result<bool> dumpSourceTerms(const nevpt2::GoldenFile& g, const nevpt2::
   std::printf("  3. %s read back: %s\n", path.c_str(),
               roundTrip ? "every member identical, bit for bit" : "DIFFERS from what was written");
 
-  const bool ok = matrixOk && walkOk && epsOk && roundTrip && edotOk && halvesOk && viaBOk;
+  const bool ok = matrixOk && walkOk && epsOk && roundTrip && edotOk && halvesOk && viaBOk &&
+                  dualityOk && terms.probedOk;
   if (fitted)
     std::printf("\n%s: the GPU's source terms Y_xy and y_I were assembled, written to %s and "
                 "read back unchanged, with Edot(kappa) along %zu seeded directions in its "

@@ -488,11 +488,12 @@ if(NEVPT2_BUILD_TESTING)
   # the source-term provider" and "Why there is no ctest entry for it"). It is
   # the same manual gate.
   #
-  # Not `small`: Y is one basis direction per MO pair (378 at N2, 253 at LiF),
-  # each pass a full slab walk, which is --kappa-full's own reason for staying
-  # out of the sanitizer tier; the writer's host code is the unit tier's
-  # (test/gradsrc/), which every sanitizer preset runs. Acrolein is not here
-  # because its sidecar is gitignored -- and the dump would cost minutes.
+  # Not `small`: the dump's edot directions and digests' terms are full passes
+  # each (and until #240 Y was one basis direction per MO pair, 378 at N2, 253
+  # at LiF), --kappa-full's own reason for staying out of the sanitizer tier;
+  # the writer's host code is the unit tier's (test/gradsrc/), which every
+  # sanitizer preset runs. Acrolein is not here because its sidecar is
+  # gitignored (its --probed-y entries below register where it exists).
   # lif_def2svp_cas46_casscf (#125) sits beside its CASCI twin: its dump is the
   # GPU-sourced half of LiF's CASSCF SC gradient verdict (docs/testing.md, "SC
   # on a CASSCF reference: LiF, and the N2 degeneracy probe").
@@ -516,6 +517,63 @@ if(NEVPT2_BUILD_TESTING)
     endif()
     unset(_dump_gold)
   endforeach()
+
+  # --- the one-pass Y against the probed one: --dump-source-terms --probed-y ------
+  #
+  # Since #240 the dump writes Y from ONE reverse pass (nevpt2.gradient's
+  # scFullRotationMatrixOnePass / pcFullRotationMatrixOnePass: the walk's
+  # adjoints pulled back through the Dyall blocks' transposes and the kappa
+  # action, docs/gradients.md, Sec. 6), and every dump entry above and below
+  # gates check 7, those transposes against their builders by duality. These
+  # entries add check 8: the probed Y -- one basis direction per MO pair, the
+  # route the one-pass one replaced, kept as its oracle -- computed beside it
+  # and held to it element by element within the probed matrix's own bound
+  # (kDumpMatrixTol, 1e-9 of max(1, |Y|)). SC and PC on N2 CAS(4,4)'s CASSCF
+  # state, SC on LiF CAS(4,6) (its golden carries no PC reference), SC and PC
+  # on the C1 case HSOH CAS(6,6), SC on the density-fitted twin, and acrolein
+  # CAS(6,5) on CASSCF orbitals where its gitignored sidecar has been
+  # regenerated (docs/reference-data.md, "The gradient sidecar"). HSOH and
+  # acrolein are `slow`: their probe is the hundreds-of-directions cost the
+  # one-pass route exists to avoid (docs/performance.md, "The one-pass `Y`").
+  foreach(_spec "n2_ccpvdz_cas44_casscf|sc" "n2_ccpvdz_cas44_casscf|pc"
+                "lif_def2svp_cas46|sc" "hsoh_def2svp_cas66_casscf|sc"
+                "hsoh_def2svp_cas66_casscf|pc" "n2_ccpvdz_cas44_df|sc"
+                "acrolein_def2svp_cas65_casscf|sc" "acrolein_def2svp_cas65_casscf|pc")
+    string(REPLACE "|" ";" _spec "${_spec}")
+    list(GET _spec 0 _case)
+    list(GET _spec 1 _scheme)
+    if(_scheme STREQUAL "pc")
+      set(_flags --pc)
+      set(_name nevpt2_sc_pseudodensity_dump_probed_pc_${_case})
+      set(_out "${_nevpt2_dump_dir}/${_case}_probed_pc.gradsrc")
+      set(_pass "PASS: the GPU's PC source terms Y_xy and y_I were assembled, written to")
+    else()
+      set(_flags "")
+      set(_name nevpt2_sc_pseudodensity_dump_probed_${_case})
+      set(_out "${_nevpt2_dump_dir}/${_case}_probed.gradsrc")
+      set(_pass "PASS: the GPU's source terms Y_xy and y_I were assembled, written to")
+    endif()
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.gradgold")
+      message(WARNING "nevpt2: gradient sidecar missing, test '${_name}' not registered")
+    else()
+      _add_golden_test_with(nevpt2_sc_pseudodensity ${_name}
+                            "${CMAKE_CURRENT_SOURCE_DIR}/golden/${_case}.nevpt2gold" --tiles 3
+                            ${_flags} --dump-source-terms "${_out}" --probed-y)
+      if(TEST ${_name})
+        set_tests_properties(${_name} PROPERTIES PASS_REGULAR_EXPRESSION "${_pass}")
+        if(_case MATCHES "^(hsoh|acrolein)_")
+          set_tests_properties(${_name} PROPERTIES LABELS "gpu;slow")
+        endif()
+      endif()
+    endif()
+  endforeach()
+  unset(_spec)
+  unset(_case)
+  unset(_scheme)
+  unset(_flags)
+  unset(_name)
+  unset(_out)
+  unset(_pass)
   unset(_nevpt2_dump_dir)
 
   # --- the GPU's source terms against PySCF's: --source-oracle ------------------

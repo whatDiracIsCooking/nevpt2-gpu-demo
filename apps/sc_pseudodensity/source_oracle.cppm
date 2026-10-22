@@ -90,7 +90,8 @@ nevpt2::Result<bool> checkSourceOracle(const nevpt2::GoldenFile& g,
          : nevpt2::scDigestAdjointDevice(rdmOpt, g.get("ci"), g.nelecA, g.nelecB, ints, dm1,
                                          dm2, dm3, f3ac, f3ca, res);
   const GpuSourceTerms terms = NEVPT2_TRY(assembleSourceTerms(
-      g, gg, pc, energyTotal, ints, gen, dm1, dm2, dm3, f3ac, f3ca, hbar, rdmOpt.nTiles, res));
+      g, gg, pc, energyTotal, ints, gen, dm1, dm2, dm3, f3ac, f3ca, hbar, rdmOpt.nTiles,
+      /*probedY=*/false, res));
 
   double cy = 0.0;
   const nevpt2::Tensor a = nevpt2::oracleBasisA(o, terms.kappa);

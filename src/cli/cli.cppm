@@ -207,6 +207,10 @@ struct Options {
   std::string scSourceTangentPath;
   std::string gradgoldPath;
   std::string dumpSourceTermsPath;
+  // nevpt2_sc_pseudodensity: --probed-y, only with --dump-source-terms (#240):
+  // also probe Y basis direction by basis direction and hold the one-pass Y
+  // the dump writes to it, element by element.
+  bool probedY = false;
   std::string sourceOraclePath;
   // nevpt2_pc_tangent: --fd-steps N, --fd-start-pow N.
   int fdSteps = kDefaultFdSteps;

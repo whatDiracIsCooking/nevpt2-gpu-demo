@@ -765,6 +765,9 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
   double ext = 0.0;
   for (std::size_t i = 0; i < blocks.size(); ++i) ext += dotTensors(*blocks[i], dBlocks[i], res);
   acc.extContraction += 0.5 * ext;
+  // The one-pass Y (#240): this slab's pseudodensities through their blocks'
+  // dots, transposed, once -- in place of one pairing per basis direction.
+  if (rot.bars != nullptr) addExternalBars(*rot.bars, blocks, kinds, dBlocks, res);
 
   // --- the tangent along a CI direction (#156) ------------------------------
   if (ci != nullptr) {
