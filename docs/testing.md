@@ -355,6 +355,28 @@ What they are, all on synthetic inputs, no PySCF solve, no card, no network:
   end to end on the committed N2 CAS(4,4) CASSCF state with seeded
   multipliers. About 8 s of CPU ([`reference-data.md`](reference-data.md),
   "Level 2's CASSCF third-derivative term").
+- **`test_casscf_constraint_mixed.py`** (#232) checks
+  `casscf_constraint_mixed.py`'s R-mixed constraint terms,
+  `Z . d²g/dθdR [u]` and `Z . d²g/dR²`. The case is a bent C1 water
+  CASSCF(4,4) in 6-31G, moved off stationarity along a seeded step, with a
+  seeded `(Z, z)`. The checks:
+  - The Z-weighted densities rebuild `E`, `gen_g_hop`'s `Z . g_all` and
+    #216's `Z . J[u]` (1e-10), and they carry the integrals' symmetries.
+  - `Z . dg/dR` equals #219's formula, and the mixed term equals #216's
+    series at #215's perturbed Hamiltonian on three coordinates (1e-10).
+  - Both terms are linear in `u` and `Z`, `Z . d²g/dR²` and each of its terms
+    is symmetric, and the translational sum rules hold.
+  - Every ladder of `g_all` along the frozen path passes (1e-6, at least three
+    fourfold halvings): 9 mixed `(u, d)` pairs, 6 second-derivative ones and
+    3 analytic-gradient columns.
+  - The ladders reject two wrong operators: the second derivative without the
+    path's second-order connection, and the mixed term with `Z` added in the
+    global chart.
+  - The script runs end to end on the committed N2 CAS(4,4) CASSCF state
+    with seeded multipliers.
+
+  About 20 s of CPU ([`reference-data.md`](reference-data.md), "The CASSCF
+  constraint's R-mixed terms").
 
 **The thresholds are written into the tests as numbers**, not read from the
 module: a test comparing against `DEGENERACY_TOL` would move with it.
