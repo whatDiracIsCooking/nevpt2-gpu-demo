@@ -118,8 +118,12 @@ checked in two halves:
   `write_pertgold` byte for byte and is held to the golden and gradient
   sidecar beside it (partition, calculation, `mo_coeff` bit for bit); a
   conventional and a density-fitted one must both be committed. The C++
-  scan's magic pattern spells `NEVPT2I` too. Ends `PASS:` or `FAIL:` with an
-  exit status.
+  scan's magic pattern spells `NEVPT2I` too. Since #180 every committed
+  `.erigold` full MO-integral tensor sidecar goes through `read_erigold` /
+  `write_erigold` byte for byte and is held to the conventional golden and
+  gradient sidecar beside it (partition, `mo_coeff` bit for bit), its
+  `(x a | a a)` rows to the sidecar's `g_xa_aa` within 1e-10; at least one
+  must be committed. Ends `PASS:` or `FAIL:` with an exit status.
 
 The Python half registers **no ctest entry**, for the same reasons the
 gradient comparison does not ("Why there is no ctest entry for it", below):
@@ -137,7 +141,9 @@ Measured (no card, 2026-10-21; the 17 committed goldens — 12 `G1`, 5 `G2` —
 7 gradient sidecars — 5 `D1`, 2 `F1` — 5 MO sidecars and 14 source-term
 oracles — 3 `S1`, 2 `P1`, 5 `SD`, 4 `PD`): 1.2 s wall, `PASS:`. With #220's
 fitted CASSCF gradient sidecar (9 gradient sidecars now, 6 `D1` and 3 `F1`), the two `.respgold` and
-the two `.pertgold` (one of each calculation): 1.3 s, `PASS:` (2026-10-22). The negative
+the two `.pertgold` (one of each calculation): 1.3 s, `PASS:` (2026-10-22).
+With #180's `.erigold` (4.9 MB) as well: 1.7 s including `uv run`'s start,
+`PASS:` (2026-10-22). The negative
 controls below were run when only the three N2 `G2` goldens were committed: a
 scratch field added to the `G2` header table fails it on all three `G2`
 goldens (their array tables
@@ -428,14 +434,15 @@ nothing skips.
 generators are bit-reproducible, so a regenerated file that differs from the
 committed one means something changed — for every committed N2 CAS(4,4) /
 CAS(8,8) reference, the C1 case's three HSOH files (#213), the two CASSCF
-response sidecars (#219) and the two integral perturbation sidecars (#220).
-Twenty-eight files from twenty-two generator runs, each with the
+response sidecars (#219), the two integral perturbation sidecars (#220)
+and N2 CAS(4,4)'s full MO-integral tensor sidecar (#180).
+Twenty-nine files from twenty-two generator runs, each with the
 generator's own settings (`--out` into a scratch directory is the only flag
 added):
 
 | files | run |
 |---|---|
-| `n2_ccpvdz_cas44.nevpt2gold`, `.gradgold`; `n2_ccpvdz_cas88.nevpt2gold`, `.gradgold` | `generate_golden.py --gradgold` |
+| `n2_ccpvdz_cas44.nevpt2gold`, `.gradgold`, `.erigold`; `n2_ccpvdz_cas88.nevpt2gold`, `.gradgold` | `generate_golden.py --gradgold`, CAS(4,4)'s with `--erigold` too (#180), which changes no byte of the other two |
 | `n2_ccpvdz_cas44_df.nevpt2gold`, `.gradgold`; `n2_ccpvdz_cas88_df.nevpt2gold`, `.gradgold` | `generate_golden.py --df --gradgold` (the density-fitted `NEVPT2F1` sidecar, #164); for CAS(4,4), then `nevpt2_numgrad.py --df` on the sidecar it just wrote, in the same run, so its `grad_num*` arrays are regenerated too (#167) |
 | `n2_ccpvdz_cas44_casscf[_df].mogold` | `generate_golden.py --casscf --mo-out` (a fresh optimisation) |
 | `n2_ccpvdz_cas44_casscf[_df].nevpt2gold`, `n2_ccpvdz_cas44_casscf_df.gradgold` | `generate_golden.py --mo-from` the **committed** sidecar, so a drifted sidecar fails as itself and not as its golden too; the fitted run with `--gradgold`, writing the `NEVPT2F1` sidecar committed for #220 |
@@ -455,7 +462,7 @@ four the state fields must be byte-identical, the new `reference_kind` must
 be `casci`, and everything from the array count on byte-identical, each
 file's header length read with `golden_format.py arrays-at`. It prints one
 `PASS:`/`FAIL:` line per file (naming it) and exits 0 only if all
-twenty-eight reproduce. `--committed DIR` compares against a copy instead of `golden/`
+twenty-nine reproduce. `--committed DIR` compares against a copy instead of `golden/`
 (the generator inputs stay `golden/`'s), `--only REGEX` narrows the set,
 `--out DIR` keeps the regenerated files and each run's log.
 
@@ -483,6 +490,7 @@ before #105 added the two directional files:
 | `-j 6`, twenty-three files, the HSOH three added, #213 (the two-card box's CPU) | 227 s, all twenty-three `PASS:`; the `hsoh_casscf` run, generator plus the 72-state `--reference casscf` sweep at `--workers 12`, 198 s, the `hsoh_casscf_mo` run 16 s |
 | `-j 6`, twenty-five files, the two `.respgold` added, #219 (the 12-core reference box, a sibling build sharing it) | 236 s, all twenty-five `PASS:`; `cas44_casscf_resp` 4 s, `hsoh_casscf_resp` 11 s |
 | `-j 6`, twenty-eight files, the fitted CASSCF `.gradgold` and the two `.pertgold` added, #220 (the 12-core reference box, a sibling agent's offline job sharing it) | 236 s, all twenty-eight `PASS:`; `cas44_casscf_pert` and `cas44_casscf_df_pert` 2 s each, `cas44_casscf_df` (now with `--gradgold`) 27 s |
+| `-j 6`, twenty-nine files, `n2_ccpvdz_cas44.erigold` added to the `cas44` run, #180 (the 12-core reference box, another job sharing it) | 229 s, all twenty-nine `PASS:`; the `cas44` run, now with `--erigold`, 28 s (its golden and `.gradgold` byte-identical, as before) |
 
 Per generator run (the `-j 1` run): `--casscf` sidecars 2–3 s,
 `n2_ccpvdz_cas44.srcgold` 9 s, the CAS(4,4) goldens 26–27 s, the CAS(8,8)
@@ -1353,11 +1361,14 @@ full`, `core x virtual`, `core x core` and `virtual x virtual`, whose K2 is
 the three-index jet's alone. Exact in every run: along the intra-space pairs
 the digests' term is `0.0` — reverse on every case, and forward and reverse
 for both terms on the fitted one, with `max|h2e''|` `0.0` there — and K2 is
-refused as Unsupported on the conventional cases; along `active x core` and
+refused as Unsupported on the conventional cases (these entries run without
+`--erigold`; "K2 from the full MO-integral tensor", below, is the run with
+it); along `active x core` and
 `active x virtual`, K1 is `0.0` (`W` vanishes for two directions in
 different spaces). The refusals fire on every run: a conventional `full x
 full` pair (and on the fitted case the same pair asked for the sidecar
-route), and the three-index route on a conventional case.
+route), the three-index route on a conventional case, and, since #180, the
+full-tensor route with no `.erigold` uploaded, on every case.
 
 **The traced pairs' zero is structural, and that is what it pins.** Both
 restored terms depend on their matrix only through `M + M^T`, so at `W` and
@@ -1490,6 +1501,93 @@ relative (the product-parameterisation row, four halvings) — inside the
 A run takes about 1.5 s at CAS(4,4), 20 s at CAS(8,8), 3 s on the fitted
 CAS(4,4) and 35 s on the fitted CAS(8,8): the forward digests, one plain RDM
 build and one PC tangent per term per pair, are most of it.
+
+## K2 from the full MO-integral tensor
+
+`nevpt2_sc_pseudodensity_cas44_sc_hessian_kk_int_eri` and
+`nevpt2_sc_pseudodensity_cas44_pc_hessian_kk_int_eri` (`gpu`) run
+`nevpt2_sc_pseudodensity --golden golden/n2_ccpvdz_cas44.nevpt2gold --tiles
+3 [--pc] --sc-hessian-kk-int --erigold golden/n2_ccpvdz_cas44.erigold` and
+match each variant's PASS line ending `(full MO-integral tensor: K2 on every
+pair, by the four-index jets where no member is active-active, both routes
+agree, every pair laddered)` (#180). The `.erigold` sidecar is the whole
+`(pq|rs)` ([`reference-data.md`](reference-data.md), "The full MO-integral
+tensor sidecar"); with it uploaded, `scOrbitalCurvatureDevice` /
+`pcOrbitalCurvatureDevice` take K2 for a pair with no active–active member
+from the four-index jets of that tensor (`fullDottedCross`;
+[`hessian-theory.md`](hessian-theory.md), §5.4) instead of refusing it, and
+the two sections above' checks run on the conventional case the way they
+run on the fitted one, plus one of their own:
+
+- **Check 1b, the full tensor at `U = 1` against the golden.** The host
+  builder the mixed ladders displace with (`kkRotatedIntsFull`: every
+  stored block sliced out of `(pq|rs)`, `h^eff` and the orbital energies
+  rebuilt from it and the sidecar's `h`) is held, before anything else reads
+  the tensor, to the golden's own fourteen blocks and two orbital-energy
+  arrays.
+- **The pairs** are the conventional ones (`active x full` and its swap,
+  `active x active`, `active x core`, `active x virtual`) plus the fitted
+  case's four (`full x full`, `core x virtual`, `core x core`, `virtual x
+  virtual`), whose K2 is the full tensor's.
+- **The two routes (check 8)**: K1 by the promotion table against the full
+  tensor's first-order jet, and K2 by the composition against the full
+  tensor's jet wherever one member is active–active — two constructions that
+  share nothing past the transformation that wrote both files.
+- **Every pair is laddered.** The three mixed pairs (`active x full`, its
+  swap, `full x full`) cannot be displaced from stored blocks, so their
+  corners are the full tensor rotated on all four slots by
+  `U = exp(s u + t v)` on the host, with `h^eff`'s core dressing and the
+  orbital energies' density lines rebuilt from the rotated integrals and
+  `gamma` held. So the composition's K2 on a mixed pair meets a ladder for
+  the first time, and the full tensor's K2 on `full x full` meets one.
+- **The refusals that remain:** a `full x full` pair asked for the
+  composition explicitly, and the three-index route on a conventional case.
+
+RTX 3080 (CUDA, `default` preset), the worst of three runs of each,
+2026-10-22:
+
+| exact check | SC | PC | gate |
+|---|---|---|---|
+| 1b: the full tensor at `U = 1` against the golden, worst array (relative) | 5.5e-14 (`h1e_v_Sir`) | 5.5e-14 (`h1e_v_Sir`) | 1e-10 |
+| 0: PC's first-order source term, the full duality | — | 1.4e-17 | 1e-7 |
+| 3: the duality, worst term of every pair | 7.5e-13 | 6.3e-17 | 1e-7 |
+| 3: the swap | 2.4e-14 | 6.1e-18 | 1e-7 |
+| 4: the traced pairs' K1 + K2 (K1's share) | ≤1.7e-18 (8.1e-3) | 8.7e-19 (5.4e-3) | 1e-12 |
+| 5: core x core and virtual x virtual: `max\|h2e''\|` and the digests' term, both terms, both directions | 0.0 | ≤6.2e-18 (the forward digests' term; the rest 0.0) | 0 / 1e-12 |
+| 5: core x core, the active blocks' K1 + K2 | 1.2e-16 | 6.9e-18 | 1e-12 |
+| 6: each ladder's term in its own walk against the curvature's | 3.4e-14 | 8.3e-17 | 1e-7 |
+| 8: K1 promotion table against the full tensor's jet, and K2 composition against it, worst pair | 4.9e-13 | 1.6e-16 | 1e-7 |
+
+The ladders, best error relative to `max(|term|, |<u, Y>|, |<v, Y>|)`
+(gate 1e-6, three fourfold halvings), worst of the three runs with the
+fewest halvings seen:
+
+| pair | SC | PC |
+|---|---|---|
+| active x full (from the full tensor) | 4.8e-8 (6) | 3.3e-8 (6) |
+| full x active, the swap (from the full tensor) | 4.8e-8 (6) | 3.3e-8 (6) |
+| full x full (from the full tensor; K2 the full tensor's) | 3.2e-8 (5) | 3.1e-8 (5) |
+| active x active | 1.7e-8 (7) | 1.8e-8 (7) |
+| active x core | 6.8e-9 (7) | 6.6e-9 (7) |
+| active x virtual | 2.9e-9 (7) | 3.1e-9 (7) |
+| core x virtual (K2 the full tensor's) | 6.4e-9 (7) | 6.4e-9 (7) |
+| core x core (K2 the full tensor's) | 3.3e-9 (8) | 3.3e-9 (8) |
+| virtual x virtual (K2 the full tensor's) | 6.8e-9 (6) | 7.0e-9 (6) |
+| along `exp(s u) exp(t v)`, virtual x virtual | 1.4e-8 (6) | 1.4e-8 (6) |
+
+The block-diagonal rows are the conventional entries' own (the section
+above, and "PC's orbital curvature") — the same stored-block corners — and
+agree with them; what is new is the four rows with no active–active member
+and the three mixed ones. The product row is `virtual x virtual` here,
+where `<[u, v], Y>` does not vanish (the conventional entries, with no
+inactive pair, ladder `active x active`, where it does).
+
+A run takes 31–36 s (six runs, SC and PC alike), against about 1 s without `--erigold`: nearly all of
+it is the host-side four-index rotations of the mixed ladders (13 steps × 4
+corners × 3 pairs, each an `n_mo^5` transform per slot), which is why the
+two entries are not `small`. The device side — the jets at `L = n_mo^2`,
+the identity factor and the tensor itself on the card — raises the pool's
+high-water mark to 48.9 MB, from 5.4 MB (SC) and 6.3 MB (PC) without it.
 
 ## PC's mixed Hessian block's checks
 
@@ -2508,6 +2606,7 @@ exact digests:
 | `nevpt2_sc_pseudodensity_cas44_sc_hessian_kc`, `nevpt2_sc_pseudodensity_cas88_sc_hessian_kc` | `nevpt2_sc_pseudodensity --sc-hessian-kc` | `PASS: the SC mixed Hessian block H_kc's two orientations agree` | `gpu;small` / `gpu` | "The SC mixed Hessian block's checks" |
 | `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk_int`, `nevpt2_sc_pseudodensity_cas88_sc_hessian_kk_int`, `nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk_int` | `nevpt2_sc_pseudodensity --sc-hessian-kk-int` | `PASS: the SC orbital Hessian's integral curvature <Ehat', I''> = K1 + K2 agrees`; the fitted entry's line must also name the route, `(density-fitted: K2 by the three-index jets, both routes agree)` | `gpu;small` (the two CAS(4,4)) / `gpu` | "The orbital block's integral curvature" |
 | `nevpt2_sc_pseudodensity_cas44_pc_hessian_kk_int`, `_cas88_pc_hessian_kk_int`, `_cas44_df_pc_hessian_kk_int`, `_cas88_df_pc_hessian_kk_int` | `nevpt2_sc_pseudodensity --pc --sc-hessian-kk-int` | `PASS: the PC orbital Hessian's integral curvature <Ehat', I''> = K1 + K2 agrees … (PC's first-order source term gated first, both dualities)`; the fitted entries' line must also name the route, `(density-fitted: K2 by the three-index jets, both routes agree)` | `gpu;small` (the two CAS(4,4)) / `gpu` | "PC's orbital curvature" |
+| `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk_int_eri`, `nevpt2_sc_pseudodensity_cas44_pc_hessian_kk_int_eri` | `nevpt2_sc_pseudodensity [--pc] --sc-hessian-kk-int --erigold golden/n2_ccpvdz_cas44.erigold` (#180) | each variant's PASS line, ending `(full MO-integral tensor: K2 on every pair, by the four-index jets where no member is active-active, both routes agree, every pair laddered)` | `gpu` | "K2 from the full MO-integral tensor" |
 | `nevpt2_sc_pseudodensity_cas44_pc_hessian_kc`, `nevpt2_sc_pseudodensity_cas44_df_pc_hessian_kc` | `nevpt2_sc_pseudodensity --pc --sc-hessian-kc` | `PASS: the PC mixed Hessian block H_kc's two orientations agree by duality`, the fitted entry's line ending `(density-fitted)` | `gpu;small` | "PC's mixed Hessian block's checks" |
 | `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk`, `nevpt2_sc_pseudodensity_cas88_sc_hessian_kk`, `nevpt2_sc_pseudodensity_cas44_df_sc_hessian_kk` | `nevpt2_sc_pseudodensity --sc-hessian-kk` | `PASS: the SC orbital Hessian's sandwich I'^T Ehat'' I' = K3 + K4 + K5 + K6 agrees with itself by duality … 2 pairs refused, with no Hessian along them (rho_t, Sec. 5.6)`, the fitted entry's line ending `(density-fitted)` | `gpu;small` (the two CAS(4,4)) / `gpu` | "The orbital block's sandwich" |
 | `nevpt2_sc_pseudodensity_cas44_pc_hessian_kk`, `nevpt2_sc_pseudodensity_cas44_df_pc_hessian_kk` | `nevpt2_sc_pseudodensity --pc --sc-hessian-kk` | `PASS: the PC orbital Hessian's sandwich I'^T Ehat''_pc I' agrees with itself by duality to 1e-07 in both orbital-energy modes … no pair refused for its empty perturbers (Sec. 6.6)`, the fitted entry's line ending `(density-fitted)` | `gpu;small` | "PC's orbital block's sandwich" |
@@ -2546,6 +2645,7 @@ build sets each flag's tile floor is [`performance.md`](performance.md),
 | `PcHessianReportTests`, `PcHessianVectorReportTests` | `pc_tangent_tests` | the PC Hessian checks' gates: a refused class, a control that answers instead of refusing, a two-term tangent off the three-term one and a plateau in any class each fail |
 | `CliHessianRefusalTests` | `cli_tests` | every Hessian flag against every approximate digest, in both orders, refused as `err_unsupported`; each flag one binary's; the exact digests accepted |
 | `CliScPseudodensityFlagTests` (`ScSourceTangent*`, #220, #234) | `cli_tests` | `--sc-source-tangent PATH` sets its path, needs one, takes `--gradgold`, the exact digests and `--pc` (#234), refuses the other jobs (`err_config`) and the approximate digests (`err_unsupported`, the Hessian flags' message), with `--pc` too, and is `nevpt2_sc_pseudodensity`'s alone |
+| `EriGoldRoundTripTests`, `EriGoldLoadErrorTests`, `EriGoldCommittedTests` | `erigold_tests` | the `.erigold` reader (#180): a written sidecar's header and values read back; every malformed file an IO Error, either array missing refused whole; the committed N2 CAS(4,4) tensor's `(x a | a a)` rows against its gradient sidecar's `g_xa_aa`, paired with its own golden and sidecar and refused beside the CASSCF-orbital pair (another frame) and the density-fitted one |
 | `PertGoldRoundTripTests`, `PertGoldLoadErrorTests`, `PertGoldCommittedTests` | `pertgold_tests` | the `.pertgold` reader (#220): a written sidecar's header, arrays and per-coordinate slices read back; every malformed file an IO Error, and the sidecar with **any one** of its 22 arrays missing refused whole; the two committed sidecars paired with their own golden and gradient sidecar and refused beside the CASCI state's (another frame) and the other calculation's |
 
 ## The density-fitted orbital source term

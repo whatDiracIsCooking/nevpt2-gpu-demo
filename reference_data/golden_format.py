@@ -4,8 +4,9 @@ formats in ``golden/``: the ``*.nevpt2gold`` golden, the ``*.gradgold``
 gradient sidecar (conventional or density-fitted) and the ``*.mogold`` MO
 sidecar -- and of the
 ``*.srcgold`` source-term oracle, the ``*.respgold`` CASSCF response
-sidecar and the ``*.pertgold`` integral perturbation sidecar, which end in
-the same array section. It
+sidecar, the ``*.pertgold`` integral perturbation sidecar and the
+``*.erigold`` full MO-integral tensor sidecar, which end in the same array
+section. It
 also reads ``states.json``, the manifest a CASSCF-reference sweep keeps its
 displaced states' ``.mogold`` files under (:func:`read_states_manifest`).
 
@@ -13,7 +14,8 @@ Every reader in ``reference_data/`` goes through this module; none parses a
 header, or seeks to an offset, of its own. The scalar header of each format is
 written down **once**, as a field table keyed by magic (:data:`GOLDEN_HEADERS`,
 :data:`GRADGOLD_HEADERS`, :data:`MO_SIDECAR_HEADERS`,
-:data:`SRCGOLD_HEADERS`, :data:`RESPGOLD_HEADERS`, :data:`PERTGOLD_HEADERS`), and
+:data:`SRCGOLD_HEADERS`, :data:`RESPGOLD_HEADERS`, :data:`PERTGOLD_HEADERS`,
+:data:`ERIGOLD_HEADERS`), and
 both directions are
 driven by that table: :func:`pack_header` writes it, :func:`_read_header`
 reads it, and where the array table begins is wherever the header read stopped
@@ -130,6 +132,18 @@ RESPGOLD_MAGIC = b"NEVPT2R1"
 #: for the conventional integrals and the auxiliary basis size for the
 #: density-fitted ones, as a ``NEVPT2F1`` sidecar's is.
 PERTGOLD_MAGIC = b"NEVPT2I1"
+
+#: Magic bytes identifying a **full MO-integral tensor sidecar**
+#: (``*.erigold``, #180): every ``(pq|rs)`` of a CONVENTIONAL golden's state
+#: over the whole MO range, in the gradient sidecar's orbitals
+#: (``generate_golden.py --erigold``; :data:`ERIGOLD_ARRAYS` has the arrays).
+#: What the orbital Hessian's cross-slot curvature K2 reads for a direction
+#: pair with no active-active member (docs/hessian-theory.md, Sec. 5.4): two
+#: general indices reach every MO integral, so nothing smaller serves it. An
+#: opt-in sidecar of its own, so no committed ``.gradgold`` grows or changes a
+#: byte. A density-fitted case needs none: its ``B`` is already the whole
+#: tensor in three-index form.
+ERIGOLD_MAGIC = b"NEVPT2E1"
 
 #: A source-term oracle's ``(scheme, flavour)``, by magic: what
 #: :func:`read_srcgold` reports as ``header["scheme"]`` /
@@ -273,6 +287,23 @@ PERTGOLD_ARRAYS = (
     ("g_xc_cc_k", ("ncoord", "nmo", "ncore", "ncore")),
     ("g_xa_vv", ("ncoord", "nmo", "nact", "nvirt")),
     ("g_xc_vv", ("ncoord", "nmo", "ncore", "nvirt")),
+)
+
+#: THE full-tensor sidecar's scalar header: the orbital-space partition of the
+#: gradient sidecar beside it (less ``nelec_rhf``).
+ERIGOLD_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
+    ERIGOLD_MAGIC: tuple((n, "i") for n in ("nao", "nmo", "ncore", "nact", "nvirt")),
+}
+
+#: The arrays a full-tensor sidecar holds, in file order, each with its shape
+#: in header fields. ``eri[p, q, r, s] = (pq|rs)`` in chemists' order over the
+#: whole MO range: ``n_mo^4`` doubles, every permutational copy stored, so the
+#: C++ reader uploads it as it is.
+ERIGOLD_ARRAYS = (
+    # the frame: the golden's orbitals (its gradient sidecar's mo_coeff, bit
+    # for bit)
+    ("mo_coeff", ("nao", "nmo")),
+    ("eri", ("nmo", "nmo", "nmo", "nmo")),
 )
 
 #: No array the generator writes has more than a handful of axes; a rank past
@@ -589,6 +620,53 @@ def read_pertgold(path) -> tuple[dict, dict[str, np.ndarray]]:
         del header["magic"]
         arrays = _read_arrays(f, path, None)
     _check_pertgold(path, header, arrays)
+    return header, arrays
+
+
+def _check_erigold(path, header: dict, arrays: dict[str, np.ndarray]) -> None:
+    """Exactly the :data:`ERIGOLD_ARRAYS`, in order, each at the shape the
+    header gives it; a partition that does not add up is refused before any
+    shape is read against it. A sidecar missing an array is refused whole."""
+    if (header["ncore"] + header["nact"] + header["nvirt"] != header["nmo"]
+            or header["nmo"] < 1 or header["nao"] < 1 or header["nact"] < 1
+            or header["ncore"] < 0 or header["nvirt"] < 0):
+        raise FormatError(f"{path}: header {header} is not a usable partition")
+    names = [n for n, _s in ERIGOLD_ARRAYS]
+    if list(arrays) != names:
+        missing = [n for n in names if n not in arrays]
+        raise FormatError(f"{path}: arrays {list(arrays)}, expected {names}"
+                          + (f" (missing {', '.join(missing)})" if missing else ""))
+    for name, shape in ERIGOLD_ARRAYS:
+        want = tuple(header[d] for d in shape)
+        if arrays[name].shape != want:
+            raise FormatError(f"{path}: {name} is {arrays[name].shape}, expected {shape} = {want}")
+
+
+def write_erigold(path, *, header: dict, arrays: dict[str, np.ndarray]) -> None:
+    """Write a full MO-integral tensor sidecar (``*.erigold``, ``NEVPT2E1``):
+    the :data:`ERIGOLD_HEADERS` scalar header from ``header``, then the
+    :data:`ERIGOLD_ARRAYS` in their order, held to their shapes before a byte
+    is written. :func:`read_erigold` reads it back into the same
+    ``(header, arrays)``."""
+    names = [n for n, _s in ERIGOLD_ARRAYS]
+    if set(arrays) != set(names):
+        raise FormatError(f"{path}: arrays {sorted(arrays)}, expected {sorted(names)}")
+    arrays = {n: np.asarray(arrays[n], dtype=np.float64) for n in names}
+    _check_erigold(path, header, arrays)
+    with open(path, "wb") as f:
+        f.write(pack_header(ERIGOLD_HEADERS, ERIGOLD_MAGIC, header))
+        write_arrays(f, arrays)
+
+
+def read_erigold(path) -> tuple[dict, dict[str, np.ndarray]]:
+    """``(header, arrays)`` from a full MO-integral tensor sidecar, every
+    array held to :data:`ERIGOLD_ARRAYS`' order and shapes, so
+    :func:`write_erigold` writes the same file back."""
+    with open(path, "rb") as f:
+        header = _read_header(f, path, ERIGOLD_HEADERS, "full MO-integral tensor sidecar")
+        del header["magic"]
+        arrays = _read_arrays(f, path, None)
+    _check_erigold(path, header, arrays)
     return header, arrays
 
 

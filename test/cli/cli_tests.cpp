@@ -423,7 +423,8 @@ constexpr std::array kExpectedMatrix{
     MatrixRow{"--kappa-full", "S"},         MatrixRow{"--sc-hessian-kc", "S"},
     MatrixRow{"--sc-hessian-kk-int", "S"},  MatrixRow{"--sc-hessian-kk", "S"},
     MatrixRow{"--sc-source-tangent", "S"},
-    MatrixRow{"--gradgold", "DSP"},         MatrixRow{"--dump-source-terms", "S"},
+    MatrixRow{"--gradgold", "DSP"},         MatrixRow{"--erigold", "S"},
+    MatrixRow{"--dump-source-terms", "S"},
     MatrixRow{"--probed-y", "S"},
     MatrixRow{"--source-oracle", "S"},      MatrixRow{"--fd-steps", "P"},
     MatrixRow{"--fd-start-pow", "P"},       MatrixRow{"--pc-hessian", "P"},
@@ -672,6 +673,9 @@ TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
       {Binary::ScPseudodensity, {"--tiles", "3", "--pc", "--sc-hessian-kk-int"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--pc", "--sc-hessian-kk"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--sc-source-tangent", "x.pertgold"}},
+      {Binary::ScPseudodensity, {"--tiles", "3", "--sc-hessian-kk-int", "--erigold", "x.erigold"}},
+      {Binary::ScPseudodensity,
+       {"--tiles", "3", "--pc", "--sc-hessian-kk-int", "--erigold", "x.erigold"}},
       {Binary::PcTangent, {"--tiles", "3"}},
       {Binary::PcTangent, {"--tiles", "40", "--fd-steps", "3"}},
       {Binary::PcTangent, {"--tiles", "3", "--pc-hessian"}},
@@ -1239,6 +1243,40 @@ TEST(CliScPseudodensityFlagTests, ScHessianKkIntSetsItsFieldAndTakesGradgold) {
                                    "--blas-digest"});
   ASSERT_TRUE(g.has_value()) << g.error().message;
   EXPECT_EQ(g->gradgoldPath, "s.gradgold");
+}
+
+// --erigold (#180): the full MO-integral tensor --sc-hessian-kk-int's K2
+// reads, with or without --pc, and nothing else's.
+TEST(CliScPseudodensityFlagTests, ErigoldRidesOnScHessianKkIntAlone) {
+  for (const std::vector<std::string_view>& args :
+       {std::vector<std::string_view>{"--sc-hessian-kk-int", "--erigold", "x.erigold"},
+        std::vector<std::string_view>{"--erigold", "x.erigold", "--pc", "--sc-hessian-kk-int",
+                                      "--gradgold", "s.gradgold"}}) {
+    const Result<Options> r = parse(Binary::ScPseudodensity, args);
+    ASSERT_TRUE(r.has_value()) << r.error().message;
+    EXPECT_TRUE(r->scHessianKkInt);
+    EXPECT_EQ(r->erigoldPath, "x.erigold");
+  }
+  for (const std::vector<std::string_view>& args :
+       {std::vector<std::string_view>{"--erigold", "x.erigold"},
+        std::vector<std::string_view>{"--sc-hessian-kk", "--erigold", "x.erigold"},
+        std::vector<std::string_view>{"--kappa-full", "--erigold", "x.erigold"},
+        std::vector<std::string_view>{"--sc-hessian-kc", "--erigold", "x.erigold"}}) {
+    const Result<Options> r = parse(Binary::ScPseudodensity, args);
+    ASSERT_FALSE(r.has_value()) << args[0];
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(r.error().message,
+              "--erigold is the full MO-integral tensor --sc-hessian-kk-int's K2 reads for a "
+              "pair with no active-active member; it does nothing on its own or beside another "
+              "job");
+  }
+  for (const Binary b : {Binary::Demo, Binary::DfDemo, Binary::PcTangent}) {
+    const Result<Options> r = parse(b, {"--erigold", "x.erigold"});
+    ASSERT_FALSE(r.has_value()) << binaryName(b);
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << binaryName(b);
+    EXPECT_NE(r.error().message.find("only nevpt2_sc_pseudodensity"), std::string::npos)
+        << r.error().message;
+  }
 }
 
 TEST(CliScPseudodensityFlagTests, ScHessianKkIntRefusesTheOtherJobs) {

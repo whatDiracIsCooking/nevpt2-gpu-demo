@@ -166,7 +166,7 @@ def write_transient(atom: str, case: dict, mogold: Path, out: Path, *, name: str
     if placeholder_pc and pc:
         raise SystemExit("write_transient: placeholder PC fields are for a --no-pc golden")
     with contextlib.redirect_stdout(io.StringIO()):
-        meta, arrays, grad = gg.generate(
+        meta, arrays, grad, _full = gg.generate(
             atom, case["basis"], case["ncas"], case["nelecas"], name, pc=pc,
             cas_irreps=case["cas_irreps"], core_irreps=case["core_irreps"],
             gradgold=gradgold, mo_from=mogold,

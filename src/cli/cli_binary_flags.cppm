@@ -101,6 +101,11 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   --pc-hessian-vector is its too (#155): PC's H_cc u,
 //                   gated against --pc-hessian's Eddot by duality, with the
 //                   same ladder flags; the two are one check at a time.
+//   --erigold       nevpt2_sc_pseudodensity alone, with --sc-hessian-kk-int
+//                   only (#180): the full MO-integral tensor its K2 reads for
+//                   a pair with no active-active member on a conventional
+//                   case. --sc-hessian-kk's Eddot_kk keeps the refusal: its
+//                   ladders of the whole energy displace stored blocks only.
 //   --gradgold      nevpt2_sc_pseudodensity (--kappa-full, --sc-hessian-kc,
 //                   --sc-hessian-kk-int, --sc-hessian-kk, --sc-source-tangent,
 //                   --dump-source-terms,
@@ -142,6 +147,7 @@ constexpr std::array kFlagTable{
     FlagSpec{"--sc-hessian-kk", "", kScPd},
     FlagSpec{"--sc-source-tangent", "path", kScPd},
     FlagSpec{"--gradgold", "path", kDemo | kScPd | kPcTangent},
+    FlagSpec{"--erigold", "path", kScPd},
     FlagSpec{"--dump-source-terms", "path", kScPd},
     FlagSpec{"--probed-y", "", kScPd},
     FlagSpec{"--source-oracle", "path", kScPd},
@@ -207,6 +213,8 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
     opt.scSourceTangentPath = std::string(args[++i]);
   } else if (a == "--gradgold") {
     opt.gradgoldPath = std::string(args[++i]);
+  } else if (a == "--erigold") {
+    opt.erigoldPath = std::string(args[++i]);
   } else if (a == "--dump-source-terms") {
     opt.dumpSourceTermsPath = std::string(args[++i]);
   } else if (a == "--probed-y") {
@@ -448,6 +456,13 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
             "--gradgold is the sidecar --kappa-full, --sc-hessian-kc, --sc-hessian-kk-int, "
             "--sc-hessian-kk, --sc-source-tangent, --dump-source-terms and --source-oracle "
             "read; it does nothing on its own");
+      // --erigold (#180) is --sc-hessian-kk-int's alone: the one job whose
+      // K2 reads the full tensor.
+      if (!opt.erigoldPath.empty() && !opt.scHessianKkInt)
+        return err_config(
+            "--erigold is the full MO-integral tensor --sc-hessian-kk-int's K2 reads for a "
+            "pair with no active-active member; it does nothing on its own or beside another "
+            "job");
       // --sc-hessian-kc / -kk-int / -kk with an approximate digest never get
       // here: checkHessianDigests refused them before finalize(), as
       // Unsupported (docs/hessian-theory.md, Sec. 9.1).

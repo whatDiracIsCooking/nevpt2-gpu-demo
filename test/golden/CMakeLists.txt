@@ -152,3 +152,42 @@ unset(_kind)
 add_gtest_suite_tests(
   TARGET pertgold_tests
   SUITES PertGoldRoundTripTests PertGoldLoadErrorTests PertGoldCommittedTests)
+
+# Host-only suites for the full MO-integral tensor sidecar reader (#180):
+# loadEriGold, `*.erigold`. The same contract -- a malformed sidecar is a
+# value-tier IO Error, never an abort, and one missing either array is refused
+# whole -- plus the committed N2 CAS(4,4) tensor against the gradient sidecar
+# rows it overlaps, paired with its own golden and gradient sidecar and refused
+# beside the CASSCF-orbital pair (another frame) and the density-fitted one
+# (another calculation). No device, so NOT REQUIRES_GPU.
+add_gtest_executable(
+  NAME erigold_tests
+  SOURCES erigold_tests.cpp
+  LINK nevpt2::golden)
+
+set(_eri_defs "")
+foreach(_spec "ERIGOLD_CAS44|n2_ccpvdz_cas44.erigold" "GOLDEN_CAS44|n2_ccpvdz_cas44.nevpt2gold"
+              "GRADGOLD_CAS44|n2_ccpvdz_cas44.gradgold"
+              "GOLDEN_CASSCF|n2_ccpvdz_cas44_casscf.nevpt2gold"
+              "GRADGOLD_CASSCF|n2_ccpvdz_cas44_casscf.gradgold"
+              "GOLDEN_CAS44_DF|n2_ccpvdz_cas44_df.nevpt2gold"
+              "GRADGOLD_CAS44_DF|n2_ccpvdz_cas44_df.gradgold")
+  string(REPLACE "|" ";" _spec "${_spec}")
+  list(GET _spec 0 _tag)
+  list(GET _spec 1 _name)
+  set(_file "${PROJECT_SOURCE_DIR}/golden/${_name}")
+  if(NOT EXISTS "${_file}")
+    message(FATAL_ERROR "test/golden: committed file missing: ${_file}")
+  endif()
+  list(APPEND _eri_defs "NEVPT2_TEST_${_tag}=\"${_file}\"")
+endforeach()
+target_compile_definitions(erigold_tests PRIVATE ${_eri_defs})
+unset(_eri_defs)
+unset(_spec)
+unset(_tag)
+unset(_name)
+unset(_file)
+
+add_gtest_suite_tests(
+  TARGET erigold_tests
+  SUITES EriGoldRoundTripTests EriGoldLoadErrorTests EriGoldCommittedTests)

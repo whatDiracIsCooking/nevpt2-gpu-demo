@@ -1074,6 +1074,46 @@ if(NEVPT2_BUILD_TESTING)
     endif()
   endforeach()
 
+  # --- K2 from the full MO-integral tensor, --sc-hessian-kk-int --erigold (#180) --
+  #
+  # The same binary and checks, SC and PC, on the conventional N2 CAS(4,4) with
+  # its committed full-tensor sidecar (golden/n2_ccpvdz_cas44.erigold, written
+  # by generate_golden.py --gradgold --erigold): K2 for a pair with no
+  # active-active member -- full x full, core x virtual, core x core, virtual
+  # x virtual -- from the four-index jets of (pq|rs) instead of refused, with
+  # each term's duality, the intra-space zeros, K1 and K2 by the sidecar's
+  # routes against the full tensor's wherever both apply, and a
+  # Richardson-verified ladder along EVERY pair: the mixed ones (active x full,
+  # its swap, full x full) displaced from the full tensor itself, after check
+  # 1b holds that tensor at U = 1 to the golden's own blocks. The entries
+  # without --erigold above keep the conventional refusal. Not `small`: about
+  # half a minute each, nearly all of it the host-side four-index rotations
+  # of the ladders (docs/testing.md, "K2 from the full MO-integral tensor").
+  set(_eri_stem "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44")
+  foreach(_eri_ext gradgold erigold)
+    if(NOT EXISTS "${_eri_stem}.${_eri_ext}")
+      message(FATAL_ERROR "nevpt2: committed sidecar missing: ${_eri_stem}.${_eri_ext}")
+    endif()
+  endforeach()
+  set(_nevpt2_kk_eri_pass
+      "\\(full MO-integral tensor: K2 on every pair, by the four-index jets where no member is active-active, both routes agree, every pair laddered\\)")
+  _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_cas44_sc_hessian_kk_int_eri
+                        "${_eri_stem}.nevpt2gold" --tiles 3 --sc-hessian-kk-int
+                        --erigold "${_eri_stem}.erigold")
+  if(TEST nevpt2_sc_pseudodensity_cas44_sc_hessian_kk_int_eri)
+    set_tests_properties(nevpt2_sc_pseudodensity_cas44_sc_hessian_kk_int_eri PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_kk_pass} .*${_nevpt2_kk_eri_pass}")
+  endif()
+  _add_golden_test_with(nevpt2_sc_pseudodensity nevpt2_sc_pseudodensity_cas44_pc_hessian_kk_int_eri
+                        "${_eri_stem}.nevpt2gold" --tiles 3 --pc --sc-hessian-kk-int
+                        --erigold "${_eri_stem}.erigold")
+  if(TEST nevpt2_sc_pseudodensity_cas44_pc_hessian_kk_int_eri)
+    set_tests_properties(nevpt2_sc_pseudodensity_cas44_pc_hessian_kk_int_eri PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_pc_hessian_kk_pass}.*${_nevpt2_kk_eri_pass}")
+  endif()
+  unset(_eri_stem)
+  unset(_nevpt2_kk_eri_pass)
+
   # --- the orbital block's sandwich and Eddot_kk, --sc-hessian-kk (#158, #190) ----
   #
   # nevpt2_sc_pseudodensity --sc-hessian-kk (apps/sc_pseudodensity/

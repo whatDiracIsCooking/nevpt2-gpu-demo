@@ -74,6 +74,19 @@
 // construction of K1 that never sees the sidecar's promotion table or its
 // restorations -- the fitted case's cross-check of both.
 //
+// K2 FROM THE FULL TENSOR: fullDottedCross, on a conventional case with its
+// `.erigold` uploaded (#180), for any pair. Nothing above needs the two
+// factors to be the same tensor, only that (pq|rs) = sum_L F_L[p,q] G_L[r,s]
+// EXACTLY, with each factor rotating as U^T X_L U -- the first distribution's
+// slots in F, the second's in G, which is how the evaluator places them. The
+// exact four-index factorisation is F = the identity over L = (p', q'),
+// F_L[p, q] = delta_{p p'} delta_{q q'}, and G_L[r, s] = (p'q'|rs), the
+// tensor itself read as [n_mo^2, n_mo, n_mo]: sum_L F(U)_L[p,q] G(U)_L[r,s] =
+// sum_{p'q'r's'} U_{p'p} U_{q'q} U_{r'r} U_{s's} (p'q'|r's'), the rotated
+// integral. So the same jets, F_s G_t + ..., at L = n_mo^2: the whole
+// n_mo^4 cost Sec. 5.4 says no smaller input avoids, and nothing else. Its
+// first-order twin (fullDottedFirst) is an independent K1, as the fitted one.
+//
 // Every generator returns WHOLE blocks shaped like the integrals', from res's
 // pool, on res.stream(): the walk that pairs them runs one slab per block.
 module;
@@ -388,44 +401,114 @@ ScDotted dfDottedFromPairs(const NevptIntegralsDevice& ints, const GeneralIntegr
   return out;
 }
 
-// K1 in three-index form: the first-order jet at any (n_mo, n_mo) `m`.
-ScDotted dfDottedFirst(const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen,
-                       const DeviceTensor& dm1, const Tensor& m, const DeviceResources& res) {
+// The first-order jet at any (n_mo, n_mo) `m` over an exact factorisation
+// (pq|rs) = sum_L f1[L,p,q] f2[L,r,s] (header); the one-electron term is
+// gen.h's.
+ScDotted factorDottedFirst(const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen,
+                           const DeviceTensor& dm1, const Tensor& m, const DeviceTensor& f1,
+                           const DeviceTensor& f2, const DeviceResources& res) {
   const wwrStream_t s = res.stream();
   const DeviceTensor dm = uploadTensor(m, res);
-  // B_M[L,p,q] = sum_x m_xp B[L,x,q] + m_xq B[L,p,x].
-  DeviceTensor bm = dfLeft(gen.b, dm, res);
-  deviceEinsumAccum("Lpx,xq->Lpq", {&gen.b, &dm}, bm, 1.0, s);
+  // X_M[L,p,q] = sum_x m_xp X[L,x,q] + m_xq X[L,p,x], each factor.
+  const auto jet = [&](const DeviceTensor& f) {
+    DeviceTensor out = dfLeft(f, dm, res);
+    deviceEinsumAccum("Lpx,xq->Lpq", {&f, &dm}, out, 1.0, s);
+    return out;
+  };
+  const DeviceTensor f1m = jet(f1);
+  // One tensor for both factors (the fitted B): its jet once.
+  std::optional<DeviceTensor> f2own;
+  if (&f2 != &f1) f2own.emplace(jet(f2));
+  const DeviceTensor& f2m = f2own ? *f2own : f1m;
   // h_M = m^T h + h m.
   DeviceTensor hm = deviceEinsumNew("xp,xq->pq", {&dm, &gen.h}, 1.0, res);
   deviceEinsumAccum("px,xq->pq", {&gen.h, &dm}, hm, 1.0, s);
-  const DfFactorPairs pairs{{&bm, &gen.b}, {&gen.b, &bm}};
+  const DfFactorPairs pairs{{&f1m, &f2}, {&f1, &f2m}};
   return dfDottedFromPairs(ints, gen, dm1, pairs, hm, res);
+}
+
+// The cross-slot jet along (u, v), both (n_mo, n_mo), over the same exact
+// factorisation.
+ScDotted factorDottedCross(const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen,
+                           const DeviceTensor& dm1, const Tensor& u, const Tensor& v,
+                           const DeviceTensor& f1, const DeviceTensor& f2,
+                           const DeviceResources& res) {
+  const wwrStream_t s = res.stream();
+  const DeviceTensor du = uploadTensor(u, res);
+  const DeviceTensor dv = uploadTensor(v, res);
+  // X_s = u^T X + X u, X_t likewise, and X_st = u^T X v + v^T X u: u on the
+  // first index then v on the second, and the other way round.
+  struct Jets {
+    DeviceTensor s, t, st;
+  };
+  const auto jets = [&](const DeviceTensor& f) {
+    DeviceTensor fu = dfLeft(f, du, res);
+    deviceEinsumAccum("Lpx,xq->Lpq", {&f, &du}, fu, 1.0, s);
+    DeviceTensor fv = dfLeft(f, dv, res);
+    deviceEinsumAccum("Lpx,xq->Lpq", {&f, &dv}, fv, 1.0, s);
+    const DeviceTensor leftU = dfLeft(f, du, res);
+    const DeviceTensor leftV = dfLeft(f, dv, res);
+    DeviceTensor fuv = deviceEinsumNew("Lpy,yq->Lpq", {&leftU, &dv}, 1.0, res);
+    deviceEinsumAccum("Lpy,yq->Lpq", {&leftV, &du}, fuv, 1.0, s);
+    return Jets{std::move(fu), std::move(fv), std::move(fuv)};
+  };
+  const Jets j1 = jets(f1);
+  // One tensor for both factors (the fitted B): its jets once.
+  std::optional<Jets> j2own;
+  if (&f2 != &f1) j2own.emplace(jets(f2));
+  const Jets& j2 = j2own ? *j2own : j1;
+  // h_st = u^T h v + v^T h u.
+  DeviceTensor huv = deviceEinsumNew("xp,xy,yq->pq", {&du, &gen.h, &dv}, 1.0, res);
+  deviceEinsumAccum("xp,xy,yq->pq", {&dv, &gen.h, &du}, huv, 1.0, s);
+  const DfFactorPairs pairs{{&j1.st, &f2}, {&f1, &j2.st}, {&j1.s, &j2.t}, {&j1.t, &j2.s}};
+  return dfDottedFromPairs(ints, gen, dm1, pairs, huv, res);
+}
+
+// K1 in three-index form: the first-order jet at any (n_mo, n_mo) `m`.
+ScDotted dfDottedFirst(const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen,
+                       const DeviceTensor& dm1, const Tensor& m, const DeviceResources& res) {
+  return factorDottedFirst(ints, gen, dm1, m, gen.b, gen.b, res);
 }
 
 // K2 in three-index form: the cross-slot jet along (u, v), both (n_mo, n_mo).
 ScDotted dfDottedCross(const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen,
                        const DeviceTensor& dm1, const Tensor& u, const Tensor& v,
                        const DeviceResources& res) {
-  const wwrStream_t s = res.stream();
-  const DeviceTensor du = uploadTensor(u, res);
-  const DeviceTensor dv = uploadTensor(v, res);
-  // B_s = u^T B + B u and B_t likewise.
-  DeviceTensor bu = dfLeft(gen.b, du, res);
-  deviceEinsumAccum("Lpx,xq->Lpq", {&gen.b, &du}, bu, 1.0, s);
-  DeviceTensor bv = dfLeft(gen.b, dv, res);
-  deviceEinsumAccum("Lpx,xq->Lpq", {&gen.b, &dv}, bv, 1.0, s);
-  // B_st = u^T B v + v^T B u: u on the first index then v on the second, and
-  // the other way round.
-  const DeviceTensor leftU = dfLeft(gen.b, du, res);
-  const DeviceTensor leftV = dfLeft(gen.b, dv, res);
-  DeviceTensor buv = deviceEinsumNew("Lpy,yq->Lpq", {&leftU, &dv}, 1.0, res);
-  deviceEinsumAccum("Lpy,yq->Lpq", {&leftV, &du}, buv, 1.0, s);
-  // h_st = u^T h v + v^T h u.
-  DeviceTensor huv = deviceEinsumNew("xp,xy,yq->pq", {&du, &gen.h, &dv}, 1.0, res);
-  deviceEinsumAccum("xp,xy,yq->pq", {&dv, &gen.h, &du}, huv, 1.0, s);
-  const DfFactorPairs pairs{{&buv, &gen.b}, {&gen.b, &buv}, {&bu, &bv}, {&bv, &bu}};
-  return dfDottedFromPairs(ints, gen, dm1, pairs, huv, res);
+  return factorDottedCross(ints, gen, dm1, u, v, gen.b, gen.b, res);
+}
+
+// The full tensor's exact factorisation (header): the identity over
+// L = (p', q') as the first factor, the tensor read as [n_mo^2, n_mo, n_mo]
+// as the second. The identity is owned and returned; the second factor is a
+// view of gen.eri.
+struct FullFactors {
+  DeviceTensor eye;     // owns the (n_mo^2, n_mo^2) identity
+  DeviceTensor first;   // its view as [n_mo^2, n_mo, n_mo]
+  DeviceTensor second;  // gen.eri's view as [n_mo^2, n_mo, n_mo]
+};
+
+FullFactors fullFactors(const GeneralIntegralsDevice& gen, const DeviceResources& res) {
+  const int64_t n = gen.nmo();
+  FullFactors f;
+  f.eye = deviceEye(n * n, res);
+  f.first = reshapeView(f.eye, {n * n, n, n});
+  f.second = reshapeView(gen.eri, {n * n, n, n});
+  return f;
+}
+
+// K1 from the full tensor: the first-order jet at any (n_mo, n_mo) `m`.
+ScDotted fullDottedFirst(const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen,
+                         const DeviceTensor& dm1, const Tensor& m, const DeviceResources& res) {
+  const FullFactors f = fullFactors(gen, res);
+  return factorDottedFirst(ints, gen, dm1, m, f.first, f.second, res);
+}
+
+// K2 from the full tensor: the cross-slot jet along (u, v), any pair.
+ScDotted fullDottedCross(const NevptIntegralsDevice& ints, const GeneralIntegralsDevice& gen,
+                         const DeviceTensor& dm1, const Tensor& u, const Tensor& v,
+                         const DeviceResources& res) {
+  const FullFactors f = fullFactors(gen, res);
+  return factorDottedCross(ints, gen, dm1, u, v, f.first, f.second, res);
 }
 
 }  // namespace nevpt2

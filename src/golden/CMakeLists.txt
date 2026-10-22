@@ -4,7 +4,9 @@
 # docs/gradient-theory.md, section 3 is the inventory it carries) -- and of the
 # .srcgold SC source-term oracle reference_data/sc_source_oracle.py writes
 # (srcgold.cpp, #92), and of the .pertgold integral perturbation sidecar
-# reference_data/integral_perturbation.py writes (pertgold.cpp, #220). Host only,
+# reference_data/integral_perturbation.py writes (pertgold.cpp, #220), and of
+# the .erigold full MO-integral tensor sidecar generate_golden.py --erigold
+# writes (erigold.cpp, #180). Host only,
 # no GPU. A missing or malformed file of either kind is a value-tier IO Error
 # (nevpt2.error_handling), reported once by each demo's main().
 # golden_reader.cppm is the internal partition nevpt2.golden:reader -- the
@@ -14,6 +16,6 @@ add_cxx_module_library(
   NAME nevpt2.golden
   PRIMARY_INTERFACE golden.cppm
   PARTITIONS golden_reader.cppm
-  IMPLEMENTATION golden.cpp gradgold.cpp srcgold.cpp pertgold.cpp
+  IMPLEMENTATION golden.cpp gradgold.cpp srcgold.cpp pertgold.cpp erigold.cpp
   LINK_PUBLIC nevpt2::tensor nevpt2::error_handling
 )
