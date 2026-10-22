@@ -1,0 +1,1156 @@
+% docs/nuclear_gradients.tex -- the NEVPT2 nuclear gradient, as implemented.
+%
+% Current-state, like every file in docs/: it describes what the tree does,
+% and it carries NO measured numbers (gradients, residuals, condition numbers,
+% walls, agreements with grad_num). Those live in performance.md,
+% pc-nevpt2.md, reference-data.md and testing.md, and are cited here by file
+% and section name. The constants that appear below (the difference-quotient
+% steps, GRAD_NUM_TOL, PC_GAP_FLOOR, ...) are constants of the code, not
+% measurements; why each has the value it has is cited, not restated.
+%
+% Build: pdflatex nuclear_gradients.tex (twice, for the cross-references).
+% Needs amsmath, amssymb, booktabs, algorithm, algpseudocode (algorithmicx),
+% hyperref, geometry, lmodern and microtype -- all in a standard TeX Live.
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+% "--pc" must stay two hyphens in \texttt, not an en dash.
+\DisableLigatures[-]{encoding = T1, family = tt*}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\G}[1]{\Gamma^{(#1)}}
+\newcommand{\eps}{\varepsilon}
+\newcommand{\Fca}{F^{\mathrm{ca}}}
+\newcommand{\Fac}{F^{\mathrm{ac}}}
+\newcommand{\heff}{h^{\mathrm{eff}}}
+\newcommand{\Ecas}{E_{\mathrm{CAS}}}
+\newcommand{\Ecorr}{E_{\mathrm{corr}}}
+\newcommand{\cls}[1]{\ensuremath{\mathrm{#1}}}
+\newcommand{\cons}[1]{\ensuremath{(\mathrm{#1})}}
+\algrenewcommand\algorithmicrequire{\textbf{Input:}}
+\algrenewcommand\algorithmicensure{\textbf{Output:}}
+
+\title{The NEVPT2 nuclear gradient:\\
+SC and PC, on CASCI and CASSCF orbitals}
+\author{\code{nevpt2-gpu-demo}, \code{docs/nuclear\_gradients.tex}}
+\date{}
+
+\begin{document}
+\sloppy
+\maketitle
+
+\begin{abstract}
+The tree assembles the analytic nuclear gradient of the strongly-contracted
+(SC) and, with \code{--pc}, the partially-contracted (PC) NEVPT2 energy, and
+checks it against a numerical gradient of re-converged energies to
+$10^{-6}\,E_h/a_0$ per component. The work is split on purpose. The GPU
+(\code{nevpt2\_sc\_pseudodensity --dump-source-terms}) computes the two
+\emph{source terms}, the energy's derivatives with respect to the orbital
+rotations and the CI coefficients, in reverse mode, and writes them out.
+Offline Python (\code{reference\_data/nevpt2\_grad.py}) reads them, solves
+the Lagrangian's Z-vector equations, and takes the nuclear derivative of one
+scalar along a frozen orthonormal path. A second offline script
+(\code{nevpt2\_numgrad.py}) supplies the numerical gradient that the result is
+gated against. This document covers the four combinations
+$\{\text{SC},\text{PC}\}\times\{\text{CASCI},\text{CASSCF}\}$ and the
+density-fitted SC case. For each it gives the equations the code evaluates
+and pseudocode for the path through the tree. The derivation is
+\code{docs/gradient-theory.md}, the GPU side in prose is
+\code{docs/gradients.md}, and the energy itself is \code{docs/energy.tex}.
+Like every file in \code{docs/}, this one states what the code \emph{does},
+and it carries no measured numbers.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{The four paths, and where they actually differ}
+\label{sec:paths}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & CASCI orbitals (RHF) & CASSCF orbitals \\
+\midrule
+SC & \S\ref{sec:sc-casci} (fitted: \S\ref{sec:df}) & \S\ref{sec:sc-casscf} \\
+PC (\code{--pc}) & \S\ref{sec:pc-casci} & \S\ref{sec:pc-casscf} \\
+\bottomrule
+\end{tabular}
+\caption{The four paths, and the section that walks through each.}
+\label{tab:paths}
+\end{table}
+
+For the energy the two axes of Table~\ref{tab:paths} split the work at the
+input and at the class energies (\code{docs/energy.tex},
+\S1). For the gradient they split it differently:
+
+\begin{itemize}
+\item \textbf{CASCI vs.\ CASSCF changes the Lagrangian.} The energy is the same
+  functional on both kinds of orbitals. What differs is how the orbitals were
+  made, and that is what the orbital constraints state. On RHF orbitals the
+  core/active/virtual partition holds because the RHF Fock matrix is
+  block-diagonal over it (\S\ref{sec:casci}). On CASSCF orbitals it holds
+  because the CASSCF orbital gradient vanishes (\S\ref{sec:casscf}). The
+  first gives a CI equation decoupled from the orbital one. The second gives
+  one coupled CP-CASSCF system. The golden's header field
+  \code{reference\_kind} records which branch applies, and
+  \code{nevpt2\_grad.py --reference} must name the same one.
+\item \textbf{SC vs.\ PC changes one scalar.} The Lagrangian is a statement
+  about the reference, not about the contraction scheme. \code{--pc}
+  replaces $\Ecorr$, PySCF's SC sum or the GPU's SC walk, by the PC energy
+  (block2's offline, the GPU's PC walk on the card). Through $\Ecorr$ it also
+  replaces the two source terms. Everything else is unchanged: the constraint
+  set, the Jacobian, the frozen path and the solve order. PC adds its own
+  difference-quotient steps and a conditioning guard at every displaced CI
+  vector (\S\ref{sec:pc-casci}).
+\end{itemize}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+stage & where & equations \\
+\midrule
+the source terms $Y_{xy}$, $y_I$ & GPU, reverse mode (\code{--dump-source-terms}) & \S\ref{sec:src-gpu} \\
+ & \emph{or} offline, central differences of PySCF/block2 & \S\ref{sec:src-fd} \\
+the constraint Jacobian, $\partial(Hc)/\partial\kappa$ & offline, one $\kappa$ sweep & \S\ref{sec:src-fd} \\
+the Z-vector solve & offline only & \S\ref{sec:casci}, \S\ref{sec:casscf} \\
+the skeleton derivative and $\Lambda\cdot\partial g/\partial\xi$ & offline, frozen-path differences of $\Phi$ & \S\ref{sec:frozen} \\
+the numerical gradient \code{grad\_num} & offline, re-converged energies & \S\ref{sec:numgrad} \\
+\bottomrule
+\end{tabular}
+\caption{Who computes what. Only the first row has a GPU path. Nothing in
+\code{src/} or \code{apps/} differentiates with respect to a nuclear
+coordinate (\code{docs/gradients.md}, \S1).}
+\label{tab:who}
+\end{table}
+
+\textbf{The Z-vector solve is offline by design.} The repo's shape is
+``offline Python generates the reference, the C++ GPU demo reproduces it'',
+and a PySCF solve inside the runtime would invert it. The GPU's job is the one
+expensive derivative of the NEVPT2 energy, its source terms. A gradient built
+from the GPU's dump \emph{is} the NEVPT2 nuclear gradient, and is gated as one
+(\code{docs/testing.md}, ``The GPU as the source-term provider'').
+
+%======================================================================
+\section{Notation and conventions}
+\label{sec:notation}
+
+\paragraph{Orbital spaces.} $i,j$ label core orbitals, $t,u,v,w$ active
+orbitals and $r,s$ virtual orbitals. In this document $p,q,x,y$ label a
+\emph{general} MO, any of the three; \code{docs/energy.tex} uses $p,q$ for
+active ones. The counts are $n_c$, $n_a$, $n_v$, $n_{\mathrm{mo}} = n_c + n_a
++ n_v$. On the CASCI branch a second partition is in play, the RHF occupied
+space $O$ and virtual space $V$. The active space straddles it:
+$\mathrm{act}_O = \mathrm{act}\cap O$ and $\mathrm{act}_V = \mathrm{act}\cap
+V$ (\code{docs/gradient-theory.md}, \S0). $I,J$ label determinants of the CI
+vector $c$. $\xi$ is one Cartesian nuclear coordinate.
+
+\paragraph{Orbital rotations.} $C(\kappa) = C\,e^{\kappa}$ with $\kappa$ real
+antisymmetric, so that
+\begin{align}
+  \delta h_{pq} &= \sum_x \bigl(\kappa_{xp} h_{xq} + \kappa_{xq} h_{px}\bigr),
+  \label{eq:dh}\\
+  \delta(pq|rs) &= \sum_x \bigl(\kappa_{xp}(xq|rs) + \kappa_{xq}(px|rs)
+     + \kappa_{xr}(pq|xs) + \kappa_{xs}(pq|rx)\bigr),
+  \label{eq:dg}
+\end{align}
+in chemists' notation. The offline code steps a single pair $(p,q)$, $p<q$,
+by the exact Givens rotation $C\exp\bigl(\theta(E_{pq}-E_{qp})\bigr)$
+(\code{givens}).
+
+\paragraph{Fock matrices.} $F$ is the \textbf{RHF} Fock matrix, built from the
+RHF density $2\,C P_O C^{\mathsf T}$ and so from $O$ alone. $f$ is the
+\textbf{generalised} Fock matrix, built from the zeroth-order density:
+\begin{equation}
+  \heff_{pq} = h_{pq} + \sum_j \bigl[2(pq|jj) - (pj|jq)\bigr],\qquad
+  f_{pq} = \heff_{pq} + \sum_{tu}\G1_{tu}\bigl[(pq|tu) - \tfrac12(pt|uq)\bigr],
+  \qquad \eps_p = f_{pp}.
+  \label{eq:fock}
+\end{equation}
+$\eps_i$ and $\eps_r$ are the golden's \code{e\_core} and \code{e\_virt}, and
+they move with the CI vector through $\G1$.
+
+\paragraph{Density matrices.} $\G1,\G2,\G3,\Fca,\Fac$ are those of
+\code{docs/energy.tex}, \S2. $E_{tu} = \sum_\sigma a^\dagger_{t\sigma}
+a_{u\sigma}$. $P = 1 - |c\rangle\langle c|$ projects the state out of the
+determinant space.
+
+\paragraph{Constants of the code.} $\code{GRAD\_NUM\_TOL} = 10^{-6}$ (the gate
+against \code{grad\_num}, and every ladder's tolerance);
+$\code{PC\_GAP\_FLOOR} = 10^{-6}\,E_h$ and $\code{PC\_ZERO\_TOL} = 10^{-8}$
+(the degenerate-pair rule, \S\ref{sec:casci}); the difference-quotient steps
+of Table~\ref{tab:steps}; and the ladder rule's window $(3.2, 4.8)$ and run
+length $3$ (\S\ref{sec:checks}). All are in \code{nevpt2\_grad.py} and
+\code{nevpt2\_numgrad.py}. Why each step has its value is
+\code{docs/testing.md}, ``The step constants, measured''. Why the gate is not
+this repo's usual $10^{-7}$ is \code{docs/testing.md}, ``The analytic gradient
+against the numerical one'': both sides are finite differences.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+step & differences & SC & PC \\
+\midrule
+\code{KAPPA\_STEP} & $\Ecorr$, $F$, $f$, $Hc$ along one $\kappa$ pair & $2^{-17}$ & $10^{-4}$ \\
+\code{CI\_STEP} & $\Ecorr$ along $Pe_I$ & $2^{-17}$ & $10^{-7}$ \\
+\code{NUC\_STEP} & $\Phi$ along $\xi$, frozen path (bohr) & $2^{-13}$ & $0.0025$ \\
+\code{STEP\_BOHR} & re-converged $E$ along $\xi$ (\code{nevpt2\_numgrad.py}) & $0.0025$ & $0.0025$ \\
+\bottomrule
+\end{tabular}
+\caption{The difference-quotient steps. PC's CI step is not chosen for
+truncation error: it is the step at which the PC metric's lifted null modes
+stay below the cut (\S\ref{sec:pc-casci}).}
+\label{tab:steps}
+\end{table}
+
+%======================================================================
+\section{What is differentiated}
+\label{sec:functional}
+
+The total energy is $E = \Ecas + \Ecorr$, a function of the geometry, the MO
+coefficients $C$ and the CI vector $c$ (Park Eq.~21). The amplitude
+dependence drops out because the Hylleraas functional is stationary in the
+amplitudes, for either reference. $\Ecas = \langle c|H|c\rangle$ includes the
+nuclear repulsion and the core energy.
+
+\paragraph{The SC finish, and its three multipliers.} Each SC class reaches
+$C$ and $c$ only through three scalars per external tuple $t$: the norm $N_t$,
+the active part $H_t$ of the Dyall expectation value, and the orbital-energy
+sum $\Delta_t$ (\code{docs/energy.tex}, \S6). With the amplitude $T_t$,
+\begin{equation}
+\begin{gathered}
+  T_t = -\frac{1}{\Delta_t + H_t/N_t},\qquad E_t = T_t N_t,\\
+  P_t = \frac{\partial E}{\partial N_t} = 2T_t + \Delta_t T_t^2,\qquad
+  Q_t = \frac{\partial E}{\partial H_t} = T_t^2,\qquad
+  R_t = \frac{\partial E}{\partial \Delta_t} = N_t T_t^2,
+\end{gathered}
+  \label{eq:pqr}
+\end{equation}
+which are Park's Eqs.~36--38 and satisfy $P_tN_t + Q_tH_t = E_t$ (Eq.~40).
+This is the only hand-differentiated expression on the SC side; everything
+downstream is $P$, $Q$ and $R$ contracted back against integrals and densities
+(\code{nevpt2.sc\_amplitudes}, \code{nevpt2.energy\_finish}).
+
+\paragraph{The PC finish.} A PC class solves in the span of its internal
+functions, $E_t = -c_\kappa\,b_t^{\mathsf T} A_t^{+} b_t$ with $A_t = K + \Delta_t S$ and
+$b_t = S x_t + S_1 h_t$ (\code{docs/energy.tex}, Eq.~(29); $c_\kappa$ the
+class's coupling factor). With $x = A_t^{+} b_t$, the solve the energy
+already ran,
+\begin{equation}
+  \dot E_t = -c_\kappa\,\bigl(2\,x^{\mathsf T}\dot b_t - x^{\mathsf T}\dot A_t\,x\bigr),
+  \label{eq:pcdot}
+\end{equation}
+so no eigenvalue or eigenvector derivative appears. This holds only where the
+kept rank of $S$ is locally constant. The energy's gap refusal enforces that,
+and at an eigenstate $K$ annihilates $S$'s dropped space, which makes the two
+terms of Eq.~\eqref{eq:pcdot} exact (\code{docs/gradients.md}, \S7).
+
+\paragraph{What carries the CI vector.} The RDMs, and through $\G1$ in
+Eq.~\eqref{eq:fock} the orbital energies. $\eps_p$ is affine in $\G1$:
+\begin{equation}
+  \eps_p = \heff_{pp} + \sum_{tu} \G1_{tu}\,W_p[t,u],\qquad
+  W_p[t,u] = (pp|tu) - \tfrac12(pt|up),\qquad p\notin\mathrm{act}.
+  \label{eq:epsW}
+\end{equation}
+Holding the orbital energies fixed differentiates a different functional, and
+that omission is invisible to any check whose two sides share it
+(\code{docs/gradients.md}, \S5.5).
+
+%======================================================================
+\section{\texorpdfstring{Shared stage A: the source terms $Y$ and $y$}{Shared stage A: the source terms Y and y}}
+\label{sec:src}
+
+\subsection{What the Lagrangian reads}
+Park's Eqs.~26--27 define the two source terms as derivatives of $\Ecorr$ at
+\emph{fixed} constraints, with no solve involved:
+\begin{equation}
+  Y_{xy} = \frac{\partial \Ecorr}{\partial \kappa_{xy}},\qquad
+  y_I = \frac{\partial \Ecorr}{\partial c_I}.
+  \label{eq:YY}
+\end{equation}
+$\kappa$ is antisymmetric and $c$ is normalised, so the solve reads only two
+combinations:
+\begin{equation}
+  A_{pq} = Y_{pq} - Y_{qp},\qquad Py = y - (c\cdot y)\,c.
+  \label{eq:Apy}
+\end{equation}
+Every block of $A$ has a reader. Core--core and virtual--virtual feed
+\cons{O2}'s multipliers, active--active feeds the gauge identity, and the
+three mixed blocks feed the orbital Z-vector equation
+(\code{docs/gradient-theory.md}, \S2.1). The source terms are the same on both
+branches: they differentiate the NEVPT2 energy, which does not know how its
+orbitals were made. There are two providers.
+
+\subsection{Provider 1: the GPU, by reverse mode}
+\label{sec:src-gpu}
+
+\paragraph{The CI source term.} \code{scCiSourceDevice} runs the class
+energies' own slab walk once more. Each class is a list of norm and $H$ terms
+in the same subscript strings as its energy einsums. One routine evaluates the
+list and differentiates it by rewriting the subscripts per operand, so no
+derivative is hand-transcribed. The walk leaves an accumulator $M_G =
+\partial E/\partial G$ per metric and Dyall block $G$. Every block is linear
+in the RDMs, so a reverse-topological sweep through the blocks' own builders
+gives five coefficient tensors:
+\begin{equation}
+  \bar\rho = \frac{\partial E}{\partial\rho} = \sum_G
+    \Bigl(\frac{\partial G}{\partial\rho}\Bigr)^{\mathsf T} M_G,
+  \qquad \rho\in\{\G1,\G2,\G3,\Fca,\Fac\}.
+  \label{eq:rdmadj}
+\end{equation}
+The orbital energies add one more $\G1$ coefficient. Each class scatters its
+$R_t$ onto the $\eps_p$ its $\Delta_t$ reads, and the sum enters through
+Eq.~\eqref{eq:epsW}:
+\begin{equation}
+  \bar\Gamma^{(1)}_{tu} \mathrel{+}= \sum_{p\notin\mathrm{act}}
+    \bar\eps_p\,W_p[t,u],\qquad
+  \bar\eps_p = \sum_t R_t\,\frac{\partial\Delta_t}{\partial\eps_p}.
+  \label{eq:epsadj}
+\end{equation}
+Then
+\begin{equation}
+  y_I = \sum_\rho \Bigl\langle \bar\rho,\ \frac{\partial\rho}{\partial c_I}\Bigr\rangle,
+  \label{eq:ysigma}
+\end{equation}
+taken without ever forming $\partial\G3/\partial c$ (an $n_a^6\,n_{\mathrm{det}}$
+object) or the 4-RDM. One 3-body sigma vector carries $\bar\Gamma^{(1)}$,
+$\bar\Gamma^{(2)}$ and $\bar\Gamma^{(3)}$, because the trace of a one-body
+generator is the electron count on any determinant. A forward and a dagger
+4-body contracted sigma for each $F$ order carry the digests, through one
+$(n_a^2, n_{\mathrm{det}})$ intermediate (\code{docs/gradients.md}, \S5.3--5.5;
+\code{nevpt2.sigma\_vector}).
+
+\paragraph{The orbital source term.} Along a rotation at fixed $c$, every
+stored array with an index the rotation touches moves. The stored two-electron
+blocks move by Eq.~\eqref{eq:dg}, slot by slot. The one-electron blocks move,
+their core dressing promoted with them. The orbital energies move. And the
+digests move, because they are the active integrals contracted with the
+4-RDM. The pairing is
+\begin{equation}
+  \langle\kappa, Y\rangle =
+    \underbrace{\langle \bar I,\ \dot I(\kappa)\rangle
+    + \sum_t R_t\,\dot\Delta_t(\kappa)}_{\text{frozen digests}}
+    + \underbrace{\langle \bar v,\ \dot v(\kappa)\rangle}_{\text{the digests' term}},
+  \label{eq:Ypair}
+\end{equation}
+where $I$ is every stored block, $\bar I$ its pseudodensity (Park Eq.~41 and
+the Eqs.~42--47 intermediates), and $\bar v = \partial E/\partial v$ through
+$\Fca,\Fac$ (with $v$ the active block, \code{docs/energy.tex},
+Eq.~(1)). $\dot I(\kappa)$ is the \emph{promotion rule}: replace one slot of a
+block by a general index and contract it with $\kappa$. Each right-hand side is
+one of the gradient sidecar's one-general-index arrays
+(Appendix~\ref{app:inventory}). $\bar v$ comes from running the digest build's
+$f3$ path backwards, the \emph{transpose} (\code{buildDigestAdjointDevice}).
+The plain build's \code{produce} kernel regenerates $L$ tile by tile, so the
+4-RDM is never formed (\code{docs/gradients.md}, \S6). The active--active part
+of the directly contractible terms is symmetric, so it is invisible to an
+antisymmetric $\kappa$, and the matrix $Y$ is assembled by probing
+Eq.~\eqref{eq:Ypair} along basis directions (\code{scFullRotationMatrix}).
+
+\paragraph{PC.} The same walk with each PC class's solve differentiated
+through its own $S$, $K$ and $S_1$, Eq.~\eqref{eq:pcdot} read as an adjoint:
+\begin{equation}
+  \frac{\partial E}{\partial K} = U\,\mathrm{sym}(m)\,U^{\mathsf T},\quad
+  \frac{\partial E}{\partial S} = \mathrm{sym}\bigl(U\,\bar T^{\mathsf T}\bigr)
+     + U\,\mathrm{sym}\Bigl(\textstyle\sum_t \Delta_t m_t\Bigr)U^{\mathsf T},\quad
+  \frac{\partial E}{\partial S_1} = U\,\bar t_1^{\mathsf T},\quad
+  R_t = \frac{\partial E}{\partial\Delta_t},
+  \label{eq:pcadj}
+\end{equation}
+with $U$, $T$, $t_1$ the solve's eigenbasis quantities (\code{docs/energy.tex},
+Eqs.~(30)--(33)), $m_t$ the tuple's weight in that basis, and $\bar T$,
+$\bar t_1$ the slab einsum's adjoint in its basis operand. $K$ is SC's own
+Dyall blocks and $S$, $S_1$ are permutations of SC's metrics, so
+Eq.~\eqref{eq:rdmadj}'s sweep carries them down unchanged. A class that the
+energy's gap or denominator test refuses carries that refusal out of every
+entry point; it never contributes a zero (\code{docs/gradients.md}, \S5.6,
+\S6.1).
+
+\paragraph{The gates the GPU holds itself to.} Both source terms are also
+computed in forward mode, a tangent $\dot E(u)$ along a CI direction and
+$\dot E(\kappa)$ along a rotation. The two modes share no code past the slab
+walk, so their agreement is an exact identity with no step size in it:
+\begin{equation}
+  \langle u, y\rangle = \dot E(u),\qquad
+  \langle\kappa, Y\rangle = \dot E_{\mathrm{frozen}}(\kappa) + \dot E_{\mathrm{digest}}(\kappa).
+  \label{eq:duality}
+\end{equation}
+The dualities cannot see a term both modes omit. The orbital energies'
+response and the digests' term are therefore also held to PySCF's exact
+derivative and to finite differences of the unmodified energy
+(\code{docs/gradients.md}, \S2 and \S5.5).
+
+\begin{algorithm}[htbp]
+\caption{\code{nevpt2\_sc\_pseudodensity --dump-source-terms} \textit{P} (\code{apps/sc\_pseudodensity/source\_dump.cppm})}
+\label{alg:dump}
+\begin{algorithmic}[1]
+\Require golden $g$ and its \code{.gradgold} sidecar; an exact digest (\code{--cublas}, \code{--ozaki}, \code{--fused-digest} refused); \code{--pc} optional
+\State $(\G3,\Fca,\Fac) \gets$ \code{buildRdmsDevice} \Comment{\code{docs/energy.tex}, Alg.~2}
+\State $W \gets$ \code{orbitalEnergyResponse}(sidecar) \Comment{Eq.~\eqref{eq:epsW}}
+\State $\bar v \gets$ the digests' transpose \Comment{\code{scDigestAdjointDevice}, or PC's}
+\State $Y \gets$ probe Eq.~\eqref{eq:Ypair} along every MO pair \Comment{\code{scFullRotationMatrix}}
+\State $y \gets$ Eqs.~\eqref{eq:rdmadj}--\eqref{eq:ysigma} with $W$ \Comment{\code{scCiSourceDevice}, or \code{pcCiSourceDevice}}
+\State along six seeded directions $\kappa_d$: $\dot E_{\mathrm{frozen}}(\kappa_d)$, $\dot E_{\mathrm{digest}}(\kappa_d)$
+\State \textbf{gate:} the matrix is the pairing; $\dot E(\kappa_d) = \langle\kappa_d, Y\rangle$ to $10^{-7}$; $y$'s walk reproduces $\Ecorr$ to $10^{-7}$; PC: the integral halves' duality too
+\State write $P$ (\code{.gradsrc}, an \code{.npz}): \code{kappa\_source}, \code{ci\_source}, \code{ci}, $n_c,n_a,n_v$, \code{e\_corr}, \code{pc}, \code{edot\_*}; read it back bit for bit
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Carrying the dump into the gradient's basis.} The GPU knows one
+active basis, the golden's natural orbitals. On the CASCI branch
+\code{nevpt2\_grad.py} holds the state in the eigenbasis of $F$'s active block
+(\S\ref{sec:casci}), reached by an active rotation $W_a$ that carries $c$
+along. \code{load\_source\_terms} therefore first checks that the dump's
+\code{ci} is the golden's up to a sign $\sigma$ (to \code{DUMP\_CI\_TOL}),
+that its partition is the state's, that its \code{e\_corr} matches, and that
+its scheme (SC or PC) is the run's. It then transforms
+\begin{equation}
+  Y' = W^{\mathsf T} Y\,W,\quad W = 1\oplus W_a,\qquad
+  y' = \mathcal T(W_a)\,(\sigma y),
+  \label{eq:dumprot}
+\end{equation}
+with $\mathcal T(W_a)$ the CI transform for the orbital rotation (orthogonal,
+so $y$ transforms as $c$ does). $E$ is even in $c$, so $y$ is odd, and the sign
+goes on $y$. On the CASSCF branch the state is the golden's own basis and
+$W_a = 1$.
+
+\subsection{Provider 2: offline central differences}
+\label{sec:src-fd}
+
+\code{--source pyscf}, the default, differentiates PySCF's SC energy, or
+block2's PC energy with \code{--pc}, and needs no card. One pass over every
+non-gauge pair $k = (p,q)$ (\code{kappa\_sweep}) produces three objects at
+once:
+\begin{align}
+  A_{pq} &= \frac{E(C\,G_{pq}(h)) - E(C\,G_{pq}(-h))}{2h},
+  \label{eq:Afd}\\
+  M_{km} &= \frac{\partial G_m}{\partial\kappa_k},\qquad
+  Q_{kI} = \frac{\partial (Hc)_I}{\partial\kappa_k},
+  \label{eq:MQ}
+\end{align}
+at $h = \code{KAPPA\_STEP}$ and fixed $c$, with $G_{pq}$ the Givens rotation
+and $G_m$ the orbital constraints of \S\ref{sec:casci}--\ref{sec:casscf}. $M$
+is the constraint Jacobian. $Q$ makes the CI relaxation $Qz$ available for any
+$z$ found later. $M$ is differenced rather than written out because $f$ is not
+covariant under a rotation that mixes the core and active index ranges. The
+CI source term is differenced along directions \emph{orthogonal to the state}
+and inside the state's spatial irrep (\code{allowed\_determinants}):
+\begin{equation}
+  y_I = \|Pe_I\|\;\frac{\Ecorr(c + h\,d_I) - \Ecorr(c - h\,d_I)}{2h},\qquad
+  d_I = \frac{Pe_I}{\|Pe_I\|},
+  \label{eq:yfd}
+\end{equation}
+at $h = \code{CI\_STEP}$, with $\eps$ rebuilt from Eq.~\eqref{eq:fock} at
+every displaced $c$. Both restrictions are load-bearing. Off the unit sphere
+the hole-side metrics' constants are no longer hole RDMs and the SC finish has
+poles. Outside the irrep a symmetry-empty perturber fills linearly in $h$, and
+the limit, though it converges, is not linear in the direction
+(\code{nevpt2\_grad.py}, \code{pyscf\_ci\_source}). When a dump supplies $Y$,
+the sweep still runs to build $M$ and $Q$, but with $\Ecorr$ dropped, and the
+dump's $A$ is added to the sweep's $\Ecas$ half.
+
+\code{--source both} solves twice on one sweep, once from the dump and once
+from PySCF's or block2's quotients. It compares the two source terms block by
+block and prints both gradients beside \code{grad\_num}, so a difference
+between them can only come from the source terms.
+
+%======================================================================
+\section{\texorpdfstring{Shared stage B: the frozen orthonormal path, and $\Phi$}{Shared stage B: the frozen orthonormal path, and Phi}}
+\label{sec:frozen}
+
+Given the multipliers $\Lambda$, the gradient is the nuclear derivative of one
+scalar along a path on which the wavefunction parameters do not respond:
+\begin{equation}
+  C(\xi) = S(\xi)^{-1/2}\,S(\xi_0)^{1/2}\,C(\xi_0),\qquad c(\xi) = c(\xi_0),
+  \label{eq:frozen}
+\end{equation}
+with $S$ the AO overlap (\code{frozen\_coeff}). Then $C(\xi)^{\mathsf
+T}S(\xi)C(\xi) = 1$ at every geometry. The orthonormality constraint holds
+identically along the path and needs no multiplier, so no energy-weighted
+density term appears. With
+\begin{equation}
+  \Phi(\xi) = \Ecas(\xi) + \Ecorr(\xi) + \sum_m \lambda_m G_m(\xi) + \Lambda_{\mathrm{CI}}(\xi),
+  \label{eq:phi}
+\end{equation}
+where $\Lambda_{\mathrm{CI}}$ is the CI constraint's term ($\langle z|H|c\rangle$
+on the CASCI branch, $z\cdot g_{\mathrm{ci}}$ on the CASSCF one), every
+quantity is evaluated at $(C(\xi), c)$ on the displaced molecule's own
+integrals. The multipliers satisfy their equations, so
+\begin{equation}
+  \frac{dE}{d\xi} = \frac{d\Phi}{d\xi}
+  \approx \frac{4\,g(h/2) - g(h)}{3},\qquad
+  g(h) = \frac{\Phi(\xi + h) - \Phi(\xi - h)}{2h},
+  \label{eq:dphi}
+\end{equation}
+at $h = \code{NUC\_STEP}$. The Richardson bar $|R - g(h/2)|$ is printed with
+the gradient. The two halves are reported separately:
+\code{get\_ham\_response} is the derivative of $\Ecas + \Ecorr$, and
+\code{get\_LdotJnuc} is the derivative of the constraint terms.
+
+\textbf{This is a Lagrangian gradient whose skeleton derivatives are
+differenced, not contracted against derivative integrals}, and that is a stated
+limitation. All the analytic content is exercised: the constraint set, the
+Z-vector equations and the stationarity that makes a frozen path sufficient.
+Replacing the differences with PySCF's derivative integrals would need the
+NEVPT2 relaxed densities, and no flag writes those out (\S\ref{sec:limits}).
+Nothing re-solves along the path, so every Cartesian component is
+differenced, including the ones that are zero by symmetry. They come out as
+the zeros they are, which is a free check (\S\ref{sec:numgrad}).
+
+\begin{algorithm}[htbp]
+\caption{\code{Gradients.kernel}: the frozen-path derivative}
+\label{alg:kernel}
+\begin{algorithmic}[1]
+\Require the state $(C_0, c)$ at $\xi_0$; multipliers $\lambda$, $z$; step $h$
+\State $S_0^{1/2} \gets$ \code{sym\_power}$(S(\xi_0), \tfrac12)$
+\For{each atom and Cartesian component $\xi$} \Comment{all $3N$, zero-by-symmetry included}
+  \For{$s \in \{h, h/2\}$}
+    \For{$\pm$}
+      \State build the molecule at $\xi \pm s$; its RHF object, integrals and, fitted, its own \code{with\_df}
+      \State $C \gets S(\xi\pm s)^{-1/2} S_0^{1/2} C_0$ \Comment{Eq.~\eqref{eq:frozen}}
+      \State $\Phi_\pm \gets \Ecas + \Ecorr + \lambda\cdot G + \Lambda_{\mathrm{CI}}$ at $(C, c)$ \Comment{Eq.~\eqref{eq:phi}}
+    \EndFor
+    \State $g(s) \gets (\Phi_+ - \Phi_-)/2s$
+  \EndFor
+  \State $\partial E/\partial\xi \gets [4g(h/2) - g(h)]/3$;\ bar $\gets |{\cdot} - g(h/2)|$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+%======================================================================
+\section{The CASCI-branch Lagrangian and its solve}
+\label{sec:casci}
+
+\subsection{The constraints}
+On RHF orbitals, canonicalised with \code{cas\_natorb=True}, core, active and
+virtual are each spanned by a fixed set of RHF canonical orbitals
+(\code{docs/gradient-theory.md}, \S1.2). The constraint set is
+\begin{align}
+  \cons{O1}&:\ F_{pq} = 0\ \text{for $p$, $q$ in different spaces of
+     $\{\text{core},\mathrm{act}_O,\mathrm{act}_V,\text{virt}\}$},\\
+  \cons{O2}&:\ f_{ij} = 0\ (i\ne j\ \text{core}),\quad f_{rs} = 0\ (r\ne s\
+     \text{virtual}),\\
+  \cons{C1}&:\ (H - \Ecas)\,c = 0,\quad c^{\mathsf T}c = 1,
+\end{align}
+and the Lagrangian is
+\begin{equation}
+  L = \Ecas + \Ecorr + \sum_{m\in\cons{O1}} \lambda_m F_{p_mq_m}
+    + \sum_{m\in\cons{O2}} \lambda_m f_{p_mq_m}
+    + \langle z|H - \Ecas|c\rangle.
+  \label{eq:Lcasci}
+\end{equation}
+\cons{O1}'s blocks between $O$ and $V$ are RHF Brillouin conditions. Its blocks
+within $O$ (core--$\mathrm{act}_O$) and within $V$ ($\mathrm{act}_V$--virtual)
+hold by the active-space \emph{selection} (\S\ref{sec:limits}).
+
+\paragraph{The gauges are $\mathrm{act}_O$-internal and $\mathrm{act}_V$-internal rotations, and no others.}
+An $\mathrm{act}_O$--$\mathrm{act}_V$ rotation leaves the energy alone, being an
+active--active rotation of a full CI, but it moves the RHF occupied space and
+therefore $F$. So $F_{\mathrm{act}_O,\mathrm{act}_V} = 0$ is a genuine
+Brillouin condition with a multiplier of its own. For that reason the state is
+held in the basis that diagonalises $F$'s active block, with the CI vector
+transformed to match, so that $\mathrm{act}_O$ and $\mathrm{act}_V$ are index
+ranges (\code{build\_state}; \code{docs/gradient-theory.md}, \S2.6). The
+rebuild is checked: $\Ecorr$ must not move under the rotation, and $F$'s
+active block must come out diagonal. \code{kappa\_pairs} is every $p<q$ except
+those two gauge blocks. \code{constraints} pairs them one to one with \cons{O1}
+(between spaces) and \cons{O2} (inside core or inside virtual), and asserts
+the count, so stationarity is a \emph{square} system.
+
+\subsection{The stationarity equations}
+Differentiating Eq.~\eqref{eq:Lcasci}:
+\begin{align}
+  \frac{\partial L}{\partial c}&:\quad P(H - \Ecas)P\,z = -P\bigl(y + y^c\bigr),
+  \label{eq:ciz}\\
+  \frac{\partial L}{\partial \kappa_k}&:\quad A_k + (Qz)_k + \sum_m M_{km}\lambda_m = 0
+  \quad\text{for every non-gauge pair $k$},
+  \label{eq:orbz}
+\end{align}
+with $A$, $M$, $Q$ from Eqs.~\eqref{eq:Afd}--\eqref{eq:MQ} (or $A$ from the
+dump) and $y$ masked to the state's irrep. $F$ is built from the RHF density
+and has no CI dependence, so Eq.~\eqref{eq:ciz} contains no $\cons{O1}$ term.
+That is the decoupling of \code{docs/gradient-theory.md}, \S2.2. One coupling
+survives. $f$ is built from $\G1$ and so does depend on $c$, which puts
+\cons{O2}'s multipliers into the CI right-hand side as a one-body sigma vector
+(\code{ci\_coupling}):
+\begin{equation}
+  y^c_I = \sum_{tu}\bigl(\mathcal W + \mathcal W^{\mathsf T}\bigr)_{tu}\,(E_{tu}c)_I,\qquad
+  \mathcal W_{tu} = \sum_{m\in\cons{O2}} \lambda_m\bigl[(p_mq_m|tu) - \tfrac12(p_mt|uq_m)\bigr].
+  \label{eq:yc}
+\end{equation}
+
+\paragraph{The solve.} Eq.~\eqref{eq:ciz} goes to preconditioned conjugate
+gradient: $P(H-\Ecas)P$ is positive semidefinite on the projected space. The
+preconditioner projects, and the answer is projected again, $z \gets z -
+(c\cdot z)c$. $|c\rangle$ is an exact null vector, so a Jacobi preconditioner
+would otherwise let $z$ drift along it at no cost to the residual. $\Phi$ drops
+$-\Ecas'(\xi)\,(z\cdot c)$ on the assumption that $z\cdot c = 0$. The orbital
+system, Eq.~\eqref{eq:orbz}, is square and indefinite by construction: the
+\cons{O2} diagonal $\varepsilon_q - \varepsilon_p$ changes sign with the pair
+order. It gets a direct least-squares solve (\code{JACOBIAN\_RCOND}), with
+GMRES through the same operator beside it as an independent residual. The two
+equations are iterated to a fixed point, because $y^c$ reads $\lambda$ and the
+orbital right-hand side reads $Qz$. The iteration count is printed.
+
+\paragraph{Degenerate \cons{O2} pairs.} Where $|\eps_p - \eps_q| <
+\code{PC\_GAP\_FLOOR}$, the pair's multiplier is a division the state does not
+determine. If $|A_{pq}| \le \code{PC\_ZERO\_TOL}$, the pair and its constraint
+are dropped together, which keeps the system square, and the multiplier is
+left at zero. An abelian subgroup puts two degenerate partners in different
+irreps, so the source term vanishes there too and zero is the right
+representative. Otherwise the run is refused rather than divided through
+(\code{degenerate\_constraints}).
+
+\paragraph{The theory's triangular order falls out.} On \cons{O2}'s rows $M$
+is diagonal in the pseudocanonical gauge. Those rows reduce to Park's
+Eqs.~56--57 (Appendix~\ref{app:z}), the selection-boundary rows to two small
+Sylvester equations, and the rest to CPHF on the $O$--$V$ block
+(\code{docs/gradient-theory.md}, \S2.3--2.5). The code imposes none of that.
+It solves the one square system, so a response block that the triangular form
+assumes to vanish is never relied on.
+
+\begin{algorithm}[htbp]
+\caption{\code{Gradients} (CASCI branch): \code{prepare}, \code{solve\_multipliers}, \code{kernel}}
+\label{alg:casci}
+\begin{algorithmic}[1]
+\Require the rebuilt state; source terms $(A, y)$ from a dump or \code{None}
+\State rotate the active block to $F$'s eigenbasis, CI vector along; check $\Ecorr$ unmoved and \cons{O1}, \cons{O2} \Comment{\S\ref{sec:casci}}
+\State $(A_{\mathrm{sweep}}, M, Q) \gets$ \code{kappa\_sweep} \Comment{Eqs.~\eqref{eq:Afd}--\eqref{eq:MQ}; $\Ecorr$ dropped under a dump}
+\State $A \gets A_{\mathrm{sweep}}$, or $A_{\mathrm{sweep}}^{\Ecas} + A_{\mathrm{dump}}$; \ $y \gets$ Eq.~\eqref{eq:yfd} or the dump's
+\State $\lambda \gets 0$;\ $z \gets 0$
+\Repeat \Comment{the CI/\cons{O2} fixed point}
+  \State $b_{\mathrm{ci}} \gets P\bigl(y + y^c(\lambda)\bigr)$ \Comment{Eq.~\eqref{eq:yc}}
+  \State $z \gets \textsc{Pcg}\bigl(P(H-\Ecas)P,\ -b_{\mathrm{ci}}\bigr)$;\ $z \gets Pz$
+  \State drop degenerate \cons{O2} pairs, or refuse
+  \State $\lambda \gets \textsc{Lstsq}\bigl(M,\ -(A + Qz)\bigr)$;\ GMRES beside it
+\Until{the step in $(z,\lambda)$ is below $10^{-12}$}
+\State report the gauge identity: $\max|A + Qz|$ over the $\mathrm{act}_O$-, $\mathrm{act}_V$-internal rotations
+\State $\partial E/\partial\xi \gets$ Algorithm~\ref{alg:kernel} with $\lambda\cdot G = \lambda\cdot(F, f)$ and $\Lambda_{\mathrm{CI}} = z\cdot(H(\xi)c)$
+\end{algorithmic}
+\end{algorithm}
+
+%======================================================================
+\section{The CASSCF-branch Lagrangian and its solve}
+\label{sec:casscf}
+
+On converged CASSCF orbitals, Park's Eq.~23 holds as written
+(\code{docs/gradient-theory.md}, \S1.4). Its first line, CASSCF
+stationarity, replaces \cons{O1}:
+\begin{equation}
+  L = \Ecas + \Ecorr + Z\cdot g_{\mathrm{orb}}(\kappa, c) + z\cdot g_{\mathrm{ci}}(\kappa, c)
+    + \sum_{m\in\cons{O2}} z^c_m\,f_{p_mq_m},
+  \label{eq:Lcasscf}
+\end{equation}
+with $g = (g_{\mathrm{orb}}, g_{\mathrm{ci}})$ PySCF's second-order CASSCF
+gradient, \code{newton\_casscf.gen\_g\_hop}'s \code{g\_all}. The orbital part
+$g_{\mathrm{orb}}$ runs over the non-redundant core--active, core--virtual and
+active--virtual rotations (constraint kind \cons{S1}), and $g_{\mathrm{ci}} =
+2(H - \Ecas)c$ is \cons{C1}. There is no $F$, no \cons{O1}, no
+$\mathrm{act}_O/\mathrm{act}_V$ split and no rotation of the state. Every
+active--active rotation is a gauge.
+
+\paragraph{The solve, in two steps and one pass.} First $z^c$, alone, from
+\cons{O2}'s own rows. At a stationary point no other constraint responds to a
+core--core or virtual--virtual rotation (\code{solve\_o2}, with the same
+degenerate-pair rule as \S\ref{sec:casci}):
+\begin{equation}
+  M_{oo}\,z^c = -A_{oo}.
+  \label{eq:zc}
+\end{equation}
+Then one coupled system (\code{solve\_coupled}), with $J = \partial g/\partial
+x$ (\code{gen\_g\_hop}'s \code{h\_op}, the CASSCF orbital+CI Hessian in its own
+step variables $x$), solved on a basis $B$: the identity on the orbital
+variables, and an orthonormal basis of the in-sector determinants with $c$
+projected out:
+\begin{equation}
+\begin{gathered}
+  \bigl(B^{\mathsf T}JB\bigr)^{\mathsf T}\,\ell = -B^{\mathsf T}b,\qquad
+  \begin{pmatrix} Z\\ z\end{pmatrix} = B\ell,\\
+  b = \begin{pmatrix} -\bigl(A_{pq} + \sum_{o\in\cons{O2}} M_{ko}\,z^c_o\bigr)_{k=(p,q)}\\[2pt]
+                      P\bigl(y + y^c(z^c)\bigr)\end{pmatrix}.
+\end{gathered}
+  \label{eq:cp}
+\end{equation}
+The minus sign on the orbital rows is the Givens convention: the rotation by
+$\theta$ on $(p,q)$ is \code{gen\_g\_hop}'s step $x_{(q,p)} = -\theta$. By
+default $B^{\mathsf T}JB$ is built densely, one \code{h\_op} product per
+column, and LU-factorised. The solve is exact, with no preconditioner, level
+shift or threshold. Its symmetric part is also diagonalised, and the modes
+nearest singular are printed with their weight on the right-hand side, so a
+near-null or negative mode is seen directly rather than inferred.
+\code{--cp-solve cg} runs the base class's conjugate gradient through the same
+operator, for a case too large to build densely.
+
+\begin{algorithm}[htbp]
+\caption{\code{CasscfGradients} (CASSCF branch)}
+\label{alg:casscf}
+\begin{algorithmic}[1]
+\Require the state on \code{--mo-from}'s orbitals, unrotated; source terms as Algorithm~\ref{alg:casci}
+\State $(A, M_{oo}) \gets$ \code{kappa\_sweep} \Comment{only \cons{O2}'s columns of $M$ are differenced}
+\State $(g, J) \gets$ \code{gen\_g\_hop}$(C, c)$;\ report $\|g_{\mathrm{orb}}\|$, $\|g_{\mathrm{ci}}\|$ (the residual stationarity)
+\State $z^c \gets$ Eq.~\eqref{eq:zc} \Comment{degenerate pairs left at zero, or refused}
+\State $B \gets$ orbital variables $\oplus$ (in-sector determinants $\perp c$)
+\State $J_{\mathrm{red}} \gets B^{\mathsf T}JB$, column by column;\ $\ell \gets J_{\mathrm{red}}^{-\mathsf T}(-B^{\mathsf T}b)$ \Comment{Eq.~\eqref{eq:cp}}
+\State report $\|J_{\mathrm{red}}^{\mathsf T}\ell + B^{\mathsf T}b\|$, the same $\ell$ through \code{h\_op}, $J$'s asymmetry and its spectrum
+\State $(Z, z) \gets B\ell$
+\State $\partial E/\partial\xi \gets$ Algorithm~\ref{alg:kernel} with $\lambda\cdot G = Z\cdot g_{\mathrm{orb}} + z^c\cdot f$ and $\Lambda_{\mathrm{CI}} = z\cdot g_{\mathrm{ci}}$, $g$ from \code{gen\_g\_hop} at each displaced geometry
+\end{algorithmic}
+\end{algorithm}
+
+%======================================================================
+\section{The numerical gradient, and the gate}
+\label{sec:numgrad}
+
+\code{nevpt2\_numgrad.py} differences re-converged energies built by
+\code{generate\_golden.\_build\_state} itself, at the same settings as the
+golden. Those settings are single-threading, a $10^{-12}$ Davidson tolerance,
+the point group detected, and the same irrep-selected active space. For each
+probed component, with $h = \code{STEP\_BOHR}$,
+\begin{equation}
+\begin{gathered}
+  g(s) = \frac{E(\xi+s) - E(\xi-s)}{2s},\qquad
+  R(s) = \frac{4\,g(s/2) - g(s)}{3},\\
+  \code{grad\_num} = R(h/2),\qquad
+  \code{grad\_num\_residual} = |R(h/2) - R(h)|,
+\end{gathered}
+  \label{eq:numgrad}
+\end{equation}
+so each component costs six displaced energies. The residual is an error bar
+on the stored number.
+
+\paragraph{In-plane displacements only, and the refusal.} The active space is
+selected by irrep, and irrep labels exist only while the point group does. A
+displacement whose detected point group differs from the reference's is
+refused (\code{\_check\_point\_group}). So is one whose core or active irrep
+labels differ at an unchanged group (\code{\_check\_selection}). The
+components such a displacement would probe are zero by symmetry at a planar
+geometry. \code{--components auto} records them as exact zeros and leaves them
+to the analytic side as a free check (\code{docs/gradient-theory.md}, \S4.3).
+
+\paragraph{On a CASSCF reference} (\code{--reference casscf}) every displaced
+state is re-optimised from a cold start through the generator's own optimiser,
+then finished to a tighter orbital gradient, then given the golden's
+\code{--mo-from} CASCI and NEVPT2. A displaced optimisation that lands on
+another stationary point would give a number from a different reference, so
+every displaced state passes a continuity guard before it is differenced. The
+guard refuses an energy off its first-order prediction, an active subspace or
+CI vector that moved too far, and an unconverged optimiser. A warm start on a
+few geometries probes for a second solution (\code{docs/reference-data.md},
+``The numerical gradient of a CASSCF reference''). Its PC twin runs no sweep:
+\code{--pc-states} differences the GPU's PC energies on the finished sweep's
+kept states (\code{pc\_on\_states.py}).
+
+\paragraph{The gate} (\code{nevpt2\_grad.py}'s last step) compares each probed
+component $\alpha$ with \code{grad\_num}:
+\begin{equation}
+  \max_\alpha \bigl|g_\alpha - \code{grad\_num}_\alpha\bigr| < \code{GRAD\_NUM\_TOL} = 10^{-6},
+  \label{eq:gate}
+\end{equation}
+and prints \code{PASS:} or \code{FAIL:}, exiting 1 on a failure. The source is
+the sidecar's \code{grad\_num}, or an \code{.npz} named with
+\code{--grad-num}; the file must be of the same case, reference and functional
+(\code{grad\_num}, \code{grad\_num\_pc}, or \code{grad\_casci} under
+\code{--casci-only}). Two more checks are free and always reported: the
+gradient summed over atoms (translational invariance), and $|g|$ on the axes
+along which every atom shares a coordinate, i.e.\ zero by symmetry
+(\code{zero\_axes}). \textbf{There is no ctest entry for the gate.} It would put
+PySCF and block2 in the test path, and the gate needs no card. Only the GPU dump
+it reads is a ctest entry (\code{docs/testing.md}, ``Why there is no ctest entry
+for it'').
+
+%======================================================================
+\section{Path 1: SC-NEVPT2 on a CASCI reference}
+\label{sec:sc-casci}
+
+\paragraph{Offline, before.} The golden is the energy's
+(\code{docs/energy.tex}, Path~1, conventional integrals here). Beside it,
+\code{generate\_golden.py --gradgold} writes the \code{.gradgold} sidecar: the
+one-general-index integral inventory of Appendix~\ref{app:inventory}, the
+full-range one-electron and Fock matrices, $F$ and \code{mo\_coeff}.
+\code{nevpt2\_numgrad.py} appends \code{grad\_num} to it, or writes an
+\code{.npz} for a case whose committed sidecar carries none.
+
+\begin{algorithm}[htbp]
+\caption{Path 1, SC on CASCI orbitals}
+\label{alg:path1}
+\begin{algorithmic}[1]
+\Statex \textit{Offline} (\code{generate\_golden.py --gradgold}; \code{nevpt2\_numgrad.py [--npz]})
+\State golden and sidecar, as Path~1 of \code{docs/energy.tex} plus the inventory
+\State \code{grad\_num} $\gets$ Eq.~\eqref{eq:numgrad} over the in-plane components
+\Statex \textit{GPU} (\code{nevpt2\_sc\_pseudodensity --golden \textit{g} --tiles 3 --dump-source-terms \textit{P}})
+\State $(Y, y) \gets$ Algorithm~\ref{alg:dump};\ \textbf{PASS} on its own gates
+\Statex \textit{Offline} (\code{nevpt2\_grad.py --case \textit{c} --source dump|both --source-path \textit{P}})
+\State rebuild the golden's state; refuse it unless $\Ecas$, $\Ecorr$ are the golden's to \code{REF\_STATE\_TOL}
+\State carry $(Y, y)$ into the $F$-eigenbasis \Comment{Eq.~\eqref{eq:dumprot}}
+\State $(\lambda, z) \gets$ Algorithm~\ref{alg:casci};\ $g \gets$ Algorithm~\ref{alg:kernel}
+\State the residual-independent checks \Comment{\S\ref{sec:checks}}
+\State \textbf{PASS} iff Eq.~\eqref{eq:gate} holds and every residual-independent check passes
+\end{algorithmic}
+\end{algorithm}
+
+The equations are Eqs.~\eqref{eq:pqr}--\eqref{eq:dumprot},
+\eqref{eq:frozen}--\eqref{eq:dphi}, \eqref{eq:Lcasci}--\eqref{eq:yc} and
+\eqref{eq:numgrad}--\eqref{eq:gate}. Without \code{--source}, Algorithm~\ref{alg:path1}'s
+GPU step is replaced by Eqs.~\eqref{eq:Afd} and \eqref{eq:yfd} and needs no
+card. The cases are LiF CAS(4,6) and acrolein CAS(6,5), the planar $C_s$
+gradient-validation pair (acrolein's sidecar is gitignored), and N2 CAS(4,4).
+N2 is the deliberately symmetric case: six exactly degenerate inactive pairs,
+and a linear molecule that keeps its point group under every displacement. Its
+committed sidecar carries no \code{grad\_num}, so the route there is
+\code{--npz}. The GPU dump's ctest entries are
+\code{nevpt2\_sc\_pseudodensity\_dump\_\{n2\_ccpvdz\_cas44,
+n2\_ccpvdz\_cas88, lif\_def2svp\_cas46\}}, plus the CAS(4,4) and LiF
+\code{\_casscf} twins.
+The verdicts are \code{docs/testing.md}, ``The analytic gradient against the
+numerical one'' and ``The GPU as the source-term provider''.
+
+\subsection{The density-fitted variant}
+\label{sec:df}
+
+\code{--df} differentiates the density-fitted SC energy on the \code{\_df}
+golden's state: a fitted RHF and a \code{DFCASCI} sharing its \code{with\_df},
+with \code{dfnevpt2.\_ERIS} called directly. Nothing else changes. The fitted
+RHF is still an RHF, so \cons{O1}, \cons{O2}, \cons{C1}, the frozen path and
+the solve are this section's. \textbf{The fit's own nuclear derivative is in the
+quotient with no term written out}: each displaced geometry in
+Algorithm~\ref{alg:kernel} builds its own fitting object, so the auxiliary
+functions and the metric $(P|Q)$ move with the nuclei. An orbital rotation, by
+contrast, never reaches the metric (\code{docs/gradient-theory.md}, \S3.8):
+\begin{equation}
+  (pq|rs) = \sum_L B^L_{pq}B^L_{rs},\qquad
+  \delta B^L_{pq} = \sum_x \bigl(\kappa_{xp}B^L_{xq} + \kappa_{xq}B^L_{px}\bigr),
+  \label{eq:dB}
+\end{equation}
+so the promotion rule acts on one $B$ factor at a time, and every inventory
+array is a strip of $B$ against a block of $B$. The GPU's fitted dump
+(\code{nevpt2\_sc\_pseudodensity --dump-source-terms} on the \code{\_df}
+golden beside its \code{NEVPT2F1} sidecar) contracts that inventory out of the
+whole $B$ and carries both terms of $Y$. The gate is the \code{NEVPT2F1}
+sidecar's \code{grad\_num}, which \code{nevpt2\_numgrad.py --df} wrote. The
+variant is SC, CASCI branch and N2 CAS(4,4) only. \code{--pc},
+\code{--reference casscf}, \code{--casci-only} and \code{--grad-num} are
+refused with it (\code{docs/testing.md}, ``The density-fitted gradient against
+the numerical one'').
+
+%======================================================================
+\section{Path 2: PC-NEVPT2 on a CASCI reference}
+\label{sec:pc-casci}
+
+\paragraph{What \code{--pc} changes.} $\Ecorr$ becomes block2's PC energy
+(\code{generate\_golden.\_block2\_icmr}) in the quotients and in $\Phi$. The
+GPU's dump becomes the PC one (\code{--pc --dump-source-terms}, marked
+\code{pc}; a dump of the other scheme is refused). Four things come with it:
+\begin{itemize}
+\item \textbf{The orbital energies, rebuilt at every point.} block2 runs
+  \code{canonicalized = True} and uses the \code{mo\_energy} it is handed, so
+  every evaluation hands it Eq.~\eqref{eq:fock}'s diagonal at that $(C, c)$.
+\item \textbf{The 4-RDM, rebuilt when $c$ moves.} It is cached across the
+  $\kappa$ sweep, keyed on the CI vector's bytes.
+\item \textbf{A PC answer must exist.} \code{\_check\_pc\_conditioning} refuses
+  LiF's state as a continuum through the cut, so \code{--pc} on LiF stops at
+  the reference state. There is no PC gradient check on LiF, by design
+  (\code{docs/testing.md}, ``LiF has no PC gradient, and that is the answer'').
+\item \textbf{Its own CI step, and the guard at every displaced CI vector.} A
+  determinant-axis displacement is not a spin eigenfunction. It lifts the PC
+  metric's structurally null modes, and a lifted mode past the cut is kept and
+  divided by. That is an error of order $h/h$ in the quotient, which no step
+  ladder converges away and no residual sees. \code{CI\_STEP\_PC} keeps the
+  lifted modes below the cut. Every PC energy at a CI vector other than the
+  state's own runs the conditioning guard, and a rank test against the
+  reference state's smallest kept singular value
+  (\code{PC\_RANK\_KEPT\_FRACTION}) catches a mode kept outright. A ledger
+  counts evaluations and guard runs in two different places, so a path that
+  skips the guard fails the run (\code{check\_pc\_guard\_ledger}).
+\end{itemize}
+
+\begin{algorithm}[htbp]
+\caption{Path 2, PC on CASCI orbitals}
+\label{alg:path2}
+\begin{algorithmic}[1]
+\Statex \textit{Offline}: Algorithm~\ref{alg:path1}'s lines 1--2, \code{nevpt2\_numgrad.py --pc --npz \textit{N}} (no sidecar is written)
+\Statex \textit{GPU} (\code{nevpt2\_sc\_pseudodensity ... --pc --dump-source-terms \textit{P}}): Algorithm~\ref{alg:dump} with PC's walk
+\Statex \textit{Offline} (\code{nevpt2\_grad.py --case \textit{c} --pc [--source dump|both --source-path \textit{P}] --grad-num \textit{N}})
+\State Algorithm~\ref{alg:path1}'s offline lines, with block2's $\Ecorr$, the PC steps of Table~\ref{tab:steps}, and the guard at every displaced $c$
+\State \textbf{PASS} iff Eq.~\eqref{eq:gate} holds against \code{grad\_num\_pc}, every residual-independent check passes, and the guard ledger balances
+\end{algorithmic}
+\end{algorithm}
+
+The equations are Path~1's, with Eqs.~\eqref{eq:pcdot} and \eqref{eq:pcadj}
+in place of Eq.~\eqref{eq:pqr} on the GPU side. The cases are acrolein
+CAS(6,5) and N2 CAS(4,4). The cost is the $\kappa$ sweep, one block2 PC solve
+per non-gauge rotation (\code{--workers N} forks it, bit-identically to the
+serial loop). The verdicts are \code{docs/testing.md}, ``The analytic gradient
+against the numerical one'', and \code{docs/pc-nevpt2.md}, ``The source terms
+by reverse mode''.
+
+%======================================================================
+\section{Path 3: SC-NEVPT2 on a CASSCF reference}
+\label{sec:sc-casscf}
+
+\paragraph{Offline, before.} The golden is the energy's Path~3: a CASCI on the
+committed \code{\_casscf.mogold} orbitals, which pass the \code{--mo-from}
+stationarity gate (\code{docs/energy.tex}, Eq.~(39)). The CASSCF-reference
+sidecar is written by \code{--mo-from --gradgold}. The numerical gradient is
+\code{nevpt2\_numgrad.py --reference casscf}, which re-optimises every
+displaced state (\S\ref{sec:numgrad}).
+
+\begin{algorithm}[htbp]
+\caption{Path 3, SC on CASSCF orbitals}
+\label{alg:path3}
+\begin{algorithmic}[1]
+\Statex \textit{Offline} (\code{generate\_golden.py --mo-from \textit{m} --gradgold}; \code{nevpt2\_numgrad.py --reference casscf --npz \textit{N}})
+\State golden and sidecar on the CASSCF orbitals
+\State \code{grad\_num} $\gets$ Eq.~\eqref{eq:numgrad} over re-optimised, continuity-guarded displaced states
+\Statex \textit{GPU}: Algorithm~\ref{alg:dump} on the \code{\_casscf} golden, \textbf{unchanged}
+\Statex \textit{Offline} (\code{nevpt2\_grad.py --case \textit{c} --reference casscf [--source both --source-path \textit{P}] [--grad-num \textit{N}]})
+\State rebuild the state through \code{--mo-from}'s refusals (fingerprint, symmetry purity, the stationarity gate); assert \cons{O2}
+\State read the dump unrotated \Comment{the state is the golden's basis}
+\State $(z^c, Z, z) \gets$ Algorithm~\ref{alg:casscf};\ $g \gets$ Algorithm~\ref{alg:kernel}
+\State the residual-independent checks, plus the Hessian-vector ladder \Comment{\S\ref{sec:checks}}
+\State \textbf{PASS} iff Eq.~\eqref{eq:gate} holds (where a \code{grad\_num} exists) and every check passes
+\end{algorithmic}
+\end{algorithm}
+
+The equations are Eqs.~\eqref{eq:pqr}--\eqref{eq:dphi},
+\eqref{eq:Lcasscf}--\eqref{eq:cp} and \eqref{eq:numgrad}--\eqref{eq:gate}. The
+GPU side is reference-agnostic: source terms are derivatives at fixed
+orbitals, and the dump takes a \code{casscf} golden behind the source-term gate.
+The cases are N2 CAS(4,4) (the inactive-degeneracy probe), LiF CAS(4,6), and
+HSOH CAS(6,6), the $C_1$ case. HSOH keeps its point group under every
+displacement, so all $3N$ components are probed and none is zero by symmetry.
+Its committed \code{\_casscf.gradgold} carries the re-optimised sweep's
+\code{grad\_num}, which is read by default. Without a \code{grad\_num} the gate
+is the residual-independent checks. The verdicts are \code{docs/testing.md},
+``SC on a CASSCF reference: LiF, and the N2 degeneracy probe'' and ``SC on a
+CASSCF reference: the C1 case''.
+
+%======================================================================
+\section{Path 4: PC-NEVPT2 on a CASSCF reference}
+\label{sec:pc-casscf}
+
+\paragraph{What it is.} Path~2's \code{--pc} fed into Path~3's coupled solve.
+$Y$, $y$ and $\Phi$'s $\Ecorr$ are the PC energy's, at the PC steps and under
+the guard. $J$, \cons{S1}, \cons{C1}, \cons{O2} and $B$ are the reference's
+and do not change.
+
+\begin{algorithm}[htbp]
+\caption{Path 4, PC on CASSCF orbitals}
+\label{alg:path4}
+\begin{algorithmic}[1]
+\Statex \textit{Offline}: Algorithm~\ref{alg:path3}'s sweep; then \code{pc\_on\_states.py} (the GPU's PC energy on each kept state) and \code{nevpt2\_numgrad.py --reference casscf --pc-states \textit{S} --npz \textit{N}}
+\Statex \textit{GPU}: Algorithm~\ref{alg:dump} with \code{--pc}, on the \code{\_casscf} golden
+\Statex \textit{Offline} (\code{nevpt2\_grad.py --case \textit{c} --reference casscf --pc [--source both --source-path \textit{P}] --grad-num \textit{N}})
+\State Algorithm~\ref{alg:path3}'s offline lines, with Path~2's changes
+\State \textbf{PASS} iff Eq.~\eqref{eq:gate} holds against \code{grad\_num\_pc}, every check passes, and the guard ledger balances
+\end{algorithmic}
+\end{algorithm}
+
+The equations are Path~3's with Path~2's substitutions. Its numerical gradient
+is the GPU's PC energy, differenced over the same re-optimised states the SC
+sweep kept, so the oracle's PC energies come from the card while its states
+come from PySCF. The case is acrolein CAS(6,5), block2-sourced and
+GPU-sourced (\code{docs/testing.md}, ``PC on a CASSCF reference: acrolein'').
+
+%======================================================================
+\section{Checks that read no residual}
+\label{sec:checks}
+
+A converged residual says that a solve found the answer to the equations it
+was given, not that those were the right equations. Every solve and every
+difference quotient in \code{nevpt2\_grad.py} therefore also gets a check that
+reads no residual. Each such check runs through \code{Functional.evaluate},
+the route $\Phi$ is differentiated through, rather than through the code under
+test. Most are \emph{step ladders}: central differences at $h = 2^{-k}$ over a
+range of $k$, gated on two facts.
+\begin{enumerate}
+\item \textbf{The ladder converges.} The change between neighbouring rungs falls
+  by a factor in $(3.2, 4.8)$ for at least three consecutive halvings, and of
+  several such runs the finest is used. This is the C++ checks' rule too,
+  \code{nevpt2::longestFourfoldRun}.
+\item \textbf{It converges to the right number.} The Richardson extrapolant at
+  that run's finest pair is within \code{LADDER\_TOL} $= 10^{-6}$ of the
+  quantity under test. Comparing an extrapolant, rather than the smallest
+  $|f_d - \mathrm{ref}|$ in the sweep, is what keeps a crossing of a wrong
+  reference from reading as agreement.
+\end{enumerate}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{@{}p{0.24\textwidth}p{0.44\textwidth}p{0.26\textwidth}@{}}
+\toprule
+check & ladder of & converges to \\
+\midrule
+projection of $y$, of $z$ & --- & $|c\cdot y|$, $|c\cdot z| \le 10^{-6}$ \\
+$y$ linearity (two seeds) & $\Ecorr$ along a spin-adapted, in-sector $u\perp c$, on the sphere & $\langle u, y\rangle$ \\
+CI stationarity & Eq.~\eqref{eq:Lcasci}'s CI part along $u$ (whole, or by pieces) & $0$ \\
+orbital stationarity & $L$ along a totally symmetric non-gauge $\kappa$, $C e^{t\kappa}$ & $0$ \\
+nuclear ladder & $\Phi$ along a totally symmetric displacement & $\langle d, g\rangle$ \\
+PC guard ledger & --- & every displaced $c$ guarded, no rank change \\
+Hessian-vector (CASSCF) & \code{gen\_g\_hop}'s $g$ along seeded random $v$ & $Jv$ \\
+\bottomrule
+\end{tabular}
+\caption{The residual-independent checks (\code{check\_*} in
+\code{nevpt2\_grad.py}). The non-gauge rotations of the orbital-stationarity
+check are derived from the RHF occupied projector, independently of the
+solve's \code{kappa\_pairs}, so the check does not inherit that bookkeeping.
+Which check catches which of the errors found so far, with the numbers, is
+\code{docs/testing.md}, ``Residual-independent checks of the gradient
+path''.}
+\label{tab:checks}
+\end{table}
+
+\paragraph{Validation with $\Ecorr$ dropped.} \code{--casci-only} runs the
+identical pipeline with $\Ecorr$ removed from the source terms and from $\Phi$.
+On the CASCI branch the reference is then a plain CASCI, and its gradient is
+gated against \code{nevpt2\_numgrad.py}'s \code{grad\_casci}. That one
+comparison exercises the frozen path, the full constraint Jacobian, the
+selection-boundary multipliers and the CPHF block. It does not exercise the
+CI Z-vector (a CASCI is variational in $c$, so $y = z = 0$) or Eqs.~56--57,
+whose numerators vanish for $\Ecas$. \code{pyscf.grad.casci} is an oracle only
+for an energy-ordered active space (\code{--energy-ordered}). On the CASSCF
+branch the reference becomes a CASSCF, stationary in $\kappa$ and $c$, so the
+multipliers must come out \emph{exactly} zero and the gradient must be
+\code{pyscf.grad.casscf}'s (\code{check\_multipliers\_vanish}).
+
+\paragraph{The gauge identity} (\code{docs/gradient-theory.md}, \S1.3) is
+reported, not gated: the Lagrangian's derivative along the gauge rotations.
+On the CASCI branch the constraints' own gauge response is not part of the
+sum, because $f$'s active sum is not covariant at fixed $\G1$. On the CASSCF
+branch the constraints are covariant and the identity is the whole
+Lagrangian's.
+
+%======================================================================
+\section{Scope and limits}
+\label{sec:limits}
+
+\begin{itemize}
+\item \textbf{No nuclear derivative in \code{src/} or \code{apps/}.} The GPU
+  computes and writes the source terms. The Z-vector solve, the skeleton
+  derivative and the numerical gradient are offline Python. The in-tree
+  Lagrangian gate, \code{requireLagrangianReference}, refuses a \code{casscf}
+  golden, and no path in \code{src/} sits behind it yet
+  (\code{docs/gradients.md}, \S1).
+\item \textbf{The skeleton derivative is differenced, not contracted.} An AO
+  contraction against derivative integrals would need the NEVPT2 relaxed
+  densities: $Y$ fixes only the antisymmetric part of the generalised Fock.
+  \code{src/gradient/} builds the pseudodensities and frees them as the slab
+  walk ends, and no flag writes them out.
+\item \textbf{The CASCI branch's selection is a discrete function of geometry.}
+  Where it changes, the energy has a kink. A small gap across an active-space
+  boundary makes the selection multipliers large. Validation therefore uses
+  in-plane displacements of planar $C_s$ molecules, or a $C_1$ one on the
+  CASSCF branch (\code{docs/gradient-theory.md}, \S4). On the CASSCF branch
+  the analogue is the conditioning of $J$, and a displaced optimisation that
+  lands on another branch.
+\item \textbf{SC's non-invariance among degenerate inactive orbitals} (Park)
+  reaches the gradient through the \cons{O2} divisions on both branches. N2 is
+  the deliberate probe of it, and degenerate pairs follow the rule of
+  \S\ref{sec:casci}.
+\item \textbf{PC can refuse.} PC refuses a state whose metric is not gapped,
+  with LiF as the standing example, and a displaced CI vector that lifts a null
+  mode past the cut.
+\item \textbf{Density fitting is SC, CASCI branch, one case.} There is no
+  fitted PC dump and no fitted CASSCF \code{grad\_num}.
+\item \textbf{The second derivative is elsewhere.} The energy's parameter
+  Hessian is in tree; the nuclear Hessian is not. See
+  \code{docs/hessian-theory.md} and \code{docs/gradients.md}, \S1.1.
+\item \textbf{Cost.} The offline cost is the $\kappa$ sweep, $O(n_{\mathrm{mo}}^2)$
+  energy evaluations, and that is the part the GPU's dump replaces for $Y$.
+  The walls are \code{docs/reference-data.md}, ``The analytic gradient'', and
+  \code{docs/testing.md}, ``PC on a CASSCF reference: acrolein''.
+\end{itemize}
+
+%======================================================================
+\appendix
+\section{The source-term inventory}
+\label{app:inventory}
+
+$Y$ reads, besides what the energy reads, the arrays the promotion rule
+generates: every stored block with one index replaced by a general one $x$,
+keeping the charge-distribution pairing (\code{docs/gradient-theory.md},
+\S3.1--3.3). Write $(xP|QR)$ for the array in which $x$ shares a charge
+distribution with a label from space $P$. Seventeen of the eighteen are
+needed, and the sidecar carries them:
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+array & shape & differentiates \\
+\midrule
+$(xa|aa)$ & $n_{\mathrm{mo}}n_a^3$ & $aaaa$, $aaav$, $aaac$ \\
+$(xv|aa)$ & $n_{\mathrm{mo}}n_vn_a^2$ & $aaav$, $caav$, $\eps_r$ \\
+$(xa|va)$ & $n_{\mathrm{mo}}n_a^2n_v$ & $aaav$, $aavv$, $caav$, $\eps$ \\
+$(xc|aa)$ & $n_{\mathrm{mo}}n_cn_a^2$ & $aaac$, $caav$, $\heff$, $\eps_i$ \\
+$(xa|ca)$ & $n_{\mathrm{mo}}n_a^2n_c$ & $aaac$, $ccaa$, $caav$, $\eps$ \\
+$(xv|va)$ & $n_{\mathrm{mo}}n_v^2n_a$ & $aavv$, $cavv$ \\
+$(xc|ca)$ & $n_{\mathrm{mo}}n_c^2n_a$ & $ccaa$, $ccav$, $\heff$ \\
+$(xa|cv)$ & $n_{\mathrm{mo}}n_an_cn_v$ & $caav$, $ccav$, $cavv$ \\
+$(xv|ca)$ & $n_{\mathrm{mo}}n_vn_cn_a$ & $caav$, $ccav$ \\
+$(xc|va)$ & $n_{\mathrm{mo}}n_cn_vn_a$ & $caav$, $cavv$, $\heff$ \\
+$(xc|cv)$ & $n_{\mathrm{mo}}n_c^2n_v$ & $ccav$, $ccvv$, $\heff$ \\
+$(xv|cv)$ & $n_{\mathrm{mo}}n_v^2n_c$ & $cavv$, $ccvv$ \\
+$(xa|cc)$ & $n_{\mathrm{mo}}n_an_c^2$ & $\heff$ (exchange), $\eps_i$ \\
+$(xv|cc)$ & $n_{\mathrm{mo}}n_vn_c^2$ & $\heff$ (exchange), $\eps_r$ \\
+$(xc|cc)$, two core labels tied & $n_{\mathrm{mo}}n_c^2$ & $\heff$, $\eps_i$ \\
+$(xa|vv)$, virtual labels tied & $n_{\mathrm{mo}}n_an_v$ & $\eps_r$ \\
+$(xc|vv)$, virtual labels tied & $n_{\mathrm{mo}}n_cn_v$ & $\eps_r$ \\
+\bottomrule
+\end{tabular}
+\caption{The one-general-index arrays (\code{docs/gradient-theory.md}, \S3.3).
+The eighteenth, $(xv|vv)$, is never needed: no integral the energy reads has
+three virtual labels, and promotion cannot add one.}
+\label{tab:inventory}
+\end{table}
+
+Besides the integrals, the sidecar carries the full-range $h$, $\heff$ and its
+variants, $f$, $f^{\mathrm h}$, \code{mo\_coeff} and, for the CASCI branch
+only, the RHF Fock $F$ and the RHF electron count
+(\code{docs/gradient-theory.md}, \S3.5). Three invariants are checked on it.
+$F$ is block-diagonal over core/active/virtual (\cons{O1}; CASCI only). $f$'s
+core and virtual off-diagonals vanish, and its diagonal is \code{e\_core},
+\code{e\_virt} (\cons{O2}). $F$'s active block splits into the right number of
+occupied and virtual eigenvalues (CASCI only). Density-fitted, each array is
+$\sum_L B^L_{xp}B^L_{qr}$ (Eq.~\eqref{eq:dB}). It reads all six space blocks
+of $B$, and the \code{NEVPT2F1} sidecar adds the two that a \code{--df} golden
+lacks, $B_{cc}$ and $B_{vv}$ (\code{docs/gradient-theory.md}, \S3.8).
+
+\section{\texorpdfstring{The pseudocanonical multipliers $z^c$}{The pseudocanonical multipliers z\^{}c}}
+\label{app:z}
+
+The energy reads $f$ only on its core and virtual diagonals, so $f$'s
+off-diagonal response there must be pinned by the convention \cons{O2}. In the
+pseudocanonical gauge $f$ is diagonal on both spaces, so for a rotation inside
+one of them Eq.~\eqref{eq:dh} collapses to $\delta f_{pq} =
+\kappa_{qp}(\eps_q - \eps_p)$. The \cons{O2} rows of the stationarity
+equations then reduce to one division per pair, Park's Eqs.~56--57:
+\begin{equation}
+  z^c_{ij} = \frac12\,\frac{Y_{ij} - Y_{ji}}{\eps_i - \eps_j}\quad(i\ne j\ \text{core}),\qquad
+  z^c_{rs} = \frac12\,\frac{Y_{rs} - Y_{sr}}{\eps_r - \eps_s}\quad(r\ne s\ \text{virtual}).
+  \label{eq:z5657}
+\end{equation}
+The code does not divide by hand. It solves \cons{O2}'s rows of $M$
+(Eqs.~\eqref{eq:orbz} and \eqref{eq:zc}), whose diagonal holds these
+denominators, and the degenerate-pair rule of \S\ref{sec:casci} replaces a
+division the state does not determine. Neither branch adds anything to this
+appendix, which is why \code{docs/gradient-theory.md}, \S2.3 calls it shared.
+The GPU divides the same two blocks of its own $Y$ in
+\code{nevpt2\_sc\_pseudodensity --kappa-full}, where it is a check on $Y$
+rather than an input to a gradient (\code{docs/gradients.md}, \S6).
+
+\end{document}
