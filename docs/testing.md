@@ -5350,7 +5350,134 @@ replace `NUC_STEP`'s quotient, which removes the translational sum; #217's
 ladder still sees the 1.5e-8 spread until the CASSCF branch's
 `dE_CASCI/dkappa` is taken analytically — on a converged state it is
 `gen_g_hop`'s `g_orb`, ~1e-11 here — rather than from the sweep. That is a
-separate piece of work.
+separate piece of work. Measured after #247: "The analytic nuclear term",
+next.
+
+### The analytic nuclear term
+
+Since #247 `nevpt2_grad.py`'s nuclear term is analytic: every piece of `Phi`
+but `E_corr` as a density pair against the frozen path's derivative
+integrals, and `E_corr`'s through the dump's integral adjoint (#246)
+([`reference-data.md`](reference-data.md), "The analytic gradient").
+`--nuclear-quotient` takes the old term and the analytic one on one solve,
+so the A/B below compares two nuclear terms with the same multipliers.
+2026-10-22, the RTX 3080 box: dumps from `nevpt2_sc_pseudodensity
+--dump-source-terms` (`default` preset, `--tiles 3`), every Python run at
+`--workers 12`, `--source dump`.
+
+**What checks it, every run.** Two new residual-independent checks
+("Residual-independent checks of the gradient path" above): each density
+pair rebuilds its piece of `Phi` (`E_CASCI`, and the constraints' term at
+the solved multipliers) from the MO integrals at a displaced geometry. On
+every run below both read ≤ 6.8e-13 against `1e-9`. The nuclear ladder still
+differences `Phi` along two seeded directions and now gates the analytic
+term. The hand cases (`tests/test_analytic_nuclear.py`,
+`tests/test_integral_perturbation.py`) hold `inventory_adjoint` to
+`inventory`'s transpose, `path_gradient` to #215's forward derivative
+(conventional and fitted, to 1e-10 relative), and the analytic term with
+seeded multipliers to the frozen-path quotient on N2's two references
+(≤ 1.4e-9 against a 1e-7 gate, the constraints' term 0.16 and 1.3 Eh/bohr).
+They also show the density identity failing when the CI multiplier's share
+is dropped.
+
+**The A/B, at the shipped steps** (SC `NUC_STEP = 2^-13`, PC 0.0025 bohr).
+"Bar" is the quotient's own Richardson bar per component, `|extrapolant −
+fine quotient|` of both halves summed. The zero-by-symmetry components are
+left out of the last two columns: there the quotient reads round-off
+(≤ 9e-11) and the analytic term ≤ 1.6e-12.
+
+| case | max \|A − Q\| | quotient's max bar | non-zero components outside their bar | translational sum, analytic / quotient |
+|---|---:|---:|---:|---|
+| N2 CAS(4,4) SC | 3.0e-9 | 5.1e-8 | 0 of 2 | 1.2e-14 / 1.8e-9 |
+| N2 CAS(4,4) `_df` SC | 4.2e-9 | 5.1e-8 | 0 of 2 | 5.9e-13 / 1.8e-9 |
+| N2 CAS(4,4) `_casscf` SC | 8.0e-10 | 4.9e-9 | 0 of 2 | 4.0e-14 / 1.5e-9 |
+| N2 CAS(4,4) `_casscf` PC | 5.5e-11 | 1.6e-6 | 0 of 2 | 6.1e-15 / 6.9e-11 |
+| LiF CAS(4,6) SC | 9.8e-10 | 5.5e-10 | **2 of 2** (×1.8) | 3.1e-15 / 1.9e-11 |
+| LiF CAS(4,6) `_casscf` SC | 3.2e-10 | 3.5e-10 | 0 of 2 | 1.6e-15 / 1.9e-11 |
+| HSOH CAS(6,6) `_casscf` SC | 1.4e-8 | 4.4e-9 | **12 of 12** (×16) | 3.5e-14 / 3.1e-8 |
+| HSOH CAS(6,6) `_casscf` PC | 6.4e-10 | 2.9e-7 | 0 of 12 | 3.3e-14 / 8.0e-10 |
+| acrolein CAS(6,5) `_casscf` SC | 3.9e-9 | 1.5e-9 | **14 of 16** (×35) | 4.4e-14 / 5.8e-9 |
+| acrolein CAS(6,5) `_casscf` PC | 2.0e-10 | 4.3e-7 | 0 of 16 | 1.6e-13 / 3.8e-10 |
+
+LiF PC is refused at the state, as before ("LiF and acrolein, the
+gradient-validation pair" in [`reference-data.md`](reference-data.md)), and
+the CASCI-reference PC runs need a `--grad-num` PC `.npz` that was not
+re-swept for this, so N2 CASCI PC was not run.
+
+**Where the A/B misses the bar, it is the quotient's round-off, and the bar
+does not see round-off.** The three SC rows outside are the cases where
+`NUC_STEP = 2^-13` is already past the round-off crossover ("Where
+`gradient_at`'s ~1e-8 noise comes from", above: the translational sum grows
+as `1/h` there). The quotient's own translational sum is the same size as
+the gap: 3.1e-8 on HSOH, 5.8e-9 on acrolein. At coarser steps, where the
+quotient is truncation-dominated, the gap closes to the bar:
+
+| case | `NUC_STEP` | max \|A − Q\| | quotient's max bar | non-zero components outside | quotient's translational sum |
+|---|---|---:|---:|---:|---:|
+| HSOH SC | `2^-9` | 8.4e-10 | 2.4e-7 | 0 of 12 | 8.3e-10 |
+| HSOH SC | `2^-10` | 1.0e-9 | 6.0e-8 | 1 of 12 (×2.7) | 1.5e-9 |
+| HSOH SC | `2^-11` | 5.6e-9 | 1.5e-8 | 5 of 12 (×15) | 2.7e-9 |
+| acrolein SC | `2^-9` | 1.2e-9 | 4.0e-7 | 0 of 16 | 7.4e-10 |
+| acrolein SC | `2^-10` | 4.3e-10 | 1.0e-7 | 0 of 16 | 7.5e-10 |
+| LiF SC | `2^-10` | 3.5e-11 | 3.4e-8 | 0 of 2 | 3.9e-11 |
+
+So the acceptance's "within the quotient's own Richardson bar" holds at the
+shipped step for N2, both PC cases and LiF `_casscf`. For SC on HSOH,
+acrolein and LiF it holds at a step where the bar measures the quotient's
+error (`2^-9`, except one HSOH component at `2^-10`). At the shipped step
+it does not, by the quotient's round-off. `NUC_STEP` was not moved.
+
+**The `grad_num` gates still pass, analytic term in.** LiF CAS(4,6) SC
+7.7e-9 (8.7e-9 with the quotient), N2 CAS(4,4) `_df` SC 1.6e-8 (1.3e-8),
+HSOH `_casscf` SC 7.6e-8 (7.3e-8), all against 1e-6. Every
+residual-independent check passes on those three, and on N2 and LiF
+`_casscf` SC, with one exception. **N2 CAS(4,4) SC (CASCI reference) now
+fails both nuclear ladders, on run length alone**: two fourfold halvings
+where three are needed, the last ratio 3.13 at `2^-16`, Richardson values
+3.5e-9 from `<d, g>` against 1e-6. This is the edge recorded in "What the
+committed cases come out at" above. The ladder's direction is built from the
+gradient, so a 3e-9 change in the gradient moves the round-off rung across
+3.2. With the quotient the same run passes with a run of three. Neither the
+window nor the run length was changed. The two failing PC checks on HSOH
+(`y` linearity, seed 2026) and acrolein (`y` linearity and CI stationarity,
+seed 70) fail identically on the code before #247. They are PC's known
+CI-direction ladders ("PC's CI-direction ladders, measured").
+
+**The noise, through `gradient_at`** (HSOH CAS(6,6) `_casscf`, guess A the
+committed `.mogold`, guess B those orbitals rotated by the seeded `kappa` of
+"Where `gradient_at`'s ~1e-8 noise comes from": `|g_orb|` 1.6e-11 and
+2.5e-11, `E_CASSCF` equal to 3e-13). Before is the code before #247, after
+this change. The dumps are fresh per call.
+
+| | transl. sum A / B | max \|g_A − g_B\| | its `<dH/dx>` part | its `L . J_nuc` part |
+|---|---|---:|---:|---:|
+| SC, before | 2.3e-8 / 2.1e-8 | 9.6e-9 | 5.6e-9 | 1.0e-8 |
+| SC, after | 2.4e-14 / 4.8e-14 | 1.0e-8 | 3.3e-12 | 1.0e-8 |
+| PC, before | 7.6e-10 / 7.0e-10 | 1.4e-9 | 2.4e-10 | 1.3e-9 |
+| PC, after | 4.7e-14 / 3.3e-14 | 1.9e-9 | 3.8e-10 | 1.6e-9 |
+
+- **The SC translational sum is ≤ 1e-10: 2.4e-14 and 4.8e-14.** It was the
+  nuclear quotient's round-off, and the analytic term removes it on every
+  case above (≤ 6e-13 everywhere, the fitted N2 included).
+- **The guess-to-guess spread is not met: 1.0e-8 on SC against the
+  acceptance's 1e-10**, and the analytic term was not expected to meet it.
+  All of it is now the multipliers' term. The `<dH/dx>` part's spread fell
+  from 5.6e-9 to 3.3e-12, and `L . J_nuc`'s stayed at 1.0e-8 because its
+  multipliers are 3.2e-6 apart between the guesses (#246's step 0 measured
+  3.1e-6). That is `KAPPA_STEP`'s round-off in the `kappa` sweep's
+  `dE_CASCI/dkappa`, amplified by the CP-CASSCF solve, as "Where
+  `gradient_at`'s ~1e-8 noise comes from" attributed it (#250 tracks it).
+  Before, the
+  quotient's `<dH/dx>` noise partly cancelled the multipliers'; the
+  analytic term leaves the multipliers' alone, so the total spread is a
+  little larger (9.6e-9 → 1.0e-8). `KAPPA_STEP` and the sweep were not
+  changed.
+- **PC's floor is 1.9e-9, and it is not the nuclear term's.** 1.6e-9 of it
+  is the multipliers' term (the `kappa` sweep at `KAPPA_STEP_PC`, #246's
+  step 0). 3.8e-10 is `<dH/dx>`: the two converged states' own difference
+  read through PC's `E_corr`, not round-off of a quotient. One guess twice,
+  two dumps, gives 1.1e-10 (`<dH/dx>` 7.2e-11), so the GPU's run-to-run
+  spread is a third of it.
 
 ### A ladder can converge, cleanly, to the wrong branch
 

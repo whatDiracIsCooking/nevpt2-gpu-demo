@@ -35,6 +35,14 @@ inventory. Four-index because that form is gauge-free: the golden's ``B`` is
 a Cholesky factor of the metric, whose own derivative is a choice, while
 ``sum_L B B`` is not. ``h`` is the conventional one-electron derivative.
 
+THE ADJOINT SIDE (#247). ``nevpt2_grad.py``'s analytic nuclear term needs the
+same derivatives contracted rather than written: :func:`inventory_adjoint` is
+:func:`inventory`'s transpose, carrying a gradient with respect to the
+inventory -- the GPU's integral adjoint ``dE_corr/d(inventory)`` (#246) --
+onto the full ``(h, (pq|rs))``, and :func:`path_gradient` takes any density
+pair's frozen-path derivative from the adjoint side, so no per-coordinate
+tensor is ever formed.
+
 THE CHECKS, before anything is written:
 
 * the frame: the state is the committed golden's (its ``ci``) and gradient
