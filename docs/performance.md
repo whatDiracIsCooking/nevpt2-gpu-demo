@@ -763,6 +763,7 @@ live there and are not repeated here:
 | `--sc-hessian-kk` (#158, #190) | the plain build and the digests' transpose | the plain rows and the transpose's | **yes**, on the three cases with a sidecar it reads: floor 1 (the table above) |
 | `--pc --sc-hessian-kk` (#202) | the plain build, the digests' transpose, and the gauge's tangent builds (#201's) | the plain rows, the transpose's and the `--rdm-tangent` rows | **yes**, on the four cases with a sidecar and PC fields: floor 1 (the table above) |
 | `--sc-source-tangent` (#220) | the plain build, the digests' transpose, and the tangent build (the mixed block's forward orientation) | the plain rows, the transpose's and the `--rdm-tangent` rows | no; pool high-water at the ctest entries only |
+| `--pc --sc-source-tangent` (#234) | the same three, PC's mixed block's forward orientation running the tangent build three times per CI direction (#201's) | the plain rows, the transpose's and the `--rdm-tangent` rows, as a lower bound | no; pool high-water only: 8.4 MB used for the whole run at its entry's `--tiles 3` (RTX 3080, CUDA, 2026-10-22) |
 | `--pc-hessian` (#152) | the three-argument build, beside the PC stage's own buffers | the `--sc-hessian` rows, as a lower bound | **no**. Its only entries are CAS(4,4) (`docs/testing.md`, "The Hessian tier's entries") |
 | `--pc-hessian-vector` (#155) | the three-argument build, beside the PC adjoint walk's buffers | the `--sc-hessian` rows, as a lower bound | **no**, likewise |
 

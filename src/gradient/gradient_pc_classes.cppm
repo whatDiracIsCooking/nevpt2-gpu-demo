@@ -601,9 +601,26 @@ std::vector<double> projectSymDropped(const DeviceTensor& x, const DeviceTensor&
 // `epsKappa`: the orbital energies respond to kappa (Delta'_w per tuple from
 // the direction's deps; a direction without a sidecar has none, and the
 // caller refuses that mode there).
+//
+// `epsCi` (#234), the FULL mode: they respond to the CI vector too, through
+// W. Forward, the CI leg carries its own Delta tangent, e'[u] = <dm1'[u], W>
+// (`epsCoreU` / `epsVirtU`), and the pair its second-order one, e^{wu} =
+// <dm1'[u], W'[w]> (`epsCoreWU` / `epsVirtWU`), each per tuple through the
+// class's Delta construction (pcQuadSecond's PcDeltaTangents u and uv).
+// Reverse, the plain R_t = dE/dDelta_t and its tangent along w, Rdot_t, are
+// scattered onto acc.dEdCore / acc.dEdCoreDot (sized by the caller): the bars
+// of e^{wv} and e'[v], which the caller folds onto dm1 through W'[w] and W.
+// Every other bar is the fixed mode's: Delta_v enters A_v as Delta_v I, whose
+// bar is exactly Rdot, and Delta_wv enters A_wv as Delta_wv I, whose bar is R
+// (S does not move along w, so there is no Delta_v nS_w term).
 struct PcMixedWalk {
   const ScRotation* rot = nullptr;
   bool epsKappa = false;
+  bool epsCi = false;
+  const Tensor* epsCoreU = nullptr;
+  const Tensor* epsVirtU = nullptr;
+  const Tensor* epsCoreWU = nullptr;
+  const Tensor* epsVirtWU = nullptr;
   const PcRdms* sumU = nullptr;
   const PcRdms* sumUU = nullptr;
   const PcRdms* sumWU = nullptr;
@@ -631,6 +648,16 @@ Status pcClassMixed(const PcClassWalk& w, const ActiveIntegralsDevice& ai, Integ
   check(!reverse || (mw.adj != nullptr && mw.adjW != nullptr && mw.adjFree != nullptr &&
                      mw.aiW != nullptr && mw.aiZero != nullptr),
         "pcClassMixed: the reverse walk needs its four accumulators and both integral sets");
+  check(!mw.epsCi || !forward ||
+            (mw.epsCoreU != nullptr && mw.epsVirtU != nullptr && mw.epsCoreWU != nullptr &&
+             mw.epsVirtWU != nullptr),
+        "pcClassMixed: the FULL forward walk needs the CI leg's e'[u] and the pair's e^{wu}");
+  check(!mw.epsCi || !reverse ||
+            (acc.dEdCore.size() == static_cast<std::size_t>(ncore) &&
+             acc.dEdVirt.size() == static_cast<std::size_t>(nvirt) &&
+             acc.dEdCoreDot.size() == static_cast<std::size_t>(ncore) &&
+             acc.dEdVirtDot.size() == static_cast<std::size_t>(nvirt)),
+        "pcClassMixed: the FULL reverse walk needs dE/de and its tangent sized");
   const ScRotationDir& dir = mw.rot->dirs[0];
   const bool two = w.pattern == PcPattern::PairTwo;
   const bool single = w.pattern == PcPattern::Single;
@@ -664,6 +691,15 @@ Status pcClassMixed(const PcClassWalk& w, const ActiveIntegralsDevice& ai, Integ
   const std::vector<DeviceTensor> basis = w.basis(cs.T, cs.t1);
   const auto deltaWOf = [&](int64_t b0, int64_t b1) {
     return moveEps ? w.delta(b0, b1, dir.epsCoreDot, dir.epsVirtDot) : std::vector<double>{};
+  };
+  // FULL (#234): the CI leg's Delta tangent and the pair's second-order one.
+  const auto deltaUOf = [&](int64_t b0, int64_t b1) {
+    return mw.epsCi && forward ? w.delta(b0, b1, *mw.epsCoreU, *mw.epsVirtU)
+                               : std::vector<double>{};
+  };
+  const auto deltaWUOf = [&](int64_t b0, int64_t b1) {
+    return mw.epsCi && forward ? w.delta(b0, b1, *mw.epsCoreWU, *mw.epsVirtWU)
+                               : std::vector<double>{};
   };
   // A slab's external operands, their dots along w, and the plain rows.
   struct Slab {
@@ -738,6 +774,8 @@ Status pcClassMixed(const PcClassWalk& w, const ActiveIntegralsDevice& ai, Integ
       const std::array<Tensor, 2> ywu = rowsOf(sl, sl.dots.ptr, basisU);
       const std::vector<double> delta = w.delta(b0, b1, hostEC, hostEV);
       const std::vector<double> deltaW = deltaWOf(b0, b1);
+      const std::vector<double> deltaU = deltaUOf(b0, b1);
+      const std::vector<double> deltaWU = deltaWUOf(b0, b1);
       const int64_t nt = std::ssize(delta);
       // r_w = Vn b_w = 0: b_w lies in S's range.
       const Tensor rv0 = Tensor::fromFlat({nt * nd}, std::vector<double>(
@@ -746,8 +784,10 @@ Status pcClassMixed(const PcClassWalk& w, const ActiveIntegralsDevice& ai, Integ
       const PcHessianSlab a{&sl.y, &yu[0], &yw[0], &ywu[0], &rv0};
       const PcHessianSlab a0{&sl.y, &yu[0], &yw[0], &ywu[0], &rvNone};
       if (single) {
-        hessianSingle(a, cs.lambda, delta, blk, rotB, w.factor, sums, minDen, deltaW);
-        hessianSingle(a0, cs.lambda, delta, blk, noRot, w.factor, sumsNoRot, minDen, deltaW);
+        hessianSingle(a, cs.lambda, delta, blk, rotB, w.factor, sums, minDen, deltaW, deltaU,
+                      deltaWU);
+        hessianSingle(a0, cs.lambda, delta, blk, noRot, w.factor, sumsNoRot, minDen, deltaW,
+                      deltaU, deltaWU);
         return;
       }
       const PcHessianSlab b{&sl.x, &yu[1], &yw[1], &ywu[1], &rv0};
@@ -756,12 +796,15 @@ Status pcClassMixed(const PcClassWalk& w, const ActiveIntegralsDevice& ai, Integ
           w.pattern == PcPattern::PairSwap ? w.partner(b1 - b0) : std::vector<int64_t>{};
       for (int64_t t = 0; t < nt; ++t) {
         const int64_t pt = two ? t : partner[static_cast<std::size_t>(t)];
-        const double dw = deltaW.empty() ? 0.0 : deltaW[static_cast<std::size_t>(t)];
-        const double dt = delta[static_cast<std::size_t>(t)];
+        const std::size_t ut = static_cast<std::size_t>(t);
+        const double dw = deltaW.empty() ? 0.0 : deltaW[ut];
+        const double du = deltaU.empty() ? 0.0 : deltaU[ut];
+        const double dwu = deltaWU.empty() ? 0.0 : deltaWU[ut];
+        const double dt = delta[ut];
         hessianPair(pcHessianRowAt(a, t, m, nd), pcHessianRowAt(two ? b : a, pt, m, nd),
-                    cs.lambda, dt, blk, rotB, true, sums, minDen, dw);
+                    cs.lambda, dt, blk, rotB, true, sums, minDen, dw, du, dwu);
         hessianPair(pcHessianRowAt(a0, t, m, 0), pcHessianRowAt(two ? b0s : a0, pt, m, 0),
-                    cs.lambda, dt, blk, noRot, true, sumsNoRot, minDen, dw);
+                    cs.lambda, dt, blk, noRot, true, sumsNoRot, minDen, dw, du, dwu);
       }
     });
     acc.result.energy = sums.energy;
@@ -813,6 +856,14 @@ Status pcClassMixed(const PcClassWalk& w, const ActiveIntegralsDevice& ai, Integ
                                        deltaW)
                : pcAdjointSecondPair(sl.y, two ? &sl.x : nullptr, &yw[0], two ? &yw[1] : nullptr,
                                      partner, cs.lambda, delta, blkA, second, deltaW);
+    // FULL (#234): R and its tangent along w, onto dE/de and its tangent.
+    if (mw.epsCi) {
+      const auto deltaOf = [&](const Tensor& ec, const Tensor& ev) {
+        return w.delta(b0, b1, ec, ev);
+      };
+      deltaAdjointInto(deltaOf, a.r, acc.dEdCore, acc.dEdVirt);
+      deltaAdjointInto(deltaOf, sec.rDot, acc.dEdCoreDot, acc.dEdVirtDot);
+    }
     // The bilinear part's bars on v's rows (y_v = T_v^T x through the PLAIN
     // slab), and the mixed set's: the plain ybar on y_wv = T_v^T x'[w]
     // through the DOTTED slab -- both onto T_v's (and t1_v's) adjoint.
@@ -1446,7 +1497,11 @@ Result<PcGradientResult> assemblePcCiClasses(const ActiveIntegralsDevice& ai, In
 // pcClassMixed, class `cls` (in reverse) sweeping into the cls-th entry of
 // each accumulator array (several classes may share one). Sijrs reads no RDM:
 // with the orbital energies fixed in c its share of H_kc is exactly zero in
-// both orientations, and only its energy is formed.
+// both orientations, and only its energy is formed. In the FULL mode (#234,
+// `base.epsCi`) it is SC's own class through gradientSijrs along the mixed
+// direction, as SC's mixed walk runs it: forward its Eddot_kc through the
+// orbital energies' tangents, reverse its dE/de and that's tangent along w
+// (every class's sized here) for the caller's fold through W.
 Result<PcGradientResult> assemblePcMixedClasses(
     const ActiveIntegralsDevice& ai, IntegralSource& src, const PcRdms& rdm,
     const PcMixedWalk& base, const std::array<ScRdmAdjoint*, 8>& adj,
@@ -1459,9 +1514,19 @@ Result<PcGradientResult> assemblePcMixedClasses(
   const DeviceTensor z3ac = DeviceTensor::zeros(rdm.f3ac->dims, dr);
   const DeviceTensor z3ca = DeviceTensor::zeros(rdm.f3ca->dims, dr);
   const PcRdms zeroF3{rdm.dm1, rdm.dm2, rdm.dm3, &z3ac, &z3ca};
+  const bool full = base.epsCi;
+  const bool forward = base.sumU != nullptr;
+  const auto sizeEps = [&](std::vector<double>& core, std::vector<double>& virt) {
+    core.assign(static_cast<std::size_t>(ncore), 0.0);
+    virt.assign(static_cast<std::size_t>(nvirt), 0.0);
+  };
   PcGradientResult r;
   for (const int cls : {0, 1, 3, 4, 5, 6, 7}) {
     const std::size_t k = static_cast<std::size_t>(cls);
+    if (full && !forward) {
+      sizeEps(r.classes[k].dEdCore, r.classes[k].dEdVirt);
+      sizeEps(r.classes[k].dEdCoreDot, r.classes[k].dEdVirtDot);
+    }
     PcMixedWalk mw = base;
     if (base.sumU == nullptr) {
       mw.adj = adj[k];
@@ -1473,13 +1538,49 @@ Result<PcGradientResult> assemblePcMixedClasses(
     NEVPT2_TRY(pcClassMixed(w, ai, src, ncore, nvirt, hostEC, hostEV, rdm, zeroF3, mw,
                             r.classes[k], dr));
   }
-  {
+  if (!full) {
     const ScRotation none;
     ScClassGradient sc;
     gradientSijrs(src, /*batch=*/0, hostEC, hostEV, none, sc, /*mix=*/nullptr,
                   /*epsCoreU=*/nullptr, /*epsVirtU=*/nullptr, dr);
     r.classes[2].result.status = PcStatus::Done;
     r.classes[2].result.energy = sc.energy;
+  } else {
+    ScMixedDirection mix;
+    mix.forward = forward;
+    mix.reverse = !forward;
+    mix.epsKappa = base.epsKappa;
+    mix.epsCi = true;
+    mix.epsCoreU = forward ? *base.epsCoreU : Tensor({ncore});
+    mix.epsVirtU = forward ? *base.epsVirtU : Tensor({nvirt});
+    mix.epsCoreWU = forward ? *base.epsCoreWU : Tensor({ncore});
+    mix.epsVirtWU = forward ? *base.epsVirtWU : Tensor({nvirt});
+    ScClassGradient sc;
+    const std::size_t nDir = base.rot->size();
+    sc.rotExt.assign(nDir, 0.0);
+    sc.rotAct.assign(nDir, 0.0);
+    sc.rotTangent.assign(nDir, 0.0);
+    sc.rotEps.assign(nDir, 0.0);
+    sc.epsAdjoint = !forward;
+    if (!forward) {
+      sizeEps(sc.dEdCore, sc.dEdVirt);
+      sizeEps(sc.dEdCoreDot, sc.dEdVirtDot);
+    }
+    gradientSijrs(src, /*batch=*/0, hostEC, hostEV, *base.rot, sc, &mix, /*epsCoreU=*/nullptr,
+                  /*epsVirtU=*/nullptr, dr);
+    PcClassGradient& c = r.classes[2];
+    c.result.status = PcStatus::Done;
+    c.result.energy = sc.energy;
+    c.mixedEdotW = sc.mixedEdotW;
+    if (forward) {
+      c.mixedEddot = sc.mixed.total();
+      c.mixedEdotU = sc.mixedEdotU;
+    } else {
+      c.dEdCore = sc.dEdCore;
+      c.dEdVirt = sc.dEdVirt;
+      c.dEdCoreDot = sc.dEdCoreDot;
+      c.dEdVirtDot = sc.dEdVirtDot;
+    }
   }
   for (const PcClassGradient& c : r.classes) r.total += c.result.energy;
   return r;

@@ -1209,6 +1209,96 @@ The flag's refusals are `test/cli/`'s `CliScPseudodensityFlagTests`
 (`ScSourceTangent*`), and the reader's — the whole sidecar refused if any of
 its 22 arrays is missing — `test/golden/`'s `pertgold_tests`.
 
+## PC's source terms' tangent along an integral perturbation
+
+`nevpt2_sc_pseudodensity_cas44_casscf_pc_source_tangent` (`gpu`) runs
+`nevpt2_sc_pseudodensity --golden golden/n2_ccpvdz_cas44_casscf.nevpt2gold
+--tiles 3 --pc --sc-source-tangent golden/n2_ccpvdz_cas44_casscf.pertgold`,
+#220's sidecar, and matches `PASS: the PC source terms' tangent along the
+integral perturbation agrees with itself by duality to 1e-07 … on 6 of 6
+coordinates (orbital energies FULL)` (#234). It checks `nevpt2.gradient`'s
+`pcSourceTangentDevice` (`Ydot` probed, `ydot` PC's mixed block in reverse
+in its FULL mode) and `pcSourceTangentForwardDevice`: PC's gated `Y_pc` and
+three-term `y_pc` differentiated along each coordinate's perturbed
+Hamiltonian ([`hessian-theory.md`](hessian-theory.md), §6.4, §6.7 and §8;
+`apps/sc_pseudodensity/source_tangent_pc_check.cppm` has the checks). N2
+CAS(4,4)'s CASSCF state only: PC's second-order checks are gated at CAS(4,4)
+(#194). RTX 3080 (CUDA, `default` preset), 2026-10-22, the binary run by
+hand under the card's lock:
+
+| check, per coordinate (worst of the six) | measured | gate |
+|---|---|---|
+| the gradient sidecar against its golden (once) | 4.6e-14 | 1e-10 |
+| the dotted `h^eff` and `f` against the dotted `h` and rows | 3.7e-16 | 1e-10 |
+| `Edot(Idot)`: the pairing with `hbar_pc` against its forward tangent plus the digests' forward term | 1.4e-17 | 1e-7 |
+| `Edot(Idot)`: the pairing against the FULL mixed walk's own | 1.7e-16 | 1e-7 |
+| every probe's integrals term, adjoint against forward tangent (integral half), 378 probes | 4.0e-17 | 1e-7 |
+| every probe's sandwich, reverse against forward, 378 probes | 7.1e-15 | 1e-7 |
+| the duality `<Ydot, κ> + <ydot, u>` against `d²E_pc/dh dθ`, four `θ`: `(κ, Epq)`, `(κ, 0)`, `(0, rot)`, `(0, c)` | 9.7e-14 | 1e-7 |
+| the translational sum rule, `max \|Σ_A Ydot_A\|` / `max \|Σ_A ydot_A\|` along z (printed, not gated) | 3.1e-13 / 1.05e-13 | — |
+
+`max |Ydot|` is 8.07 on z (the integrals term 3.6e-2, the sandwich 8.07) and
+2.44 on x and y; `max |ydot|` is 1.02 on z. The CI directions are
+`--pc --sc-hessian-kc`'s kinds, which do not lift: a random amplitude vector
+would, and the mixed block refuses it. Along z the `(κ, Epq)` forward total
+splits into the integrals term, its digests' forward term, the sandwich and
+the mixed block as 1.4e-3, -3.2e-5, -0.767 and -1.244, the mixed block's
+rotation term -9.95e-5 of it.
+
+**The x and y coordinates are computed, not refused.** PC has no
+empty-perturber term ([`hessian-theory.md`](hessian-theory.md), §6.6), so
+the perturbations that SC's entry refuses for populating integral-empty
+tuples (#220, above) are formed here, and all four hold every check. Along
+them `ydot` is a symmetry zero: its largest element is 5.5e-16 against
+`max |y_pc|` = 0.136, and `Edot(Idot)` is 1.7e-16. On N2's CAS(4,4) the
+four active orbitals are the four π irreps, and no product of two of them is
+the x or y displacement's irrep, so the perturbation cannot reach an active
+density at first order (`max |hdot2e|` is 5.9e-17 and 1.9e-16). `Ydot`
+there is not zero (2.44): its external pairs carry the irrep.
+
+**The ladders: `Y_pc` and `y_pc` recomputed in full**, as SC's (every block,
+the inventory and the orbital energies displaced to `I ± h Idot`, the
+digests and `hbar_pc` rebuilt at the displaced `h2e`, `W` at the displaced
+rows), from `h = 2^-4`, `k = 4…18`. z of the first atom; the second atom's
+agree to two digits:
+
+| k | `Y_pc` | ratio | `y_pc` | ratio |
+|---|---:|---:|---:|---:|
+| 4 | 5.6e-4 | — | 2.8e-2 | — |
+| 6 | 3.5e-5 | 4.00 | 1.7e-3 | 4.01 |
+| 8 | 2.2e-6 | 4.00 | 1.1e-4 | 4.00 |
+| 10 | 1.4e-7 | 4.00 | 6.7e-6 | 4.00 |
+| 12 | 8.5e-9 | 4.00 | 4.2e-7 | 4.00 |
+| 14 | 5.3e-10 | 4.00 | 2.6e-8 | 4.00 |
+| 16 | 3.3e-11 | 3.99 | 1.7e-9 | 3.91 |
+| 17 | 8.3e-12 | 4.00 | 3.9e-10 | 4.28 |
+
+Both run thirteen fourfold halvings, from the first rung; the gate needs
+three and a best under 1e-6. Unlike SC's, PC's `Y` has no structure at
+`h ~ 1e-3` to wait out, so the PC convention's `2^-4` start costs nothing.
+`Y_pc`'s ladder runs thirteen halvings on every coordinate. `y_pc`'s on x and
+y is a symmetry zero's: there is no error to halve, so each rung's central
+difference is held, relative to `max |y_pc|`, under the same 1e-6 at every
+rung. The worst rung is 1.6e-9, round-off over `h`.
+
+**What a run costs.** About 80 s for the six coordinates with the card
+free, the PC energy stage included (longer when the card is shared): per coordinate the 378
+probes take 11.4–11.9 s, one sandwich pair walk each plus 24 walks of the
+integrals term, and the fifteen-rung ladder 1.5 s, `Y_pc` in one pass
+(#240) at each side. Not `small`.
+
+**The negative control: what only the ladder sees.** The run was repeated
+once in scratch with `W'[Idot]` zeroed in both the reverse and the forward
+side, then reverted. Every duality still held (worst 7.0e-14), and so did
+the symmetry zeros and every `Y_pc` ladder. On both z coordinates the `y_pc`
+ladder stalled at 7.4e-4 relative, one fourfold halving, and failed. So the
+FULL mode's mixed response is in the gated `y_pc`, and only the ladder sees
+its absence.
+
+The flag's parsing is `test/cli/`'s `CliScPseudodensityFlagTests`
+(`ScSourceTangentTakesPc`, and `--pc` in `ScSourceTangentRefusesTheOtherJobs`
+and `ScSourceTangentRefusesTheApproximateDigests`).
+
 ## The orbital block's integral curvature
 
 `nevpt2_sc_pseudodensity_cas44_sc_hessian_kk_int`,
@@ -2413,6 +2503,7 @@ exact digests:
 | `nevpt2_pc_hessian_cas44_full`, `nevpt2_pc_hessian_cas44_casscf_full` | `nevpt2_pc_tangent --pc-hessian --gradgold <sidecar>` | `PASS: the PC-NEVPT2 Hessian Eddot(u, v) matches the central difference of Edot (orbital-energy mode: FULL, …`, with the smallest kept `s / s_max` and gap | `gpu;small` | "The CI block in FULL mode" |
 | `nevpt2_pc_hessian_vector_cas44_full`, `nevpt2_pc_hessian_vector_cas44_casscf_full` | `nevpt2_pc_tangent --pc-hessian-vector --gradgold <sidecar>` | `PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches … (orbital-energy mode: FULL, …`, likewise | `gpu;small` | "The CI block in FULL mode" |
 | `nevpt2_sc_pseudodensity_cas44_casscf_sc_source_tangent`, `nevpt2_sc_pseudodensity_cas44_casscf_df_sc_source_tangent` | `nevpt2_sc_pseudodensity --sc-source-tangent <pertgold>` (#220) | `PASS: the SC source terms' tangent along the integral perturbation agrees with itself by duality to 1e-07 … on 2 of 6 coordinates; 4 refused, populating empty perturbers (Sec. 5.6)`, the fitted entry's line ending `(density-fitted)` | `gpu` | "The source terms' tangent along an integral perturbation" |
+| `nevpt2_sc_pseudodensity_cas44_casscf_pc_source_tangent` | `nevpt2_sc_pseudodensity --pc --sc-source-tangent <pertgold>` (#234) | `PASS: the PC source terms' tangent along the integral perturbation agrees with itself by duality to 1e-07 … on 6 of 6 coordinates (orbital energies FULL)` | `gpu` | "PC's source terms' tangent along an integral perturbation" |
 
 There is no CAS(8,8) entry for PC's CI block: there both second-order checks
 converge to a value standing off the analytic one, for a conditioning reason
@@ -2438,7 +2529,7 @@ build sets each flag's tile floor is [`performance.md`](performance.md),
 | `RdmSecondDerivativeTests`, `RdmHessianTangentsTests` (`gpu`) | `rdm_tangent_tests` | the builder at `(u, v)` against a central difference of the tangent, the third derivative exactly zero; each three-argument set against the tangent build at its pair |
 | `PcHessianReportTests`, `PcHessianVectorReportTests` | `pc_tangent_tests` | the PC Hessian checks' gates: a refused class, a control that answers instead of refusing, a two-term tangent off the three-term one and a plateau in any class each fail |
 | `CliHessianRefusalTests` | `cli_tests` | every Hessian flag against every approximate digest, in both orders, refused as `err_unsupported`; each flag one binary's; the exact digests accepted |
-| `CliScPseudodensityFlagTests` (`ScSourceTangent*`, #220) | `cli_tests` | `--sc-source-tangent PATH` sets its path, needs one, takes `--gradgold` and the exact digests, refuses the other jobs and `--pc` (`err_config`) and the approximate digests (`err_unsupported`, the Hessian flags' message), and is `nevpt2_sc_pseudodensity`'s alone |
+| `CliScPseudodensityFlagTests` (`ScSourceTangent*`, #220, #234) | `cli_tests` | `--sc-source-tangent PATH` sets its path, needs one, takes `--gradgold`, the exact digests and `--pc` (#234), refuses the other jobs (`err_config`) and the approximate digests (`err_unsupported`, the Hessian flags' message), with `--pc` too, and is `nevpt2_sc_pseudodensity`'s alone |
 | `PertGoldRoundTripTests`, `PertGoldLoadErrorTests`, `PertGoldCommittedTests` | `pertgold_tests` | the `.pertgold` reader (#220): a written sidecar's header, arrays and per-coordinate slices read back; every malformed file an IO Error, and the sidecar with **any one** of its 22 arrays missing refused whole; the two committed sidecars paired with their own golden and gradient sidecar and refused beside the CASCI state's (another frame) and the other calculation's |
 
 ## The density-fitted orbital source term
