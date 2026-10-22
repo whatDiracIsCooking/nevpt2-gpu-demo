@@ -1,0 +1,1037 @@
+% docs/energy.tex -- the density-fitted NEVPT2 energy, as implemented.
+%
+% Current-state, like every file in docs/: it describes what the tree does,
+% and it carries NO measured numbers (timings, errors, gaps, tile floors).
+% Those live in performance.md, pc-nevpt2.md, reference-data.md and
+% testing.md, and are cited here by file and section name. The thresholds
+% that appear below (1e-7, 1e-14, PC_TAU, PC_MIN_GAP) are constants of the
+% code, not measurements.
+%
+% Build: pdflatex energy.tex (twice, for the cross-references). Needs
+% amsmath, amssymb, booktabs, algorithm, algpseudocode (algorithmicx),
+% hyperref, geometry, lmodern and microtype -- all in a standard TeX Live.
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+% "--pc" must stay two hyphens in \texttt, not an en dash.
+\DisableLigatures[-]{encoding = T1, family = tt*}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\G}[1]{\Gamma^{(#1)}}
+\newcommand{\Gh}[1]{\Gamma^{\mathrm{h}(#1)}}
+\newcommand{\Gb}[1]{\bar\Gamma^{(#1)}}
+\newcommand{\eps}{\varepsilon}
+\newcommand{\Fca}{F^{\mathrm{ca}}}
+\newcommand{\Fac}{F^{\mathrm{ac}}}
+\newcommand{\cls}[1]{\ensuremath{\mathrm{#1}}}
+\algrenewcommand\algorithmicrequire{\textbf{Input:}}
+\algrenewcommand\algorithmicensure{\textbf{Output:}}
+
+\title{The density-fitted NEVPT2 energy:\\
+SC and PC, on CASCI and CASSCF orbitals}
+\author{\code{nevpt2-gpu-demo}, \code{docs/energy.tex}}
+\date{}
+
+\begin{document}
+\sloppy
+\maketitle
+
+\begin{abstract}
+\code{nevpt2\_df\_demo} computes the strongly-contracted (SC) and, with
+\code{--pc}, the partially-contracted (PC) NEVPT2 correlation energy of a
+density-fitted reference, and checks every class and the total against a
+committed golden file to $10^{-7}\,E_h$. The golden may be built on RHF
+orbitals (a CASCI reference) or on converged CASSCF orbitals. This document
+covers the four combinations
+$\{\text{SC},\text{PC}\}\times\{\text{CASCI},\text{CASSCF}\}$. For each one it
+gives the equations the code evaluates and pseudocode for the path through
+the tree. The pipeline in prose is \code{docs/implementation.md}, and the PC
+derivation and its measured behaviour are \code{docs/pc-nevpt2.md}. Like
+every file in \code{docs/}, this one states what the code \emph{does}, and it
+carries no measured numbers.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{The four paths, and where they actually differ}
+\label{sec:paths}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & CASCI orbitals (RHF) & CASSCF orbitals \\
+\midrule
+SC & \S\ref{sec:sc-casci} & \S\ref{sec:sc-casscf} \\
+PC (\code{--pc}) & \S\ref{sec:pc-casci} & \S\ref{sec:pc-casscf} \\
+\bottomrule
+\end{tabular}
+\caption{The four paths, and the section that walks through each.}
+\label{tab:paths}
+\end{table}
+
+The two axes of Table~\ref{tab:paths} split the work at different places:
+
+\begin{itemize}
+\item \textbf{CASCI vs.\ CASSCF is decided offline, in the golden file.}
+  Every golden is a deterministic \code{mcscf.CASCI} (density-fitted:
+  \code{DFCASCI}). A CASSCF golden is the same CASCI, run on converged
+  CASSCF orbitals that \code{generate\_golden.py --casscf --mo-out}
+  optimised once and committed as a \code{.mogold} sidecar, and that
+  \code{--mo-from} reads back. The canonicalisation, the RDMs, the integral
+  blocks and the reference answers all come downstream of that solve. The only
+  trace in the file is the header field \code{reference\_kind}. The demo
+  prints it and otherwise ignores it. \textbf{At run time the CASCI and
+  CASSCF paths run the same code.} (Beyond the energy, the field matters in
+  one place: \code{requireLagrangianReference} refuses a \code{casscf}
+  golden, because the Z-vector chain is derived for CASCI on RHF orbitals.
+  The source-term checks pass \code{requireSourceTermReference}, which
+  accepts both kinds. Neither is part of this document.)
+\item \textbf{SC vs.\ PC is decided at run time, by \code{--pc}.} Both share
+  the input stage, the density-fitted slab builder (\S\ref{sec:df}), the RDM
+  build (\S\ref{sec:rdm}) and the RDM-only intermediates
+  (Appendix~\ref{app:intermediates}). They fork at the class energies:
+  \code{energiesDevice} (\S\ref{sec:sc}) or \code{pcEnergiesDevice}
+  (\S\ref{sec:pc}).
+\end{itemize}
+
+So the four paths are two run-time pipelines, each fed by two kinds of
+golden. Sections~\ref{sec:sc-casci}--\ref{sec:pc-casscf} still give each path
+its own end-to-end pseudocode, offline step included, so that each can be read
+alone.
+
+%======================================================================
+\section{Notation and conventions}
+\label{sec:notation}
+
+\paragraph{Orbital spaces.} $i,j$ label core (doubly occupied) orbitals,
+$r,s$ virtual orbitals. Active orbitals are labelled by any of
+$p,q,a,b,c,t,u,k,l,m$. The counts are $n_c$, $n_a$ (also written $n$) and
+$n_v$, and $n_L$ is the number of auxiliary functions.
+
+\paragraph{Integrals.} $(pq|rs)$ is a chemists'-notation two-electron
+integral over the canonicalised MOs (\S\ref{sec:input}). The active block that
+the RDM build and the intermediates read is stored in \emph{physicists'}
+order,
+\begin{equation}
+  v_{tuvw} \equiv \code{h2e}[t,u,v,w] = (tv|uw),
+  \label{eq:h2e}
+\end{equation}
+and its chemists'-order transpose is $e_{tuvw} = (tu|vw)$
+(\code{transpose(h2e, \{0,2,1,3\})} in \code{src/rdm/rdm\_build.cpp}).
+$h$ is the active-active block of the effective one-electron operator
+\code{h1eff} (\S\ref{sec:input}).
+
+\paragraph{Density matrices.} With $E_{pq} = \sum_\sigma
+a^\dagger_{p\sigma}a_{q\sigma}$ and the CAS reference $|\Psi_0\rangle$,
+\begin{equation}
+  \G1_{pq} = \langle E_{pq}\rangle,\qquad
+  \G2_{pqrs} = \langle E_{pq}E_{rs}\rangle,\qquad
+  \G3_{pqrstu} = \langle E_{pq}E_{rs}E_{tu}\rangle,
+  \label{eq:rdm}
+\end{equation}
+which is the convention of PySCF's \code{fci.rdm.make\_dm123} and of the
+golden's \code{dm1}/\code{dm2} (\code{docs/architecture.md}, the
+\code{rdm\_host\_dm} row). $\Fca$ and $\Fac$ are the two
+integral-contracted 4-RDMs (\code{f3ca}, \code{f3ac}), PySCF's
+\code{NEVPTkern\_sf} quantities, built on the device in
+\S\ref{sec:rdm}. The full 4-RDM is never formed.
+
+\paragraph{Orbital energies.} $\eps_i$, $\eps_r$ are the diagonal of the
+generalised Fock matrix in the canonical core and virtual bases
+(\S\ref{sec:input}), read from the golden as \code{e\_core}, \code{e\_virt}.
+
+\paragraph{Summation.} In the class formulas of \S\ref{sec:sc} and
+\S\ref{sec:pc}, \emph{repeated active indices are summed} and external indices
+are free unless a sum says otherwise. The intermediates in
+Appendix~\ref{app:intermediates} write every sum explicitly.
+
+\paragraph{Tolerances (constants of the code).}
+$\code{NUMERICAL\_ZERO} = 10^{-14}$ (the SC empty-perturber guard),
+$\code{PC\_TAU} = 10^{-13}$ (the PC metric cut),
+$\code{PC\_MIN\_GAP} = 10^{3}$ (the PC gap refusal), and $10^{-7}\,E_h$ (the
+golden comparison), all in \code{src/energy/energy\_finish.cppm} and the
+demo's \code{main}.
+
+%======================================================================
+\section{What a density-fitted golden carries}
+\label{sec:input}
+
+The demo's inputs are fixed offline by \code{reference\_data/generate\_golden.py
+--df}, the only file that defines the state. No PySCF runs at build or test
+time. This section states what the file contains, because each of the four
+paths begins here.
+
+\subsection{Density fitting}
+The whole calculation is fitted with one auxiliary basis (\code{--auxbasis},
+default \code{<basis>-jkfit}): the RHF, the CASCI (or CASSCF), the
+canonicalisation, \code{h1eff} and every NEVPT2 integral block. With $J_{PQ} =
+(P|Q)$ the Coulomb metric and $M$ any factor with $M^{\mathsf T}M = J^{-1}$
+(PySCF's \code{\_cderi}),
+\begin{equation}
+  B^L_{pq} = \sum_{\mu\nu} C_{\mu p} C_{\nu q} \sum_P M_{LP}\,(P|\mu\nu),
+  \qquad
+  (pq|rs) \approx \sum_{L=1}^{n_L} B^L_{pq}\,B^L_{rs}
+  \label{eq:df}
+\end{equation}
+(the symmetric-metric convention: no metric between the two factors). The file
+carries four MO blocks of $B$,
+\begin{equation}
+  B_{aa}\,(n_L,n_a,n_a),\quad B_{ca}\,(n_L,n_c,n_a),\quad
+  B_{va}\,(n_L,n_v,n_a),\quad B_{cv}\,(n_L,n_c,n_v),
+  \label{eq:bblocks}
+\end{equation}
+and \textbf{no virtual--virtual block}. No SC- or PC-NEVPT2 class has two
+virtual indices in one charge distribution, so $B_{vv}$, the largest block of
+all, is never needed.
+
+\subsection{Canonicalisation and the one-electron inputs}
+\label{sec:canon}
+After the CAS solve the generator calls
+\code{NEVPT.canonicalize(cas\_natorb=True)}, which is exactly what
+\code{pyscf.mrpt.NEVPT.kernel} does. It forms the generalised Fock matrix
+\begin{equation}
+  f_{pq} = h^{\mathrm{core}}_{pq}
+     + \sum_i \bigl[2(pq|ii) - (pi|iq)\bigr]
+     + \sum_{tu} \G1_{tu}\bigl[(pq|tu) - \tfrac12(pt|uq)\bigr],
+  \label{eq:gfock}
+\end{equation}
+diagonalises its core--core and virtual--virtual blocks ($\eps_i$, $\eps_r$
+are the eigenvalues), and rotates the active space to natural orbitals,
+transforming the CI vector with it. The effective one-electron operator that
+the active space sees is the core Fock operator,
+\begin{equation}
+  h^{\mathrm{eff}}_{pq} = h^{\mathrm{core}}_{pq}
+     + \sum_i \bigl[2(pq|ii) - (pi|iq)\bigr],
+  \label{eq:h1eff}
+\end{equation}
+and the golden stores four slices of it (\code{\_integral\_blocks}):
+\begin{equation}
+  h_{pq} = h^{\mathrm{eff}}_{pq},\quad
+  h'^{\,\cls{Sr}}_{rp} = h^{\mathrm{eff}}_{rp} - \sum_b (rb|bp),\quad
+  h'^{\,\cls{Si}}_{pi} = h^{\mathrm{eff}}_{pi},\quad
+  h'^{\,\cls{Sir}}_{ri} = h^{\mathrm{eff}}_{ri}.
+  \label{eq:h1slices}
+\end{equation}
+These, $\eps$, $\G1$ and $\G2$ are \textbf{read from the file}. They belong to
+the CAS calculation and are not a fitting target, so the DF demo does not
+rebuild them. $\G3$, $\Fca$ and $\Fac$ are deliberately \emph{not} in the
+file: building them is the device's job (\S\ref{sec:rdm}).
+
+\subsection{The reference answers}
+The SC reference is PySCF's DF-NEVPT2 (\code{pyscf.mrpt.dfnevpt2}) on the
+same state: per-class norms and energies and the total. The PC reference is
+block2's \code{icnevpt2\_full} with the same fitted integrals injected
+(\code{docs/pc-nevpt2.md}, ``The block2 reference''), stored as
+\code{pc\_class\_energies} and \code{e\_pc\_total}. A golden whose PC metric is
+not gapped is written \code{--no-pc} and carries no PC fields. N2 CAS(12,12) is
+one (\code{docs/implementation.md}, \S4.3).
+
+%======================================================================
+\section{\texorpdfstring{Shared stage A: external integrals from $B$, slab by slab}{Shared stage A: external integrals from B, slab by slab}}
+\label{sec:df}
+
+The class energies never read a whole four-index external block. Each class
+walks one external index in batches of \code{--batch} (default 8; 0 means one
+batch), and asks its \code{IntegralSource} for the slab covering that batch.
+\code{DfIntegralSource} (\code{src/df\_integrals/}) builds every slab the same
+way: one DGEMM and at most one permutation.
+\begin{align}
+  C_{xyzw} &= \sum_L X^L_{xy}\,Y^L_{zw},
+    \qquad x \in [b_0, b_1)\ \text{(the batch)},
+  \label{eq:slabgemm}\\
+  \mathrm{slab}_{\sigma(xyzw)} &= C_{xyzw}
+  \label{eq:slabperm}
+\end{align}
+Equation~\eqref{eq:slabgemm} is a single \code{wwrblasDgemm} with $M = n_z
+n_w$, $N = (b_1-b_0)\,n_y$, $K = n_L$, whose $B$ operand is a contiguous run
+of $X$'s rows. Equation~\eqref{eq:slabperm} is the generic einsum kernel's
+transpose into the physicist layout the class subscripts expect. The batched
+index is always the first index of $X$'s pair, which is why $B_{cv}$ is also
+held transposed as $B_{vc}$. Table~\ref{tab:slabs} is the code's own table
+(\code{DfIntegralSource::slab}).
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{@{}llllll@{}}
+\toprule
+block & slab element & $X$ & $Y$ & $C$ & axes $\sigma$ \\
+\midrule
+$V^{\cls{Sr}}_{rabc}$   & $(rb|ac)$ & $B_{va}$ & $B_{aa}$ & $[r,b,a,c]$ & 0 2 1 3 \\
+$V^{\cls{Si}}_{tuiv}$   & $(it|uv)$ & $B_{ca}$ & $B_{aa}$ & $[i,t,u,v]$ & 1 2 0 3 \\
+$g_{iajb}$ (\cls{Sijrs}) & $(ia|jb)$ & $B_{cv}$ & $B_{cv}$ & $[i,a,j,b]$ & identity \\
+$V^{\cls{Sijr}}_{rpji}$ & $(rj|ip)$ & $B_{vc}$ & $B_{ca}$ & $[r,j,i,p]$ & 0 3 1 2 \\
+$V^{\cls{Srsi}}_{rsit}$ & $(ri|st)$ & $B_{vc}$ & $B_{va}$ & $[r,i,s,t]$ & 0 2 1 3 \\
+$V^{\cls{SrsiT}}_{srit}$& $(rt|si)$ & $B_{va}$ & $B_{vc}$ & $[r,t,s,i]$ & 2 0 3 1 \\
+$V^{\cls{Srs}}_{rstu}$  & $(rt|su)$ & $B_{va}$ & $B_{va}$ & $[r,t,s,u]$ & 0 2 1 3 \\
+$V^{\cls{Sij}}_{tuij}$  & $(it|ju)$ & $B_{ca}$ & $B_{ca}$ & $[i,t,j,u]$ & 1 3 0 2 \\
+$V^{1}_{rtiu}$ (\cls{Sir}) & $(ri|tu)$ & $B_{vc}$ & $B_{aa}$ & $[r,i,t,u]$ & 0 2 1 3 \\
+$V^{2}_{ruti}$ (\cls{Sir}) & $(rt|iu)$ & $B_{va}$ & $B_{ca}$ & $[r,t,i,u]$ & 0 3 1 2 \\
+\midrule
+$v_{tuvw}$ (active)     & $(tv|uw)$ & $B_{aa}$ & $B_{aa}$ & $[t,v,u,w]$ & 0 2 1 3 \\
+\bottomrule
+\end{tabular}
+\caption{Each external block as one DGEMM over $B$ plus a permutation
+(slab axis $k$ is $C$ axis $\sigma_k$, NumPy's convention). The first index is
+the batched one, except for \cls{Si} and \cls{Sij} (axis 2) and
+\cls{SrsiT} (axis 1, the \cls{Srsi} block batched along its second virtual,
+because \cls{Srsi} contracts $V_{rs\cdots}$ against $V_{sr\cdots}$). The last
+row, the active block, is built whole, once, before the RDM build.}
+\label{tab:slabs}
+\end{table}
+
+\begin{algorithm}[htbp]
+\caption{\code{DfIntegralSource::slab} and \code{activeH2e}}
+\label{alg:slab}
+\begin{algorithmic}[1]
+\Require block $b$, batch $[b_0,b_1)$; device-resident $B_{aa},B_{ca},B_{va},B_{cv}$ and $B_{vc} = B_{cv}^{\mathsf T_{12}}$
+\State $(X, Y, \sigma) \gets$ the row of Table~\ref{tab:slabs} for $b$
+\State $C \gets \mathbf{0}_{(b_1-b_0)\times n_y\times n_z\times n_w}$ \Comment{from the pool, on the one stream}
+\State $C \gets \textsc{Dgemm}\bigl(Y^{\mathsf T}_{(L,zw)},\ X_{(L,\,b_0{:}b_1\,y)}\bigr)$ \Comment{Eq.~\eqref{eq:slabgemm}}
+\If{$\sigma$ is the identity} \Return $C$ \EndIf
+\State $S \gets \textsc{Transpose}(C, \sigma)$ \Comment{Eq.~\eqref{eq:slabperm}}
+\State \Return $S$ \Comment{$C$ is freed stream-ordered, behind the transpose}
+\end{algorithmic}
+\end{algorithm}
+
+Only the slab-sized $C$ and its permuted copy exist at any one time. The
+caller drops each slab at the end of its batch iteration, so the external
+memory high-water mark is set by \code{--batch} and not by the size of the
+blocks (\code{docs/reference-data.md}, ``Density fitting'', has what that
+measured).
+
+%======================================================================
+\section{\texorpdfstring{Shared stage B: $\G3$, $\Fca$, $\Fac$ on the device}{Shared stage B: dm3, f3ca, f3ac on the device}}
+\label{sec:rdm}
+
+\code{nevpt2.rdm\_build} is shared by both demos, and the only integrals it
+reads are the active block $v$. The DF demo builds $v$ from $B_{aa}$ (last row
+of Table~\ref{tab:slabs}), downloads it once, and hands it to the same
+\code{buildRdmsDevice} the integral-direct demo calls. The determinant axis is
+split into \code{--tiles} tiles. Per tile, with $K$ a determinant of the tile,
+\begin{align}
+  R_{tu,K} &= \bigl(E_{tu}|\Psi_0\rangle\bigr)_K, &
+  L_{pqrs,K} &= \bigl(E_{pq}E_{rs}|\Psi_0\rangle\bigr)_K,
+  \label{eq:produce}\\
+  W^{\mathrm{ca}}_{af,K} &= \sum_{pqx} e_{axqp}\,L_{pqxf,K}, &
+  W^{\mathrm{ac}}_{af,K} &= \sum_{pqx} e_{axqp}\,L_{pqfx,K},
+  \label{eq:consume}
+\end{align}
+and the three digests accumulate over tiles into device-resident totals:
+\begin{align}
+  \G3_{[pqrs],[tu]} &\mathrel{+}= \sum_K L_{pqrs,K}\,R_{tu,K},
+  \label{eq:dm3}\\
+  \Fca_{[w],f,a} &\mathrel{+}= \sum_K W^{\mathrm{ca}}_{af,K}\,L_{w,K},
+  \qquad
+  \Fac_{[w],a,f} \mathrel{+}= \sum_K W^{\mathrm{ac}}_{af,K}\,L_{w,K},
+  \label{eq:f3}
+\end{align}
+where $[w]$ is a four-index row of $L$. The products in
+Eqs.~\eqref{eq:produce}--\eqref{eq:f3} use the string conventions of PySCF's
+\code{fci.rdm} kernels, which fix the index order that the golden's
+$\G1,\G2$ and the energy einsums expect. The digest's target row is $L$'s
+own row, so no permuted copy of $L$ is ever made. After the tile loop, two
+corrections run once, on the fully summed tensors, for each order
+$o\in\{\mathrm{ca},\mathrm{ac}\}$:
+\begin{align}
+  f^{\mathrm{ca}}_{ijkl} &= \sum_{ABC} e_{lCBA}\,\G3_{ABCkji}, &
+  f^{\mathrm{ac}}_{ijkl} &= \sum_{CEF} e_{kCEF}\,\G3_{ijClEF},
+  \label{eq:fdm2}
+\end{align}
+and the ``wedge'', for every $j<i$ and all free indices:
+\begin{equation}
+  F^{o}_{jbicde} \gets F^{o}_{icjbde},\qquad
+  F^{o}_{jiicde} \mathrel{+}= f^{o}_{jcde},\qquad
+  F^{o}_{jbijde} \mathrel{-}= f^{o}_{ibde}.
+  \label{eq:wedge}
+\end{equation}
+
+\begin{algorithm}[htbp]
+\caption{\code{buildRdmsDevice} (the default emitted digest; the GEMM digests
+differ only in where the per-tile add happens)}
+\label{alg:rdm}
+\begin{algorithmic}[1]
+\Require CI vector $c$, $(n_a, n_\alpha, n_\beta)$, active $v$, tile count $T$
+\State link tables $\gets$ \textsc{KnowlesHandy}$(n_a, n_\alpha, n_\beta)$ \Comment{host}
+\State $e \gets \textsc{Transpose}(v, (0,2,1,3))$; upload $c$, $e$, link tables
+\State $\G3, \Fca, \Fac \gets \mathbf 0_{n^6}$ \Comment{device accumulators}
+\For{each determinant tile $\mathcal T$ of $T$}
+  \State $(R, L) \gets \textsc{Produce}(c, \mathcal T)$ \Comment{Eq.~\eqref{eq:produce}, one thread per $K$}
+  \State $W^{\mathrm{ca}}, W^{\mathrm{ac}} \gets \textsc{Consume}(e, L)$ \Comment{Eq.~\eqref{eq:consume}, strided-batched DGEMM}
+  \State $\G3 \mathrel{+}= L\,R^{\mathsf T}$;\quad $\Fca \mathrel{+}= \cdots$;\quad $\Fac \mathrel{+}= \cdots$ \Comment{Eqs.~\eqref{eq:dm3}--\eqref{eq:f3}}
+\EndFor
+\For{$o \in \{\mathrm{ca}, \mathrm{ac}\}$}
+  \State $f^o \gets \textsc{Fdm2}(e, \G3)$;\quad $F^o \gets \textsc{Wedge}(F^o, f^o)$ \Comment{Eqs.~\eqref{eq:fdm2}--\eqref{eq:wedge}}
+\EndFor
+\State \Return $\G3, \Fca, \Fac$ \Comment{device-resident, never downloaded}
+\end{algorithmic}
+\end{algorithm}
+
+The digests can run four ways: emitted kernels, native fp64 BLAS
+(\code{--blas-digest}), cuBLAS fixed-point emulation (\code{--cublas}, CUDA
+only) and int8 Ozaki (\code{--ozaki}). All four compute
+Eqs.~\eqref{eq:dm3}--\eqref{eq:f3}. Which is the default, and why, is
+\code{docs/performance.md}, ``Native-fp64 BLAS digest''. \code{--tiles} is a
+memory lever, and the floors are in \code{docs/performance.md}, ``Tile
+floors''.
+
+%======================================================================
+\section{The strongly-contracted energy}
+\label{sec:sc}
+
+\subsection{The formula every class shares}
+For a perturber class $\kappa$ (one of \cls{Sr}, \cls{Si}, \cls{Sijrs},
+\cls{Sijr}, \cls{Srsi}, \cls{Srs}, \cls{Sij}, \cls{Sir}, the order PySCF and
+the golden use) and an external tuple $t$ of that class, SC-NEVPT2 builds one
+perturber $|\Psi^\kappa_t\rangle = P^\kappa_t\,V|\Psi_0\rangle$, the projection
+of the perturbation onto the internal space that $t$ labels. With the Dyall
+Hamiltonian $H_D$ and $E_0 = \langle\Psi_0|H_D|\Psi_0\rangle$,
+\begin{equation}
+  N_t = \langle\Psi^\kappa_t|\Psi^\kappa_t\rangle,\qquad
+  E^\kappa_t - E_0 = \Delta_t + \frac{H_t}{N_t},\qquad
+  E^{(2)}_\kappa = -\!\!\sum_{t:\,|N_t|>\code{NUMERICAL\_ZERO}}\!\!
+     \frac{N_t}{\Delta_t + H_t/N_t},
+  \label{eq:sc}
+\end{equation}
+where $\Delta_t$ is the tuple's orbital-energy sum (Table~\ref{tab:sc}) and
+$H_t$ is the active part of $\langle\Psi^\kappa_t|(H_D - E_0)|\Psi^\kappa_t
+\rangle$. The total is $E^{(2)} = \sum_\kappa E^{(2)}_\kappa$. The reduction in
+Eq.~\eqref{eq:sc} is \code{normToEnergy}, a verbatim transcription of
+\code{pyscf.mrpt.nevpt2.\_norm\_to\_energy}, vanishing-norm guard included.
+The class norm it returns is the plain sum $\sum_t N_t$, which is what the
+golden's \code{class\_norms} holds.
+
+Each $N_t$ and $H_t$ is a quadratic form in the slab's integrals, contracted
+against one RDM-only block per term: a metric on the $N$ side and a Dyall
+block on the $H$ side. Neither block depends on $t$. Every class therefore
+builds its blocks \emph{once}, before its slab walk, and the walk does one
+einsum chain per slab. The blocks are listed in
+Appendix~\ref{app:intermediates}. \code{make\_a16} and \code{make\_a22} are
+the only readers of $\Fca$, $\Fac$.
+
+\subsection{The eight classes}
+\label{sec:sc-classes}
+Each formula below is the einsum chain of
+\code{src/energy/energy\_sc\_classes.cppm}, with the code's subscripts renamed
+so that core indices are $i,j$, virtual indices are $r,s$, and every other
+index is active (summed). The slabs $V$ are those of Table~\ref{tab:slabs},
+and the one-electron rows those of Eq.~\eqref{eq:h1slices}.
+
+\paragraph{\cls{Sr} (one virtual), $\Delta_r = \eps_r$.}
+\begin{align}
+  N_r &= V^{\cls{Sr}}_{rpqu}\,\G3_{upqbac}\,V^{\cls{Sr}}_{rabc}
+       + 2\,V^{\cls{Sr}}_{rpqu}\,\G2_{upqa}\,h'^{\,\cls{Sr}}_{ra}
+       + h'^{\,\cls{Sr}}_{rp}\,\G1_{pa}\,h'^{\,\cls{Sr}}_{ra},\\
+  H_r &= V^{\cls{Sr}}_{rpqu}\,A^{16}_{pqu,abc}\,V^{\cls{Sr}}_{rabc}
+       + 2\,V^{\cls{Sr}}_{rpqu}\,A^{17}_{pqua}\,h'^{\,\cls{Sr}}_{ra}
+       + h'^{\,\cls{Sr}}_{rp}\,A^{19}_{pa}\,h'^{\,\cls{Sr}}_{ra}.
+\end{align}
+
+\paragraph{\cls{Si} (one core), $\Delta_i = -\eps_i$.} The metric is
+hole-side: $\Gh3$, $\Gh2$ and $\Gh1 = 2\delta - \G{1\,\mathsf T}$
+(Eqs.~\eqref{eq:dmh3}--\eqref{eq:dmh2}).
+\begin{align}
+  N_i &= V^{\cls{Si}}_{qpiu}\,\Gh3_{upqbac}\,V^{\cls{Si}}_{baic}
+       + 2\,V^{\cls{Si}}_{qpiu}\,\Gh2_{upqa}\,h'^{\,\cls{Si}}_{ai}
+       + h'^{\,\cls{Si}}_{pi}\,\Gh1_{pa}\,h'^{\,\cls{Si}}_{ai},\\
+  H_i &= V^{\cls{Si}}_{qpiu}\,A^{22}_{pqu,abc}\,V^{\cls{Si}}_{baic}
+       + 2\,V^{\cls{Si}}_{qpiu}\,A^{23}_{pqua}\,h'^{\,\cls{Si}}_{ai}
+       + h'^{\,\cls{Si}}_{pi}\,A^{25}_{pa}\,h'^{\,\cls{Si}}_{ai}.
+\end{align}
+
+\paragraph{\cls{Sijrs} (two core, two virtual).} It has no active index and
+no RDM, so it is MP2-like. It runs as a dedicated reduction kernel
+(\code{energy\_sijrs}) over $(i, a, j, b)$ slabs of $g_{iajb} = (ia|jb)$, with
+$a,b$ virtual here:
+\begin{equation}
+  N = \sum_{iajb} g_{iajb}\,\theta_{iajb},\qquad
+  E^{(2)}_{\cls{Sijrs}} = \sum_{iajb}
+     \frac{g_{iajb}\,\theta_{iajb}}{\eps_i+\eps_j-\eps_a-\eps_b},\qquad
+  \theta_{iajb} = 2g_{iajb} - g_{ibja}.
+  \label{eq:sijrs}
+\end{equation}
+Each thread accumulates both sums in a grid-stride loop. A warp-shuffle block
+reduction then folds each sum into one \code{atomicAdd} per block.
+
+\paragraph{\cls{Sijr} (two core, one virtual).} With $G = \Gb1 = 2\delta -
+\G{1\,\mathsf T}$ on the $N$ side and $G = A^3$ on the $H$ side,
+\begin{equation}
+  \tilde X_{r,ji}[G] = 2\,V^{\cls{Sijr}}_{rpji}\,V^{\cls{Sijr}}_{raji}\,G_{pa}
+                     - V^{\cls{Sijr}}_{rpji}\,V^{\cls{Sijr}}_{raij}\,G_{pa}.
+\end{equation}
+The host symmetrises in $(i,j)$, halves the diagonal and packs $j\le i$:
+\begin{equation}
+  X_{r,ji} = \bigl(\tilde X_{r,ji} + \tilde X_{r,ij}\bigr)\bigl(1 -
+  \tfrac12\delta_{ij}\bigr),\quad
+  N_{rji} = X_{r,ji}[\Gb1],\quad H_{rji} = X_{r,ji}[A^3],\quad
+  \Delta_{rji} = \eps_r - \eps_j - \eps_i.
+\end{equation}
+
+\paragraph{\cls{Srsi} (two virtual, one core).} With $G = \G1$ ($N$) and $G =
+K^{27}$ ($H$), accumulated into a whole $(n_v,n_v,n_c)$ table, batch by
+batch,
+\begin{equation}
+  \tilde X_{rs,i}[G] = 2\,V^{\cls{Srsi}}_{rsip}\,V^{\cls{Srsi}}_{rsia}\,G_{pa}
+     - V^{\cls{Srsi}}_{rsip}\,V^{\cls{SrsiT}}_{sria}\,G_{pa}.
+\end{equation}
+After the walk, the host symmetrises in $(r,s)$, halves the diagonal and
+packs $r\le s$, with $\Delta_{rsi} = \eps_r+\eps_s-\eps_i$. The table is
+whole because $(r,s)$ and $(s,r)$ can fall in different batches.
+
+\paragraph{\cls{Srs} (two virtual), $\Delta_{rs} = \eps_r+\eps_s$, over
+ordered $(r,s)$.}
+\begin{equation}
+  N_{rs} = \tfrac12\,V^{\cls{Srs}}_{rsqp}\,V^{\cls{Srs}}_{rsba}\,R^{(2)}_{pqba},
+  \qquad
+  H_{rs} = \tfrac12\,V^{\cls{Srs}}_{rsqp}\,V^{\cls{Srs}}_{rsba}\,A^{7}_{pqab}.
+\end{equation}
+
+\paragraph{\cls{Sij} (two core), $\Delta_{ij} = -(\eps_i+\eps_j)$, over
+ordered $(i,j)$.}
+\begin{equation}
+  N_{ij} = \tfrac12\,V^{\cls{Sij}}_{qpij}\,V^{\cls{Sij}}_{baij}\,\Gb2_{pqab},
+  \qquad
+  H_{ij} = \tfrac12\,V^{\cls{Sij}}_{qpij}\,V^{\cls{Sij}}_{baij}\,A^{9}_{pqab}.
+\end{equation}
+
+\paragraph{\cls{Sir} (one core, one virtual), $\Delta_{ir} = \eps_r -
+\eps_i$.} Two slabs, $V^1$ and $V^2$, and the row $h'_{ri} \equiv
+h'^{\,\cls{Sir}}_{ri}$:
+\begin{align}
+  N_{ir} &= 2\,V^1_{rpiq}V^1_{raib}\G2_{qpab}
+          - V^1_{rpiq}V^2_{rabi}\G2_{qpab}
+          - V^2_{rpqi}V^1_{raib}\G2_{qpab}
+          + 2\,V^2_{raqi}V^2_{rabi}\G1_{qb} \notag\\
+         &\quad - V^2_{rpqi}V^2_{rabi}\G2_{qbap}
+          + V^2_{rpqi}\Bigl(\textstyle\sum_a V^2_{raai}\Bigr)\G1_{qp}
+          + 4\,V^1_{rpiq}h'_{ri}\G1_{qp}
+          - 2\,V^2_{rpqi}h'_{ri}\G1_{qp}
+          + 2\,h'^{\,2}_{ri},\\
+  H_{ir} &= 2\,V^1_{rpiq}V^1_{raib}A^{12}_{pqab}
+          - V^1_{rpiq}V^2_{rabi}A^{12}_{pqab}
+          - V^2_{rpqi}V^1_{raib}A^{12}_{pqab}
+          + V^2_{rpqi}V^2_{rabi}A^{13}_{pqab}.
+\end{align}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{@{}lllll@{}}
+\toprule
+class & tuple $t$ & metric (norm) & Dyall block ($H$) & $\Delta_t$ \\
+\midrule
+\cls{Sr}    & $r$         & $\G3,\G2,\G1$       & $A^{16},A^{17},A^{19}$ & $\eps_r$ \\
+\cls{Si}    & $i$         & $\Gh3,\Gh2,\Gh1$    & $A^{22},A^{23},A^{25}$ & $-\eps_i$ \\
+\cls{Sijrs} & $(i,j,r,s)$ & ---                 & ---                     & $\eps_r+\eps_s-\eps_i-\eps_j$ \\
+\cls{Sijr}  & $(r,j\le i)$& $\Gb1$              & $A^3$                   & $\eps_r-\eps_i-\eps_j$ \\
+\cls{Srsi}  & $(r\le s,i)$& $\G1$               & $K^{27}$                & $\eps_r+\eps_s-\eps_i$ \\
+\cls{Srs}   & $(r,s)$     & $R^{(2)}$           & $A^7$                   & $\eps_r+\eps_s$ \\
+\cls{Sij}   & $(i,j)$     & $\Gb2$              & $A^9$                   & $-\eps_i-\eps_j$ \\
+\cls{Sir}   & $(i,r)$     & $\G2,\G1$           & $A^{12},A^{13}$         & $\eps_r-\eps_i$ \\
+\bottomrule
+\end{tabular}
+\caption{The SC classes at a glance.}
+\label{tab:sc}
+\end{table}
+
+\begin{algorithm}[htbp]
+\caption{\code{energiesDevice} over a \code{DfIntegralSource}}
+\label{alg:sc}
+\begin{algorithmic}[1]
+\Require active ints $(h, v, h'^{\cls{Sr}}, h'^{\cls{Si}}, h'^{\cls{Sir}}, \eps)$; $\G1,\G2$ (uploaded); $\G3,\Fca,\Fac$ (device); source $\mathcal S$; batch $\beta$
+\Ensure $(N_\kappa, E^{(2)}_\kappa)$ for the eight classes, $E^{(2)}$
+\For{$\kappa \in (\cls{Sr},\cls{Si},\cls{Sijrs},\cls{Sijr},\cls{Srsi},\cls{Srs},\cls{Sij},\cls{Sir})$}
+  \If{$\kappa = \cls{Sijrs}$}
+    \For{each core batch $[b_0,b_1)$}
+       \State $g \gets \mathcal S.\textsc{slab}(\cls{Sijrs}, b_0, b_1)$; $(N, E) \mathrel{+}= \textsc{EnergySijrs}(g, \eps)$ \Comment{Eq.~\eqref{eq:sijrs}}
+    \EndFor
+    \State \textbf{continue}
+  \EndIf
+  \State build the class's metric and Dyall blocks \Comment{App.~\ref{app:intermediates}; once per class}
+  \For{each batch $[b_0,b_1)$ of the class's external index} \Comment{\code{forBatches}}
+    \State $V \gets \mathcal S.\textsc{slab}(\kappa, b_0, b_1)$ \Comment{Alg.~\ref{alg:slab}; \cls{Srsi}: also \cls{SrsiT}; \cls{Sir}: $V^1,V^2$}
+    \State $N_t, H_t \gets$ the class's einsum chains on $V$ \Comment{\S\ref{sec:sc-classes}}
+    \State download $N_t, H_t$ \Comment{synchronises the stream; no sync before it}
+    \State \cls{Sijr}: symmetrise and pack $j\le i$ on the host
+    \State $(N_\kappa, E^{(2)}_\kappa) \mathrel{+}= \textsc{NormToEnergy}(N_t, H_t, \Delta_t)$ \Comment{Eq.~\eqref{eq:sc}}
+  \EndFor
+  \State \cls{Srsi}: symmetrise and pack $r\le s$ over the whole table, then \textsc{NormToEnergy}
+\EndFor
+\State \Return $N_\kappa, E^{(2)}_\kappa$, $E^{(2)} = \sum_\kappa E^{(2)}_\kappa$
+\end{algorithmic}
+\end{algorithm}
+
+%======================================================================
+\section{The partially-contracted energy}
+\label{sec:pc}
+
+\subsection{PC is SC without the final contraction}
+SC collapses each class to two scalars per tuple. PC keeps the whole span of
+the class's internal functions. With $S$ the class metric, $K$ its Dyall
+block (the same blocks SC contracts, as $d\times d$ matrices over the class's
+internal basis), $x_t$ the tuple's slab as a vector over that basis, $S_1$
+the metric columns through which the one-body part of $V|\Psi_0\rangle$
+projects, and $h_t$ the tuple's one-electron row,
+\begin{equation}
+  E^{\mathrm{PC}}_t = -c\; b_t^{\mathsf T}\,\bigl(K + \Delta_t S\bigr)^{+}\,b_t,
+  \qquad b_t = S\,x_t + S_1\,h_t.
+  \label{eq:pc}
+\end{equation}
+Here $c$ is the class's coupling factor: $1$ for \cls{Sr}, \cls{Si} and
+\cls{Sir}, $\tfrac12$ over ordered pairs for \cls{Srs} and \cls{Sij}, and
+the two-coupling form of Eq.~\eqref{eq:pc-coupled} for \cls{Sijr} and
+\cls{Srsi} (Table~\ref{tab:pc}). In one dimension Eq.~\eqref{eq:pc} reduces
+exactly to Eq.~\eqref{eq:sc}, and $K + \Delta_t S$ is block2's $H_D$. \textbf{PC needs no new RDM intermediate}: it calls the
+same \code{make\_a16}, \code{make\_a22}, \code{make\_a7}, \code{make\_hdm1},
+\code{make\_a3}, \code{make\_k27}, \code{make\_a9}, \code{make\_a12} and
+\code{make\_a13} as SC. It does not need SC's one-body Dyall blocks $A^{17},
+A^{19}, A^{23}, A^{25}$, because the one-body part enters only through
+$S_1 h_t$. \cls{Sijrs} has no active index, so there PC equals SC, and
+\code{pcEnergiesDevice} calls \code{energy\_Sijrs} itself.
+
+\subsection{One solve per class}
+\label{sec:pcsolve}
+$S$ and $K$ are the same for every tuple, and only $\Delta_t$ and $b_t$ vary.
+So \code{solveClass} diagonalises each class once:
+\begin{align}
+  \bar S &= \tfrac12(S + S^{\mathsf T}) = V\,\mathrm{diag}(s)\,V^{\mathsf T},
+    \qquad \bar K = \tfrac12(K + K^{\mathsf T}),
+  \label{eq:pc-s}\\
+  \mathcal K &= \{k : s_k > \code{PC\_TAU}\cdot s_{\max}\},\qquad
+  X = V_{\mathcal K}\,\mathrm{diag}(s_{\mathcal K})^{-1/2},
+  \label{eq:pc-cut}\\
+  X^{\mathsf T}\bar K X &= W\,\mathrm{diag}(\lambda)\,W^{\mathsf T},
+    \qquad U = XW,
+  \label{eq:pc-k}\\
+  T &= \bar S\,U, \qquad t_1 = S_1^{\mathsf T} U .
+  \label{eq:pc-T}
+\end{align}
+On the kept range, $(K + \Delta_t S)^{+} = U\,\mathrm{diag}\bigl(1/(\lambda_k +
+\Delta_t)\bigr)\,U^{\mathsf T}$. Each slab is then a single einsum straight
+into the eigenbasis, and the per-tuple energy finishes on the host:
+\begin{equation}
+  y_t = T^{\mathsf T} x_t + t_1^{\mathsf T} h_t,\qquad
+  E^{\mathrm{PC}}_t = -c \sum_{k\in\mathcal K} \frac{y_{tk}^2}{\lambda_k + \Delta_t}.
+  \label{eq:pc-finish}
+\end{equation}
+$K$ is symmetrised because a quadratic form defines only its symmetric part,
+and $\langle\Phi|[H_D,\Phi]\rangle$ is Hermitian only for an exact eigenstate.
+The two eigendecompositions are \code{wwrsolverDnDsyevd}, and the $d\times d$
+products are \code{wwrblasDgemm}.
+
+\paragraph{Refusals.} A class gets \emph{no} energy, and is reported refused,
+when any of the following holds:
+\begin{itemize}
+\item $\bar S$ has no positive eigenvalue;
+\item the gap is too small (\code{pcRankCut}):
+  \begin{equation}
+  \frac{\min_{k\in\mathcal K} s_k/s_{\max}}
+       {\max_{k\notin\mathcal K} |s_k|/s_{\max}} < \code{PC\_MIN\_GAP}
+  \quad\text{(denominator \code{PC\_TAU} when nothing is dropped);}
+  \label{eq:gap}
+  \end{equation}
+\item some denominator $\lambda_k + \Delta_t \le 0$ (\code{checkDenominator}).
+\end{itemize}
+A \code{syevd} that runs but returns $\code{devInfo}\ne 0$ is a numerical
+error, which \code{main} reports. The gap is checked rather than assumed
+because $S$ is singular by construction: \cls{Sr} and \cls{Si} drop exact null
+modes at every active space. That is also why a generalised eigensolver,
+which Cholesky-factors $S$, is not used (\code{docs/pc-nevpt2.md}, ``The
+solve: once per class, not once per tuple'').
+
+\subsection{The eight classes}
+\label{sec:pc-classes}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{@{}llllll@{}}
+\toprule
+class & basis, $d$ & $S$ & $K$ & $S_1$ (row) & per-tuple finish \\
+\midrule
+\cls{Sr} & $(p,q,u)$, $n^3$ & $\G3_{upqbac}$ & $A^{16}$ & $\G2_{upqa}$ ($h'^{\cls{Sr}}_{ra}$) & $-\sum_k y^2_{rk}/(\lambda_k+\eps_r)$ \\
+\cls{Si} & $(p,q,u)$, $n^3$ & $\Gh3_{upqbac}$ & $A^{22}$ & $\Gh2_{upqa}$ ($h'^{\cls{Si}}_{ai}$) & $-\sum_k y^2_{ik}/(\lambda_k-\eps_i)$ \\
+\cls{Sijr} & $p$, $n$ & $\Gb1$ & $A^3$ & --- & Eq.~\eqref{eq:pc-coupled} \\
+\cls{Srsi} & $p$, $n$ & $\G1$ & $K^{27}$ & --- & Eq.~\eqref{eq:pc-coupled} \\
+\cls{Srs} & $(p,q)$, $n^2$ & $R^{(2)}_{pqba}$ & $A^7$ & --- & $-\tfrac12\sum_{rs}\sum_k y^2_{rsk}/(\lambda_k+\eps_r+\eps_s)$ \\
+\cls{Sij} & $(p,q)$, $n^2$ & $\Gb2$ & $A^9$ & --- & $-\tfrac12\sum_{ij}\sum_k y^2_{ijk}/(\lambda_k-\eps_i-\eps_j)$ \\
+\cls{Sir} & $(p,q)\oplus(p,q)$, $2n^2$ & Eq.~\eqref{eq:sir-S} & Eq.~\eqref{eq:sir-K} & $(2\G1_{qp};\,-\G1_{qp})$ ($h'^{\cls{Sir}}_{ri}$) & $-\sum_k y^2_{irk}/(\lambda_k+\eps_r-\eps_i)$ \\
+\cls{Sijrs} & --- & --- & --- & --- & SC's, Eq.~\eqref{eq:sijrs} \\
+\bottomrule
+\end{tabular}
+\caption{The PC classes (\code{src/energy/energy\_pc\_classes.cppm}). The
+pairs in \cls{Srs} and \cls{Sij} are ordered, with the factor $\tfrac12$, as
+SC walks them. Neither class has an explicit $\pm$ split.}
+\label{tab:pc}
+\end{table}
+
+The slab einsums that produce $y_t$ are
+\begin{align*}
+\cls{Sr}:&\ y_{rk} = V^{\cls{Sr}}_{rpqu}T_{pqu,k} + h'^{\cls{Sr}}_{ra}t_{1,ak}, &
+\cls{Si}:&\ y_{ik} = V^{\cls{Si}}_{qpiu}T_{pqu,k} + h'^{\cls{Si}}_{ai}t_{1,ak},\\
+\cls{Sijr}:&\ y_{rjik} = V^{\cls{Sijr}}_{rpji}T_{pk}, &
+\cls{Srsi}:&\ y_{rsik} = V^{\cls{Srsi}}_{rsip}T_{pk},\ \
+  y^{\mathsf T}_{rsik} = V^{\cls{SrsiT}}_{srip}T_{pk},\\
+\cls{Srs}:&\ y_{rsk} = V^{\cls{Srs}}_{rsqp}T_{pq,k}, &
+\cls{Sij}:&\ y_{ijk} = V^{\cls{Sij}}_{qpij}T_{pq,k},\\
+\cls{Sir}:&\ y_{irk} = V^1_{rpiq}T^{(1)}_{pq,k} + V^2_{rpqi}T^{(2)}_{pq,k} + h'^{\cls{Sir}}_{ri}t_{1,k}. &&
+\end{align*}
+
+\paragraph{\cls{Sijr}, \cls{Srsi}: two spin couplings, no explicit $\pm$
+split.} SC's ``2 direct $-$ exchange'' coupling, summed over \emph{ordered}
+external pairs:
+\begin{equation}
+  E^{\mathrm{PC}}_{\cls{Sijr}} = -\!\!\sum_{r,j,i}\sum_k
+     \frac{2y_{rjik}^2 - y_{rjik}\,y_{rijk}}{\lambda_k + \eps_r - \eps_j - \eps_i},
+  \qquad
+  E^{\mathrm{PC}}_{\cls{Srsi}} = -\!\!\sum_{r,s,i}\sum_k
+     \frac{2y_{rsik}^2 - y_{rsik}\,y^{\mathsf T}_{rsik}}{\lambda_k + \eps_r + \eps_s - \eps_i}.
+  \label{eq:pc-coupled}
+\end{equation}
+Each \cls{Srsi} batch holds both $y$ and $y^{\mathsf T}$, so unlike SC, PC
+needs no whole $(n_v,n_v,n_c)$ table.
+
+\paragraph{\cls{Sir}: the two couplings as two blocks.} The basis is two
+copies of $(p,q)$, held as $(x,p,q;\,y,a,b)$ with $x,y\in\{1,2\}$:
+\begin{align}
+  S &= \begin{pmatrix} 2\G2_{qpab} & -\G2_{qpab}\\ -\G2_{qpab} & S^{22}_{pqab}\end{pmatrix},
+  \qquad
+  S^{22}_{pqab} = 2\delta_{pa}\G1_{qb} - \G2_{qbap} + \delta_{ab}\G1_{qp},
+  \label{eq:sir-S}\\
+  K &= \begin{pmatrix} 2A^{12}_{pqab} & -A^{12}_{pqab}\\ -A^{12}_{pqab} & A^{13}_{pqab}\end{pmatrix},
+  \label{eq:sir-K}
+\end{align}
+and $T$ splits into its two $n^2$-row halves $T^{(1)}, T^{(2)}$.
+
+\begin{algorithm}[htbp]
+\caption{\code{pcEnergiesDevice} over a \code{DfIntegralSource}}
+\label{alg:pc}
+\begin{algorithmic}[1]
+\Require as Algorithm~\ref{alg:sc}
+\Ensure per class: status $\in\{\textsc{Done},\textsc{Refused}\}$, $E^{\mathrm{PC}}_\kappa$, $S$'s spectrum
+\For{$\kappa \in (\cls{Sr},\cls{Si},\cls{Sijrs},\cls{Sijr},\cls{Srsi},\cls{Srs},\cls{Sij},\cls{Sir})$}
+  \If{$\kappa = \cls{Sijrs}$} $E^{\mathrm{PC}}_\kappa \gets$ SC's \code{energy\_Sijrs}; \textbf{continue} \EndIf
+  \State $S, K, S_1 \gets$ Table~\ref{tab:pc}, from App.~\ref{app:intermediates} \Comment{scoped: freed before the walk}
+  \State $\bar S \gets \frac12(S+S^{\mathsf T})$;\ $\bar K \gets \frac12(K+K^{\mathsf T})$
+  \State $(V, s) \gets \textsc{Syevd}(\bar S)$ \Comment{error if \code{devInfo} $\ne 0$}
+  \State $\mathcal K, \text{status} \gets \textsc{PcRankCut}(s)$ \Comment{Eqs.~\eqref{eq:pc-cut}, \eqref{eq:gap}}
+  \If{status $=$ \textsc{Refused}} record why; \textbf{continue} \EndIf
+  \State $X \gets V_{\mathcal K}\,s_{\mathcal K}^{-1/2}$;\ $(W, \lambda) \gets \textsc{Syevd}(X^{\mathsf T}\bar K X)$;\ $U \gets XW$
+  \State $T \gets \bar S U$;\ $t_1 \gets S_1^{\mathsf T}U$ \Comment{Eq.~\eqref{eq:pc-T}}
+  \State $E \gets 0$;\ $\delta_{\min} \gets +\infty$
+  \For{each batch $[b_0,b_1)$}
+    \State $V \gets \mathcal S.\textsc{slab}(\kappa, b_0, b_1)$ \Comment{\cls{Srsi}: also \cls{SrsiT}; \cls{Sir}: $V^1,V^2$}
+    \State $y \gets$ the class's slab einsum into the eigenbasis; download
+    \State $E \mathrel{+}=$ the class's finish (Table~\ref{tab:pc});\ $\delta_{\min} \gets \min(\delta_{\min}, \lambda_k + \Delta_t)$
+  \EndFor
+  \If{$\delta_{\min} \le 0$} status $\gets$ \textsc{Refused} \Else\ $E^{\mathrm{PC}}_\kappa \gets E$ \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+%======================================================================
+\section{Path 1: SC-NEVPT2 on a CASCI reference}
+\label{sec:sc-casci}
+
+\paragraph{Offline.} The state is RHF $\to$ \code{DFCASCI} $\to$ NEVPT
+canonicalisation, all fitted with one auxiliary basis. The golden stores
+$B$ (Eq.~\eqref{eq:bblocks}), the one-electron slices
+(Eq.~\eqref{eq:h1slices}), $\eps$, $\G1$, $\G2$, the CI vector and
+PySCF's DF-NEVPT2 answer. Its header says \code{reference=casci}.
+
+\begin{algorithm}[htbp]
+\caption{Path 1, SC on CASCI orbitals}
+\label{alg:path1}
+\begin{algorithmic}[1]
+\Statex \textit{Offline} (\code{generate\_golden.py --df}; single-threaded, Davidson to $10^{-12}$, point group detected)
+\State $\phi \gets \textsc{DF-RHF}(\text{mol}, \text{auxbasis})$
+\State $(c, E_{\mathrm{CASCI}}) \gets \textsc{DFCASCI}(\phi, n_a, n_{\mathrm{el}})$ \Comment{sharing $\phi$'s fitted integrals}
+\State $(C, c, \eps) \gets \textsc{Canonicalize}(\text{cas\_natorb})$ \Comment{Eq.~\eqref{eq:gfock}}
+\State refuse a degenerate state (\code{\_check\_degeneracy})
+\State write $c, \G1, \G2, h, h', \eps, B_{aa}, B_{ca}, B_{va}, B_{cv}$, PySCF DF-NEVPT2's $(N_\kappa, E_\kappa, E^{(2)})$
+\Statex \textit{Run time} (\code{nevpt2\_df\_demo --golden \textit{f} --tiles \textit{T} [--batch $\beta$]})
+\State load and check the golden; refuse it if any $B$ block is missing
+\State $\textit{res} \gets$ \code{DeviceResources::create}(0) \Comment{one stream, pool, BLAS and solver handles}
+\State $\mathcal S \gets$ \code{DfIntegralSource}$(B_{aa},B_{ca},B_{va},B_{cv})$;\ $v \gets \mathcal S.\textsc{activeH2e}()$
+\State $(\G3, \Fca, \Fac) \gets$ Algorithm~\ref{alg:rdm}$(c, v, T)$
+\State upload $h, h', \eps, \G1, \G2$
+\State $(N_\kappa, E_\kappa, E^{(2)}) \gets$ Algorithm~\ref{alg:sc}$(\mathcal S, \beta)$
+\State \textbf{PASS} iff, for all $\kappa$, $|E_\kappa - E^{\mathrm{ref}}_\kappa| < 10^{-7}$, $|N_\kappa - N^{\mathrm{ref}}_\kappa| < 10^{-7}$, $N_\kappa \ge -10^{-7}$, and $|E^{(2)} - E^{(2)}_{\mathrm{ref}}| < 10^{-7}$ (and every block is right under \code{--check-blocks})
+\end{algorithmic}
+\end{algorithm}
+
+The equations are Eqs.~\eqref{eq:df}, \eqref{eq:slabgemm}--\eqref{eq:wedge}
+and \eqref{eq:sc}--\eqref{eq:sijrs}. The printed total is $E_{\mathrm{CASCI}}
++ E^{(2)}$. \code{--check-blocks} is a diagnostic. It also builds every
+external block whole from $B$ and compares it with the four-index arrays that
+a \code{--df} golden carries as well, to $10^{-10}$. The ctest entries are
+\code{nevpt2\_df\_cas44}, \code{\_cas88}, \code{\_cas1010},
+\code{\_ccpvtz\_cas1010}, \code{\_cas1212} (\code{slow}),
+\code{\_salicylaldimine\_cas88} (gitignored golden, registered only once it
+has been generated), and the digest variants of \code{\_cas1010}.
+
+%======================================================================
+\section{Path 2: PC-NEVPT2 on a CASCI reference}
+\label{sec:pc-casci}
+
+\paragraph{Offline.} The state is Path~1's. In addition, unless the golden is
+written \code{--no-pc}, \code{\_check\_pc\_conditioning} must find every
+class's metric gapped, and block2's PC-NEVPT2 on the same state, with the
+fitted integrals injected, is stored as \code{pc\_class\_energies} and
+\code{e\_pc\_total}.
+
+\begin{algorithm}[htbp]
+\caption{Path 2, PC on CASCI orbitals}
+\label{alg:path2}
+\begin{algorithmic}[1]
+\Statex \textit{Offline}: Algorithm~\ref{alg:path1}'s lines 1--5, then
+\State refuse an ungapped metric (\code{\_check\_pc\_conditioning}; otherwise \code{--no-pc})
+\State write block2's $E^{\mathrm{PC,ref}}_\kappa$ and $E^{\mathrm{PC,ref}}$
+\Statex \textit{Run time} (\code{nevpt2\_df\_demo --golden \textit{f} --tiles \textit{T} --pc [--batch $\beta$]})
+\State refuse a golden without \code{pc\_class\_energies}/\code{e\_pc\_total} \Comment{before any device work}
+\State Algorithm~\ref{alg:path1}'s run-time lines up to the uploads, unchanged
+\State $(\text{status}_\kappa, E^{\mathrm{PC}}_\kappa) \gets$ Algorithm~\ref{alg:pc}$(\mathcal S, \beta)$
+\State \textbf{PASS} iff every class is \textsc{Done}, $|E^{\mathrm{PC}}_\kappa - E^{\mathrm{PC,ref}}_\kappa| < 10^{-7}$ for all $\kappa$, and $\bigl|\sum_\kappa E^{\mathrm{PC}}_\kappa - E^{\mathrm{PC,ref}}\bigr| < 10^{-7}$
+\end{algorithmic}
+\end{algorithm}
+
+The equations are Eqs.~\eqref{eq:df}, \eqref{eq:slabgemm}--\eqref{eq:wedge},
+\eqref{eq:sijrs} and \eqref{eq:pc}--\eqref{eq:sir-K}. The total is checked on
+its own, because eight per-class errors just under $10^{-7}$ could add up past
+it. The PASS line is worded differently from SC's, so that a \code{*\_pc}
+entry cannot pass on SC output. The ctest entries are
+\code{nevpt2\_df\_cas44\_pc}, \code{\_cas88\_pc}, \code{\_cas1010\_pc},
+\code{\_ccpvtz\_cas1010\_pc}, the \code{--ozaki} variants
+\code{\_cas88\_pc\_ozaki} and \code{\_ccpvtz\_cas1010\_pc\_ozaki}, and
+\code{\_salicylaldimine\_cas88\_pc}. There is no DF CAS(12,12) PC entry: that
+golden is \code{--no-pc}.
+
+%======================================================================
+\section{Path 3: SC-NEVPT2 on a CASSCF reference}
+\label{sec:sc-casscf}
+
+\paragraph{Offline, in two steps.} First, \code{--casscf --mo-out} runs one
+symmetry-adapted \code{DFCASSCF} that shares the RHF's fitted integrals, and
+commits the converged orbitals $C^{\mathrm{SCF}}$ and $E_{\mathrm{CASSCF}}$
+as a \code{.mogold} sidecar. Second, \code{--mo-from} runs Path~1's
+deterministic \code{DFCASCI} on $C^{\mathrm{SCF}}$, which is already in
+core/active/virtual order and is not re-sorted. Before anything is written,
+three refusals run. The sidecar's fingerprint must match the run's flags.
+The orbitals must be symmetry-pure in the expected irreps. And the CASCI
+must be a converged CASSCF stationary point:
+\begin{equation}
+  \bigl\| g^{\mathrm{orb}}(C^{\mathrm{SCF}}) \bigr\| \le \code{CASSCF\_GRAD\_TOL},
+  \qquad
+  \bigl| E_{\mathrm{CASCI}}(C^{\mathrm{SCF}}) - E_{\mathrm{CASSCF}} \bigr| \le \code{CASSCF\_E\_TOL},
+  \label{eq:casscf-gate}
+\end{equation}
+where $g^{\mathrm{orb}}$ is the CASSCF orbital gradient
+(\code{\_check\_casscf\_stationary}; the thresholds are constants in
+\code{generate\_golden.py}, and what they were set against is
+\code{docs/reference-data.md}, ``The \code{--casscf} / \code{--mo-from} gate
+thresholds''). Everything after the solve is Path~1's: the canonicalisation of
+Eq.~\eqref{eq:gfock} (now on CASSCF orbitals), the degeneracy check, the
+RDMs, the integral blocks and $B$ (Eq.~\eqref{eq:df} with $C = C^{\mathrm{SCF}}$
+canonicalised), and PySCF's DF-NEVPT2. The header records
+\code{reference=casscf}.
+
+\begin{algorithm}[htbp]
+\caption{Path 3, SC on CASSCF orbitals}
+\label{alg:path3}
+\begin{algorithmic}[1]
+\Statex \textit{Offline, step 1} (\code{--df --casscf --mo-out \textit{m}}; the only place an orbital optimiser runs)
+\State $\phi \gets \textsc{DF-RHF}$;\ $(C^{\mathrm{SCF}}, E_{\mathrm{CASSCF}}) \gets \textsc{DFCASSCF}(\phi, n_a, n_{\mathrm{el}})$
+\State write the sidecar $m$: $C^{\mathrm{SCF}}$, $E_{\mathrm{CASSCF}}$, fingerprint
+\Statex \textit{Offline, step 2} (\code{--df --mo-from \textit{m}}, the same case flags)
+\State check the fingerprint, the orbital symmetry and the irreps
+\State $(c, E_{\mathrm{CASCI}}) \gets \textsc{DFCASCI}(\phi, n_a, n_{\mathrm{el}};\ C^{\mathrm{SCF}})$
+\State refuse unless Eq.~\eqref{eq:casscf-gate} holds
+\State Algorithm~\ref{alg:path1}'s offline lines 3--5, with \code{reference\_kind = casscf}
+\Statex \textit{Run time}: Algorithm~\ref{alg:path1}'s run-time lines, \textbf{unchanged}
+\end{algorithmic}
+\end{algorithm}
+
+The equations are Path~1's together with Eq.~\eqref{eq:casscf-gate}. Nothing at run time
+depends on the orbitals having been optimised. In particular the SC
+formulas take $\eps$ and $h'$ as given, so a CASSCF golden goes through the
+same $10^{-7}$ comparison against PySCF's DF-NEVPT2 on the same CASSCF
+orbitals. The ctest entry is \code{nevpt2\_df\_cas44\_casscf} (N2/cc-pVDZ
+CAS(4,4), \code{small}, with \code{--check-blocks}). It is the only
+density-fitted CASSCF golden. The CAS(10,10) CASSCF golden is conventional,
+so only \code{nevpt2\_demo} runs it.
+
+%======================================================================
+\section{Path 4: PC-NEVPT2 on a CASSCF reference}
+\label{sec:pc-casscf}
+
+\paragraph{Offline.} Path~3's two steps, plus Path~2's PC conditioning check
+and block2 run on the resulting state.
+
+\begin{algorithm}[htbp]
+\caption{Path 4, PC on CASSCF orbitals}
+\label{alg:path4}
+\begin{algorithmic}[1]
+\Statex \textit{Offline}: Algorithm~\ref{alg:path3}'s two steps, then Algorithm~\ref{alg:path2}'s offline lines 1--2 on that state
+\Statex \textit{Run time}: Algorithm~\ref{alg:path2}'s run-time lines, \textbf{unchanged}
+\end{algorithmic}
+\end{algorithm}
+
+The equations are Eqs.~\eqref{eq:pc}--\eqref{eq:sir-K} on top of Path~3's.
+The rank cut, the gap test (Eq.~\eqref{eq:gap}) and the denominator test
+all run as in Path~2. Whether a CASSCF state's metric is gapped is decided by
+the same offline check that every other PC golden passes. The ctest entry is
+\code{nevpt2\_df\_cas44\_casscf\_pc}.
+
+%======================================================================
+\section{Scope and limits}
+\label{sec:limits}
+
+\begin{itemize}
+\item \textbf{The one-electron side is not fitted at run time.} $h$, $h'$,
+  $\eps$, $\G1$ and $\G2$ come from the golden. The demo rebuilds only the
+  two-electron integrals from $B$: the active block $v$ for the RDM build and
+  the intermediates, and every external slab for the classes.
+\item \textbf{A different reference from the conventional goldens.} The
+  \code{*\_df} goldens hold a different (fitted) CASCI state and PySCF's
+  DF-NEVPT2. They are never compared with the conventional numbers, which
+  differ by the fitting error (\code{docs/reference-data.md}, ``Density
+  fitting'').
+\item \textbf{CASSCF coverage is one size.} The DF CASSCF paths are tested on
+  N2/cc-pVDZ CAS(4,4) only.
+\item \textbf{PC can refuse.} A class with an ungapped metric, or with a
+  non-positive denominator, gets no energy. A golden whose metric is
+  ungapped carries no PC fields, and \code{--pc} refuses it before the RDM
+  build.
+\item \textbf{Beyond the energy.} The DF demo also runs \code{--sc-tangent}
+  and \code{--gradient-source} (SC only, orbital energies frozen). Both accept a
+  \code{casscf} golden, since they differentiate at fixed orbitals. PC's CI
+  source term and the CI-block Hessians have no DF slab path. See
+  \code{docs/gradients.md}.
+\end{itemize}
+
+%======================================================================
+\appendix
+\section{The RDM-only intermediates}
+\label{app:intermediates}
+
+These are the metric and Dyall blocks of Tables~\ref{tab:sc} and
+\ref{tab:pc}, generated from the einsum chains in \code{src/energy/energy.cpp}
+(shared by SC and PC) and \code{src/energy/energy\_sc\_classes.cppm} (SC only).
+Each subscript string was rendered mechanically, sums written out, so that
+this appendix is the code and not a re-derivation. $v$ is the physicist
+active block (Eq.~\eqref{eq:h2e}), $h$ the active \code{h1eff}, and $\delta$ the
+identity. Each block is built once per class, before the slab walk, and freed
+when the class returns.
+
+\subsection{\texorpdfstring{Hole-side metrics and the $\bar\Gamma$, $R$ families}{Hole-side metrics and the Gamma-bar, R families}}
+\begin{align}
+\Gh3_{abcdef} &= 2\,\G2_{abef}\,\delta_{cd} - \G3_{abdcef}, \label{eq:dmh3}\\
+\Gh2_{abcd} &= 2\,\G1_{ab}\,\delta_{cd} - \G2_{abdc}, \label{eq:dmh2}\\
+\Gb1_{ij} &= 2\,\delta_{ij} - \G1_{ji}, \\
+\Gamma'_{ijkl} &= \G2_{ikjl} - \delta_{jk}\,\G1_{il}, \\
+\Gb2_{ijkl} &= \Gamma'_{klij} + \delta_{il}\G1_{kj} + \delta_{jk}\G1_{li}
+  - 2\,\delta_{ik}\G1_{lj} - 2\,\delta_{jl}\G1_{ki}
+  - 2\,\delta_{il}\delta_{jk} + 4\,\delta_{ik}\delta_{jl}, \\
+\Gb3_{pqrabc} &= -\delta_{pb}\Gb2_{qrac} - \delta_{br}\Gb2_{pqac}
+  + 2\,\delta_{bq}\Gb2_{prac} + 2\,\delta_{ap}\G2_{bqcr}
+  - 4\,\delta_{ap}\delta_{cr}\G1_{bq} \notag\\
+  &\quad + 2\,\delta_{cr}\G2_{bqap} - \G3_{bqapcr}
+  + 2\,\delta_{ar}\delta_{pc}\G1_{bq} - \delta_{ar}\G2_{bqcp}, \\
+R^{(2)}_{ijkl} &= \G2_{iljk} - \G1_{ik}\,\delta_{jl}, \\
+R^{(3)}_{ijklmn} &= \G3_{injmkl} - \delta_{jn}\G2_{imkl}
+  - \delta_{km}R^{(2)}_{ijln} - \delta_{kn}R^{(2)}_{ijml}.
+\end{align}
+$\Gh1 = 2\delta - \G{1\,\mathsf T}$, the same expression as $\Gb1$, is built
+inline in \code{energy\_Si}.
+
+\subsection{\texorpdfstring{$A^{16}$ (\cls{Sr}), reading $\Fca$ and $\Fac$}{A16 (Sr), reading f3ca and f3ac}}
+\begin{align}
+A^{16}_{pqrabc} &= -\sum_{i} h_{ib}\G3_{rpqiac} + \sum_{i} h_{ia}\G3_{rpqbic}
+   - \sum_{i} h_{ci}\G3_{rpqbai} - \Fca_{rpacqb} \notag\\
+ &\quad - \sum_{k,i} v_{kbia}\G3_{rpqcki} - \sum_{k,j} v_{kbaj}\G3_{rpqjkc}
+   + \sum_{i,j} v_{cbij}\G3_{rpqjai} + \delta_{qc}\,f_{prab} \notag\\
+ &\quad + \Fac_{rpqbac} - \Fca_{rpqbac}
+   + \sum_{j,i} v_{jbij}\G3_{rpqiac} - \sum_{j,k} v_{cjka}\G3_{rpqbjk}
+   + \sum_{j,i} v_{jcij}\G3_{rpqbai}, \\
+f_{prab} &= \sum_{k,i,j} v_{kbij}\,\G3_{rpajki}.
+\end{align}
+The $\delta_{qc}f_{prab}$ term is \code{launchDiagA16}, which implements
+\code{a16[:, i, ..., i] += fdm2}. Here the labels $p,q,r$ are the rows of
+$A^{16}$, all active. They are not the class's virtual.
+
+\subsection{\texorpdfstring{$A^{22}$ (\cls{Si}), reading $\Fca$ and $\Fac$}{A22 (Si), reading f3ca and f3ac}}
+\begin{align}
+A^{22}_{ijkabc} &= -\sum_{p} h_{pb}\G3_{kipjac} - \sum_{p} h_{pa}\G3_{kibjpc}
+   + \sum_{p} h_{cp}\G3_{kibjap}
+   + \sum_{q,r} v_{cqra}\G3_{kibjqr} - \sum_{q,p} v_{qcpq}\G3_{kibjap} \notag\\
+ &\quad - \Fac_{kiacbj} - \delta_{ja}\,f^{a}_{ikbc}
+   - \sum_{p,q} v_{pqab}\G3_{kiqjpc} + \sum_{p,r} v_{pcrb}\G3_{kiajpr}
+   + \sum_{q,r} v_{cqrb}\G3_{kiqjar} \notag\\
+ &\quad - \Fac_{kibjac} + \Fca_{kibjac} + 2\,h_{jb}\G2_{kiac}
+   + 2\sum_{p,r} v_{pjrb}\G3_{kiprac} + 2\,\delta_{jb}\,f^{b}_{ikac}, \\
+f^{a}_{ikbc} &= \sum_{p,q,r} v_{pqrb}\,\G3_{kiqcpr}, \\
+f^{b}_{ikac} &= \sum_{p} h_{pa}\G2_{kipc} - \sum_{p} h_{cp}\G2_{kiap}
+   - \sum_{q,r} v_{cqra}\G2_{kiqr} + \sum_{q,p} v_{qcpq}\G2_{kiap} \notag\\
+ &\quad + \sum_{p,q,r} v_{pqra}\G3_{kiqcpr} - \sum_{r,p,q} v_{rcpq}\G3_{kiaqrp}.
+\end{align}
+The two $\delta$ terms are \code{launchDiagA22a}
+(\code{a22[:, i, :, i, :, :] -= fdm2a}) and \code{launchDiagA22b}
+(\code{a22[:, i, :, :, i, :] += 2 fdm2b}). All of $i,j,k$ here are active
+labels of $A^{22}$.
+
+\subsection{\texorpdfstring{The small blocks: $A^3$ (\cls{Sijr}), $K^{27}$ (\cls{Srsi})}{The small blocks: A3 (Sijr), K27 (Srsi)}}
+\begin{align}
+A^{3}_{pa} &= \sum_{i} h_{ia}\Gb1_{ip} + 2\sum_{i,j,k} v_{ijka}\delta_{pj}\G1_{ik}
+   - \sum_{i,j,k} v_{ijka}\G2_{jpik}, \\
+K^{27}_{pa} &= -\sum_{i} h_{ai}\G1_{pi} - \sum_{i,j,k} v_{iajk}\G2_{pkij}
+   + \sum_{i,j} v_{iaji}\G1_{pj}.
+\end{align}
+
+\subsection{\texorpdfstring{$A^7$ (\cls{Srs}), $A^9$ (\cls{Sij})}{A7 (Srs), A9 (Sij)}}
+\begin{align}
+A^{7}_{pqab} &= -\sum_{i} h_{bi}R^{(2)}_{pqia} - \sum_{i} h_{ai}R^{(2)}_{pqbi}
+   - \sum_{k,i,j} v_{kbij}R^{(3)}_{pqkija}
+   - \sum_{k,i,j} v_{kaij}R^{(3)}_{pqkibj} - \sum_{i,j} v_{baij}R^{(2)}_{pqij}, \\
+A^{9}_{pqab} &= \sum_{i} h_{ib}\Gb2_{pqai} + 2\sum_{i,j} v_{ijib}\Gb2_{pqaj}
+   - \sum_{i,j} v_{ijjb}\Gb2_{pqai} - \sum_{i,j,k} v_{ijkb}\Gb3_{pkqaij} \notag\\
+ &\quad + \sum_{i} h_{ia}\Gb2_{pqib} - \sum_{i,j} v_{ijja}\Gb2_{pqib}
+   - \sum_{i,j} v_{ijba}\Gb2_{pqji} + 2\sum_{i,j} v_{ijia}\Gb2_{pqjb}
+   - \sum_{i,j,k} v_{ijka}\Gb3_{pqkjbi}.
+\end{align}
+
+\subsection{\texorpdfstring{$A^{12}$, $A^{13}$ (\cls{Sir})}{A12, A13 (Sir)}}
+\begin{align}
+A^{12}_{pqab} &= \sum_{i} h_{ia}\G2_{qpib} - \sum_{i} h_{bi}\G2_{qpai}
+   + \sum_{i,j,k} v_{ijka}\G3_{qpjbik} - \sum_{k,i,j} v_{kbij}\G3_{qpajki} \notag\\
+ &\quad - \sum_{j,k} v_{bjka}\G2_{qpjk} + \sum_{j,i} v_{jbij}\G2_{qpai}, \\
+A^{13}_{pqab} &= -\sum_{i} h_{ia}\G2_{qbip} + 2\,h_{pa}\G1_{qb}
+   + \sum_{i} h_{bi}\G2_{qiap} - 2\sum_{i}\delta_{pa}h_{bi}\G1_{qi} \notag\\
+ &\quad - \sum_{i,j,k} v_{ijka}\G3_{qbjpik} + \sum_{k,i,j} v_{kbij}\G3_{qjapki}
+   + \sum_{l,m} v_{blma}\G2_{qmlp} + 2\sum_{k,m} v_{kpma}\G2_{qbkm} \notag\\
+ &\quad - 2\sum_{m} v_{bpma}\G1_{qm} - \sum_{l,k} v_{lbkl}\G2_{qkap}
+   - 2\sum_{m,k,l}\delta_{ap}v_{mbkl}\G2_{qlmk} + 2\sum_{l,k}\delta_{ap}v_{lbkl}\G1_{qk}.
+\end{align}
+
+\subsection{\texorpdfstring{SC only: the one-body Dyall blocks $A^{17}, A^{19}$ (\cls{Sr}), $A^{23}, A^{25}$ (\cls{Si})}{SC only: the one-body Dyall blocks A17, A19 (Sr), A23, A25 (Si)}}
+With $\tilde h_{mn} = h_{mn} - \sum_j v_{mjjn}$,
+\begin{align}
+A^{17}_{abcp} &= -\sum_{i} \tilde h_{pi}\G2_{cabi} - \sum_{k,i,j} v_{kpij}\G3_{cabjki}, \\
+A^{19}_{ap} &= -\sum_{i} \tilde h_{pi}\G1_{ai} - \sum_{k,i,j} v_{kpij}\G2_{ajki}, \\
+A^{23}_{abcp} &= -\sum_{i} h_{ip}\G2_{caib} - \sum_{i,j,k} v_{pijk}\G3_{cajbik}
+   + 2\,h_{bp}\G1_{ca} + 2\sum_{i,k} v_{pibk}\G2_{caik}, \\
+A^{25}_{ap} &= -\sum_{i} h_{pi}\G1_{ai} - \sum_{i,j,k} v_{pijk}\G2_{jaik}
+   + 2\,h_{pa} + 2\sum_{i,j} v_{piaj}\G1_{ij}.
+\end{align}
+PC does not build these four (\S\ref{sec:pc}).
+
+\end{document}

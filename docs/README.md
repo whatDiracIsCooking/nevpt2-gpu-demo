@@ -7,6 +7,7 @@ is checked.
 |---|---|
 | [`architecture.md`](architecture.md) | How is the tree put together? The `wwr*` layering that lets one `src/` build for CUDA or HIP, the host-modules / device-C++20 boundary and the `*_bridge.h` seam, the component graph, the one-stream / one-pool / RAII discipline, the one host integer type, the two-tier error model (abort on our bug, a returned `Result` otherwise), and the build layer. |
 | [`implementation.md`](implementation.md) | How does a number get computed? CI vector → link tables → produce `R`/`L2` → digests → fdm2/wedge → `dm3`/`f3ac`/`f3ca` → the slab walk and 146 einsums → `normToEnergy` → `PASS:`, then the PC fork off the same `S` and `K`. |
+| [`energy.tex`](energy.tex) | What exactly does the density-fitted energy evaluate? LaTeX (`pdflatex energy.tex`, twice; the rendered [`energy.pdf`](energy.pdf) is committed beside it and must be rebuilt when the `.tex` changes): the four paths SC/PC × CASCI/CASSCF, why CASCI vs. CASSCF is settled offline in the golden and SC vs. PC at run time, the slab-by-slab DGEMM over `B`, the `dm3`/`f3ca`/`f3ac` digests, every SC class's norm and `H` and every PC class's solve, written as equations with pseudocode per path, and an appendix of the RDM-only intermediates rendered from the einsum chains themselves. |
 | [`performance.md`](performance.md) | What does it cost, and which knobs matter? Where the time goes, scaling with active-space size, the head-to-head against PySCF, the four digests, memory and `--tiles`, the one-stream rule, and what was measured not to help. |
 | [`pc-nevpt2.md`](pc-nevpt2.md) | How is PC-NEVPT2 done on the device, and how well does it agree? The block2 reference, the once-per-class eigensolve and the singular-metric convention, each class, accuracy and cost. |
 | [`reference-data.md`](reference-data.md) | Where do the golden files come from, and why can they be trusted? Why CASCI, the reproducibility and symmetry settings, the PC fields, the file format and its sidecars (MO, gradient, source-term oracle), the offline numerical and analytic gradients, density fitting, every committed and gitignored case. |
@@ -18,7 +19,7 @@ is checked.
 
 ## Where numbers live
 
-**`architecture.md`, `implementation.md`, `gradients.md`,
+**`architecture.md`, `implementation.md`, `energy.tex`, `gradients.md`,
 `gradient-theory.md`, `hessian-theory.md` and `references.md` carry no
 measured numbers.** Every timing, sweep, accuracy figure and negative result
 lives in `performance.md`, `pc-nevpt2.md`, `reference-data.md` or
@@ -32,8 +33,8 @@ drift from its source and become a second, quieter source of truth. So the
 other documents, and the code's comments, cite a section by file and name —
 `docs/testing.md, "Sanitizers"` — rather than repeat the figure.
 
-If you are about to add a figure to any of those six — `architecture.md`,
-`implementation.md`, `gradients.md`, `gradient-theory.md`,
+If you are about to add a figure to any of those seven — `architecture.md`,
+`implementation.md`, `energy.tex`, `gradients.md`, `gradient-theory.md`,
 `hessian-theory.md`, `references.md` — it belongs in one of the four measured
 documents instead. A *size formula* in `n_mo`, `n_core`, `n_act`, `n_virt` (and `naux`) is algebra
 and stays with the derivation; the bytes it works out to for a given case are
