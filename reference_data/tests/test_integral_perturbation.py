@@ -23,6 +23,7 @@ import nevpt2_numgrad as ngrad
 import numpy as np
 import pytest
 from pyscf import scf
+from pyscf.grad import rhf as rhf_grad
 
 GEOM = [("O", (0.0, 0.05, 0.11)), ("H", (0.02, 0.76, -0.47)), ("H", (-0.03, -0.77, -0.45))]
 BASIS = "6-31g"
@@ -146,3 +147,54 @@ def test_perturbed_integrals_are_the_frozen_path_derivative(water, auxbasis):
             gr = (4 * quot[1][1] - quot[0][1]) / 3
             assert np.abs(hr - hk).max() < 1e-8, (k, np.abs(hr - hk).max())
             assert np.abs(gr - gk).max() < 1e-8, (k, np.abs(gr - gk).max())
+
+
+def test_inventory_adjoint_is_the_transpose():
+    """#247: ``inventory_adjoint`` is :func:`inventory`'s transpose -- a seeded
+    ``ibar`` paired with the inventory of a seeded ``(h, g)`` equals ``(Hbar,
+    Gbar)`` paired with ``(h, g)`` -- and the symmetrized densities pair the
+    same against a symmetric ``(h, g)``."""
+    rng = np.random.default_rng(247)
+    n = NCORE + NACT + 4
+    gamma = rng.standard_normal((NACT, NACT))
+    gamma = gamma + gamma.T
+    shapes = {k: v.shape for k, v in ip.inventory(np.zeros((n, n)), np.zeros((n,) * 4),
+                                                   gamma, NCORE, NACT).items()}
+    ibar = {k: rng.standard_normal(s) for k, s in shapes.items()}
+    Hbar, Gbar = ip.inventory_adjoint(ibar, gamma, NCORE, NACT)
+    for sym in (False, True):
+        h = rng.standard_normal((n, n))
+        g = rng.standard_normal((n,) * 4)
+        if sym:
+            h, g = h + h.T, ip.symmetrized(g)
+        inv = ip.inventory(h, g, gamma, NCORE, NACT)
+        lhs = sum(float(np.sum(ibar[k] * inv[k])) for k in ip.NAMES)
+        rhs = float(np.sum(Hbar * h) + np.sum(Gbar * g))
+        assert abs(lhs - rhs) < 1e-10 * max(1.0, abs(lhs)), (sym, lhs, rhs)
+        if sym:
+            P, Gamma = ip.adjoint_densities(Hbar, Gbar)
+            dens = float(np.sum(P * h) + 0.5 * np.sum(Gamma * g))
+            assert abs(lhs - dens) < 1e-10 * max(1.0, abs(lhs))
+
+
+@pytest.mark.parametrize("auxbasis", [None, AUXBASIS])
+def test_path_gradient_is_the_skeleton_gradient(water, auxbasis):
+    """#247: ``path_gradient``'s adjoint-side derivative equals #215's
+    forward one (``Skeleton.gradient`` at the same densities over the whole
+    MO range, ``E_nuc`` taken off) for seeded full-range densities --
+    conventional and fitted -- and obeys the translational sum rule."""
+    rng = np.random.default_rng(2047)
+    n = water.C0.shape[1]
+    P = rng.standard_normal((n, n))
+    P = P + P.T
+    Gamma = ip.symmetrized(rng.standard_normal((n,) * 4))
+    full = ch.Reference(GEOM, BASIS, water.C0, 0, n, P, Gamma)
+    fwd_sk = ch.Skeleton(full) if auxbasis is None else ip.DfSkeleton(full, auxbasis)
+    fwd = fwd_sk.gradient().ravel() - np.asarray(rhf_grad.grad_nuc(fwd_sk.mol)).ravel()
+    sk = ch.Skeleton(water) if auxbasis is None else ip.DfSkeleton(water, auxbasis)
+    adj = ip.path_gradient(sk, P, Gamma)
+    scale = max(1.0, float(np.abs(fwd).max()))
+    assert np.abs(adj - fwd).max() < 1e-10 * scale, np.abs(adj - fwd).max()
+    # a rigid translation moves no overlap, so the frozen path's integrals are
+    # invariant along it: the sum rule, exact
+    assert np.abs(adj.reshape(-1, 3).sum(axis=0)).max() < 1e-10 * scale

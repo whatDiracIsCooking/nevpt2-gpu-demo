@@ -296,6 +296,110 @@ def symmetrized(g: np.ndarray) -> np.ndarray:
     return 0.5 * (g + g.transpose(2, 3, 0, 1))
 
 
+# --------------------------------------------------------------------------
+# The adjoint side (#247): a scalar's frozen-path derivative from its
+# gradient with respect to the integrals
+# --------------------------------------------------------------------------
+
+#: The inventory's sliced rows: name -> the ranges of ``g[:, r1, r2, r3]``.
+_ROWS = {
+    "g_xa_aa": "aaa", "g_xv_aa": "vaa", "g_xc_aa": "caa",
+    "g_xa_va": "ava", "g_xv_va": "vva", "g_xc_va": "cva",
+    "g_xa_ca": "aca", "g_xv_ca": "vca", "g_xc_ca": "cca",
+    "g_xa_cv": "acv", "g_xv_cv": "vcv", "g_xc_cv": "ccv",
+    "g_xa_cc": "acc", "g_xv_cc": "vcc",
+}
+
+
+def inventory_adjoint(ibar: dict[str, np.ndarray], gamma: np.ndarray, ncore: int,
+                      nact: int) -> tuple[np.ndarray, np.ndarray]:
+    """The transpose of :func:`inventory`: ``(Hbar, Gbar)`` with
+
+        sum_n <ibar_n, inventory(h, g)_n> = <Hbar, h> + <Gbar, g>
+
+    for every ``(h, g)``. ``ibar`` holds one array per :data:`NAMES` entry,
+    at the inventory's shapes -- the GPU's integral adjoint
+    ``dE_corr/d(inventory)`` (#246, a ``.gradsrc``'s ``ibar_<name>``), so
+    ``(Hbar, Gbar)`` is ``E_corr``'s gradient with respect to the full MO
+    Hamiltonian at fixed orbitals, CI vector and active density ``gamma``.
+    ``Gbar`` is not symmetrized (:func:`adjoint_densities` does that)."""
+    nmo = np.asarray(ibar["h"]).shape[0]
+    nocc = ncore + nact
+    rng = dict(c=slice(0, ncore), a=slice(ncore, nocc), v=slice(nocc, nmo))
+    j = np.arange(ncore)
+    r = np.arange(nocc, nmo)
+    a = rng["a"]
+    Gbar = np.zeros((nmo,) * 4)
+    # heff = h + sum_j [2 (pq|jj) - (pj|jq)]; f = heff + the active terms,
+    # so heff's adjoint collects f's as well.
+    e = np.asarray(ibar["heff"]) + np.asarray(ibar["f"])
+    Hbar = np.asarray(ibar["h"]) + e
+    Gbar[:, :, j, j] += 2.0 * e[:, :, None]
+    Gbar[:, j, j, :] -= e[:, None, :]
+    fb = np.asarray(ibar["f"])
+    Gbar[:, :, a, a] += np.einsum("pq,tu->pqtu", fb, gamma)
+    Gbar[:, a, :, a] -= 0.5 * np.einsum("pq,tu->ptqu", fb, gamma)
+    for name, (r1, r2, r3) in _ROWS.items():
+        Gbar[:, rng[r1], rng[r2], rng[r3]] += ibar[name]
+    c = rng["c"]
+    Gbar[:, c, j, j] += ibar["g_xc_cc_j"]      # (x i | j j)
+    Gbar[:, j, j, c] += ibar["g_xc_cc_k"]      # (x j | j i), stored [x, j, i]
+    Gbar[:, a, r, r] += ibar["g_xa_vv"]        # (x t | r r)
+    Gbar[:, c, r, r] += ibar["g_xc_vv"]        # (x i | r r)
+    return Hbar, Gbar
+
+
+def adjoint_densities(Hbar: np.ndarray, Gbar: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(P, Gamma)`` with ``<Hbar, h> + <Gbar, g> = <P, h> + 1/2 <Gamma, g>``
+    for every symmetric ``h`` and every ``g`` with the eightfold symmetry --
+    which the integrals and their frozen-path derivatives have, so the
+    symmetrization changes no contraction :func:`path_gradient` takes."""
+    return 0.5 * (Hbar + Hbar.T), 2.0 * symmetrized(Gbar)
+
+
+def path_gradient(sk: ch.Skeleton, P: np.ndarray, Gamma: np.ndarray) -> np.ndarray:
+    """``d/dR_k [sum_pq P_pq h_pq(R) + 1/2 sum_pqrs Gamma_pqrs (pq|rs)(R)]``
+    along the frozen orthonormal path anchored at ``sk``'s reference, every
+    coordinate ``k = 3 atom + axis``, ``(3N,)``; ``E_nuc``'s derivative is
+    not in it. ``P`` symmetric and ``Gamma`` eightfold symmetric, over the
+    whole MO range of ``sk.ref.C0`` (fitted integrals on a
+    :class:`DfSkeleton`).
+
+    The same derivative :meth:`casscf_hessian.Skeleton.gradient` takes at
+    the densities ``(P, Gamma)`` -- the perturbed Hamiltonian contracted
+    with them -- but taken from the **adjoint** side, so no perturbed tensor
+    is ever formed: the connection ``t^k`` enters through one matrix,
+    ``X = 2 h P + 2 sum_qrs (tq|rs) Gamma_pqrs`` (``sum_tp t^k_tp X_tp``),
+    and the skeleton two-electron term through ``Gamma`` carried into the AO
+    basis once, against ``int2e_ip1`` atom by atom (``-2 sum_{mu on A}
+    (d_x mu nu|la si) Gamma_AO``; the four index positions are equal under
+    ``Gamma``'s symmetry). A fitted skeleton's two-electron term is its own
+    :meth:`DfSkeleton.eri1_skel`."""
+    C0 = sk.ref.C0
+    allmo = slice(None)
+    t1, _ = sk.connection(second=False)
+    h1 = sk.hcore1()
+    g = sk.mo_eri(allmo, allmo, allmo, allmo)
+    X = 2.0 * sk.h_mo @ P + 2.0 * np.tensordot(g, Gamma, axes=([1, 2, 3], [1, 2, 3]))
+    de = (np.einsum("kmn,mn->k", h1, C0 @ P @ C0.T, optimize=True)
+          + np.einsum("ktp,tp->k", t1, X, optimize=True))
+    if isinstance(sk, DfSkeleton):
+        for ia in range(sk.natm):
+            skel = sk.eri1_skel(ia, allmo, allmo, allmo, allmo)
+            for x in range(3):
+                de[3 * ia + x] += 0.5 * float(np.tensordot(skel[x], Gamma, axes=4))
+        return de
+    CT = C0.T
+    gamma_ao = ch._tx(Gamma[None], CT, CT, CT, CT)[0]
+    mol, nbas = sk.mol, sk.mol.nbas
+    for ia, (sh0, sh1, p0, p1) in enumerate(sk.aoslices):
+        ip1 = mol.intor("int2e_ip1", comp=3, aosym="s1",
+                        shls_slice=(sh0, sh1, 0, nbas, 0, nbas, 0, nbas))
+        for x in range(3):
+            de[3 * ia + x] -= 2.0 * float(np.tensordot(ip1[x], gamma_ao[p0:p1], axes=4))
+    return de
+
+
 def skeleton_of(st: State) -> ch.Skeleton:
     return DfSkeleton(st.ref, st.auxbasis) if st.df else ch.Skeleton(st.ref)
 

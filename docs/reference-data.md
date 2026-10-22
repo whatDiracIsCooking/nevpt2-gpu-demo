@@ -1778,8 +1778,8 @@ hooks the base class leaves to a child are exactly the four pieces:
 |---|---|
 | `get_wfn_response` | `y_I = dE_corr/dc_I` and `A_pq = Y_pq − Y_qp`, plus the CI relaxation and the (O2)–CI coupling |
 | `get_Aop_Adiag` | `P (H − E_CASCI) P` from the CASCI reference, block-diagonal against the constraint Jacobian — the decoupling of §2.2 |
-| `get_ham_response` | `d(E_CASCI + E_corr)/dx` at frozen wavefunction parameters |
-| `get_LdotJnuc` | the multipliers against `dF/dx`, `df/dx` and `d<z\|H\|c>/dx` |
+| `get_ham_response` | `d(E_CASCI + E_corr)/dx` at frozen wavefunction parameters: analytic (#247), `E_corr`'s half through the dump's integral adjoint |
+| `get_LdotJnuc` | the multipliers against `dF/dx`, `df/dx` and `d<z\|H\|c>/dx` (on the CASSCF branch `d(Z . g_all)/dx`): analytic (#247) |
 
 **SC or PC is one flag, because the Lagrangian is a statement about the
 reference and not about the contraction.** `--pc` swaps `E_corr` for block2's
@@ -1797,19 +1797,39 @@ held where every PC figure was measured while SC's moved
 ([`testing.md`](testing.md), "The step constants, measured"). The cost is one block2 PC solve per non-gauge rotation, so it is the
 `kappa` sweep that pays.
 
-**It is a Lagrangian gradient with differenced skeleton derivatives**, and the
-distinction from `grad_num` is the point. With the multipliers in hand the
-whole gradient is the nuclear derivative of one scalar along a **frozen
-orthonormal path** `C(x) = S(x)^{−1/2} S(x₀)^{1/2} C(x₀)` at fixed CI vector
-— four evaluations per Cartesian component, against `nevpt2_numgrad.py`'s six
-**re-converged** RHF+CASCI+NEVPT2 runs. Nothing re-solves, so every component
-is differenced, including the ones that are zero by symmetry (which
-`nevpt2_numgrad.py` must skip, §4.3): they come out as the zeros they are and
-are reported as the free check. Replacing the quotients with PySCF's
-derivative integrals needs the NEVPT2 **relaxed densities** — `Y_xy` fixes
-only the antisymmetric part of the generalized Fock, and the AO contraction
-needs the densities themselves — which `src/gradient/` builds and frees
-unread ([`gradients.md`](gradients.md), §5.2).
+**It is a Lagrangian gradient**, and the distinction from `grad_num` is the
+point. With the multipliers in hand the whole gradient is the nuclear
+derivative of one scalar `Phi` along a **frozen orthonormal path**
+`C(x) = S(x)^{−1/2} S(x₀)^{1/2} C(x₀)` at fixed CI vector, and nothing
+re-solves along it, so every component is taken, including the ones that are
+zero by symmetry (which `nevpt2_numgrad.py` must skip, §4.3): they come out as
+the zeros they are and are reported as the free check.
+
+**That derivative is analytic since #247.** Along the frozen path only the
+integrals move. Every term of `Phi` but `E_corr` is linear in the MO
+Hamiltonian there — `E_CASCI` is the state's RDMs against it, `F` and `f`
+are Fock matrices, `<z|H|c>` is a transition density, and the CASSCF
+branch's `Z . g_all` is #232's `Z`-weighted densities — so each is a density
+pair (`Gradients.nuclear_densities`) and its derivative is #215's
+derivative integrals contracted with it. `E_corr`'s derivative is the GPU's
+integral adjoint (#246) against the same integrals: `inventory_adjoint`
+pulls the dump's 21 `ibar_*` arrays back onto `(h, (pq|rs))`, and
+`integral_perturbation.path_gradient` contracts every density from the
+adjoint side — the connection through one matrix, the two-electron skeleton
+through the density carried into the AO basis once against `int2e_ip1`
+(`DfSkeleton`'s fitted three-centre and metric derivatives on a `--df`
+state) — so no perturbed tensor is formed and no displaced geometry is
+evaluated. Without an adjoint (`--source pyscf`, or a dump older than #246)
+`E_corr`'s half alone stays the frozen-path quotient. `--nuclear-quotient`
+keeps the term as it was before — `Phi` differenced at `NUC_STEP` with a
+Richardson pass, four evaluations per Cartesian component — and takes the
+analytic one beside it for the A/B. The nuclear ladder still differences
+`Phi`, now as a check; a new identity holds each density to `Phi`'s linear
+part rebuilt at a displaced geometry ([`testing.md`](testing.md), "The
+analytic nuclear term"). The relaxed densities a fully AO-side contraction
+would read, the NEVPT2 pseudodensities, are still built and freed unread by
+`src/gradient/` ([`gradients.md`](gradients.md), §5.2); the integral
+adjoint is what made them unnecessary here.
 
 **What the two cases come out at**, source terms from PySCF, at the SC
 steps (`CI_STEP = KAPPA_STEP = 2^-17`, `NUC_STEP = 2^-13` bohr since #77 —
@@ -1836,6 +1856,10 @@ an idle machine. At those steps the rows that moved read: orbital residual
 direct 1.0e-15 / 5.9e-15, fixed point's last step 1.9e-15 / 3.7e-15, `z·c`
 4.0e-19 / −5.7e-19, Richardson bars 2.2e-7 / 1.8e-9 and 5.6e-7 / 1.2e-8,
 zero-by-symmetry 1.7e-15 / 3.0e-11, column sums ≤5.6e-11 / ≤1.0e-8.
+The table is the nuclear term before #247, all of it a quotient; it has not
+been re-run since. The analytic term's own numbers, against the quotient
+on the committed cases, are [`testing.md`](testing.md), "The analytic
+nuclear term".
 
 The cost is the `kappa` sweep: one central difference of the SC-NEVPT2 energy
 per non-gauge rotation, `O(n_mo²)` of them — 937 s of acrolein's 1029 s.

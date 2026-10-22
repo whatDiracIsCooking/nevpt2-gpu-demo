@@ -32,7 +32,10 @@ It chains four steps that already exist, and copies none of them:
    --reference casscf --source dump``'s own -- :func:`nevpt2_grad.build_state`
    at this geometry on that ``.mogold``, :func:`nevpt2_grad.load_source_terms`
    and :func:`nevpt2_grad.solve_gradient`, the coupled CP-CASSCF solve that
-   ``nevpt2_grad.py``'s ``--source both`` runs for its second provider.
+   ``nevpt2_grad.py``'s ``--source both`` runs for its second provider. Its
+   nuclear term is the analytic one (#247): ``E_corr``'s half is the dump's
+   integral adjoint (#246) against the frozen path's derivative integrals,
+   so no displaced geometry is evaluated; the ledger's ``nuclear`` says so.
 
 **What it refuses**, each a ``SystemExit`` naming why, as every script here
 does:
@@ -534,13 +537,17 @@ def _gradient_at(geom: list, spec: dict, *, pc: bool, mo_guess, exe: Path, work:
                          f"guarded, {len(led.rank_changed)} rank change(s)")
     ledger["residuals"] = {k: v for k, v in g.residuals.items()
                            if isinstance(v, (int, float, bool, type(None)))}
+    # #247: the nuclear term is analytic, E_corr's half through the dump's
+    # integral adjoint (#246); a dump without one leaves that half the
+    # frozen-path quotient, and this says which it was.
+    ledger["nuclear"] = g.nuclear_origin
     ledger["energies"] = dict(e_casscf=rec["e_casscf"], e_casci=st.e_casci,
                               e_corr_sc=st.e_corr, e_corr_pc=st.e_corr_pc)
     ledger["walls"] = walls
     energy = st.e_casci + (st.e_corr_pc if pc else st.e_corr)
     log(f"  gradient ({'PC' if pc else 'SC'}) solved in {walls['solve']:.1f}s: E = "
         f"{energy:+.12f}, max |g| = {np.abs(g.de).max():.6e}, sum over atoms "
-        f"{np.abs(g.de.sum(axis=0)).max():.1e}")
+        f"{np.abs(g.de.sum(axis=0)).max():.1e}; nuclear term {g.nuclear_origin}")
     nxt = MoGuess(geom=geom, mo_coeff=rec["mo"], ci=rec["ci_opt"], e_casscf=rec["e_casscf"],
                   origin=f"gradient_at({case}) {label}")
     return GradientAt(geom=geom, grad=np.asarray(g.de), energy=float(energy), mo=nxt,

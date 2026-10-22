@@ -5040,7 +5040,7 @@ path also has a check that **reads no residual**, and a failing one fails the
 run.
 
 **In `reference_data/nevpt2_grad.py`** (offline, so this is the same manual
-gate as the section above, and needs no card): eleven checks after the
+gate as the section above, and needs no card): thirteen checks after the
 multipliers and the AO contraction, printed as their own `PASS:`/`FAIL:` line
 beside the `grad_num` one, exit 1 on a failure, `--show-ladders` for every
 table.
@@ -5052,7 +5052,8 @@ table.
 | `y` linearity, two seeds | `<u, y>` against a step ladder of `E_corr` along `u`, through `Functional.evaluate` — not through `corr_at_ci`, the route `y` was built on | the `y_I` quotients, `CI_STEP` / `CI_STEP_PC` |
 | CI stationarity, two seeds | the Lagrangian's CI part, laddered along `u` at the solved multipliers, has zero slope (its three pieces laddered one by one and summed when the whole shows no run: "PC's CI-direction ladders, measured") | the CI Z-vector solve and the CI/(O2) coupling |
 | orbital stationarity, two seeds | the Lagrangian at fixed `c`, laddered along `C exp(t kappa)` over every non-gauge rotation — the set derived from the RHF occupied projector, **not** the solve's own `kappa_pairs` | the orbital Z-vector solve, `KAPPA_STEP`'s `A`, `M` and `Q` |
-| nuclear ladder, two seeds | `Phi` laddered along a totally symmetric displacement against `<d, g>` | `NUC_STEP`'s quotients and their Richardson pass |
+| the analytic nuclear term's densities, `E_CASCI` and the constraints' term | each density pair rebuilds its piece of `Phi` from the MO integrals at a displaced geometry (`2^-6` bohr along a seeded totally symmetric direction), against `Functional.evaluate`'s own, to `1e-9` Eh: an exact identity (#247) | the analytic nuclear term's densities, every multiplier's weight in them |
+| nuclear ladder, two seeds | `Phi` laddered along a totally symmetric displacement against `<d, g>` | the nuclear term: the analytic one by default (#247), `NUC_STEP`'s quotients and their Richardson pass under `--nuclear-quotient` |
 | PC guard at every displaced CI vector | a ledger: every PC energy at a CI vector other than the state's own ran the conditioning guard (counted in a different place from the evaluation), and no guarded point **kept a mode the reference state drops** (a block's smallest kept singular value under `1e-2` of the reference's) | every displaced PC quantity; orbital and nuclear ladder rungs are guarded too, as a sample |
 
 **The ladder rule** (`step_ladder`, the same rule as the C++ checks'

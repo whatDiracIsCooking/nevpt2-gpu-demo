@@ -93,8 +93,8 @@ therefore rotated into the basis that diagonalises ``F``'s active block
 (section 2.6), CI vector and all, so act_O and act_V are index ranges --
 :meth:`State.occ_projector` is where it matters.
 
-THE FROZEN ORTHONORMAL PATH, AND THE ONE PLACE A DIFFERENCE QUOTIENT ENTERS
----------------------------------------------------------------------------
+THE FROZEN ORTHONORMAL PATH, AND THE NUCLEAR TERM
+-------------------------------------------------
 
 Every derivative above is taken along::
 
@@ -110,10 +110,32 @@ derivative of **one scalar** along that path::
            + sum Z_pq F_pq(x) + sum zc f(x) + <z|H(x)|c> get_LdotJnuc
 
 and ``dPhi/dx = dE/dx`` *iff* the multipliers satisfy their equations -- which
-is the entire content of a Lagrangian gradient. Four displaced evaluations per
-Cartesian component (two with ``--no-richardson``), against
-``nevpt2_numgrad.py``'s six **re-converged** RHF+CASCI+NEVPT2 runs per
-component.
+is the entire content of a Lagrangian gradient.
+
+**That derivative is analytic (#247).** Along the frozen path nothing moves
+but the integrals, and every term of ``Phi`` except ``E_corr`` is LINEAR in
+the MO Hamiltonian there: ``E_CASCI`` is the state's RDMs against it, ``F``
+and ``f`` are Fock matrices, ``<z|H|c>`` is a transition density and the
+CASSCF branch's ``Z . g_all`` is #232's ``Z``-weighted densities. So each is a
+density pair ``(P, Gamma)`` (:meth:`Gradients.nuclear_densities`), and its
+nuclear derivative is #215's frozen-path derivative integrals contracted with
+it -- taken from the adjoint side, ``integral_perturbation.path_gradient``,
+so no perturbed tensor is formed. ``E_corr`` is not linear, but along the
+path its slope is its gradient with respect to the integrals against their
+derivative, and that gradient is the GPU's **integral adjoint** (#246, the
+dump's ``ibar_*``), pulled back onto the full MO Hamiltonian
+(``integral_perturbation.inventory_adjoint``; :meth:`Gradients.corr_densities`).
+No displaced geometry is evaluated. With no adjoint in the source terms
+(``--source pyscf``, or a dump older than #246) ``E_corr``'s half alone stays
+the frozen-path quotient below.
+
+``--nuclear-quotient`` keeps the term this file had before: ``Phi`` itself
+differenced, four displaced evaluations per Cartesian component (two with
+``--no-richardson``), against ``nevpt2_numgrad.py``'s six **re-converged**
+RHF+CASCI+NEVPT2 runs per component -- and computes the analytic one beside
+it, for the A/B. Either way :func:`check_nuclear_ladder` differences ``Phi``
+along seeded directions, and :func:`check_nuclear_densities` holds every
+density to ``Phi``'s linear part rebuilt at a displaced geometry.
 
 The ``<z|H(x)|c>`` term drops ``- (dE_CASCI/dx) (z.c)`` because ``z`` is
 projected against the state, so ``z`` must *actually* be projected and not
@@ -122,25 +144,13 @@ multiple of it moves no residual, and a Jacobi preconditioner puts one there.
 :meth:`Gradients.solve_lagrange` projects both inside the preconditioner and
 after the solve, and reports ``z.c``.
 
-So this is an analytic gradient whose *skeleton* derivatives are differenced
-rather than contracted against derivative integrals. That is a deliberate,
-stated limitation and not a hidden one:
-
-* The analytic content -- the constraint set, the Z-vector equations, the
-  multipliers, the stationarity that makes two displaced points enough -- is
-  all here and is exactly what is being tested when the result is compared
-  against ``grad_num``.
-* Replacing the difference quotients with PySCF's derivative integrals needs
-  the NEVPT2 **relaxed densities** (Park Eqs. 41-47 completed into Eq. 35's
-  RDM-conjugate form), because ``Y_xy`` fixes only the antisymmetric part of
-  the generalized Fock and the AO contraction needs the densities themselves.
-  ``src/gradient/`` builds those pseudodensities and frees them as the slab
-  walk ends (docs/gradients.md, section 5.2: "Nothing consumes them yet"), and
-  no flag writes them out. Closing that is C++-side work, and this issue
-  changes no ``src/``.
-* The difference quotients are of a *scalar along a frozen path*, so their
-  own error is measurable, and it is measured: the Richardson bar is on by
-  default and printed with the gradient (``--no-richardson`` turns it off).
+What still is a difference quotient is the ``kappa`` sweep's (the source
+term ``A``'s ``E_CASCI`` half, the constraint Jacobian and ``Q``) and the
+source terms' when PySCF provides them; the nuclear term's frozen-path
+quotient is a check and an opt-in A/B, not the number. The quotients are of
+a *scalar along a frozen path*, so their own error is measurable, and it is
+measured: the Richardson bar is on by default and printed with the gradient
+(``--no-richardson`` turns it off).
 
 SC OR PC: ONE LAGRANGIAN, TWO CORRELATION ENERGIES
 --------------------------------------------------
@@ -598,7 +608,10 @@ CI_STEP = 2.0 ** -17
 #: (docs/testing.md, "Residual-independent checks of the gradient path").
 CI_STEP_PC = 1e-7
 
-#: The nuclear step for ``dPhi/dx``, in bohr, SC; the gradient is the
+#: The nuclear step for ``dPhi/dx``, in bohr, SC, when it is a quotient: under
+#: ``--nuclear-quotient``, and for ``E_corr``'s half when the source terms carry
+#: no integral adjoint (:data:`NUCLEAR_TERMS`; the default term is analytic
+#: since #247). The quotient is the
 #: Richardson extrapolant of the quotients at this step and half of it.
 #: What is differenced is one scalar along a frozen path, not the
 #: re-converged energy ``nevpt2_numgrad.py`` differences, and the two need not
@@ -617,6 +630,35 @@ NUC_STEP = 2.0 ** -13
 #: moves by 1.3e-9 between it and ``2^-13`` bohr, and its nuclear ladder
 #: passes at it (docs/testing.md, "The step constants, measured").
 NUC_STEP_PC = ngrad.STEP_BOHR
+
+#: How ``dPhi/dx`` is taken (#247). ``analytic``, the default: every term of
+#: ``Phi`` but ``E_corr`` is linear in the MO Hamiltonian along the frozen
+#: path, so it is a density pair contracted with the path's derivative
+#: integrals (:meth:`Gradients.nuclear_densities`), and ``E_corr``'s term is
+#: the GPU's integral adjoint (#246) against the same derivatives -- no
+#: displaced evaluation at all. ``quotient``: the central differences of
+#: ``Phi`` at :data:`NUC_STEP` with the Richardson pass, the term before
+#: #247, kept for the A/B (``--nuclear-quotient``, which computes the analytic
+#: one beside it).
+NUCLEAR_TERMS = ("analytic", "quotient")
+
+#: How far the analytic term's densities may miss ``Phi``'s linear part
+#: rebuilt by :meth:`Functional.evaluate` at a displaced geometry, Eh
+#: (:func:`check_nuclear_densities`). The identity is exact -- both sides are
+#: the same linear function of the same integrals -- so this is round-off
+#: headroom on energies of a few hundred Eh, not a tolerance on a derivative.
+DENSITY_IDENTITY_TOL = 1e-9
+
+#: The displacement (bohr, along a seeded totally symmetric direction) that
+#: identity is read at: large enough that every constraint is far from its
+#: zero, so a missing or mis-weighted density moves the sum by much more than
+#: :data:`DENSITY_IDENTITY_TOL`.
+DENSITY_IDENTITY_STEP = 2.0 ** -6
+
+#: The A/B's floor on the quotient's per-component Richardson bar, Eh/bohr: a
+#: component that is zero by symmetry has a quotient of exactly 0 and a bar of
+#: 0, and the analytic term reads round-off there.
+AB_BAR_FLOOR = 1e-12
 
 
 def scheme_steps(pc: bool) -> tuple[float, float]:
@@ -1645,6 +1687,14 @@ class SourceTerms:
     #: Jacobian, which runs either way.
     from_dump: bool = False
     seconds: float = 0.0
+    #: The GPU's integral adjoint ``dE_corr/d(integrals)`` (#246): the 21
+    #: ``ibar_<name>`` members of a dump written since, by inventory name
+    #: (``integral_perturbation.NAMES``), in the **golden's** frame -- what
+    #: the analytic nuclear term contracts ``E_corr``'s half with (#247).
+    #: ``None`` for PySCF's source terms and an older dump: ``E_corr``'s
+    #: nuclear term is then its frozen-path quotient
+    #: (:meth:`Gradients.analytic_nuclear`).
+    ibar: dict | None = None
 
 
 #: How far a dump's ``ci`` may sit from the rebuilt state's (after the sign is
@@ -1691,6 +1741,13 @@ def load_source_terms(path: Path, st: State, *, pc: bool = False) -> SourceTerms
         ci_dump = np.asarray(z["ci"], dtype=float)
         e_corr = float(z["e_corr"]) if "e_corr" in z else None
         dump_pc = bool(int(z["pc"])) if "pc" in z else False
+        ibar_names = [n for n, _a, _t in gf.GRADSRC_IBAR]
+        have = [n for n in ibar_names if n in z]
+        if have and len(have) != len(ibar_names):
+            raise SystemExit(f"{path}: {len(have)} of the {len(ibar_names)} integral-adjoint "
+                             "members (#246): the set is written whole or not at all")
+        ibar = ({n[len("ibar_"):]: np.asarray(z[n], dtype=float) for n in ibar_names}
+                if have else None)
     if dump_pc != pc:
         raise SystemExit(
             f"{path} holds the GPU's {'PC' if dump_pc else 'SC'}-NEVPT2 source terms, and this "
@@ -1726,8 +1783,10 @@ def load_source_terms(path: Path, st: State, *, pc: bool = False) -> SourceTerms
     y_rot = w.T @ y_mat @ w
     y_ci_rot = fci.addons.transform_ci_for_orbital_rotation(
         sign * y_ci.reshape(st.ci.shape), st.nact, st.nelecas, st.act_rot)
+    if ibar is not None and ibar["h"].shape != (st.nmo, st.nmo):
+        raise SystemExit(f"{path}: ibar_h is {ibar['h'].shape}, expected ({st.nmo}, {st.nmo})")
     return SourceTerms(kappa=y_rot - y_rot.T, ci=np.asarray(y_ci_rot).reshape(st.ci.shape),
-                       origin=f"dump {path}", from_dump=True)
+                       origin=f"dump {path}", from_dump=True, ibar=ibar)
 
 
 def kappa_sweep(fn: Functional, st: State, cons: list, *, with_corr: bool,
@@ -2363,8 +2422,17 @@ class Gradients(lagrange.Gradients):
 
     def __init__(self, st: State, src: SourceTerms, *, with_corr: bool = True,
                  step: float | None = None, richardson: bool = True,
-                 pc: bool = False, kappa_step: float | None = None, workers: int = 1):
+                 pc: bool = False, kappa_step: float | None = None, workers: int = 1,
+                 nuclear: str = "analytic"):
+        if nuclear not in NUCLEAR_TERMS:
+            raise SystemExit(f"nuclear={nuclear!r} is not one of {NUCLEAR_TERMS}")
         self.st = st
+        #: how the nuclear term is taken (:data:`NUCLEAR_TERMS`)
+        self.nuclear = nuclear
+        #: :meth:`analytic_nuclear`'s result, once taken, and the skeleton it
+        #: was taken on
+        self._analytic: dict | None = None
+        self._sk = None
         default_step, default_kappa = scheme_steps(pc)
         step = default_step if step is None else step
         kappa_step = default_kappa if kappa_step is None else kappa_step
@@ -2556,13 +2624,16 @@ class Gradients(lagrange.Gradients):
     # -- hooks 3 and 4: the nuclear derivatives --------------------------
 
     def _phi(self, geom, *, ham_only: bool, lag_only: bool, guard: bool = False,
-             where: str = "") -> float:
-        """One evaluation of ``Phi`` (or of either half) along the frozen
-        orthonormal path at a displaced geometry. ``guard`` runs the PC
-        conditioning guard there too (:meth:`Functional.pc_energy`)."""
+             where: str = "", corr_only: bool = False) -> float:
+        """One evaluation of ``Phi`` (or of either half, or with
+        ``corr_only`` of ``E_corr`` alone) along the frozen orthonormal path
+        at a displaced geometry. ``guard`` runs the PC conditioning guard
+        there too (:meth:`Functional.pc_energy`)."""
         st = self.st
         fn = self._geom_fn(geom)
         C = frozen_coeff(st.mo_coeff, self._S0_half, fn.ovlp)
+        if corr_only:
+            return fn.evaluate(C, st.ci, with_corr=True, guard=guard, where=where)["e_corr"]
         b = fn.evaluate(C, st.ci, with_corr=self.with_corr, guard=guard, where=where,
                         with_g=st.casscf)
         ham = b["e_casci"] + b["e_corr"]
@@ -2581,10 +2652,14 @@ class Gradients(lagrange.Gradients):
             self._fn_cache[key] = cached
         return cached
 
-    def _nuclear_difference(self, *, ham_only: bool, lag_only: bool) -> tuple:
+    def _nuclear_difference(self, *, ham_only: bool, lag_only: bool,
+                            corr_only: bool = False) -> tuple:
         """``dPhi/dx`` component by component, as a central difference along
         the frozen path -- with a Richardson pass at ``h/2`` when asked, whose
-        difference from the coarse one is the error bar on the number."""
+        difference from the coarse one is the error bar on the number. The
+        ``quotient`` nuclear term (:data:`NUCLEAR_TERMS`), and with
+        ``corr_only`` the analytic one's ``E_corr`` half when no integral
+        adjoint was dumped."""
         st = self.st
         natm = len(st.geom)
         de = np.zeros((natm, 3))
@@ -2606,9 +2681,11 @@ class Gradients(lagrange.Gradients):
                 g = {}
                 for h in steps:
                     plus = self._phi(ngrad.displace(st.geom, iatom, comp, +h),
-                                     ham_only=ham_only, lag_only=lag_only)
+                                     ham_only=ham_only, lag_only=lag_only,
+                                     corr_only=corr_only)
                     minus = self._phi(ngrad.displace(st.geom, iatom, comp, -h),
-                                      ham_only=ham_only, lag_only=lag_only)
+                                      ham_only=ham_only, lag_only=lag_only,
+                                      corr_only=corr_only)
                     g[h] = (plus - minus) / (2.0 * h)
                 de[iatom, comp] = g[steps[-1]]
                 if len(steps) > 1:
@@ -2622,20 +2699,197 @@ class Gradients(lagrange.Gradients):
         """``<dH/dx>``: the gradient the method would have if it were
         variational -- here ``d/dx [E_CASCI + E_corr]`` along the frozen
         orthonormal path, nuclear repulsion included (it is inside
-        ``E_CASCI``'s core energy)."""
+        ``E_CASCI``'s core energy). Analytic by default
+        (:meth:`analytic_nuclear`), the quotient under ``nuclear="quotient"``."""
+        if self.nuclear == "analytic":
+            return self.analytic_nuclear()["ham"]
         de, res, probed = self._nuclear_difference(ham_only=True, lag_only=False)
         self.residuals["ham_response_richardson"] = float(res.max()) if self.richardson else None
         self._probed = probed
+        self._quotient_bar = res
         return de
 
     def get_LdotJnuc(self, Lvec, **kwargs) -> np.ndarray:
         """``Lvec . J_nuc``: the multipliers against the constraints' nuclear
         derivative -- ``d/dx [ sum Z F(x) + sum zc f(x) + <z|H(x)|c> ]`` along
         the same path. The second term of the final gradient, and the only
-        place the Z-vector solution enters it."""
+        place the Z-vector solution enters it. Analytic or the quotient, as
+        :meth:`get_ham_response`."""
+        if self.nuclear == "analytic":
+            return self.analytic_nuclear()["lag"]
         de, res, _probed = self._nuclear_difference(ham_only=False, lag_only=True)
         self.residuals["ldotjnuc_richardson"] = float(res.max()) if self.richardson else None
+        self._quotient_bar = self._quotient_bar + res
         return de
+
+    # -- the analytic nuclear term (#247) --------------------------------
+
+    def nuclear_skeleton(self):
+        """#215's :class:`casscf_hessian.Skeleton` at this state's orbitals and
+        geometry (``integral_perturbation.DfSkeleton``, fitted in the state's
+        auxiliary basis, under ``--df``): the frozen path's derivative
+        integrals every density below is contracted with. Built once."""
+        if self._sk is None:
+            import casscf_hessian as ch
+            import integral_perturbation as ip
+
+            st = self.st
+            D, G = ch.full_rdms(st.ncore, st.nact, st.nelecas, st.ci)
+            ref = ch.Reference(geom=st.geom, basis=st.basis, C0=st.mo_coeff, ncore=st.ncore,
+                               ncas=st.nact, D=D, G=G)
+            self._sk = ip.DfSkeleton(ref, st.auxbasis) if st.df else ch.Skeleton(ref)
+        return self._sk
+
+    def _full_range(self, D: np.ndarray, G: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """``casscf_hessian.full_rdms``' occupied-range densities, zero-padded
+        to the whole MO range."""
+        n, o = self.st.nmo, D.shape[0]
+        P = np.zeros((n, n))
+        P[:o, :o] = D
+        Gamma = np.zeros((n,) * 4)
+        Gamma[:o, :o, :o, :o] = G
+        return P, Gamma
+
+    def nuclear_densities(self) -> dict:
+        """The pieces of ``Phi`` that are LINEAR in the MO Hamiltonian along
+        the frozen path, each as ``(P, Gamma, e_nuc)`` with
+
+            piece(R) = e_nuc E_nuc(R) + sum P h(R) + 1/2 sum Gamma (pq|rs)(R)
+
+        over the whole MO range at fixed orbitals and CI vector -- exactly, at
+        every ``R`` -- so each piece's nuclear derivative is #215's frozen-path
+        derivative at these densities (``integral_perturbation.path_gradient``):
+
+        * ``casci``: ``E_CASCI``, the state's own full-range RDMs
+          (``casscf_hessian.full_rdms``), nuclear repulsion included;
+        * ``lag``: the constraints' term. The (O1) ``F`` and (O2) ``f`` rows
+          are Fock matrices -- ``h + sum_j [2 (pq|jj) - (pj|jq)]`` over the RHF
+          occupied space or the core, ``f`` plus ``gamma``'s active terms --
+          so their multipliers make a density directly. The CASCI branch's
+          ``<z|H|c>`` is the symmetric transition density of ``z`` and ``c``
+          (the bilinear part of ``full_rdms``, by polarisation) plus ``z.c``
+          times the core's (``E_nuc`` with it). The CASSCF branch's (S1) and
+          (C1), ``Z . g_all``, are #232's ``Z``-weighted densities
+          (``casscf_constraint_mixed.Constraint.densities``), the slope of
+          the energy along the multipliers.
+
+        ``E_corr`` is not linear in the integrals and is not here:
+        :meth:`corr_densities` linearises it with the GPU's adjoint."""
+        import casscf_hessian as ch
+        import integral_perturbation as ip
+
+        st = self.st
+        nmo = st.nmo
+        out = {"casci": (*self._full_range(*ch.full_rdms(st.ncore, st.nact, st.nelecas,
+                                                         st.ci)), 1.0)}
+        W = {"F": np.zeros((nmo, nmo)), "f": np.zeros((nmo, nmo))}
+        for m, (kind, p, q) in enumerate(self.cons):
+            if kind in W:
+                W[kind][p, q] += self.lam[m]
+        P = W["F"] + W["f"]
+        Graw = np.zeros((nmo,) * 4)
+        for kind, occ in (("F", np.arange(st.ncore + st.n_act_occ)), ("f", np.arange(st.ncore))):
+            w = W[kind]
+            Graw[:, :, occ, occ] += 2.0 * w[:, :, None]
+            Graw[:, occ, occ, :] -= w[:, None, :]
+        a = st.act
+        gamma = fci.direct_spin1.make_rdm1(st.ci, st.nact, st.nelecas)
+        Graw[:, :, a, a] += np.einsum("pq,tu->pqtu", W["f"], gamma)
+        Graw[:, a, :, a] -= 0.5 * np.einsum("pq,tu->ptqu", W["f"], gamma)
+        P, Gamma = ip.adjoint_densities(P, Graw)
+        if st.casscf:
+            import casscf_constraint_mixed as ccm
+
+            con = ccm.Constraint(st.geom, st.basis, st.mo_coeff, st.ci, st.ncore, st.nact,
+                                 st.nelecas)
+            if not np.array_equal(con.th.var, self.var):
+                raise SystemExit("nuclear_densities: #232's gen_g_hop variables are not "
+                                 "this solve's: the multipliers would be misread")
+            zorb = np.zeros(self.nvar)
+            zorb[self.s_var] = self.lam[self.s_rows]
+            pz, gz = con.densities(np.concatenate([zorb, self.z.ravel()]))[4]
+            out["lag"] = (P + pz, Gamma + gz, 0.0)
+            return out
+        c, z = st.ci.ravel(), self.z.ravel()
+        zc = float(z @ c)
+        shape = st.ci.shape
+        dp, gp = ch.full_rdms(st.ncore, st.nact, st.nelecas, (c + z).reshape(shape))
+        dm, gm = ch.full_rdms(st.ncore, st.nact, st.nelecas, (c - z).reshape(shape))
+        d0, g0 = ch.full_rdms(st.ncore, st.nact, st.nelecas, np.zeros(shape))
+        pz, gz = self._full_range(0.25 * (dp - dm) + zc * d0, 0.25 * (gp - gm) + zc * g0)
+        out["lag"] = (P + pz, Gamma + gz, zc)
+        return out
+
+    def corr_densities(self) -> tuple[np.ndarray, np.ndarray]:
+        """``E_corr``'s first-order density pair from the GPU's integral
+        adjoint (#246): ``dE_corr/d(inventory)`` pulled back onto the full MO
+        Hamiltonian (``integral_perturbation.inventory_adjoint``, at the
+        golden's active density, in the golden's frame) and carried into the
+        frame this state is held in -- section 2.6's active rotation ``W``,
+        ``C = C_golden W``, so a density goes as ``W^T P W`` on every index.
+        ``E_corr``'s frozen-path slope is then ``path_gradient`` at it, since
+        along that path only the integrals move."""
+        import casscf_hessian as ch
+        import integral_perturbation as ip
+
+        st = self.st
+        gamma_g = fci.direct_spin1.make_rdm1(st.ci_golden, st.nact, st.nelecas)
+        Hbar, Gbar = ip.inventory_adjoint(self.src.ibar, gamma_g, st.ncore, st.nact)
+        if not np.array_equal(st.act_rot, np.eye(st.nact)):
+            w = np.eye(st.nmo)
+            w[st.act, st.act] = st.act_rot
+            Hbar = w.T @ Hbar @ w
+            Gbar = ch._tx(Gbar[None], w, w, w, w)[0]
+        return ip.adjoint_densities(Hbar, Gbar)
+
+    def analytic_nuclear(self) -> dict:
+        """Hooks 3 and 4 with no displaced evaluation (#247): ``ham`` (the
+        derivative of ``E_CASCI + E_corr``) and ``lag`` (the constraints'
+        term), each ``(natm, 3)``, from :meth:`nuclear_densities` and
+        :meth:`corr_densities` through ``integral_perturbation.path_gradient``
+        -- every density summed per half first, so each half is one adjoint
+        contraction -- plus ``E_nuc``'s own derivative at its weight.
+
+        ``E_corr``'s half needs the dump's integral adjoint
+        (:attr:`SourceTerms.ibar`). Without one -- PySCF's source terms, or a
+        dump older than #246 -- that half alone is still the frozen-path
+        quotient of ``E_corr`` (with the Richardson bar, under
+        ``corr_richardson``), and :attr:`nuclear_origin` says so. Computed
+        once and cached; ``nuclear_seconds`` in :attr:`residuals` is its
+        wall."""
+        if self._analytic is not None:
+            return self._analytic
+        import integral_perturbation as ip
+        from pyscf.grad import rhf as rhf_grad
+
+        t0 = time.perf_counter()
+        st = self.st
+        natm = len(st.geom)
+        sk = self.nuclear_skeleton()
+        gnuc = np.asarray(rhf_grad.grad_nuc(sk.mol)).ravel()
+        dens = self.nuclear_densities()
+        P, Gamma, _e = dens["casci"]
+        corr = None
+        origin = "analytic"
+        if self.with_corr and self.src.ibar is not None:
+            pc_, gc_ = self.corr_densities()
+            P, Gamma = P + pc_, Gamma + gc_
+            origin = "analytic (E_corr through the GPU's integral adjoint)"
+        elif self.with_corr:
+            corr, res, _probed = self._nuclear_difference(ham_only=False, lag_only=False,
+                                                          corr_only=True)
+            self.residuals["corr_richardson"] = float(res.max()) if self.richardson else None
+            origin = ("analytic, but E_corr's half the frozen-path quotient: no integral "
+                      "adjoint (#246) in the source terms")
+        ham = gnuc + ip.path_gradient(sk, P, Gamma)
+        if corr is not None:
+            ham = ham + corr.ravel()
+        P, Gamma, enuc = dens["lag"]
+        lag = enuc * gnuc + ip.path_gradient(sk, P, Gamma)
+        self.nuclear_origin = origin
+        self._analytic = dict(ham=ham.reshape(natm, 3), lag=lag.reshape(natm, 3), densities=dens)
+        self.residuals["nuclear_seconds"] = time.perf_counter() - t0
+        return self._analytic
 
     # -- the driver -------------------------------------------------------
 
@@ -2693,6 +2947,7 @@ class Gradients(lagrange.Gradients):
             kappa=(sweep["A_casci"] + self.src.kappa) if self.src.from_dump
             else (sweep["A"] if self.with_corr else sweep["A_casci"]),
             ci=self.src.ci, origin=self.src.origin, from_dump=self.src.from_dump,
+            ibar=self.src.ibar,
         )
         log(f"  one kappa sweep over {len(self.pairs)} pairs in "
             f"{sweep['seconds']:.0f}s: the source term A (max |A| = "
@@ -2910,12 +3165,27 @@ class Gradients(lagrange.Gradients):
 
     def kernel(self, **kwargs) -> np.ndarray:
         """The complete gradient: the skeleton derivative plus the
-        multipliers against the constraints' nuclear derivative."""
+        multipliers against the constraints' nuclear derivative.
+
+        Under ``nuclear="quotient"`` the analytic term is taken beside it, so
+        the A/B (#247) reads both on one solve: :attr:`de_analytic`, and
+        :attr:`quotient_bar`, the quotient's per-component Richardson bar
+        (``|extrapolant - fine quotient|``, both halves summed)."""
+        t0 = time.perf_counter()
         ham = self.get_ham_response()
         lag = self.get_LdotJnuc(self.lam)
+        self.residuals["nuclear_seconds"] = time.perf_counter() - t0
         self.de = ham + lag
         self.ham_response = ham
         self.ldotjnuc = lag
+        if self.nuclear == "quotient":
+            self.quotient_bar = self._quotient_bar
+            quotient_seconds = self.residuals["nuclear_seconds"]
+            ana = self.analytic_nuclear()
+            self.residuals["analytic_nuclear_seconds"] = self.residuals["nuclear_seconds"]
+            self.residuals["nuclear_seconds"] = quotient_seconds
+            self.de_analytic = ana["ham"] + ana["lag"]
+            self.nuclear_origin = "quotient"
         return self.de
 
 
@@ -2956,7 +3226,7 @@ class CasscfGradients(Gradients):
     def __init__(self, st: State, src: SourceTerms, *, with_corr: bool = True,
                  step: float | None = None, richardson: bool = True,
                  kappa_step: float | None = None, cp_solve: str = "dense",
-                 pc: bool = False, workers: int = 1):
+                 pc: bool = False, workers: int = 1, nuclear: str = "analytic"):
         if not st.casscf:
             raise SystemExit("CasscfGradients needs a --reference casscf state")
         # ``pc`` changes E_corr and nothing else (#126): the source terms Y, y
@@ -2964,7 +3234,7 @@ class CasscfGradients(Gradients):
         # the PC guard at every displaced CI vector; (S1), (C1), (O2) and the
         # coupled operator are the reference's and do not see it.
         super().__init__(st, src, with_corr=with_corr, step=step, richardson=richardson,
-                         pc=pc, kappa_step=kappa_step, workers=workers)
+                         pc=pc, kappa_step=kappa_step, workers=workers, nuclear=nuclear)
         if cp_solve not in CP_SOLVES:
             raise SystemExit(f"--cp-solve {cp_solve!r} is not one of {CP_SOLVES}")
         self.cp_solve = cp_solve
@@ -3817,10 +4087,13 @@ def check_orbital_stationarity(g: Gradients) -> list[Check]:
 
 
 def check_nuclear_ladder(g: Gradients) -> list[Check]:
-    """``NUC_STEP``'s quotients, gated by a ladder: ``Phi`` differenced along
-    a seeded totally symmetric displacement of every atom must converge to
-    the assembled gradient contracted with it. Run after
-    :meth:`Gradients.kernel`, with the PC guard sampled at every rung."""
+    """The nuclear term, gated by a ladder: ``Phi`` differenced along a
+    seeded totally symmetric displacement of every atom must converge to the
+    assembled gradient contracted with it. Run after :meth:`Gradients.kernel`,
+    with the PC guard sampled at every rung. Since #247 the term it gates is
+    analytic by default, so this is the frozen-path quotient kept as the
+    check it was always meant to be; under ``--nuclear-quotient`` it gates
+    ``NUC_STEP``'s quotients as before."""
     st = g.st
     out = []
     for seed in CHECK_SEEDS:
@@ -3832,6 +4105,51 @@ def check_nuclear_ladder(g: Gradients) -> list[Check]:
 
         out.append(step_ladder(f"nuclear ladder, seed {seed}", phi, ladder_steps(NUC_LADDER),
                                float(np.sum(d * g.de))))
+    return out
+
+
+def check_nuclear_densities(g: Gradients) -> list[Check]:
+    """The analytic nuclear term's densities (:meth:`Gradients.nuclear_densities`)
+    are what they claim: at a displaced geometry on the frozen path
+    (:data:`DENSITY_IDENTITY_STEP` along a seeded totally symmetric
+    direction), each rebuilds its piece of ``Phi`` -- ``E_CASCI``, and the
+    constraints' term with the solved multipliers -- from that geometry's MO
+    integrals, against :meth:`Functional.evaluate`'s own (``_phi``'s path),
+    to round-off. Exact for any linear piece and any geometry, so a missing
+    term or a mis-weighted multiplier fails it by the size of what it
+    dropped; with :func:`check_nuclear_ladder` behind it, which reads the
+    assembled derivative, and the hand cases' ``path_gradient`` against
+    #215's forward derivative, every link of the analytic term is checked
+    without a residual. (``E_corr``'s half is not linear in the integrals:
+    its adjoint is #246's dump check 9.)"""
+    import casscf_hessian as ch
+    import integral_perturbation as ip
+    from pyscf import scf as pscf
+
+    st = g.st
+    dens = g.analytic_nuclear()["densities"]
+    d = nuclear_check_direction(g, CHECK_SEEDS[0])
+    geom = displace_along(st.geom, d, DENSITY_IDENTITY_STEP)
+    fn = g._geom_fn(geom)
+    C = frozen_coeff(st.mo_coeff, g._S0_half, fn.ovlp)
+    b = fn.evaluate(C, st.ci, with_corr=False, with_g=st.casscf)
+    mol = ch.mol_at(geom, st.basis)
+    h = C.T @ pscf.hf.get_hcore(mol) @ C
+    eri = ip.full_eri(mol, C, st.auxbasis)
+    out = []
+    for key, name, ref in (
+            ("casci", "E_CASCI", b["e_casci"]),
+            ("lag", "the constraints' term",
+             float(g.lam @ constraint_vector(b, g.cons)) + g.ci_term(b))):
+        P, Gamma, enuc = dens[key]
+        val = (enuc * float(mol.energy_nuc()) + float(np.sum(P * h))
+               + 0.5 * float(np.tensordot(Gamma, eri, axes=4)))
+        err = abs(val - ref)
+        out.append(Check(
+            f"the analytic nuclear term's densities rebuild {name}", err <= DENSITY_IDENTITY_TOL,
+            f"at {DENSITY_IDENTITY_STEP:g} bohr along the path: {val:+.12e} vs "
+            f"{ref:+.12e}, |delta| = {err:.1e} (allowed {DENSITY_IDENTITY_TOL:g})",
+            numbers=dict(value=val, ref=ref, err=err)))
     return out
 
 
@@ -3912,7 +4230,8 @@ def load_grad_num(path: Path, case: str, *, pc: bool,
 def solve_gradient(st: State, src: SourceTerms, *, pc: bool, with_corr: bool = True,
                    step: float | None = None, richardson: bool = True,
                    kappa_step: float | None = None, cp_solve: str = "dense",
-                   workers: int = 1, sweep: dict | None = None, log=print) -> Gradients:
+                   workers: int = 1, sweep: dict | None = None, log=print,
+                   nuclear: str = "analytic") -> Gradients:
     """The gradient from given source terms, end to end: the branch's
     Lagrangian (:class:`CasscfGradients` on a CASSCF state, :class:`Gradients`
     otherwise), its ``kappa`` sweep (or ``sweep``, another instance's), the
@@ -3923,10 +4242,11 @@ def solve_gradient(st: State, src: SourceTerms, *, pc: bool, with_corr: bool = T
     solve and the contraction."""
     if st.casscf:
         g = CasscfGradients(st, src, with_corr=with_corr, step=step, richardson=richardson,
-                            kappa_step=kappa_step, cp_solve=cp_solve, pc=pc, workers=workers)
+                            kappa_step=kappa_step, cp_solve=cp_solve, pc=pc, workers=workers,
+                            nuclear=nuclear)
     else:
         g = Gradients(st, src, with_corr=with_corr, step=step, richardson=richardson, pc=pc,
-                      kappa_step=kappa_step, workers=workers)
+                      kappa_step=kappa_step, workers=workers, nuclear=nuclear)
     g.prepare(log=log, sweep=sweep)
     g.solve_multipliers(log=log)
     g.kernel()
@@ -4193,7 +4513,11 @@ def run(args) -> dict:
               f"|y| = {np.linalg.norm(src.ci):.8f}")
         if both:
             y = pyscf_ci_source(fn, st, step=args.ci_step)
-            src_pyscf = SourceTerms(kappa=np.zeros((st.nmo, st.nmo)), ci=y, origin="pyscf")
+            # E_corr's nuclear term is the state's, not a source term's: the
+            # PySCF-sourced solve takes it from the same integral adjoint, so
+            # the two gradients still differ only through Y and y.
+            src_pyscf = SourceTerms(kappa=np.zeros((st.nmo, st.nmo)), ci=y, origin="pyscf",
+                                    ibar=src.ibar)
             print(f"  and PySCF's y_I over {y.size} determinants by central differences "
                   f"(the comparison's other side), {time.perf_counter() - t_src:.0f}s")
     elif not with_corr:
@@ -4212,15 +4536,18 @@ def run(args) -> dict:
     src.seconds = time.perf_counter() - t_src
     rec["source_origin"] = src.origin
 
+    nuclear = "quotient" if args.nuclear_quotient else "analytic"
     if casscf:
         g = CasscfGradients(st, src, with_corr=with_corr, step=args.step,
                             richardson=args.richardson, kappa_step=args.kappa_step,
-                            cp_solve=args.cp_solve, pc=args.pc, workers=args.workers)
+                            cp_solve=args.cp_solve, pc=args.pc, workers=args.workers,
+                            nuclear=nuclear)
     else:
         g = Gradients(st, src, with_corr=with_corr, step=args.step,
                       richardson=args.richardson, pc=args.pc, kappa_step=args.kappa_step,
-                      workers=args.workers)
+                      workers=args.workers, nuclear=nuclear)
     rec["workers"] = args.workers
+    rec["nuclear"] = nuclear
     print("\nthe frozen orthonormal path, and one kappa sweep")
     # Under --source both the one sweep differentiates E_corr too, so PySCF's
     # half of A exists to compare the dump's with -- and to solve with.
@@ -4275,9 +4602,18 @@ def run(args) -> dict:
 
     print("\nthe AO contraction")
     de = g.kernel()
-    print("\nresidual-independent checks of the nuclear quotients")
+    rec["nuclear_origin"] = g.nuclear_origin
+    print(f"  the nuclear term: {g.nuclear_origin}, {g.residuals['nuclear_seconds']:.1f}s"
+          + (f" (the analytic one beside it, for the A/B: "
+             f"{g.residuals['analytic_nuclear_seconds']:.1f}s)"
+             if nuclear == "quotient" else ""))
+    if nuclear == "quotient":
+        rec["grad_analytic"] = g.de_analytic
+        rec["quotient_bar"] = g.quotient_bar
+    print("\nresidual-independent checks of the nuclear term")
     t_chk = time.perf_counter()
-    tail = check_nuclear_ladder(g) + [check_pc_guard_ledger(args.pc)]
+    tail = (check_nuclear_densities(g) + check_nuclear_ladder(g)
+            + [check_pc_guard_ledger(args.pc)])
     for chk in tail:
         print(f"  {'ok  ' if chk.ok else 'FAIL'} {chk.name}: {chk.summary}")
     checks += tail
@@ -4300,7 +4636,8 @@ def run(args) -> dict:
             # On the CASSCF branch the same coupled solve, dense or CG (#125).
             gx = solve_gradient(st, terms, pc=args.pc, step=args.step,
                                 richardson=args.richardson, kappa_step=args.kappa_step,
-                                cp_solve=args.cp_solve, sweep=g.sweep, log=lambda *a: None)
+                                cp_solve=args.cp_solve, sweep=g.sweep, log=lambda *a: None,
+                                nuclear=nuclear)
             return gx.de, dict(gx.residuals)
 
         rec["grad_pyscf"], rec["residuals_pyscf"] = solve_with(src_pyscf)
@@ -4317,9 +4654,11 @@ def run(args) -> dict:
         print("  and the two mixed solves that attribute the difference: GPU Y with "
               "PySCF's y, PySCF's Y with the GPU's y")
         rec["grad_gpu_y_only"], _ = solve_with(SourceTerms(
-            kappa=src.kappa, ci=src_pyscf.ci, origin="GPU Y + PySCF y", from_dump=True))
+            kappa=src.kappa, ci=src_pyscf.ci, origin="GPU Y + PySCF y", from_dump=True,
+            ibar=src.ibar))
         rec["grad_gpu_ci_only"], _ = solve_with(SourceTerms(
-            kappa=g.sweep["A_corr"], ci=src.ci, origin="PySCF Y + GPU y", from_dump=True))
+            kappa=g.sweep["A_corr"], ci=src.ci, origin="PySCF Y + GPU y", from_dump=True,
+            ibar=src.ibar))
     rec["wall"] = time.perf_counter() - t0
     rec["kappa_evals"] = fn.nevals + g.fn.nevals
 
@@ -4582,6 +4921,27 @@ def _report_gradient(rec: dict, scheme: str) -> None:
               f"the gradient above): {rec['residuals']['ham_response_richardson']:.1e} "
               f"(skeleton), {rec['residuals']['ldotjnuc_richardson']:.1e} "
               f"(multipliers)")
+    print(f"\nthe nuclear term: {rec['nuclear_origin']} "
+          f"({rec['residuals']['nuclear_seconds']:.1f}s)")
+    if rec["residuals"].get("corr_richardson") is not None:
+        print(f"  E_corr's quotient's Richardson bar: {rec['residuals']['corr_richardson']:.1e}")
+    if "grad_analytic" in rec:
+        # #247's A/B: the analytic term beside the quotient, on one solve.
+        diff = np.abs(rec["grad_analytic"] - grad)
+        bar = rec["quotient_bar"]
+        # A zero-by-symmetry component's quotient is exactly 0 with a 0 bar,
+        # and the analytic one is round-off: the bar is floored at that.
+        floor = np.maximum(bar, AB_BAR_FLOOR)
+        outside = int(np.sum(diff > floor))
+        secs = rec["residuals"]["analytic_nuclear_seconds"]
+        print(f"  A/B against the analytic term ({secs:.1f}s): max |analytic - quotient| = "
+              f"{diff.max():.3e}; the quotient's Richardson bar per component, max "
+              f"{bar.max():.1e}; {outside} of {diff.size} components outside their bar "
+              f"(floored at {AB_BAR_FLOOR:g}; worst |delta| / bar "
+              f"{float(np.max(diff / floor)):.2f})")
+        print(f"  translational sum: analytic "
+              f"{np.abs(rec['grad_analytic'].sum(axis=0)).max():.1e}, quotient "
+              f"{np.abs(grad.sum(axis=0)).max():.1e}")
 
     # The second verdict, independent of the first: every residual above can
     # read round-off on a wrong answer, and these do not read one.
@@ -4674,10 +5034,18 @@ def main() -> None:
                     help="drop E_corr from the source terms and from Phi: the "
                          "reference is then a plain CASCI and pyscf.grad.casci is "
                          "the oracle. The pipeline's own validation")
+    ap.add_argument("--nuclear-quotient", action="store_true",
+                    help="take the nuclear term as before #247: central differences of "
+                         "Phi along the frozen path at --step, with the Richardson pass. "
+                         "The default is analytic (E_corr's half through the dump's "
+                         "integral adjoint, #246); with this flag the analytic one is "
+                         "computed beside the quotient and the A/B is reported")
     ap.add_argument("--step", type=float, default=None,
                     help=f"nuclear central-difference step in bohr (default "
                          f"{NUC_STEP:g}, or {NUC_STEP_PC:g} with --pc; "
-                         "docs/testing.md, \"The step constants, measured\")")
+                         "docs/testing.md, \"The step constants, measured\"): "
+                         "--nuclear-quotient's, and E_corr's half of the analytic "
+                         "term when the source terms carry no integral adjoint")
     ap.add_argument("--no-richardson", dest="richardson", action="store_false",
                     help="difference at h only, and report no error bar. The default "
                          "differences at h and h/2 and stores the Richardson "
