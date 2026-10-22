@@ -1058,12 +1058,17 @@ with the frozen path's derivative integrals together with the rest of
 `Phi`'s densities. No `.pertgold` is read: the contraction runs at whatever
 state the solve is at, `gradient_at`'s displaced ones included.
 
-**What it does not fix.** It replaces `NUC_STEP`'s quotient for `E_corr`'s
-half of the nuclear term, and with #247 that quotient's round-off. The
-~1.5e-8 guess-to-guess spread of `gradient_at`'s SC gradient is a different
-quotient's: the `kappa` sweep's `dE_CASCI/dkappa` at `KAPPA_STEP`, amplified
-by the CP-CASSCF solve ([`testing.md`](testing.md), "Where `gradient_at`'s
-~1e-8 noise comes from").
+**What it does not fix, and what does.** It replaces `NUC_STEP`'s quotient
+for `E_corr`'s half of the nuclear term, and with #247 that quotient's
+round-off. The guess-to-guess spread of `gradient_at`'s SC gradient was a
+different quotient's: the `kappa` sweep's `dE_CASCI/dkappa` at `KAPPA_STEP`,
+amplified by the CP-CASSCF solve ([`testing.md`](testing.md), "Where
+`gradient_at`'s ~1e-8 noise comes from"). #250 takes that side analytically
+too: a rotation moves the integrals as `[I, kappa]`, so `E_CASCI`'s slope,
+the constraint Jacobian and `Q` are linear in that commutator, and
+`E_corr`'s `Y` is the dump's, which every run holds to this adjoint's own
+rotation derivative. What it leaves is PC's: the PC dump's run-to-run
+spread ([`testing.md`](testing.md), "The analytic kappa terms").
 
 ## 7. Where the path is differentiable
 

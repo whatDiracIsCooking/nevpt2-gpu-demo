@@ -1794,8 +1794,9 @@ moves, a PC answer to exist on the state at all, and its **own** CI step —
 ([`testing.md`](testing.md), "The analytic gradient against the numerical
 one"). Its orbital and nuclear steps are its own constants too since #77,
 held where every PC figure was measured while SC's moved
-([`testing.md`](testing.md), "The step constants, measured"). The cost is one block2 PC solve per non-gauge rotation, so it is the
-`kappa` sweep that pays.
+([`testing.md`](testing.md), "The step constants, measured"). With block2's own source terms the cost
+is one block2 PC solve per non-gauge rotation, so it is the `kappa` sweep
+that pays; the GPU's PC dump supplies `Y` and runs no sweep (#250, below).
 
 **It is a Lagrangian gradient**, and the distinction from `grad_num` is the
 point. With the multipliers in hand the whole gradient is the nuclear
@@ -1830,6 +1831,29 @@ analytic nuclear term"). The relaxed densities a fully AO-side contraction
 would read, the NEVPT2 pseudodensities, are still built and freed unread by
 `src/gradient/` ([`gradients.md`](gradients.md), §5.2); the integral
 adjoint is what made them unnecessary here.
+
+**The `kappa` direction is analytic too since #250.** A rotation `C
+exp(kappa)` moves the MO integrals linearly at first order, `dI/dkappa =
+[I, kappa]`, and every object the `kappa` sweep used to difference is linear
+in them at fixed CI vector. `E_CASCI`'s slope `A` is its generalized Fock
+matrix `X = 2 h P + 2 (tq|rs) Gamma` antisymmetrised (`rotation_gradient`;
+on the CASSCF branch it is `gen_g_hop`'s `g_orb`). The constraint Jacobian
+is the rotation derivative of a Fock matrix built from a density fixed in
+MO index space, `[Fock, kappa] + J([kappa, D]) - 1/2 K([kappa, D])`
+(`fock_rotation_derivatives`, with `D` the RHF occupied projector for `F`
+and `2 P_core + gamma` for `f`): the second term is why `f` is not
+covariant across the core/active boundary. `Q = d(H c)/dkappa` is `H c`
+built from the integrals' derivative (`kappa_analytic`). `E_corr`'s half is
+the dump's `Y` (#240's one reverse pass on the GPU), and every run holds it
+to its own integral adjoint's rotation derivative, `rotation_gradient` at
+`corr_densities`. So a dump-sourced gradient evaluates no rotated orbitals
+and no displaced geometry. `--kappa-quotient` keeps the sweep at
+`KAPPA_STEP` and solves on both for the A/B, with the gradient re-solved on
+a sweep at half the step as the quotient's bar. PySCF's source terms have
+no adjoint, so `--source pyscf` still sweeps `E_corr` alone for its half of
+`Y`. The measurements are [`testing.md`](testing.md), "The analytic kappa
+terms"; the walls, [`performance.md`](performance.md), "The analytic kappa
+terms (#250)".
 
 **What the two cases come out at**, source terms from PySCF, at the SC
 steps (`CI_STEP = KAPPA_STEP = 2^-17`, `NUC_STEP = 2^-13` bohr since #77 —

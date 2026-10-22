@@ -921,6 +921,44 @@ stage is the `kappa` sweep and the coupled CP-CASSCF solve. Where acrolein's
 13 s analytic term goes (#232's `Constraint` setup, the full MO tensor, the
 two adjoint contractions) has not been profiled.
 
+### The analytic kappa terms (#250)
+
+Before #250 a dump-sourced gradient still ran the `kappa` sweep for
+`E_CASCI`'s slope, the constraint Jacobian and `Q`: two `E_CASCI`
+evaluations per non-gauge rotation. On `--pc` the gauge identity also ran
+a block2 PC solve per rung. Since #250 the three objects are analytic
+([`testing.md`](testing.md), "The analytic kappa terms"), and the gauge
+identity reads `E_corr`'s slope off the dump's `Y`. Only the solve stage
+changes; the CASSCF, transient golden and dump stages do not.
+
+**The solve stage**, which is `gradient_at`'s step 4 (`build_state`,
+`load_source_terms`, `solve_gradient`), on each committed `_casscf` state
+and its dump. "Before" is `origin/main`'s `reference_data/` (`d070acb`),
+"after" this change. 2026-10-22, the RX 9060 XT box, Python at
+`--workers 6`, one run per row, run in sequence while another agent's
+GPU job held the card:
+
+| case | stage, before → after | of it, the solve | the nuclear term |
+|---|---:|---:|---:|
+| N2 CAS(4,4) SC | 1.9 → 1.5 s | 1.2 → 0.9 s | 0.4 s |
+| N2 CAS(4,4) PC | 28.4 → 26.3 s | 2.9 → 0.9 s | 0.4 s |
+| HSOH CAS(6,6) SC | 13.3 → 7.6 s | 12.1 → 6.4 s | 1.4 s |
+| HSOH CAS(6,6) PC | 73.7 → 34.8 s | 46.2 → 6.3 s | 1.4 s |
+| acrolein CAS(6,5) SC | 200.2 → 59.0 s | 192.0 → 50.8 s | 13.3 s |
+| acrolein CAS(6,5) PC | 256.3 → 88.3 s | 219.3 → 51.3 s | 13.3 s |
+
+The rest of the PC stage is `build_state`'s block2 PC energy (25 to 37 s),
+which neither version avoids. The analytic objects take 0.1 s (N2) to 1.8 s
+(acrolein, 2840 pairs, its full `n_mo^4` MO tensor included). What is left
+of acrolein's 51 s is the dense CP-CASSCF build and the nuclear term.
+
+**Whole `gradient_at` calls**, the same box, at the reference geometry from
+the committed `.mogold`, waits for the card's lock excluded. N2 SC took
+3.9 → 3.5 s, N2 PC 30.5 → 27.6 s and HSOH SC 141.5 → 135.0 s. HSOH SC's
+dump on this card is 114 s of that. The other rows were not run whole:
+the card was held for over half an hour by another job. Their solve stage
+is the table above.
+
 ### The density-fitted orbital source term
 
 `nevpt2_sc_pseudodensity --kappa-full` on a `*_df` golden (#165;

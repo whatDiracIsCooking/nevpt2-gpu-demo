@@ -5351,7 +5351,8 @@ ladder still sees the 1.5e-8 spread until the CASSCF branch's
 `dE_CASCI/dkappa` is taken analytically — on a converged state it is
 `gen_g_hop`'s `g_orb`, ~1e-11 here — rather than from the sweep. That is a
 separate piece of work. Measured after #247: "The analytic nuclear term",
-next.
+next; and after #250, which took it: "The analytic kappa terms", below
+that.
 
 ### The analytic nuclear term
 
@@ -5471,13 +5472,143 @@ this change. The dumps are fresh per call.
   quotient's `<dH/dx>` noise partly cancelled the multipliers'; the
   analytic term leaves the multipliers' alone, so the total spread is a
   little larger (9.6e-9 → 1.0e-8). `KAPPA_STEP` and the sweep were not
-  changed.
+  changed here; #250 replaced the sweep ("The analytic kappa terms", next).
 - **PC's floor is 1.9e-9, and it is not the nuclear term's.** 1.6e-9 of it
   is the multipliers' term (the `kappa` sweep at `KAPPA_STEP_PC`, #246's
   step 0). 3.8e-10 is `<dH/dx>`: the two converged states' own difference
   read through PC's `E_corr`, not round-off of a quotient. One guess twice,
   two dumps, gives 1.1e-10 (`<dH/dx>` 7.2e-11), so the GPU's run-to-run
   spread is a third of it.
+
+### The analytic kappa terms
+
+Since #250 `nevpt2_grad.py` takes the `kappa`-direction objects
+analytically: `E_CASCI`'s slope `A`, the constraint Jacobian `M` and `Q =
+d(H c)/dkappa`, each linear in the integrals' rotation derivative `[I,
+kappa]` ([`reference-data.md`](reference-data.md), "The analytic
+gradient"). `E_corr`'s half was already the dump's `Y`. `--kappa-quotient`
+keeps the sweep and solves on both, for the A/B. 2026-10-22, the RX 9060 XT
+box: the RTX 3080 was not visible to this container (`nvidia-smi`: "Failed
+to initialize NVML"), so every dump is the `hip` preset's, at `--tiles 3`.
+Python ran at `--workers 6`, with another agent's jobs on the box.
+
+**What checks it, every run.** Each dump-sourced run holds the dump's `Y`
+to its own integral adjoint's rotation derivative (`rotation_gradient` at
+`corr_densities`), and the gap is round-off: at most 8.2e-15 on every case
+below, against `|Y − Y^T|` up to 6.7e-2. The orbital-stationarity ladder
+still differences the Lagrangian along `C exp(t kappa)`. The hand cases
+(`tests/test_kappa_analytic.py`, N2 CAS(4,4) on both references) hold every
+object to the sweep at `KAPPA_STEP` (1e-7). They check that the sweep
+converges onto the objects as `h²` (10 to 25 times closer over two halvings
+from `2^-10`), and that the CASSCF slope is `gen_g_hop`'s `g_orb` (1e-12).
+They also show the Jacobian failing against the sweep without the
+index-space density's response (`[f, kappa]` alone), and the two gradients
+agreeing to 1e-7.
+
+**Step 0: the guess-to-guess spread.** HSOH CAS(6,6) `_casscf`, one
+`gradient_at` call per (scheme, guess) at the reference geometry: guess A
+the committed `.mogold`, guess B those orbitals rotated by the seeded
+`kappa` of "Where `gradient_at`'s ~1e-8 noise comes from". Both converged
+to `|g_orb|` 1.6e-11 and 2.5e-11. Each state's kept dump was then solved in
+process twice, on the sweep's objects and on the analytic ones.
+
+| | max \|g_A − g_B\| | `<dH/dx>` part | `L . J_nuc` part | multipliers apart | translational sum A / B |
+|---|---:|---:|---:|---:|---|
+| SC, the sweep | 1.0e-8 | 3.3e-12 | 1.0e-8 | 3.2e-6 | 2.1e-14 / 3.9e-14 |
+| **SC, analytic** | **5.1e-13** | 3.3e-12 | 3.1e-12 | 2.4e-11 | 1.5e-14 / 3.8e-14 |
+| PC, the sweep | 2.1e-9 | 4.7e-10 | 1.6e-9 | 2.3e-7 | 4.1e-14 / 1.7e-14 |
+| **PC, analytic** | **7.6e-10** | 4.7e-10 | 5.4e-10 | 1.5e-8 | 4.2e-14 / 1.2e-14 |
+
+The `gradient_at` calls themselves (analytic) give the same two spreads,
+5.1e-13 and 7.6e-10. Along (S1)'s rotations the sweep's `dE_CASCI/dkappa`
+reads 6.0e-8 / 3.7e-8 on the two SC states and 9.4e-9 / 1.1e-8 at
+`KAPPA_STEP_PC`. The analytic slope reads 1.1e-11 / 1.3e-11, the
+converged orbitals' own `|g_orb|`.
+
+- **SC meets the acceptance: 5.1e-13 against 1e-10.** The multipliers fall
+  from 3.2e-6 to 2.4e-11 apart, so #246's attribution was right: the
+  spread was `KAPPA_STEP`'s round-off through CP-CASSCF.
+- **PC does not: 7.6e-10.** The analytic objects take out the sweep's
+  share (2.1e-9 → 7.6e-10). What is left is **the PC dump's run-to-run
+  spread**, not the two states. Measured in process on the analytic
+  objects:
+
+| HSOH PC | max \|Δg\| | `<dH/dx>` | `L . J_nuc` | multipliers apart |
+|---|---:|---:|---:|---:|
+| one state (A), two dumps of its golden | 1.1e-9 | 6.7e-10 | 4.7e-10 | 1.9e-8 |
+| one dump (B's), the two states | 8.4e-13 | 5.4e-12 | 5.0e-12 | 3.8e-11 |
+| guess to guess, each its own dump | 7.6e-10 | 4.7e-10 | 5.4e-10 | 1.5e-8 |
+
+  The same golden dumped twice gives `Y − Y^T` 5.0e-9 apart and the
+  integral adjoint 3.5e-9, about what A and B's dumps differ by (4.7e-9,
+  5.9e-9). SC's two states' dumps differ by 2.0e-11 and 3.4e-11. The two
+  states themselves move the PC gradient by 8.4e-13, so tighter CASSCF
+  convergence on the guesses cannot reach the floor; the device's
+  reassociated sums (`atomicAdd`), carried through PC's own solve, set it.
+  #247's "one guess twice, two dumps" read 1.1e-10 on the RTX 3080 with
+  the sweep's objects. This run, on the RX 9060 XT with the analytic ones,
+  reads 1.1e-9. Whether the card accounts for the factor of ten was not
+  measured (the RTX 3080 was not reachable). Nothing here fixes it.
+
+**The A/B on the committed cases** (`nevpt2_grad.py --kappa-quotient
+--source dump`, the dumps above). "Bar" is the quotient's own,
+`|g(h) − g(h/2)|`: the gradient re-solved on a sweep at half the step,
+since one quotient carries no bar. Columns: max \|g_analytic − g_quotient\|
+(ΔA/Q), the bar's max over components, how many non-zero components lie
+outside their bar and by how much at worst, the objects' own max
+differences, and the translational sum of the analytic gradient.
+
+| case | ΔA/Q | bar | outside | `A` / `M` / `Q` | transl. sum | checks |
+|---|---:|---:|---|---|---:|---|
+| N2 CAS(4,4) SC | 1.4e-9 | 3.7e-10 | 2 of 2 (×3.7) | 2.8e-9 / 1.5e-8 / 2.8e-9 | 8.5e-15 | 13 of 13 |
+| N2 CAS(4,4) `_casscf` SC | 3.0e-10 | 9.3e-10 | 0 of 2 | 3.7e-9 / 1.7e-8 / 2.8e-9 | 4.9e-14 | 16 of 16 |
+| N2 CAS(4,4) `_casscf` PC | 1.6e-9 | 1.2e-9 | 2 of 2 (×1.3) | 6.6e-9 / 1.0e-7 / 6.3e-9 | 3.0e-15 | 16 of 16 |
+| LiF CAS(4,6) SC | 6.8e-11 | 2.0e-9 | 0 of 2 | 5.0e-9 / 1.2e-9 / 2.5e-9 | 1.9e-15 | 13 of 13 |
+| LiF CAS(4,6) `_casscf` SC | 6.5e-11 | 3.4e-9 | 0 of 2 | 6.1e-9 / 1.1e-9 / 3.2e-9 | 2.2e-15 | 16 of 16 |
+| HSOH CAS(6,6) `_casscf` SC | 1.6e-8 | 2.4e-8 | 3 of 12 (×2.1) | 4.5e-8 / 2.3e-8 / 4.0e-8 | 3.2e-14 | 16 of 16 |
+| HSOH CAS(6,6) `_casscf` PC | 1.9e-9 | 1.5e-9 | 4 of 12 (×78) | 9.9e-9 / 6.1e-7 / 9.5e-9 | 4.4e-14 | 15 of 16 |
+| acrolein CAS(6,5) `_casscf` SC | 7.7e-9 | 1.3e-8 | 2 of 16 (×2.4) | 2.4e-8 / 1.4e-7 / 2.0e-8 | 2.4e-14 | 16 of 16 |
+| acrolein CAS(6,5) `_casscf` PC | 1.1e-9 | 2.7e-9 | 4 of 16 (×3.1) | 1.6e-8 / 1.3e-7 / 1.5e-8 | 1.3e-13 | 14 of 16 |
+
+LiF PC is refused at the state, as before. N2 CASCI PC needs a `--grad-num`
+PC `.npz` that was not re-swept for this, so it was not run. The fitted N2
+CAS(4,4) `_df` state was checked at the objects only, on the fitted MO
+tensor: `A` 3.4e-9, `M` 1.7e-8, `Q` 2.8e-9 from the sweep.
+
+**Where the A/B leaves the bar, the bar is too small, not the analytic
+gradient wrong.** `|g(h) − g(h/2)|` is one sample of the quotient's
+round-off, and one component's sample can come out near zero. HSOH PC's
+×78 is a component whose bar is 8.3e-12 against a gap of 6.4e-10. The
+quotient's error is read directly by laddering its gradient against the
+analytic one (`--kappa-step 2^-k`, max \|g_quotient − g_analytic\|, the
+ratio to the previous rung in brackets):
+
+| k | N2 CAS(4,4) SC | LiF CAS(4,6) SC | HSOH `_casscf` SC |
+|---|---:|---:|---:|
+| 11 | 4.4e-8 | 3.7e-8 | 2.9e-8 |
+| 13 | 2.7e-9 (16.2) | 2.4e-9 (16.0) | 2.3e-9 (12.8) |
+| 15 | 7.7e-10 (3.5) | 1.6e-10 (14.3) | 1.8e-9 (1.3) |
+| **17** (`KAPPA_STEP`) | 1.4e-9 | 6.8e-11 | **1.6e-8** |
+| 19 | 4.5e-9 | 4.3e-9 | 5.3e-8 |
+| 21 | 2.8e-8 | 1.9e-9 | 3.0e-7 |
+
+Every column falls as `h²` (×16 per two halvings) onto the analytic
+gradient and leaves it again at round-off, so the analytic gradient is the
+quotient's limit. HSOH's PC column is the same to two digits: with a dump
+the sweep differentiates only `E_CASCI` and the constraints, which PC does
+not change. On HSOH the shipped `2^-17` was already past the crossover,
+1.6e-8 off where `2^-15` is 1.8e-9 off. That is the quotient's error #246
+saw. `KAPPA_STEP` was not moved; it now serves only `--kappa-quotient`,
+PySCF's `E_corr` half and the gauge identity.
+
+**The gates.** `grad_num` still passes: LiF CAS(4,6) SC 7.7e-9 and HSOH
+`_casscf` SC 7.6e-8, both against 1e-6. Every residual-independent check
+holds except PC's known CI-direction ladders: HSOH PC's `y` linearity, seed
+2026, and acrolein PC's `y` linearity and CI stationarity, seed 70. Those
+are the failures "The analytic nuclear term" above recorded on the code
+before #247. They read no `kappa` object. The gauge identity reads the
+dump's `Y` for `E_corr`'s slope now rather than differencing PC's energy:
+2.0e-6 at most (LiF SC), 9.7e-8 on HSOH PC.
 
 ### A ladder can converge, cleanly, to the wrong branch
 

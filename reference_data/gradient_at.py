@@ -36,6 +36,11 @@ It chains four steps that already exist, and copies none of them:
    nuclear term is the analytic one (#247): ``E_corr``'s half is the dump's
    integral adjoint (#246) against the frozen path's derivative integrals,
    so no displaced geometry is evaluated; the ledger's ``nuclear`` says so.
+   Its ``kappa``-direction objects are analytic too (#250): ``E_CASCI``'s
+   slope, the constraint Jacobian and ``Q`` from the integrals' rotation
+   derivative, ``E_corr``'s ``Y`` the dump's -- no rotated orbitals are
+   evaluated either, which is what took the ``KAPPA_STEP`` round-off out of
+   the multipliers; the ledger's ``kappa`` says so.
 
 **What it refuses**, each a ``SystemExit`` naming why, as every script here
 does:
@@ -385,8 +390,9 @@ def gradient_at(geom, case: str, *, pc: bool = False, reference: str = "casscf",
     ``mo_guess`` is the previous call's :attr:`GradientAt.mo`, a ``.mogold``
     path, or ``None`` for the committed ``golden/<case>_casscf.mogold``.
     ``binary`` is the ``nevpt2_sc_pseudodensity`` (default: :func:`find_binary`),
-    ``gpu_lock_path`` the card's lock file, ``workers`` the processes the
-    ``kappa`` sweep runs in. Files go to ``work_dir`` (default: a fresh
+    ``gpu_lock_path`` the card's lock file, ``workers`` the processes a
+    ``kappa`` sweep would run in (since #250 the solve runs none, so it is
+    kept only for the callers that pass it). Files go to ``work_dir`` (default: a fresh
     temporary directory) named by ``label``, and are deleted on return unless
     ``keep``."""
     t0 = time.perf_counter()
@@ -541,6 +547,8 @@ def _gradient_at(geom: list, spec: dict, *, pc: bool, mo_guess, exe: Path, work:
     # integral adjoint (#246); a dump without one leaves that half the
     # frozen-path quotient, and this says which it was.
     ledger["nuclear"] = g.nuclear_origin
+    # #250: the kappa-direction objects, analytic unless a caller asks
+    ledger["kappa"] = g.sweep.get("kappa", "quotient")
     ledger["energies"] = dict(e_casscf=rec["e_casscf"], e_casci=st.e_casci,
                               e_corr_sc=st.e_corr, e_corr_pc=st.e_corr_pc)
     ledger["walls"] = walls
@@ -576,7 +584,9 @@ def main() -> None:
     ap.add_argument("--keep", action="store_true", help="leave the transient files")
     ap.add_argument("--gpu-lock", default=None, help="flock this file around the dump")
     ap.add_argument("--workers", type=int, default=1,
-                    help="processes the kappa sweep runs in")
+                    help="processes a kappa sweep would run in; since #250 the "
+                         "solve runs none (its kappa objects are analytic), so this "
+                         "is kept for the callers that pass it")
     ap.add_argument("--label", default="state", help="the transient files' stem")
     ap.add_argument("--out", type=Path, default=None,
                     help="write the gradient, the energy and the ledger's numbers (.npz)")
