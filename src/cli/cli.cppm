@@ -159,7 +159,8 @@ struct Options {
   CommonOptions common;
   // Both demos: --sc-tangent, --gradient-source (one at a time; SC only,
   // except nevpt2_demo's --gradient-source --pc); nevpt2_demo also takes
-  // --gradgold PATH beside --gradient-source (the field below).
+  // --gradgold PATH beside --gradient-source, --sc-hessian or
+  // --sc-hessian-vector (the field below).
   bool scTangent = false;
   bool gradientSource = false;
   // nevpt2_demo alone: --sc-hessian, the SC energy's second directional
@@ -174,8 +175,10 @@ struct Options {
   // nevpt2_sc_pseudodensity: --kappa-act, --kappa-full, --dump-source-terms
   // PATH, --source-oracle PATH (one at a time), --gradgold PATH (only with
   // --kappa-full, --dump-source-terms or --source-oracle, the three that read
-  // the sidecar). nevpt2_demo reads gradgoldPath too, with --gradient-source
-  // alone.
+  // the sidecar). nevpt2_demo reads gradgoldPath too, with --gradient-source,
+  // --sc-hessian or --sc-hessian-vector (the last two then in FULL mode,
+  // #214), and nevpt2_pc_tangent with --pc-hessian or --pc-hessian-vector
+  // (FULL mode).
   bool kappaAct = false;
   bool kappaFull = false;
   // nevpt2_sc_pseudodensity: --sc-hessian-kc, the SC energy's mixed

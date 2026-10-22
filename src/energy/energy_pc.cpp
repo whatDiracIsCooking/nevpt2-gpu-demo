@@ -19,6 +19,7 @@ import :pc_classes;
 import :pc_tangent;
 import :pc_hessian;  // the per-class second derivatives behind pcHessianDevice (#152)
 import :sc_tangent;  // tangent_Sijrs: PC's Sijrs IS SC's, Delta term included (#74)
+import :sc_hessian;  // hessian_Sijrs: likewise one order up, the FULL mode's (#214)
 import nevpt2.profile;
 // The wwrsolverStatus_t error specializations, which make gpuCheck accept a
 // solver status (the calling unit imports them; nevpt2.wwr does not re-export them).
@@ -175,15 +176,38 @@ Result<PcHessianResult> pcHessianDevice(const ActiveIntegralsDevice& ai, Integra
     b.sumUU = &viewUU;
     b.sumVV = &viewVV;
   }
+  // The orbital energies' derivatives (#214), each the golden's lengths -- our
+  // bug if not. Without a second-order set, e''[u, v] is never meant: zeros,
+  // so no class reads a caller's unshaped one.
+  std::optional<OrbitalEnergyHessianDots> epsFirst;
+  if (sets.eps != nullptr) {
+    b.eps = sets.eps;
+    if (sets.ddot == nullptr) {
+      epsFirst.emplace(OrbitalEnergyHessianDots{
+          sets.eps->u, sets.eps->v, OrbitalEnergyDot{Tensor({ec.size()}), Tensor({ev.size()})}});
+      b.eps = &*epsFirst;
+    }
+    for (const OrbitalEnergyDot* d : {&b.eps->u, &b.eps->v, &b.eps->uv})
+      check(d->core.size() == ec.size() && d->virt.size() == ev.size(),
+            "pcHessianDevice: an orbital-energy derivative is not e_core / e_virt long");
+  }
 
   PcHessianResult r;
   r.classes[0] = NEVPT2_TRY(pcHessSr(ai, src, batch, ev, b, dr));
   r.classes[1] = NEVPT2_TRY(pcHessSi(ai, src, batch, ec, b, dr));
   // Sijrs contracts no RDM, so its energy is the SC one -- the same function,
   // not a copy -- and at fixed orbital energies every CI derivative of it is
-  // EXACTLY zero, not a number too small to see.
+  // EXACTLY zero, not a number too small to see. With the orbital energies
+  // responding (#214) it moves through its Delta alone, and SC's own second
+  // derivative of it is the answer: PC's Sijrs IS SC's.
   r.classes[2].result.status = PcStatus::Done;
-  r.classes[2].result.energy = energy_Sijrs(ai, src, batch, dr).second;
+  {
+    const ScHessianSums sijrs = hessian_Sijrs(ai, src, batch, b.eps, dr);
+    r.classes[2].result.energy = sijrs.energy;
+    r.classes[2].edotU = sijrs.energyDotU;
+    r.classes[2].edotV = sijrs.energyDotV;
+    if (sets.ddot != nullptr) r.classes[2].eddot = sijrs.energyDDot;
+  }
   r.classes[3] = NEVPT2_TRY(pcHessSijr(ai, src, batch, ec, ev, b, dr));
   r.classes[4] = NEVPT2_TRY(pcHessSrsi(ai, src, batch, ec, ev, b, dr));
   r.classes[5] = NEVPT2_TRY(pcHessSrs(ai, src, batch, ev, b, dr));

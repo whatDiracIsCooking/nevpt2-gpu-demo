@@ -247,11 +247,19 @@ std::array<DeviceTensor, 2> evalTargets(const PcClassWalk& w,
 // along the pair (u, u): a class whose dropped modes leave zero at first
 // order (|P S_u P|) or second (L_uu) above PC_LIFT_TOL relative to s_max is
 // REFUSED, never zeroed.
+//
+// `epsCoreU` / `epsVirtU` (#214, with `sumU`): the orbital energies' tangent
+// along u, e'[u] = <dm1'[u], W>, for the FULL mode. Each tuple's Delta'[u] (its
+// Delta formula at them) then enters pcAdjointSecond* as the direction's
+// Delta tangent, and the rows' Rdot is scattered onto acc.dEdCoreDot /
+// dEdVirtDot as R is onto dE/de (which the caller sizes, with its tangent).
 struct PcCiWalk {
   bool threeTerm = false;
   const PcRdms* sumU = nullptr;
   const PcRdms* sumUU = nullptr;
   ScRdmAdjoint* adjDot = nullptr;
+  const Tensor* epsCoreU = nullptr;
+  const Tensor* epsVirtU = nullptr;
 };
 
 // ||x||_F of a host block.
@@ -421,13 +429,22 @@ Status pcClassAdjoint(const PcClassWalk& w, const ActiveIntegralsDevice& ai, Int
         yu = downloadTensor(yd[0], s);
         if (two) xu = downloadTensor(yd[1], s);
       }
+      // FULL mode (#214): this slab's Delta tangent along u, per tuple.
+      const bool epsCi = direction && ci->epsCoreU != nullptr;
+      const std::vector<double> deltaDotU =
+          epsCi ? w.delta(b0, b1, *ci->epsCoreU, *ci->epsVirtU) : std::vector<double>{};
       const PcSlabAdjointSecond sec =
           w.pattern == PcPattern::Single
               ? pcAdjointSecondSingle(y, direction ? &yu : nullptr, cs.lambda, delta, w.factor, blk,
-                                      second)
+                                      second, deltaDotU)
               : pcAdjointSecondPair(y, two ? &x : nullptr, direction ? &yu : nullptr,
                                     direction && two ? &xu : nullptr, partner, cs.lambda, delta,
-                                    blk, second);
+                                    blk, second, deltaDotU);
+      // Rdot, scattered onto dE/de's tangent through the class's own Delta.
+      if (epsCi)
+        deltaAdjointInto(
+            [&](const Tensor& ec, const Tensor& ev) { return w.delta(b0, b1, ec, ev); },
+            sec.rDot, acc.dEdCoreDot, acc.dEdVirtDot);
       if (direction) {
         std::array<DeviceTensor, 2> barD, barN;
         barD[0] = uploadTensor(Tensor::fromFlat(y.dims(), sec.ybarDot), dr);
@@ -1331,7 +1348,8 @@ Result<PcGradientResult> assemblePcClasses(const ActiveIntegralsDevice& ai, Inte
       sc.dEdCore.assign(static_cast<std::size_t>(ncore), 0.0);
       sc.dEdVirt.assign(static_cast<std::size_t>(nvirt), 0.0);
     }
-    gradientSijrs(src, batch, hostEC, hostEV, rot, sc, /*mix=*/nullptr, dr);
+    gradientSijrs(src, batch, hostEC, hostEV, rot, sc, /*mix=*/nullptr, /*epsCoreU=*/nullptr,
+                  /*epsVirtU=*/nullptr, dr);
     PcClassGradient& c = r.classes[2];
     c.result.status = PcStatus::Done;
     c.result.energy = sc.energy;
@@ -1352,15 +1370,21 @@ Result<PcGradientResult> assemblePcClasses(const ActiveIntegralsDevice& ai, Inte
 // pcClassAdjoint with a PcCiWalk, class `cls` sweeping into adj[cls] and --
 // along a direction -- adjDot[cls] (the caller may point several classes at
 // one accumulator, or give each its own for a per-class y and H_cc u). No
-// rotation and the orbital energies held fixed. Sijrs reads no RDM: its
-// energy is SC's, and it adds nothing to either accumulator (its y and its
-// H_cc u are exactly zero, as pcHessianDevice's Eddot of it is).
+// rotation. Sijrs reads no RDM: its energy is SC's, and it adds nothing to
+// either accumulator (its y and its H_cc u are exactly zero with the orbital
+// energies held fixed, as pcHessianDevice's Eddot of it is).
+//
+// FULL MODE (#214), `epsAdjoint`: every class's dE/de is accumulated (and
+// Sijrs's, through SC's gradientSijrs), and along a direction with
+// `epsCoreU` / `epsVirtU` (e'[u]) its tangent too -- what the caller folds
+// onto dm1 through W, Sijrs's included.
 Result<PcGradientResult> assemblePcCiClasses(const ActiveIntegralsDevice& ai, IntegralSource& src,
                                              int64_t batch, const PcRdms& rdm,
                                              const PcRdms* sumU, const PcRdms* sumUU,
                                              const std::array<ScRdmAdjoint*, 8>& adj,
                                              const std::array<ScRdmAdjoint*, 8>& adjDot,
-                                             const DeviceResources& dr) {
+                                             bool epsAdjoint, const Tensor* epsCoreU,
+                                             const Tensor* epsVirtU, const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const Tensor hostEC = downloadTensor(ai.e_core, s);
   const Tensor hostEV = downloadTensor(ai.e_virt, s);
@@ -1369,19 +1393,38 @@ Result<PcGradientResult> assemblePcCiClasses(const ActiveIntegralsDevice& ai, In
   const DeviceTensor z3ca = DeviceTensor::zeros(rdm.f3ca->dims, dr);
   const PcRdms zeroF3{rdm.dm1, rdm.dm2, rdm.dm3, &z3ac, &z3ca};
   const ScRotation none;
+  check(epsCoreU == nullptr || (epsAdjoint && sumU != nullptr && epsVirtU != nullptr),
+        "assemblePcCiClasses: the orbital energies' tangent needs dE/de and a direction");
+  const bool epsDot = epsCoreU != nullptr;
+  const auto sizeEps = [&](std::vector<double>& core, std::vector<double>& virt) {
+    core.assign(static_cast<std::size_t>(ncore), 0.0);
+    virt.assign(static_cast<std::size_t>(nvirt), 0.0);
+  };
   PcGradientResult r;
   for (const int cls : {0, 1, 3, 4, 5, 6, 7}) {
     const std::size_t k = static_cast<std::size_t>(cls);
-    const PcCiWalk ci{/*threeTerm=*/true, sumU, sumUU, adjDot[k]};
+    PcClassGradient& c = r.classes[k];
+    if (epsAdjoint) sizeEps(c.dEdCore, c.dEdVirt);
+    if (epsDot) sizeEps(c.dEdCoreDot, c.dEdVirtDot);
+    const PcCiWalk ci{/*threeTerm=*/true, sumU, sumUU, adjDot[k], epsCoreU, epsVirtU};
     const PcClassWalk w = pcWalk(cls, ai, src, ncore, nvirt, dr);
-    NEVPT2_TRY(pcClassAdjoint(w, ai, src, batch, hostEC, hostEV, rdm, zeroF3, none, r.classes[k],
-                              adj[k], &ci, dr));
+    NEVPT2_TRY(
+        pcClassAdjoint(w, ai, src, batch, hostEC, hostEV, rdm, zeroF3, none, c, adj[k], &ci, dr));
   }
   {
     ScClassGradient sc;
-    gradientSijrs(src, batch, hostEC, hostEV, none, sc, /*mix=*/nullptr, dr);
-    r.classes[2].result.status = PcStatus::Done;
-    r.classes[2].result.energy = sc.energy;
+    sc.epsAdjoint = epsAdjoint;
+    if (epsAdjoint) sizeEps(sc.dEdCore, sc.dEdVirt);
+    if (epsDot) sizeEps(sc.dEdCoreDot, sc.dEdVirtDot);
+    gradientSijrs(src, batch, hostEC, hostEV, none, sc, /*mix=*/nullptr, epsCoreU, epsVirtU, dr);
+    PcClassGradient& c = r.classes[2];
+    c.result.status = PcStatus::Done;
+    c.result.energy = sc.energy;
+    c.ciEdot = sc.ciTangent;
+    c.dEdCore = sc.dEdCore;
+    c.dEdVirt = sc.dEdVirt;
+    c.dEdCoreDot = sc.dEdCoreDot;
+    c.dEdVirtDot = sc.dEdVirtDot;
   }
   for (const PcClassGradient& c : r.classes) r.total += c.result.energy;
   return r;
@@ -1421,7 +1464,8 @@ Result<PcGradientResult> assemblePcMixedClasses(
   {
     const ScRotation none;
     ScClassGradient sc;
-    gradientSijrs(src, /*batch=*/0, hostEC, hostEV, none, sc, /*mix=*/nullptr, dr);
+    gradientSijrs(src, /*batch=*/0, hostEC, hostEV, none, sc, /*mix=*/nullptr,
+                  /*epsCoreU=*/nullptr, /*epsVirtU=*/nullptr, dr);
     r.classes[2].result.status = PcStatus::Done;
     r.classes[2].result.energy = sc.energy;
   }
@@ -1468,7 +1512,8 @@ Result<PcGradientResult> assemblePcSandwichClasses(const ActiveIntegralsDevice& 
     sc.rotAct.assign(nd, 0.0);
     sc.rotTangent.assign(nd, 0.0);
     sc.rotEps.assign(nd, 0.0);
-    gradientSijrs(src, /*batch=*/0, hostEC, hostEV, *sw.rot, sc, &mix, dr);
+    gradientSijrs(src, /*batch=*/0, hostEC, hostEV, *sw.rot, sc, &mix, /*epsCoreU=*/nullptr,
+                  /*epsVirtU=*/nullptr, dr);
     PcClassGradient& c = r.classes[2];
     c.result.status = PcStatus::Done;
     c.result.energy = sc.energy;

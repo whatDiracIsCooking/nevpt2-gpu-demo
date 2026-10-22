@@ -86,10 +86,18 @@ Result<bool> checkScTangent(const GoldenFile& g, const RdmBuildOptions& rdmOpt,
 // "PASS: the SC Hessian matches Euler ..." / "FAIL: ...". `baseRdm` as for
 // checkScTangent. Returns whether every criterion held; an active space the
 // host RDM builder refuses is a configuration Error.
+//
+// THE ORBITAL ENERGIES' MODE (#214, both H_cc checks): `gradgoldPath` empty
+// holds them fixed, as above. Non-empty is the FULL mode: W is read from that
+// sidecar (loadOrbitalEnergyResponse below), every derivative carries the
+// orbital energies' response to the CI vector, every displaced state's
+// orbital energies are its own (the golden's plus <dm1(c') - dm1(c), W>), and
+// Euler at second order -- not an identity there (docs/hessian-theory.md,
+// Sec. 4.3) -- is SKIPPED, and the run says so. The PASS line names the mode.
 Result<bool> checkScHessian(const GoldenFile& g, const RdmBuildOptions& rdmOpt,
                             const CiCheckIntegrals& ints, const RdmBuildResult& baseRdm,
                             std::uint64_t seedU, std::uint64_t seedV,
-                            const DeviceResources& res);
+                            const std::string& gradgoldPath, const DeviceResources& res);
 
 // --sc-hessian-vector on the golden state `g` (#156): nevpt2.gradient's
 // scCiHessianVectorDevice, H_cc u by reverse over forward along `seedU`'s
@@ -101,11 +109,23 @@ Result<bool> checkScHessian(const GoldenFile& g, const RdmBuildOptions& rdmOpt,
 // either leg). Prints the tables and the gate line "PASS: the SC
 // Hessian-vector product matches ..." / "FAIL: ...". `baseRdm` as for
 // checkScTangent. Returns whether every criterion held; an active space the
-// host RDM builder refuses is a configuration Error.
+// host RDM builder refuses is a configuration Error. `gradgoldPath` as for
+// checkScHessian: non-empty, the FULL mode on every side of every check, the
+// finite difference's legs the gated y with that sidecar at each displaced
+// state's own orbital energies.
 Result<bool> checkScHessianVector(const GoldenFile& g, const RdmBuildOptions& rdmOpt,
                                   const CiCheckIntegrals& ints, const RdmBuildResult& baseRdm,
                                   std::uint64_t seedU, std::uint64_t seedV,
-                                  const DeviceResources& res);
+                                  const std::string& gradgoldPath, const DeviceResources& res);
+
+// The orbital energies' response W out of the gradient sidecar at `path`,
+// after checking the sidecar describes `g`: its partition, its four arrays,
+// and e_core / e_virt rebuilt from its h^eff and W against the golden's dm1.
+// Prints the sidecar's path and the rebuild's residual. Every failure is the
+// caller's input, a returned Error. --gradient-source's reader, and the FULL
+// mode's of every CI Hessian (#214; nevpt2_pc_tangent's too).
+Result<OrbitalEnergyResponse> loadOrbitalEnergyResponse(const GoldenFile& g,
+                                                        const std::string& path);
 
 // --gradient-source on `g`: y_I against Edot(u) along four seeded directions
 // and the state itself, plus the full Jacobian where ndet allows, all to 1e-7;

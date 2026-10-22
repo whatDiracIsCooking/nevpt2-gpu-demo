@@ -728,7 +728,8 @@ struct PcHessianSums {
 // the rotation blocks gain nothing. All zero (the default) is #152's frozen
 // orbital energies. The mixed block H_kc runs an orbital leg v with Delta_v
 // = Delta'_w per tuple and the CI leg's Delta_u = Delta_uv = 0
-// (docs/hessian-theory.md, Sec. 6.4 and 6.5).
+// (docs/hessian-theory.md, Sec. 6.4 and 6.5); the CI block's FULL mode (#214)
+// runs both legs CI with all three, the orbital energies responding to c.
 struct PcDeltaTangents {
   double u = 0.0, v = 0.0, uv = 0.0;
 };
@@ -836,12 +837,15 @@ PcHessianRow pcHessianRowAt(const PcHessianSlab& s, int64_t t, int64_t m, int64_
 // The single-coupling classes' four sums over one slab: E_t = -factor Q(t).
 // `deltaDotV` (one per tuple, or empty for zeros) is the v leg's Delta
 // tangent, PcDeltaTangents::v (#201's orbital leg); `deltaDotU` the u leg's,
-// PcDeltaTangents::u (#202: both legs orbital).
+// PcDeltaTangents::u (#202: both legs orbital); `deltaDotUV` the pair's
+// second-order Delta'', PcDeltaTangents::uv (#214: both legs CI, the orbital
+// energies responding to the CI vector).
 void hessianSingle(const PcHessianSlab& s, const std::vector<double>& lambda,
                    const std::vector<double>& delta, const PcHessianBlocks& blk,
                    const PcRotationBlocks& rot, double factor, PcHessianSums& acc,
                    double& minDen, std::span<const double> deltaDotV = {},
-                   std::span<const double> deltaDotU = {}) {
+                   std::span<const double> deltaDotU = {},
+                   std::span<const double> deltaDotUV = {}) {
   const int64_t nt = std::ssize(delta), m = std::ssize(lambda);
   const bool second = s.yuv != nullptr;
   check(s.y->size() == nt * m && s.yu->size() == nt * m && s.yv->size() == nt * m &&
@@ -849,11 +853,14 @@ void hessianSingle(const PcHessianSlab& s, const std::vector<double>& lambda,
                          s.rv->size() == nt * rot.nd)),
         "hessianSingle: the slabs must be (tuples, m) and (tuples, nd)");
   check((deltaDotV.empty() || std::ssize(deltaDotV) == nt) &&
-            (deltaDotU.empty() || std::ssize(deltaDotU) == nt),
+            (deltaDotU.empty() || std::ssize(deltaDotU) == nt) &&
+            (deltaDotUV.empty() || std::ssize(deltaDotUV) == nt),
         "hessianSingle: the Delta tangents are one per tuple");
   for (int64_t t = 0; t < nt; ++t) {
-    const PcDeltaTangents dd{deltaDotU.empty() ? 0.0 : deltaDotU[narrowTo<std::size_t>(t)],
-                             deltaDotV.empty() ? 0.0 : deltaDotV[narrowTo<std::size_t>(t)], 0.0};
+    const std::size_t ut = narrowTo<std::size_t>(t);
+    const PcDeltaTangents dd{deltaDotU.empty() ? 0.0 : deltaDotU[ut],
+                             deltaDotV.empty() ? 0.0 : deltaDotV[ut],
+                             deltaDotUV.empty() ? 0.0 : deltaDotUV[ut]};
     const PcQuadDerivatives d = pcQuadSecond(pcHessianRowAt(s, t, m, rot.nd), lambda,
                                              delta[narrowTo<std::size_t>(t)], blk, rot, second,
                                              minDen, dd);
@@ -867,13 +874,13 @@ void hessianSingle(const PcHessianSlab& s, const std::vector<double>& lambda,
 // The two-coupling finish (Sijr, Srsi) for one tuple: E_t = -(2 F(a, a) -
 // F(a, b)) with F(a, b) = [Q(a + b) - Q(a - b)] / 4, a the direct row and b
 // the exchange row at the same Delta.
-// `deltaDotV` / `deltaDotU`: the tuple's v- and u-leg Delta tangents, as
-// hessianSingle's.
+// `deltaDotV` / `deltaDotU` / `deltaDotUV`: the tuple's v- and u-leg Delta
+// tangents and its Delta'', as hessianSingle's.
 void hessianPair(const PcHessianRow& a, const PcHessianRow& b, const std::vector<double>& lambda,
                  double delta, const PcHessianBlocks& blk, const PcRotationBlocks& rot,
                  bool second, PcHessianSums& acc, double& minDen, double deltaDotV = 0.0,
-                 double deltaDotU = 0.0) {
-  const PcDeltaTangents dd{deltaDotU, deltaDotV, 0.0};
+                 double deltaDotU = 0.0, double deltaDotUV = 0.0) {
+  const PcDeltaTangents dd{deltaDotU, deltaDotV, deltaDotUV};
   const auto combine = [](std::span<const double> x, std::span<const double> y, double sign) {
     std::vector<double> out(x.size());
     for (std::size_t k = 0; k < x.size(); ++k) out[k] = x[k] + sign * y[k];

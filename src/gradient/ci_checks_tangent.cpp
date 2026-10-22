@@ -77,6 +77,10 @@ module;
 
 #include <cstdio>  // stdout: a macro, which `import std` does not carry
 
+// NEVPT2_TRY: a macro, which no import carries -- the FULL mode's sidecar
+// read (#214) propagates its Error unchanged.
+#include "error_handling/error_macros.h"
+
 module nevpt2.ci_checks;
 
 import std;
@@ -189,6 +193,86 @@ double tangentMaxDiff(const nevpt2::Tensor& a, const nevpt2::Tensor& b) {
   if (a.dims() != b.dims()) return std::numeric_limits<double>::infinity();
   double m = 0.0;
   for (std::int64_t i = 0; i < a.size(); ++i) m = std::max(m, std::fabs(a.flat(i) - b.flat(i)));
+  return m;
+}
+
+// --- the FULL mode's orbital energies (#214) -----------------------------------
+//
+// With a gradient sidecar beside an H_cc flag the orbital energies respond to
+// the CI vector: e_p(c) = h^eff_pp + <dm1(c), W_p> (docs/gradients.md,
+// Sec. 5.5), affine in dm1. So a derivative at the base state reads
+// e'[u] = <dm1'[u], W> and e''[u, v] = <dm1''[u, v], W>, and a displaced
+// state's orbital energies are the base state's plus <dm1(c') - dm1(c), W>,
+// exactly. The base state's are the golden's: loadOrbitalEnergyResponse holds
+// h^eff + <dm1, W> to them before anything here runs.
+struct CiFullMode {
+  const nevpt2::OrbitalEnergyResponse* w = nullptr;  // null: held fixed
+  nevpt2::Tensor dm1;                                 // the base state's host dm1
+  nevpt2::Tensor eCore, eVirt;                        // the base state's orbital energies
+};
+
+// e' along a 1-RDM tangent, or nothing when the orbital energies are fixed.
+std::optional<nevpt2::OrbitalEnergyDot> ciEpsDot(const CiFullMode& m,
+                                                 const nevpt2::Tensor& dm1Dot) {
+  if (m.w == nullptr) return std::nullopt;
+  return nevpt2::orbitalEnergyDot(*m.w, dm1Dot);
+}
+
+// e'[u], e'[v], e''[u, v] from the three 1-RDM sets, or nothing.
+std::optional<nevpt2::OrbitalEnergyHessianDots> ciEpsHessian(const CiFullMode& m,
+                                                             const nevpt2::Tensor& dm1U,
+                                                             const nevpt2::Tensor& dm1V,
+                                                             const nevpt2::Tensor& dm1UV) {
+  if (m.w == nullptr) return std::nullopt;
+  return nevpt2::OrbitalEnergyHessianDots{nevpt2::orbitalEnergyDot(*m.w, dm1U),
+                                          nevpt2::orbitalEnergyDot(*m.w, dm1V),
+                                          nevpt2::orbitalEnergyDot(*m.w, dm1UV)};
+}
+
+// A displaced state's active integrals: the base's, with the orbital
+// energies at the state whose host dm1 is `dm1At` (unchanged when held
+// fixed). `active` views the owned eCore / eVirt and the caller's integrals,
+// so this lives as long as anything built from it.
+struct CiDisplaced {
+  nevpt2::DeviceTensor eCore, eVirt;
+  nevpt2::ActiveIntegralsDevice active;
+};
+
+CiDisplaced ciDisplaced(const CiFullMode& m, const CiCheckIntegrals& ints,
+                        const nevpt2::Tensor& dm1At, const nevpt2::DeviceResources& res) {
+  nevpt2::Tensor ec = m.eCore, ev = m.eVirt;
+  if (m.w != nullptr) {
+    nevpt2::Tensor shift = dm1At;
+    for (std::int64_t i = 0; i < shift.size(); ++i) shift.flatRef(i) -= m.dm1.flat(i);
+    const nevpt2::OrbitalEnergyDot d = nevpt2::orbitalEnergyDot(*m.w, shift);
+    for (std::int64_t i = 0; i < ec.size(); ++i) ec.flatRef(i) += d.core.flat(i);
+    for (std::int64_t r = 0; r < ev.size(); ++r) ev.flatRef(r) += d.virt.flat(r);
+  }
+  CiDisplaced out;
+  out.eCore = nevpt2::uploadTensor(ec, res);
+  out.eVirt = nevpt2::uploadTensor(ev, res);
+  const nevpt2::ActiveIntegralsDevice& a = ints.active;
+  out.active = nevpt2::ActiveIntegralsDevice{a.h1e.view(),      a.h2e.view(),
+                                             out.eCore.view(),  out.eVirt.view(),
+                                             a.h1e_v_Sr.view(), a.h1e_v_Si.view(),
+                                             a.h1e_v_Sir.view()};
+  return out;
+}
+
+// The mode's inputs at the golden state `g`: W out of `gradgoldPath` (empty:
+// held fixed), the base host dm1 and the golden's orbital energies. `w` is the
+// caller's storage for W.
+nevpt2::Result<CiFullMode> ciFullMode(const nevpt2::GoldenFile& g, const std::string& gradgoldPath,
+                                      const nevpt2::Tensor& dm1,
+                                      std::optional<nevpt2::OrbitalEnergyResponse>& w) {
+  CiFullMode m;
+  if (!gradgoldPath.empty()) {
+    w = NEVPT2_TRY(nevpt2::loadOrbitalEnergyResponse(g, gradgoldPath));
+    m.w = &*w;
+  }
+  m.dm1 = dm1;
+  m.eCore = g.get("e_core");
+  m.eVirt = g.get("e_virt");
   return m;
 }
 
@@ -421,7 +505,8 @@ nevpt2::Result<bool> checkScTangent(const nevpt2::GoldenFile& g,
 // freed (on res's stream) when it returns.
 double scTangentAt(const nevpt2::HostDm12Builder& builder, const nevpt2::Tensor& ci,
                    const nevpt2::Tensor& u, const nevpt2::RdmBuildOptions& rdmOpt,
-                   const CiCheckIntegrals& ints, const nevpt2::DeviceResources& res) {
+                   const CiCheckIntegrals& ints, const CiFullMode& mode,
+                   const nevpt2::DeviceResources& res) {
   const nevpt2::HostDm12 dm = builder.dm12(ci);
   const nevpt2::HostDm12 dot = builder.dm12Dot(ci, u);
   const nevpt2::DeviceTensor dDm1 = nevpt2::uploadTensor(dm.dm1, res);
@@ -432,10 +517,13 @@ double scTangentAt(const nevpt2::HostDm12Builder& builder, const nevpt2::Tensor&
       rdmOpt, ci, builder.norb(), builder.nelecA(), builder.nelecB(), ints.h2e, res);
   const nevpt2::RdmBuildResult rdmDot = nevpt2::buildRdmTangentsDevice(
       rdmOpt, ci, u, builder.norb(), builder.nelecA(), builder.nelecB(), ints.h2e, res);
-  return nevpt2::energiesTangentDevice(ints.active, ints.source, ints.batch, dDm1, dDm2,
+  // FULL mode (#214): this state's own orbital energies, and their tangent.
+  const CiDisplaced at = ciDisplaced(mode, ints, dm.dm1, res);
+  const std::optional<nevpt2::OrbitalEnergyDot> epsDot = ciEpsDot(mode, dot.dm1);
+  return nevpt2::energiesTangentDevice(at.active, ints.source, ints.batch, dDm1, dDm2,
                                        rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1Dot, dDm2Dot,
                                        rdmDot.dm3, rdmDot.f3ac, rdmDot.f3ca,
-                                       /*epsDot=*/nullptr, res)
+                                       epsDot ? &*epsDot : nullptr, res)
       .totalDot;
 }
 
@@ -443,7 +531,8 @@ nevpt2::Result<bool> checkScHessian(const nevpt2::GoldenFile& g,
                                     const nevpt2::RdmBuildOptions& rdmOpt,
                                     const CiCheckIntegrals& ints,
                                     const nevpt2::RdmBuildResult& baseRdm, std::uint64_t seedU,
-                                    std::uint64_t seedV, const nevpt2::DeviceResources& res) {
+                                    std::uint64_t seedV, const std::string& gradgoldPath,
+                                    const nevpt2::DeviceResources& res) {
   nevpt2::Result<nevpt2::HostDm12Builder> builder =
       nevpt2::HostDm12Builder::create(g.ncas, g.nelecA, g.nelecB);
   if (!builder) return std::unexpected(builder.error());
@@ -452,12 +541,20 @@ nevpt2::Result<bool> checkScHessian(const nevpt2::GoldenFile& g,
   const std::int64_t norb = g.ncas;
 
   std::printf("\n--sc-hessian: the SC total's second derivative with respect to the CI vector\n");
-  // Which functional, said where the Euler gate is stated (docs/hessian-theory.md,
-  // Sec. 9.1): the identity holds only with the orbital energies fixed.
-  std::printf("  functional: the orbital energies held fixed (the golden's e_core / e_virt; "
-              "Euler holds only there)\n");
-
   const nevpt2::HostDm12 base = builder->dm12(ci);
+  std::optional<nevpt2::OrbitalEnergyResponse> w;
+  const CiFullMode mode = NEVPT2_TRY(ciFullMode(g, gradgoldPath, base.dm1, w));
+  const bool full = mode.w != nullptr;
+  // Which functional, said where the Euler gate is stated (docs/hessian-theory.md,
+  // Sec. 4.3 and 9.1): the identity holds only with the orbital energies fixed.
+  if (full)
+    std::printf("  functional: FULL mode, the orbital energies responding to the CI vector "
+                "(e = h^eff + <dm1, W>, W from the sidecar); Euler at second order does not "
+                "hold there and is SKIPPED\n");
+  else
+    std::printf("  functional: the orbital energies held fixed (the golden's e_core / e_virt; "
+                "Euler holds only there)\n");
+
   std::printf("  host dm1/dm2 rebuild vs the golden: max|delta| = %.2e / %.2e\n",
               tangentMaxDiff(base.dm1, g.get("dm1")), tangentMaxDiff(base.dm2, g.get("dm2")));
   const nevpt2::DeviceTensor dDm1 = nevpt2::uploadTensor(base.dm1, res);
@@ -489,20 +586,23 @@ nevpt2::Result<bool> checkScHessian(const nevpt2::GoldenFile& g,
     const nevpt2::RdmTensors setU{dDm1U, dDm2U, t3.cu.dm3, t3.cu.f3ac, t3.cu.f3ca};
     const nevpt2::RdmTensors setV{dDm1V, dDm2V, t3.cv.dm3, t3.cv.f3ac, t3.cv.f3ca};
     const nevpt2::RdmTensors setUV{dDm1UV, dDm2UV, t3.uv.dm3, t3.uv.f3ac, t3.uv.f3ca};
-    const nevpt2::EnergyHessianResult hr = nevpt2::energiesHessianDevice(
-        ints.active, ints.source, ints.batch, baseSet, setU, setV, setUV, res);
+    const std::optional<nevpt2::OrbitalEnergyHessianDots> eps =
+        ciEpsHessian(mode, dotU.dm1, dotV.dm1, ddot.dm1);
+    const nevpt2::EnergyHessianResult hr =
+        nevpt2::energiesHessianDevice(ints.active, ints.source, ints.batch, baseSet, setU, setV,
+                                      setUV, eps ? &*eps : nullptr, res);
     eddot = hr.totalDDot;
 
     // Free: the walk's base total and its two first-order tangents are
-    // energiesDevice's and energiesTangentDevice's own.
+    // energiesDevice's and energiesTangentDevice's own (in the same mode).
     const nevpt2::EnergyResult e = nevpt2::energiesDevice(
         ints.active, ints.source, ints.batch, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, res);
     const nevpt2::EnergyTangentResult tu = nevpt2::energiesTangentDevice(
         ints.active, ints.source, ints.batch, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1U,
-        dDm2U, t3.cu.dm3, t3.cu.f3ac, t3.cu.f3ca, /*epsDot=*/nullptr, res);
+        dDm2U, t3.cu.dm3, t3.cu.f3ac, t3.cu.f3ca, eps ? &eps->u : nullptr, res);
     const nevpt2::EnergyTangentResult tv = nevpt2::energiesTangentDevice(
         ints.active, ints.source, ints.batch, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1V,
-        dDm2V, t3.cv.dm3, t3.cv.f3ac, t3.cv.f3ca, /*epsDot=*/nullptr, res);
+        dDm2V, t3.cv.dm3, t3.cv.f3ac, t3.cv.f3ca, eps ? &eps->v : nullptr, res);
     const double dBase = std::fabs(hr.total - e.total);
     const double dU = std::fabs(hr.totalDotU - tu.totalDot);
     const double dV = std::fabs(hr.totalDotV - tv.totalDot);
@@ -536,18 +636,27 @@ nevpt2::Result<bool> checkScHessian(const nevpt2::GoldenFile& g,
       const double increment = shifted.norms[c] - hr.norms[c];
       const double d = std::fabs(increment - hr.normDDots[c]);
       ok = ok && d < kTangentExactTol;
-      // Sijrs (index 2) reads no RDM: every second derivative exactly zero.
-      if (c == 2) ok = ok && hr.energyDDots[c] == 0.0 && hr.normDDots[c] == 0.0;
+      // Sijrs (index 2) reads no RDM: every second derivative of its norm is
+      // exactly zero, and of its energy too with the orbital energies fixed
+      // (in FULL mode it moves through its Delta alone).
+      if (c == 2) ok = ok && hr.normDDots[c] == 0.0 && (full || hr.energyDDots[c] == 0.0);
       std::printf("  %-7s %16.10f %16.10f %16.10f %16.10f %16.10f %10.2e\n",
                   nevpt2::CLASSES[c].c_str(), hr.energyDotsU[c], hr.energyDotsV[c],
                   hr.energyDDots[c], increment, hr.normDDots[c], d);
     }
-    std::printf("  norm increment (every class) and Sijrs exactly zero: %s\n",
+    std::printf("  norm increment (every class) and Sijrs's norm exactly zero: %s\n",
                 ok ? "ok" : "FAILED");
   }
 
   // --- check H1: Euler, Eddot(c, u) == Edot(u) ---------------------------------
-  {
+  // An identity at fixed orbital energies only (docs/hessian-theory.md,
+  // Sec. 4.3): in FULL mode Delta is affine in c and no class is homogeneous,
+  // so the gate is skipped -- and said to be.
+  if (full) {
+    std::printf("\n  Euler at second order: SKIPPED (FULL mode: the orbital energies respond "
+                "to the CI vector, so no class is homogeneous of degree 2 and the identity "
+                "does not hold)\n");
+  } else {
     const nevpt2::HostDm12 dotC = builder->dm12Dot(ci, ci);
     const nevpt2::HostDm12 dotU = builder->dm12Dot(ci, u);
     const nevpt2::DeviceTensor dDm1C = nevpt2::uploadTensor(dotC.dm1, res);
@@ -562,8 +671,9 @@ nevpt2::Result<bool> checkScHessian(const nevpt2::GoldenFile& g,
     const nevpt2::RdmTensors setC{dDm1C, dDm2C, t3.cu.dm3, t3.cu.f3ac, t3.cu.f3ca};
     const nevpt2::RdmTensors setU{dDm1U, dDm2U, t3.cv.dm3, t3.cv.f3ac, t3.cv.f3ca};
     const nevpt2::RdmTensors setCU{dDm1U, dDm2U, t3.uv.dm3, t3.uv.f3ac, t3.uv.f3ca};
-    const nevpt2::EnergyHessianResult hr = nevpt2::energiesHessianDevice(
-        ints.active, ints.source, ints.batch, baseSet, setC, setU, setCU, res);
+    const nevpt2::EnergyHessianResult hr =
+        nevpt2::energiesHessianDevice(ints.active, ints.source, ints.batch, baseSet, setC, setU,
+                                      setCU, /*eps=*/nullptr, res);
     // The reference: the already-gated tangent, on its own tangent build.
     const nevpt2::RdmBuildResult rdmDot =
         nevpt2::buildRdmTangentsDevice(rdmOpt, ci, u, norb, g.nelecA, g.nelecB, h2e, res);
@@ -594,7 +704,8 @@ nevpt2::Result<bool> checkScHessian(const nevpt2::GoldenFile& g,
 
   // --- check H3: the one finite difference, of Edot(u) along v -----------------
   std::printf("\n  central differences of Edot(u) along c + h v (energiesTangentDevice on "
-              "fresh builds):\n");
+              "fresh builds%s):\n",
+              full ? ", each displaced state at its own orbital energies" : "");
   std::printf("  %5s %14s %20s %12s %12s %8s\n", "k", "h = 2^-k", "(Edot(+h)-Edot(-h))/2h",
               "|err|", "rel err", "ratio");
   std::array<double, kStepCount> step{};
@@ -603,8 +714,10 @@ nevpt2::Result<bool> checkScHessian(const nevpt2::GoldenFile& g,
     const int k = kFirstStepExp + static_cast<int>(i);
     const double h = std::ldexp(1.0, -k);
     step[i] = h;
-    const double plus = scTangentAt(*builder, tangentStep(ci, h, v), u, rdmOpt, ints, res);
-    const double minus = scTangentAt(*builder, tangentStep(ci, -h, v), u, rdmOpt, ints, res);
+    const double plus =
+        scTangentAt(*builder, tangentStep(ci, h, v), u, rdmOpt, ints, mode, res);
+    const double minus =
+        scTangentAt(*builder, tangentStep(ci, -h, v), u, rdmOpt, ints, mode, res);
     const double d = (plus - minus) / (2.0 * h);
     err[i] = std::fabs(d - eddot);
     const double rel = err[i] / std::max(1e-30, std::fabs(eddot));
@@ -631,10 +744,18 @@ nevpt2::Result<bool> checkScHessian(const nevpt2::GoldenFile& g,
               run.length, nevpt2::kFourfoldLow, nevpt2::kFourfoldHigh, step[run.end],
               richardson ? "ok" : "NOT ENOUGH", kRichardsonRun);
 
-  std::printf("\n%s: the SC Hessian matches Euler and the exact norm increment to %.0e, and "
-              "the finite difference of Edot to %.0e relative (the orbital energies held "
-              "fixed)\n",
-              ok ? "PASS" : "FAIL", kTangentExactTol, kTangentFdTol);
+  // The line names the mode (docs/hessian-theory.md, Sec. 9.1's Euler row):
+  // FULL mode makes no Euler claim, so its wording drops it.
+  if (full)
+    std::printf("\n%s: the SC Hessian matches the exact norm increment to %.0e, and the finite "
+                "difference of Edot to %.0e relative (orbital-energy mode: FULL, the orbital "
+                "energies responding to c, Euler skipped there)\n",
+                ok ? "PASS" : "FAIL", kTangentExactTol, kTangentFdTol);
+  else
+    std::printf("\n%s: the SC Hessian matches Euler and the exact norm increment to %.0e, and "
+                "the finite difference of Edot to %.0e relative (the orbital energies held "
+                "fixed)\n",
+                ok ? "PASS" : "FAIL", kTangentExactTol, kTangentFdTol);
   return ok;
 }
 
@@ -676,6 +797,13 @@ nevpt2::Result<bool> checkScHessian(const nevpt2::GoldenFile& g,
 // different functionals; both legs here are handed none. Same ladder and
 // Richardson rules as CHECK 2 / H3, on the difference's 2-norm, with a gate
 // of its own (kHessianVectorFdTol says why).
+//
+// FULL MODE (#214, a sidecar beside the flag): every check above runs on the
+// complete functional instead -- H_cc u and Eddot both carry the orbital
+// energies' response, and each leg of V3 is the GATED y (scCiSourceDevice
+// with the sidecar's W, --gradient-source's) at its own state's orbital
+// energies, e(c') = e(c) + <dm1(c') - dm1(c), W>. Nothing is skipped: no
+// check here is Euler's.
 //
 // Also free, and checked exactly: the walk's own Edot(u) against
 // energiesTangentDevice (which pins the walk's tangent blocks to the forward
@@ -739,6 +867,7 @@ nevpt2::ScCiHessianResult scHessianVectorAt(const nevpt2::HostDm12Builder& build
                                             const nevpt2::RdmBuildOptions& rdmOpt,
                                             const CiCheckIntegrals& ints,
                                             const nevpt2::RdmTensors& base,
+                                            const CiFullMode& mode,
                                             const nevpt2::DeviceResources& res) {
   const nevpt2::HostDm12 dot = builder.dm12Dot(ci, u);
   const nevpt2::DeviceTensor dDm1Dot = nevpt2::uploadTensor(dot.dm1, res);
@@ -750,7 +879,7 @@ nevpt2::ScCiHessianResult scHessianVectorAt(const nevpt2::HostDm12Builder& build
   sigmaOpt.nTiles = rdmOpt.nTiles;
   return nevpt2::scCiHessianVectorDevice(ints.active, ints.source, ints.batch, ci, u,
                                          builder.nelecA(), builder.nelecB(), base, dotU,
-                                         sigmaOpt, res);
+                                         sigmaOpt, mode.w, res);
 }
 
 // Eddot(u, v) at the base state, forward over forward: the three-argument
@@ -760,7 +889,8 @@ nevpt2::ScCiHessianResult scHessianVectorAt(const nevpt2::HostDm12Builder& build
 double scEddotAt(const nevpt2::HostDm12Builder& builder, const nevpt2::Tensor& ci,
                  const nevpt2::Tensor& u, const nevpt2::Tensor& v,
                  const nevpt2::RdmBuildOptions& rdmOpt, const CiCheckIntegrals& ints,
-                 const nevpt2::RdmTensors& base, const nevpt2::DeviceResources& res) {
+                 const nevpt2::RdmTensors& base, const CiFullMode& mode,
+                 const nevpt2::DeviceResources& res) {
   const nevpt2::HostDm12 dotU = builder.dm12Dot(ci, u);
   const nevpt2::HostDm12 dotV = builder.dm12Dot(ci, v);
   const nevpt2::HostDm12 ddot = builder.dm12Dot(u, v);
@@ -775,28 +905,32 @@ double scEddotAt(const nevpt2::HostDm12Builder& builder, const nevpt2::Tensor& c
   const nevpt2::RdmTensors setU{dDm1U, dDm2U, t3.cu.dm3, t3.cu.f3ac, t3.cu.f3ca};
   const nevpt2::RdmTensors setV{dDm1V, dDm2V, t3.cv.dm3, t3.cv.f3ac, t3.cv.f3ca};
   const nevpt2::RdmTensors setUV{dDm1UV, dDm2UV, t3.uv.dm3, t3.uv.f3ac, t3.uv.f3ca};
+  const std::optional<nevpt2::OrbitalEnergyHessianDots> eps =
+      ciEpsHessian(mode, dotU.dm1, dotV.dm1, ddot.dm1);
   return nevpt2::energiesHessianDevice(ints.active, ints.source, ints.batch, base, setU, setV,
-                                       setUV, res)
+                                       setUV, eps ? &*eps : nullptr, res)
       .totalDDot;
 }
 
-// y at the CI vector `ci`, the whole way from the vector, with the orbital
-// energies held FIXED (no OrbitalEnergyResponse): dm1/dm2 rebuilt on the
-// host, dm3/f3ac/f3ca built on the device, then scCiSourceDevice. The
-// finite difference's two legs, in the one mode H_cc u is computed in.
+// y at the CI vector `ci`, the whole way from the vector, in the one mode
+// H_cc u is computed in: dm1/dm2 rebuilt on the host, dm3/f3ac/f3ca built on
+// the device, then scCiSourceDevice -- with the orbital energies held FIXED
+// (no OrbitalEnergyResponse), or in FULL mode the gated y with the sidecar's
+// W at this state's own orbital energies. The finite difference's two legs.
 nevpt2::Tensor scSourceAt(const nevpt2::HostDm12Builder& builder, const nevpt2::Tensor& ci,
                           const nevpt2::RdmBuildOptions& rdmOpt, const CiCheckIntegrals& ints,
-                          const nevpt2::DeviceResources& res) {
+                          const CiFullMode& mode, const nevpt2::DeviceResources& res) {
   const nevpt2::HostDm12 dm = builder.dm12(ci);
   const nevpt2::DeviceTensor dDm1 = nevpt2::uploadTensor(dm.dm1, res);
   const nevpt2::DeviceTensor dDm2 = nevpt2::uploadTensor(dm.dm2, res);
   const nevpt2::RdmBuildResult rdm = nevpt2::buildRdmsDevice(
       rdmOpt, ci, builder.norb(), builder.nelecA(), builder.nelecB(), ints.h2e, res);
+  const CiDisplaced at = ciDisplaced(mode, ints, dm.dm1, res);
   nevpt2::SigmaVectorOptions sigmaOpt;
   sigmaOpt.nTiles = rdmOpt.nTiles;
-  return nevpt2::scCiSourceDevice(ints.active, ints.source, ints.batch, ci, builder.nelecA(),
+  return nevpt2::scCiSourceDevice(at.active, ints.source, ints.batch, ci, builder.nelecA(),
                                   builder.nelecB(), dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca,
-                                  sigmaOpt, /*eps=*/nullptr, res)
+                                  sigmaOpt, mode.w, res)
       .y;
 }
 
@@ -805,6 +939,7 @@ nevpt2::Result<bool> checkScHessianVector(const nevpt2::GoldenFile& g,
                                           const CiCheckIntegrals& ints,
                                           const nevpt2::RdmBuildResult& baseRdm,
                                           std::uint64_t seedU, std::uint64_t seedV,
+                                          const std::string& gradgoldPath,
                                           const nevpt2::DeviceResources& res) {
   nevpt2::Result<nevpt2::HostDm12Builder> builder =
       nevpt2::HostDm12Builder::create(g.ncas, g.nelecA, g.nelecB);
@@ -813,12 +948,19 @@ nevpt2::Result<bool> checkScHessianVector(const nevpt2::GoldenFile& g,
 
   std::printf("\n--sc-hessian-vector: H_cc u, the SC total's CI Hessian-vector product "
               "(reverse over forward)\n");
-  // Which functional, said where the gates are stated (docs/hessian-theory.md,
-  // Sec. 9.1): both sides of every check below hold the orbital energies fixed.
-  std::printf("  functional: the orbital energies held fixed (the golden's e_core / e_virt), "
-              "on every side of every check\n");
-
   const nevpt2::HostDm12 base = builder->dm12(ci);
+  std::optional<nevpt2::OrbitalEnergyResponse> w;
+  const CiFullMode mode = NEVPT2_TRY(ciFullMode(g, gradgoldPath, base.dm1, w));
+  const bool full = mode.w != nullptr;
+  // Which functional, said where the gates are stated (docs/hessian-theory.md,
+  // Sec. 9.1): every side of every check below is in the one mode.
+  if (full)
+    std::printf("  functional: FULL mode, the orbital energies responding to the CI vector "
+                "(e = h^eff + <dm1, W>, W from the sidecar), on every side of every check\n");
+  else
+    std::printf("  functional: the orbital energies held fixed (the golden's e_core / e_virt), "
+                "on every side of every check\n");
+
   const nevpt2::DeviceTensor dDm1 = nevpt2::uploadTensor(base.dm1, res);
   const nevpt2::DeviceTensor dDm2 = nevpt2::uploadTensor(base.dm2, res);
   const nevpt2::RdmBuildResult& rdm = baseRdm;
@@ -830,7 +972,7 @@ nevpt2::Result<bool> checkScHessianVector(const nevpt2::GoldenFile& g,
   // --- H_cc u, and the two free checks on its walk ---------------------------
   const auto t0 = std::chrono::steady_clock::now();
   const nevpt2::ScCiHessianResult hu =
-      scHessianVectorAt(*builder, ci, u, rdmOpt, ints, baseSet, res);
+      scHessianVectorAt(*builder, ci, u, rdmOpt, ints, baseSet, mode, res);
   const double huSeconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   std::printf("  H_cc u built in %.2fs (ndet=%lld, seed 0x%llx); |H_cc u| = %.10f  "
@@ -844,9 +986,10 @@ nevpt2::Result<bool> checkScHessianVector(const nevpt2::GoldenFile& g,
     const nevpt2::DeviceTensor dDm2U = nevpt2::uploadTensor(dotU.dm2, res);
     const nevpt2::RdmBuildResult rdmDot = nevpt2::buildRdmTangentsDevice(
         rdmOpt, ci, u, g.ncas, g.nelecA, g.nelecB, ints.h2e, res);
+    const std::optional<nevpt2::OrbitalEnergyDot> epsU = ciEpsDot(mode, dotU.dm1);
     const nevpt2::EnergyTangentResult t = nevpt2::energiesTangentDevice(
         ints.active, ints.source, ints.batch, dDm1, dDm2, rdm.dm3, rdm.f3ac, rdm.f3ca, dDm1U,
-        dDm2U, rdmDot.dm3, rdmDot.f3ac, rdmDot.f3ca, /*epsDot=*/nullptr, res);
+        dDm2U, rdmDot.dm3, rdmDot.f3ac, rdmDot.f3ca, epsU ? &*epsU : nullptr, res);
     std::printf("\n  the walk's own Edot(u) against energiesTangentDevice's, per class:\n");
     std::printf("  %-7s %18s %18s %10s\n", "class", "walk", "forward", "|delta|");
     bool walk = true;
@@ -874,7 +1017,7 @@ nevpt2::Result<bool> checkScHessianVector(const nevpt2::GoldenFile& g,
               "relative");
   const auto dual = [&](const std::string& what, const nevpt2::Tensor& v) {
     const double lhs = hessianDot(v, hu.hu);
-    const double rhs = scEddotAt(*builder, ci, u, v, rdmOpt, ints, baseSet, res);
+    const double rhs = scEddotAt(*builder, ci, u, v, rdmOpt, ints, baseSet, mode, res);
     const double d = std::fabs(lhs - rhs);
     ok = ok && d < kHessianDualityTol;
     std::printf("  %-18s %20.12f %20.12f %11.2e %11.2e\n", what.c_str(), lhs, rhs, d,
@@ -899,9 +1042,9 @@ nevpt2::Result<bool> checkScHessianVector(const nevpt2::GoldenFile& g,
     for (std::int64_t I = 0; I < ndet; ++I) {
       nevpt2::Tensor e(ci.dims());
       e.flatRef(I) = 1.0;
-      cols.push_back(scHessianVectorAt(*builder, ci, e, rdmOpt, ints, baseSet, res).hu);
+      cols.push_back(scHessianVectorAt(*builder, ci, e, rdmOpt, ints, baseSet, mode, res).hu);
       const double lhs = hessianDot(v, cols.back());
-      const double rhs = scEddotAt(*builder, ci, e, v, rdmOpt, ints, baseSet, res);
+      const double rhs = scEddotAt(*builder, ci, e, v, rdmOpt, ints, baseSet, mode, res);
       const double d = std::fabs(lhs - rhs);
       if (d > cWorst) {
         cWorst = d;
@@ -941,7 +1084,10 @@ nevpt2::Result<bool> checkScHessianVector(const nevpt2::GoldenFile& g,
 
   // --- check V3: the one finite difference, of y along u ------------------------
   std::printf("\n  central differences of y along c + h u (scCiSourceDevice on fresh builds, "
-              "no orbital-energy response on either leg):\n");
+              "%s):\n",
+              full ? "the gated y with the sidecar on both legs, each at its own state's "
+                     "orbital energies"
+                   : "no orbital-energy response on either leg");
   std::printf("  %5s %14s %16s %12s %12s %8s\n", "k", "h = 2^-k", "|(y+ - y-)/2h|",
               "|err|", "rel err", "ratio");
   const double huNorm = hessianNorm(hu.hu);
@@ -951,9 +1097,10 @@ nevpt2::Result<bool> checkScHessianVector(const nevpt2::GoldenFile& g,
     const int k = kFirstStepExp + static_cast<int>(i);
     const double h = std::ldexp(1.0, -k);
     step[i] = h;
-    const nevpt2::Tensor plus = scSourceAt(*builder, tangentStep(ci, h, u), rdmOpt, ints, res);
+    const nevpt2::Tensor plus =
+        scSourceAt(*builder, tangentStep(ci, h, u), rdmOpt, ints, mode, res);
     const nevpt2::Tensor minus =
-        scSourceAt(*builder, tangentStep(ci, -h, u), rdmOpt, ints, res);
+        scSourceAt(*builder, tangentStep(ci, -h, u), rdmOpt, ints, mode, res);
     nevpt2::Tensor d(ci.dims());
     double e2 = 0.0;
     for (std::int64_t j = 0; j < d.size(); ++j) {
@@ -988,9 +1135,11 @@ nevpt2::Result<bool> checkScHessianVector(const nevpt2::GoldenFile& g,
               richardson ? "ok" : "NOT ENOUGH", kRichardsonRun);
 
   std::printf("\n%s: the SC Hessian-vector product matches Eddot(u, v) by duality to %.0e, and "
-              "the finite difference of y to %.0e relative (the orbital energies held fixed "
-              "on both legs)\n",
-              ok ? "PASS" : "FAIL", kHessianDualityTol, kHessianVectorFdTol);
+              "the finite difference of y to %.0e relative (%s)\n",
+              ok ? "PASS" : "FAIL", kHessianDualityTol, kHessianVectorFdTol,
+              full ? "orbital-energy mode: FULL, the orbital energies responding to c on both "
+                     "legs"
+                   : "the orbital energies held fixed on both legs");
   return ok;
 }
 

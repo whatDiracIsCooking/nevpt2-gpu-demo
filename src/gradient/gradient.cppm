@@ -864,11 +864,16 @@ Tensor ciSourceVector(const SigmaVectorOptions& opt, const Tensor& ci, int64_t n
 // normToEnergyMultiplierTangent: the 3x3 of Sec. 2.4, the only new
 // ingredient). One walk carries both g and gdot.
 //
-// THE ORBITAL ENERGIES ARE HELD FIXED (the golden's e_core / e_virt;
-// Deltadot = 0), the functional energiesHessianDevice differentiates: the
-// exact gate is the duality <v, H_cc u> == Eddot(u, v), and the two sides
-// must differentiate one functional. The orbital energies' response at
-// second order is later work.
+// THE ORBITAL ENERGIES' MODE is `eps`, as energiesHessianDevice's (the exact
+// gate is the duality <v, H_cc u> == Eddot(u, v), and the two sides must
+// differentiate one functional). Null holds them fixed (the golden's
+// e_core / e_virt; Deltadot = 0). Non-null is the FULL mode (#214), y's own
+// functional with a sidecar (scCiSourceDevice's `eps`): y's fold
+// sigma(sum_p (dE/de_p) W_p, c) is differentiated too. W is constant in c, so
+// that is the walk's Rdot scattered onto dE/de's tangent (every class's
+// multiplier tangents finished with Deltadot[u] = Delta at e'[u] =
+// <dm1'[u], W>, Sijrs's included) and folded through W into gdot's dm1, while
+// sigma(g, u) carries the fold itself.
 //
 // Everything runs on res.stream(); every device allocation is a DeviceBuffer
 // from res's pool. The ten coefficient tensors (g and gdot) live from the
@@ -884,9 +889,11 @@ struct ScCiHessianResult {
   Tensor hu;
   Tensor fromWalkTangent;  // sigma(gdot[u], c)
   Tensor fromDirection;    // sigma(g, u)
-  // y = sigma(g, c) from the same walk, at fixed orbital energies: free, and
-  // what scCiSourceDevice returns with no OrbitalEnergyResponse.
+  // y = sigma(g, c) from the same walk, in the same orbital-energy mode: free,
+  // and what scCiSourceDevice returns with the same OrbitalEnergyResponse.
   Tensor y;
+  // Whether the orbital energies responded to the CI vector (FULL mode).
+  bool orbitalEnergiesMove = false;
   // gdot[u] itself, host-resident: the reverse side's walk tangent.
   ScRdmCoefficients gDot;
   // The walk's own Edot(u) per class (CLASSES order) and summed:
@@ -903,13 +910,15 @@ struct ScCiHessianResult {
 // (the caller's dm1/dm2 upload and dm3/f3ac/f3ca build, as for
 // scCiSourceDevice) and `dotU` their tangents along u (nevpt2.rdm_host_dm's
 // dm12Dot(ci, u) and nevpt2.rdm_build's buildRdmTangentsDevice(ci, u)).
-// `source`/`batch` as for energiesDevice; `sigma` as for scCiSourceDevice.
+// `source`/`batch` as for energiesDevice; `sigma` and `eps` as for
+// scCiSourceDevice.
 ScCiHessianResult scCiHessianVectorDevice(const ActiveIntegralsDevice& active,
                                           IntegralSource& source, int64_t batch,
                                           const Tensor& ci, const Tensor& u, int64_t nelecA,
                                           int64_t nelecB, const RdmTensors& rdm,
                                           const RdmTensors& dotU,
                                           const SigmaVectorOptions& sigma,
+                                          const OrbitalEnergyResponse* eps,
                                           const DeviceResources& res);
 
 // --- the mixed orbital-CI block, H_kc (#184) ----------------------------------
@@ -1413,6 +1422,10 @@ struct PcClassGradient {
   std::vector<double> rotEps{};      // sum_t R_t Deltadot_t, shared by both modes
   std::vector<double> dEdCore{};
   std::vector<double> dEdVirt{};
+  // dE/de's tangent along the CI walk's u, in FULL mode (#214): the class's
+  // Rdot scattered as dE/de is; empty with the orbital energies held fixed.
+  std::vector<double> dEdCoreDot{};
+  std::vector<double> dEdVirtDot{};
   // The CI walk along u (pcCiHessianVectorDevice, #155): the walk's own
   // three-term Edot(u) from the tangent rows it built, and the lift along
   // (u, u) relative to s_max that the class was tested against (0 when
@@ -1502,8 +1515,16 @@ Result<PcCiSourceResult> pcCiSourceDevice(const NevptIntegralsDevice& ints, cons
 // -- no vector is formed, never one with a zero in it. A v along which the
 // modes lift is pcHessianDevice's to refuse for the pair (u, v).
 //
-// THE ORBITAL ENERGIES ARE HELD FIXED (Deltadot = Delta'' = 0), the
-// functional pcHessianDevice differentiates.
+// THE ORBITAL ENERGIES' MODE is `eps`, as pcHessianDevice's `sets.eps`. Null
+// holds them fixed (Deltadot = Delta'' = 0). Non-null is the FULL mode (#214):
+// y carries the orbital energies' response (each class's R scattered onto
+// dE/de, folded onto dm1 through W, as pcCiSourceDevice's `eps` does), and
+// H_cc u its derivative -- every tuple's Delta'[u] = Delta at e'[u] =
+// <dm1'[u], W> entering pcAdjointSecond* (alpha_u gains Delta'[u] I and the
+// S-weighted bar its share), the rows' Rdot scattered onto dE/de's tangent
+// and folded through W into gdot's dm1. Sijrs, SC's class, joins both folds
+// (its y and H_cc u are no longer zero), so `yClass[2]` / `huClass[2]` are
+// its fold alone.
 //
 // `rdm` the state's five RDMs; `dotU` their tangent along u and `ddotUU` the
 // second-order set at (u, u) (the lift test's) -- nevpt2.rdm_host_dm's
@@ -1521,7 +1542,9 @@ struct PcCiHessianResult {
   Tensor fromWalkTangent;  // sigma(gdot[u], c)
   Tensor fromDirection;    // sigma(g, u)
   Tensor y;                // the three-term y, from the same walk
-  std::array<Tensor, 8> yClass{}, huClass{};  // with perClass; Sijrs's zero
+  // with perClass; Sijrs's zero with the orbital energies held fixed
+  std::array<Tensor, 8> yClass{}, huClass{};
+  bool orbitalEnergiesMove = false;  // FULL mode (`eps` handed in)
 };
 
 Result<PcCiHessianResult> pcCiHessianVectorDevice(const NevptIntegralsDevice& ints,
@@ -1530,17 +1553,20 @@ Result<PcCiHessianResult> pcCiHessianVectorDevice(const NevptIntegralsDevice& in
                                                   const RdmTensors& rdm, const RdmTensors& dotU,
                                                   const RdmTensors& ddotUU, bool perClass,
                                                   const SigmaVectorOptions& sigma,
-                                                  const DeviceResources& res);
+                                                  const DeviceResources& res,
+                                                  const OrbitalEnergyResponse* eps = nullptr);
 
 // The three-term y alone (no direction): what H_cc u's finite difference
-// differences at c +- h u. `perClass` as above, `ok`/`walk`/`y`/`yClass` filled
-// and nothing else.
+// differences at c +- h u. `perClass` and `eps` as above (with `eps`, the
+// FULL y, its orbital energies those of the integrals handed in),
+// `ok`/`walk`/`y`/`yClass` filled and nothing else.
 Result<PcCiHessianResult> pcCiSourceThreeTermDevice(const NevptIntegralsDevice& ints,
                                                     const Tensor& ci, int64_t nelecA,
                                                     int64_t nelecB, const RdmTensors& rdm,
                                                     bool perClass,
                                                     const SigmaVectorOptions& sigma,
-                                                    const DeviceResources& res);
+                                                    const DeviceResources& res,
+                                                    const OrbitalEnergyResponse* eps = nullptr);
 
 // One direction's PC answer over the full kappa space, summed over the eight
 // classes -- ScFullRotationPairing's fields, PC's numbers: `integral` and
@@ -1705,9 +1731,9 @@ Result<double> pcRestoredTracePairingDevice(const NevptIntegralsDevice& ints,
 // THE ORBITAL ENERGIES' MODE is the setup's, SC's fields: `epsKappa` lets
 // them respond to kappa (Delta'_w per tuple, out of the sidecar), or both
 // legs hold them fixed. `epsCi` -- the orbital energies responding to the
-// CI vector -- is REFUSED as Unsupported: PC's CI side (pcHessianDevice,
-// pcCiHessianVectorDevice, pcCiSourceThreeTermDevice) holds them fixed in c,
-// so there is no CI leg to pair it with.
+// CI vector -- is REFUSED as Unsupported: this block's CI leg does not carry
+// that response (PC's CI block H_cc has a FULL mode, #214, which carries it;
+// the mixed block's counterpart is not built).
 //
 // REFUSALS. A class the gap or the denominator check refuses, or -- forward
 // only, the one place a CI direction enters -- whose dropped modes lift along

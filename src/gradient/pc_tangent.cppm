@@ -235,17 +235,29 @@ struct PcHessianCheck {
   double richardson = 0.0;  // (4 fd(h) - fd(2h)) / 3 over the two finest steps
   double richardsonErr = 0.0;
   double seconds = 0.0;
+  // FULL mode (#214): the orbital energies responded to the CI vector, and
+  // Euler (check 2) was not run.
+  bool orbitalEnergiesMove = false;
 };
 
 // Runs the check on one state: as pcTangentFdCheck, with a second seed for v
 // (`seedU` draws u, the direction of the difference; `seedV` draws v, the
 // direction of the differenced tangent) and a third for the control's w.
+//
+// `eps` (#214): null holds the orbital energies fixed, as above. Non-null is
+// the FULL mode, W out of the gradient sidecar: every derivative carries the
+// orbital energies' response to the CI vector (pcHessianSets' `eps`,
+// pcTangentsDevice's `epsDot`), every displaced state runs at its own
+// orbital energies, e(c') = e(c) + <dm1(c') - dm1(c), W>, and Euler -- not an
+// identity there (docs/hessian-theory.md, Sec. 4.3) -- is skipped.
 Result<PcHessianCheck> pcHessianFdCheck(const RdmBuildOptions& rdmOpt,
                                         const NevptIntegralsDevice& ints, const Tensor& ci,
                                         int64_t norb, int64_t nelecA, int64_t nelecB,
                                         const Tensor& h2e, std::span<const double> steps,
                                         std::uint64_t seedU, std::uint64_t seedV,
-                                        std::uint64_t seedControl, const DeviceResources& res);
+                                        std::uint64_t seedControl,
+                                        const OrbitalEnergyResponse* eps,
+                                        const DeviceResources& res);
 
 // Prints the per-class table (with each class's smallest kept S eigenvalue,
 // gap and lift), the control and the Richardson table, and the gate line
@@ -341,11 +353,16 @@ struct PcHessianVectorCheck {
   // <v, y>'s, so the two checks' finite differences can be read side by side.
   double richardsonV = 0.0, huV = 0.0;
   double seconds = 0.0;
+  // FULL mode (#214): the orbital energies responded to the CI vector, and
+  // Euler (check 4) was not run.
+  bool orbitalEnergiesMove = false;
 };
 
 // Runs the check on one state: `seedU` draws u, `seedsV` the duality's v
 // (the first also the symmetry's), `seedControl` the control's w. Inputs as
-// pcHessianFdCheck's; `nTiles` is the sigma kernels' tiling (the RDM build's).
+// pcHessianFdCheck's, `eps` included: in FULL mode every check runs on the
+// complete functional, check 6's legs are the gated y (with W) at each
+// displaced state's own orbital energies, and Euler is skipped.
 Result<PcHessianVectorCheck> pcHessianVectorCheck(const RdmBuildOptions& rdmOpt,
                                                   const NevptIntegralsDevice& ints,
                                                   const Tensor& ci, int64_t norb, int64_t nelecA,
@@ -354,6 +371,7 @@ Result<PcHessianVectorCheck> pcHessianVectorCheck(const RdmBuildOptions& rdmOpt,
                                                   std::uint64_t seedU,
                                                   std::span<const std::uint64_t> seedsV,
                                                   std::uint64_t seedControl,
+                                                  const OrbitalEnergyResponse* eps,
                                                   const DeviceResources& res);
 
 // Prints the tables and the gate line the `nevpt2_pc_hessian_vector_*` ctest

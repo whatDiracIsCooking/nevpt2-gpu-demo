@@ -105,7 +105,7 @@ void gradientSr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
   };
   std::optional<ScCiWalk> cw;
   if (ci != nullptr) {
-    cw.emplace();
+    cw.emplace(ciWalkOf(*ci));
     cw->gDots = ciBlocks(ci->dot);
   }
   // The M / E of Eqs. 42-43 have no external index left, so one set
@@ -255,7 +255,7 @@ void gradientSi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
   };
   std::optional<ScCiWalk> cw;
   if (ci != nullptr) {
-    cw.emplace();
+    cw.emplace(ciWalkOf(*ci));
     cw->gDots = ciBlocks(ci->dot);
   }
   // The M / E of Eqs. 42-43 have no external index left, so one set
@@ -400,9 +400,18 @@ void gradientSi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
 // there, and both need the orbital energies to respond to the CI vector. In
 // reverse, likewise, it reaches the CI vector only through dE/de and its
 // tangent along w.
+//
+// A CI DIRECTION IN FULL MODE (#214) reaches it the same way: `epsCoreU` /
+// `epsVirtU` non-null (the orbital energies' tangent along u), N_t and H_t
+// stay put and only Delta moves, so the walk's Edot(u) gains R . Deltadot[u]
+// and dE/de's tangent Rdot = E_DeltaDelta Deltadot[u] -- through the same
+// unguarded finish as the rest of the class -- joins acc.dEdCoreDot /
+// dEdVirtDot. Null: nothing, as before (its CI derivative at fixed orbital
+// energies is exactly zero).
 void gradientSijrs(IntegralSource& src, int64_t batch, const Tensor& hostECore,
                    const Tensor& hostEVirt, const ScRotation& rot, ScClassGradient& acc,
-                   const ScMixedDirection* mix, const DeviceResources& dr) {
+                   const ScMixedDirection* mix, const Tensor* epsCoreU, const Tensor* epsVirtU,
+                   const DeviceResources& dr) {
   const wwrStream_t s = dr.stream();
   const int64_t ncore = hostECore.size(), nvirt = hostEVirt.size();
   if (ncore == 0 || nvirt == 0) return;
@@ -451,6 +460,17 @@ void gradientSijrs(IntegralSource& src, int64_t batch, const Tensor& hostECore,
           deviceEinsumNew("iajb,iajb->iajb", {&gdot, &theta}, 1.0, dr);
       deviceEinsumAccum("iajb,iajb->iajb", {&slab, &thetaDot}, nDot, 1.0, s);
       acc.rotTangent[k] += dotHost(m.p, downloadTensor(nDot, s).data());
+    }
+
+    // A CI direction, the orbital energies responding to it (#214).
+    if (epsCoreU != nullptr) {
+      const std::vector<double> diffDotU = deltaOf(*epsCoreU, *epsVirtU);
+      acc.ciTangent += dotHost(m.r, diffDotU);
+      const Tensor noNormDot =
+          Tensor::fromFlat(hostNorm.dims(), std::vector<double>(delta.size(), 0.0));
+      const ScSlabMultiplierTangents t =
+          sijrsMultiplierTangents(hostNorm, delta, noNormDot, diffDotU);
+      deltaAdjointInto(deltaOf, t.r, acc.dEdCoreDot, acc.dEdVirtDot);
     }
 
     if (mix == nullptr) return;
@@ -615,7 +635,7 @@ void gradientSijr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
   };
   std::optional<ScCiWalk> cw;
   if (ci != nullptr) {
-    cw.emplace();
+    cw.emplace(ciWalkOf(*ci));
     cw->gDots = ciBlocksAt(ai.h1e, ai.h2e, ci->dot, /*withMetric=*/true);
   }
   std::optional<ScMixedWalk> mw;
@@ -734,7 +754,7 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
   };
   std::optional<ScCiWalk> cw;
   if (ci != nullptr) {
-    cw.emplace();
+    cw.emplace(ciWalkOf(*ci));
     cw->gDots = ciBlocks(ci->dot);
   }
   // dm1 does not move; k27 is this class's one Dyall block.
@@ -907,12 +927,17 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
   if (cw) {
     const Tensor hostNormTCi = downloadTensor(*normTCi, s);
     const Tensor hostHTCi = downloadTensor(*hTCi, s);
-    acc.ciTangent +=
-        dotHost(m.p.data(), hostNormTCi.data()) + dotHost(m.q.data(), hostHTCi.data());
-    const ScSlabMultiplierTangents t =
-        srsiMultiplierTangents(hostNormT, hostHT, hostNormTCi, hostHTCi, hostECore, hostEVirt);
+    // FULL mode (#214): Delta's tangent along u over the same triangle.
+    const bool epsCi = cw->epsCoreU != nullptr;
+    const std::vector<double> diffDotU =
+        epsCi ? deltaOf(*cw->epsCoreU, *cw->epsVirtU) : std::vector<double>(m.r.size(), 0.0);
+    acc.ciTangent += dotHost(m.p.data(), hostNormTCi.data()) +
+                     dotHost(m.q.data(), hostHTCi.data()) + dotHost(m.r, diffDotU);
+    const ScSlabMultiplierTangents t = srsiMultiplierTangents(
+        hostNormT, hostHT, hostNormTCi, hostHTCi, diffDotU, hostECore, hostEVirt);
     mpDot.emplace(uploadTensor(t.p, dr));
     mqDot.emplace(uploadTensor(t.q, dr));
+    if (epsCi) deltaAdjointInto(deltaOf, t.r, acc.dEdCoreDot, acc.dEdVirtDot);
   }
   // The mixed direction (#184), over the same raw tables and the same
   // triangle: w's pair is the tangent tables of direction 0 (the digests'
@@ -1138,7 +1163,7 @@ void gradientSrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
   };
   std::optional<ScCiWalk> cw;
   if (ci != nullptr) {
-    cw.emplace();
+    cw.emplace(ciWalkOf(*ci));
     cw->gDots = ciBlocksAt(ai.h1e, ai.h2e, ci->dot, /*withMetric=*/true);
   }
   std::optional<ScMixedWalk> mw;
@@ -1286,7 +1311,7 @@ void gradientSij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
   };
   std::optional<ScCiWalk> cw;
   if (ci != nullptr) {
-    cw.emplace();
+    cw.emplace(ciWalkOf(*ci));
     cw->gDots = ciBlocksAt(ai.h1e, ai.h2e, ci->dot, /*withMetric=*/true);
   }
   std::optional<ScMixedWalk> mw;
@@ -1405,7 +1430,7 @@ void gradientSir(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
   };
   std::optional<ScCiWalk> cw;
   if (ci != nullptr) {
-    cw.emplace();
+    cw.emplace(ciWalkOf(*ci));
     cw->gDots = ciBlocksAt(ai.h1e, ai.h2e, ci->dot, /*withRaw=*/true);
   }
   std::optional<ScMixedWalk> mw;

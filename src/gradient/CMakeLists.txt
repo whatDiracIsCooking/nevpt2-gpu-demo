@@ -135,7 +135,8 @@ add_cxx_module_library(
 # nevpt2.pc_tangent: it links the RDM build (nevpt2::gradient re-exports it)
 # and nevpt2::rdm_host_dm for the same reason -- every displaced state and
 # every tangent needs its own RDMs -- and nevpt2::golden for the state and
-# the gradient sidecar.
+# the gradient sidecar. nevpt2_pc_tangent links it too, for its sidecar
+# reader alone (loadOrbitalEnergyResponse: the CI Hessian's FULL mode, #214).
 add_cxx_module_library(
   NAME nevpt2.ci_checks
   PRIMARY_INTERFACE ci_checks.cppm

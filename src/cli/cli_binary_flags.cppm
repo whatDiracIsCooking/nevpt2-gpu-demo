@@ -89,10 +89,13 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   same ladder flags; the two are one check at a time.
 //   --gradgold      nevpt2_sc_pseudodensity (--kappa-full, --sc-hessian-kc,
 //                   --sc-hessian-kk-int, --sc-hessian-kk, --dump-source-terms,
-//                   --source-oracle; each with or without --pc where it takes it)
-//                   and nevpt2_demo (--gradient-source, whose y_I and forward
+//                   --source-oracle; each with or without --pc where it takes
+//                   it), nevpt2_demo (--gradient-source, whose y_I and forward
 //                   tangent then carry the orbital energies' CI response,
-//                   #87): the two binaries that read the sidecar.
+//                   #87, and --sc-hessian / --sc-hessian-vector, then in FULL
+//                   mode, #214) and nevpt2_pc_tangent (--pc-hessian /
+//                   --pc-hessian-vector in FULL mode, #214): the three
+//                   binaries that read the sidecar.
 // README.md, "Which binary takes which flag", is this table in prose; keep
 // the two together.
 constexpr std::array kFlagTable{
@@ -122,7 +125,7 @@ constexpr std::array kFlagTable{
     FlagSpec{"--sc-hessian-kc", "", kScPd},
     FlagSpec{"--sc-hessian-kk-int", "", kScPd},
     FlagSpec{"--sc-hessian-kk", "", kScPd},
-    FlagSpec{"--gradgold", "path", kDemo | kScPd},
+    FlagSpec{"--gradgold", "path", kDemo | kScPd | kPcTangent},
     FlagSpec{"--dump-source-terms", "path", kScPd},
     FlagSpec{"--source-oracle", "path", kScPd},
     FlagSpec{"--fd-steps", "N", kPcTangent},
@@ -318,13 +321,15 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
   const CommonOptions& c = opt.common;
   switch (b) {
     case Binary::Demo:
-      // The sidecar's one reader here is the CI source term's orbital-energy
-      // response (#87). (With both checks set, --gradient-source is, so the
-      // one-at-a-time refusal below is what reports it.)
-      if (!opt.gradgoldPath.empty() && !opt.gradientSource)
+      // The sidecar's readers here are the CI source term's orbital-energy
+      // response (#87) and the CI Hessian's FULL mode (#214). (With two checks
+      // set, one of them is, so the one-at-a-time refusal below is what
+      // reports it.)
+      if (!opt.gradgoldPath.empty() &&
+          !(opt.gradientSource || opt.scHessian || opt.scHessianVector))
         return err_config(
-            "--gradgold is the sidecar --gradient-source reads the orbital energies' "
-            "response from; it does nothing on its own");
+            "--gradgold is the sidecar --gradient-source, --sc-hessian and --sc-hessian-vector "
+            "read the orbital energies' response from; it does nothing on its own");
       return checkDifferentiationFlags(opt);
     case Binary::DfDemo:
       if (opt.batch < 0) return err_config("--batch must be >= 0");
@@ -427,6 +432,11 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
         return err_config(
             "--pc-hessian and --pc-hessian-vector are two different checks of the PC energy's "
             "second derivative; run one at a time");
+      // The sidecar's reader here is the PC CI Hessian's FULL mode (#214).
+      if (!opt.gradgoldPath.empty() && !opt.pcHessian && !opt.pcHessianVector)
+        return err_config(
+            "--gradgold is the sidecar --pc-hessian and --pc-hessian-vector read the orbital "
+            "energies' response from; it does nothing on its own");
       return {};
   }
   check(false, "checkOwnFlags: not a Binary");

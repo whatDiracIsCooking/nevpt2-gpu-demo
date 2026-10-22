@@ -30,8 +30,9 @@
 //
 // THE CHECKS, in the order they print. Each names its orbital-energy mode:
 // EULER (they respond to kappa, held fixed in c) or FROZEN (held fixed in
-// both). FULL -- responding to c too -- is refused for PC (check 6): PC's CI
-// side holds them fixed in c.
+// both). FULL -- responding to c too -- is refused for PC (check 6): PC's
+// mixed block holds them fixed in c (only PC's CI block H_cc has a FULL mode,
+// #214).
 //
 //   With the gradient sidecar (conventional or density-fitted), EULER mode,
 //   along a seeded fully mixed w:

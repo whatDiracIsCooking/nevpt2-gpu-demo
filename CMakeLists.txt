@@ -1384,6 +1384,39 @@ if(NEVPT2_BUILD_TESTING)
       PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_vector_pass}" LABELS "gpu")
   endif()
 
+  # --- the CI block in FULL mode, --gradgold beside the H_cc flags (#214) ----------
+  #
+  # The same two checks with the committed gradient sidecar beside the golden:
+  # the orbital energies respond to the CI vector (e = h^eff + <dm1, W>, W read
+  # by the --gradient-source reader) on every side of every check, every
+  # displaced state at its own orbital energies, and Euler -- not an identity
+  # there -- skipped and said to be (docs/hessian-theory.md, Sec. 4.3 and
+  # 9.1). --sc-hessian keeps its norm increment and its difference of Edot;
+  # --sc-hessian-vector its duality against the FULL Eddot, the columns and a
+  # Richardson ladder of the gated y. Each PASS line names the mode, which the
+  # regex holds it to. CAS(4,4) (its CASSCF twin is with the #157 entries
+  # below), `small`, at --sc-hessian's --tiles 3.
+  set(_nevpt2_sc_hessian_full_pass
+      "PASS: the SC Hessian matches the exact norm increment .*\\(orbital-energy mode: FULL, the orbital energies responding to c, Euler skipped there\\)")
+  set(_nevpt2_sc_hessian_vector_full_pass
+      "${_nevpt2_sc_hessian_vector_pass} .*\\(orbital-energy mode: FULL, the orbital energies responding to c on both legs\\)")
+  set(_side_44 "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44.gradgold")
+  if(NOT EXISTS "${_side_44}")
+    message(FATAL_ERROR "nevpt2: committed gradient sidecar missing: ${_side_44}")
+  endif()
+  add_golden_test(nevpt2_cas44_sc_hessian_full "${_gold_44}" --tiles 3 --sc-hessian
+                  --gradgold "${_side_44}")
+  add_golden_test(nevpt2_cas44_sc_hessian_vector_full "${_gold_44}" --tiles 3
+                  --sc-hessian-vector --gradgold "${_side_44}")
+  if(TEST nevpt2_cas44_sc_hessian_full)
+    set_tests_properties(nevpt2_cas44_sc_hessian_full PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_full_pass}" LABELS "gpu;small")
+  endif()
+  if(TEST nevpt2_cas44_sc_hessian_vector_full)
+    set_tests_properties(nevpt2_cas44_sc_hessian_vector_full PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_vector_full_pass}" LABELS "gpu;small")
+  endif()
+
   # --- *_pc, small ----------------------------------------------------
   #
   # --pc at CAS(4,4)/CAS(8,8), both demos, labelled `small` so the sanitizer
@@ -1514,6 +1547,26 @@ if(NEVPT2_BUILD_TESTING)
   _add_casscf_hessian_test(nevpt2_pc_tangent nevpt2_pc_hessian_vector_cas44_casscf
     --pc-hessian-vector
     "PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches .*\\(orbital energies held fixed. smallest kept s/s_max [^ ]+ \\([A-Za-z]+\\), smallest gap [^ ]+ against PC_MIN_GAP")
+  # The CI block's FULL mode (#214): the four H_cc flags again with the
+  # committed sidecar beside this golden, each regex holding its line to FULL
+  # (Euler skipped). Their CASCI twins sit beside the frozen-mode entries.
+  set(_side_44_casscf "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_casscf.gradgold")
+  if(NOT EXISTS "${_side_44_casscf}")
+    message(FATAL_ERROR "nevpt2: committed gradient sidecar missing: ${_side_44_casscf}")
+  endif()
+  set(_nevpt2_pc_hessian_full_pass
+      "PASS: the PC-NEVPT2 Hessian Eddot\\(u, v\\) matches the central difference of Edot \\(orbital-energy mode: FULL, the orbital energies responding to c, Euler skipped there. smallest kept s/s_max [^ ]+ \\([A-Za-z]+\\), smallest gap [^ ]+ against PC_MIN_GAP")
+  set(_nevpt2_pc_hessian_vector_full_pass
+      "PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches .*\\(orbital-energy mode: FULL, the orbital energies responding to c, Euler skipped there. smallest kept s/s_max [^ ]+ \\([A-Za-z]+\\), smallest gap [^ ]+ against PC_MIN_GAP")
+  _add_casscf_hessian_test(nevpt2_demo nevpt2_cas44_casscf_sc_hessian_full
+    "--sc-hessian;--gradgold;${_side_44_casscf}" "${_nevpt2_sc_hessian_full_pass}")
+  _add_casscf_hessian_test(nevpt2_demo nevpt2_cas44_casscf_sc_hessian_vector_full
+    "--sc-hessian-vector;--gradgold;${_side_44_casscf}" "${_nevpt2_sc_hessian_vector_full_pass}")
+  _add_casscf_hessian_test(nevpt2_pc_tangent nevpt2_pc_hessian_cas44_casscf_full
+    "--pc-hessian;--gradgold;${_side_44_casscf}" "${_nevpt2_pc_hessian_full_pass}")
+  _add_casscf_hessian_test(nevpt2_pc_tangent nevpt2_pc_hessian_vector_cas44_casscf_full
+    "--pc-hessian-vector;--gradgold;${_side_44_casscf}" "${_nevpt2_pc_hessian_vector_full_pass}")
+  unset(_side_44_casscf)
   # PC's orbital blocks (#200-#202; #203): the same binary and flags with --pc
   # as their CAS(4,4) twins, the committed sidecar beside this golden read.
   # `flag` is a list here ("--pc;<flag>"), expanded unquoted above. Each regex
@@ -1621,6 +1674,33 @@ if(NEVPT2_BUILD_TESTING)
       PASS_REGULAR_EXPRESSION "PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches"
       LABELS "gpu;small")
   endif()
+
+  # --- PC's CI block in FULL mode, --gradgold beside the PC H_cc flags (#214) -----
+  #
+  # The two entries above with the committed gradient sidecar beside the
+  # golden: the orbital energies respond to the CI vector on every side of
+  # every check (every tuple's Delta'[u], Delta'[v], Delta''[u, v] in the
+  # solve's second derivative; the rows' Rdot folded through W in H_cc u),
+  # every displaced state at its own orbital energies, Euler skipped and said
+  # to be. --pc-hessian keeps its control and its difference of Edot;
+  # --pc-hessian-vector its duality, symmetry, control and per-class ladder of
+  # the gated three-term y. Each PASS line names the mode. CAS(4,4) (its
+  # CASSCF twins are with the #157 entries above, as are the two regexes),
+  # `small`, --tiles 3.
+  set(_pc_hess_side "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44.gradgold")
+  _add_golden_test_with(nevpt2_pc_tangent nevpt2_pc_hessian_cas44_full "${_pc_hess_gold}"
+                        --tiles 3 --pc-hessian --gradgold "${_pc_hess_side}")
+  _add_golden_test_with(nevpt2_pc_tangent nevpt2_pc_hessian_vector_cas44_full "${_pc_hess_gold}"
+                        --tiles 3 --pc-hessian-vector --gradgold "${_pc_hess_side}")
+  if(TEST nevpt2_pc_hessian_cas44_full)
+    set_tests_properties(nevpt2_pc_hessian_cas44_full PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_pc_hessian_full_pass}" LABELS "gpu;small")
+  endif()
+  if(TEST nevpt2_pc_hessian_vector_cas44_full)
+    set_tests_properties(nevpt2_pc_hessian_vector_cas44_full PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_pc_hessian_vector_full_pass}" LABELS "gpu;small")
+  endif()
+  unset(_pc_hess_side)
   unset(_pc_hess_gold)
 
   # --- salicylaldimine CAS(8,8)/6-31G** -------------------------------------------

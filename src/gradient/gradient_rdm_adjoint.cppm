@@ -83,10 +83,25 @@ struct ScRdmAdjoint {
 // as it sweeps M_G into the plain ScRdmAdjoint -- one function per class,
 // called on each. `dot` is borrowed for the call; `adjDot` is the caller's,
 // accumulated over all eight classes.
+//
+// `epsCoreU` / `epsVirtU` (#214): the orbital energies' tangent along u,
+// e'[u] = <dm1'[u], W>, for the FULL mode (their response to the CI vector
+// carried at second order); null holds them fixed. Borrowed for the call.
 struct ScCiDirection {
   const RdmTensors& dot;
   ScRdmAdjoint& adjDot;
+  const Tensor* epsCoreU = nullptr;
+  const Tensor* epsVirtU = nullptr;
 };
+
+// The walk a class carrying `d` starts from: no tangent block yet (each class
+// builds its own), and the direction's orbital-energy tangent, if any.
+ScCiWalk ciWalkOf(const ScCiDirection& d) {
+  ScCiWalk w;
+  w.epsCoreU = d.epsCoreU;
+  w.epsVirtU = d.epsVirtU;
+  return w;
+}
 
 // THE MIXED DIRECTION (#184, docs/hessian-theory.md Sec. 5.5): an orbital
 // direction w -- rot.dirs[0], its tangent blocks built and the digests' share

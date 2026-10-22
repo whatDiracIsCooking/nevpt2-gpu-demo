@@ -40,6 +40,12 @@
 // Richardson-verified difference of the GPU's own three-term y
 // (docs/hessian-theory.md, Sec. 4.2 and 6.2).
 //
+// With --gradgold PATH beside either Hessian flag (#214), the FULL mode: the
+// orbital energies respond to the CI vector, W read from that sidecar (the
+// reader --gradient-source uses, nevpt2.ci_checks' loadOrbitalEnergyResponse),
+// on every side of every check, and Euler is skipped (not an identity there,
+// docs/hessian-theory.md, Sec. 4.3). The PASS line names the mode.
+//
 // It is the only caller of nevpt2.pc_tangent; the demos do not link it.
 
 // A module unit, so each binary is apps/<app>/{main.cppm,CMakeLists.txt}.
@@ -52,6 +58,8 @@ import std;
 // nevpt2.cli: every flag this binary takes, and the ones it refuses.
 import nevpt2.cli;
 import nevpt2.golden;
+// loadOrbitalEnergyResponse: the gradient sidecar's W, for the FULL mode.
+import nevpt2.ci_checks;
 import nevpt2.link_tables;
 // nevpt2.pc_tangent re-exports nevpt2.energy (and so .einsum, .device_tensor,
 // .wwr, .tensor), nevpt2.rdm_build and nevpt2.rdm_host_dm.
@@ -151,6 +159,22 @@ int main(int argc, char** argv) {
              nevpt2::referenceKindName(g.reference));
   std::printf("golden reference: %s\n", opt.goldenPath.c_str());
 
+  // --gradgold (#214; nevpt2.cli has already refused it without a Hessian
+  // flag): the FULL mode's W, read and held to the golden's orbital energies
+  // before any card is touched. A sidecar that does not fit is the user's
+  // input, reported once here.
+  std::optional<nevpt2::OrbitalEnergyResponse> epsResponse;
+  if (!parsedOpts.gradgoldPath.empty()) {
+    nevpt2::Result<nevpt2::OrbitalEnergyResponse> w =
+        nevpt2::loadOrbitalEnergyResponse(g, parsedOpts.gradgoldPath);
+    if (!w) {
+      nevpt2::report(w.error());
+      return 1;
+    }
+    epsResponse = *std::move(w);
+  }
+  const nevpt2::OrbitalEnergyResponse* eps = epsResponse ? &*epsResponse : nullptr;
+
   std::vector<double> steps;
   steps.reserve(static_cast<std::size_t>(fdSteps));
   const double firstStep = std::ldexp(1.0, -startPow);
@@ -219,7 +243,7 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(kSeedControl));
     const nevpt2::Result<nevpt2::PcHessianCheck> hess =
         nevpt2::pcHessianFdCheck(opt.rdm, dInts, g.get("ci"), norb, g.nelecA, g.nelecB,
-                                 g.get("h2e"), steps, kSeed, kSeedV, kSeedControl, *res);
+                                 g.get("h2e"), steps, kSeed, kSeedV, kSeedControl, eps, *res);
     if (!hess) {
       nevpt2::report(hess.error());
       return 1;
@@ -259,7 +283,7 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(kSeedControl));
     const nevpt2::Result<nevpt2::PcHessianVectorCheck> hv = nevpt2::pcHessianVectorCheck(
         opt.rdm, dInts, g.get("ci"), norb, g.nelecA, g.nelecB, g.get("h2e"), steps, kSeed,
-        kSeedsV, kSeedControl, *res);
+        kSeedsV, kSeedControl, eps, *res);
     if (!hv) {
       nevpt2::report(hv.error());
       return 1;

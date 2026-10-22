@@ -170,9 +170,18 @@ void accumActiveDerivatives(const std::vector<ScTerm>& terms, const DeviceTensor
 // (ScGDot, which may VIEW a caller's tensor -- a raw RDM's tangent), and the
 // Mdot_G accumulators under the same keys, so the class's own RDM sweep reads
 // them exactly as it reads M_G.
+//
+// FULL MODE (#214): `epsCoreU` / `epsVirtU` non-null are the orbital
+// energies' tangent along u, e'[u] = <dm1'[u], W>. Every slab then reads its
+// Delta tangent off its own `deltaOf` at them, finishes the multiplier
+// tangents with it (Rdot included), adds R Deltadot to the walk's Edot(u),
+// and scatters Rdot onto dE/de's tangent (acc.dEdCoreDot / dEdVirtDot) --
+// what the caller folds onto gdot's dm1 through W. Null: held fixed.
 struct ScCiWalk {
   std::vector<ScGDot> gDots;
   std::vector<ScActiveAccum> dActive;
+  const Tensor* epsCoreU = nullptr;
+  const Tensor* epsVirtU = nullptr;
 };
 
 // The FORWARD TANGENT of a term list: the product rule, each operand
@@ -676,8 +685,10 @@ double pairSlabDots(const ScSlabDots& dots, const std::vector<DeviceTensor>& dBl
 // `multiplierDotFn(norm, h, normDot, hDot)` -- the class's own *MultiplierTangents,
 // at fixed orbital energies -- accumulated into ci->dActive. Null runs none of
 // it. `multiplierDotFn(norm, h, normDot, hDot, diffDot)` takes the Delta
-// tangent in perturber order (zeros along a CI direction: the walk holds the
-// orbital energies fixed).
+// tangent in perturber order: zeros along a CI direction with the orbital
+// energies held fixed, `deltaOf` at ci->epsCoreU / epsVirtU in FULL mode
+// (#214), which also adds R.Deltadot to acc.ciTangent and scatters Rdot onto
+// acc.dEdCoreDot / dEdVirtDot.
 //
 // `mix` non-null adds the MIXED direction (#184, ScMixedWalk above): w is
 // rot.dirs[0]. Every slab forms its per-tuple tangents along w (the digests'
@@ -767,14 +778,20 @@ void assembleSlab(const std::vector<ScTerm>& normTerms, const std::vector<ScTerm
     // No sync before the downloads, for the reason the base pair's give.
     const Tensor hostNormDot = downloadTensor(normDot, stream);
     const Tensor hostHDot = downloadTensor(hDot, stream);
-    acc.ciTangent +=
-        dotHost(m.p.data(), hostNormDot.data()) + dotHost(m.q.data(), hostHDot.data());
-    const ScSlabMultiplierTangents t = multiplierDotFn(
-        hostNorm, hostH, hostNormDot, hostHDot, std::vector<double>(m.r.size(), 0.0));
+    // FULL mode (#214): the orbital energies' tangent along u, through this
+    // class's own Delta construction; zeros with them held fixed.
+    const bool epsCi = ci->epsCoreU != nullptr;
+    const std::vector<double> diffDotU =
+        epsCi ? deltaOf(*ci->epsCoreU, *ci->epsVirtU) : std::vector<double>(m.r.size(), 0.0);
+    acc.ciTangent += dotHost(m.p.data(), hostNormDot.data()) +
+                     dotHost(m.q.data(), hostHDot.data()) + dotHost(m.r, diffDotU);
+    const ScSlabMultiplierTangents t =
+        multiplierDotFn(hostNorm, hostH, hostNormDot, hostHDot, diffDotU);
     const DeviceTensor pDot = uploadTensor(t.p, res);
     const DeviceTensor qDot = uploadTensor(t.q, res);
     accumActiveDerivatives(normTerms, pDot, ci->dActive, res);
     accumActiveDerivatives(hTerms, qDot, ci->dActive, res);
+    if (epsCi) deltaAdjointInto(deltaOf, t.r, acc.dEdCoreDot, acc.dEdVirtDot);
   }
 
   // --- the mixed direction (#184) -------------------------------------------

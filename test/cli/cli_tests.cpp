@@ -422,7 +422,7 @@ constexpr std::array kExpectedMatrix{
     MatrixRow{"--check-blocks", "F"},       MatrixRow{"--kappa-act", "S"},
     MatrixRow{"--kappa-full", "S"},         MatrixRow{"--sc-hessian-kc", "S"},
     MatrixRow{"--sc-hessian-kk-int", "S"},  MatrixRow{"--sc-hessian-kk", "S"},
-    MatrixRow{"--gradgold", "DS"},          MatrixRow{"--dump-source-terms", "S"},
+    MatrixRow{"--gradgold", "DSP"},         MatrixRow{"--dump-source-terms", "S"},
     MatrixRow{"--source-oracle", "S"},      MatrixRow{"--fd-steps", "P"},
     MatrixRow{"--fd-start-pow", "P"},       MatrixRow{"--pc-hessian", "P"},
     MatrixRow{"--pc-hessian-vector", "P"},
@@ -638,6 +638,8 @@ TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
       {Binary::Demo, {"--tiles", "3", "--sc-hessian"}},
       {Binary::Demo, {"--tiles", "3", "--sc-hessian-vector"}},
       {Binary::Demo, {"--tiles", "3", "--gradient-source", "--gradgold", "x.gradgold"}},
+      {Binary::Demo, {"--tiles", "3", "--sc-hessian", "--gradgold", "x.gradgold"}},
+      {Binary::Demo, {"--tiles", "3", "--sc-hessian-vector", "--gradgold", "x.gradgold"}},
       {Binary::DfDemo, {"--tiles", "3", "--check-blocks"}},
       {Binary::DfDemo, {"--tiles", "3", "--batch", "5", "--check-blocks"}},
       {Binary::DfDemo, {"--tiles", "40"}},
@@ -667,6 +669,8 @@ TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
       {Binary::PcTangent, {"--tiles", "40", "--fd-steps", "3"}},
       {Binary::PcTangent, {"--tiles", "3", "--pc-hessian"}},
       {Binary::PcTangent, {"--tiles", "3", "--pc-hessian-vector"}},
+      {Binary::PcTangent, {"--tiles", "3", "--pc-hessian", "--gradgold", "x.gradgold"}},
+      {Binary::PcTangent, {"--tiles", "3", "--pc-hessian-vector", "--gradgold", "x.gradgold"}},
   };
   for (const Entry& e : entries) {
     if (e.cublas && !kHaveCublasEmul) continue;  // a HIP build registers none of these
@@ -688,15 +692,20 @@ TEST(CliDemoFlagTests, EachCheckSetsItsField) {
   EXPECT_FALSE(gs->scTangent);
 }
 
-TEST(CliDemoFlagTests, GradgoldRidesOnGradientSource) {
+TEST(CliDemoFlagTests, GradgoldRidesOnGradientSourceAndTheCiHessian) {
   // #87: the CI source term reads the orbital energies' response from the
-  // sidecar, so --gradgold is accepted beside --gradient-source ...
-  const Result<Options> gs =
-      parse(Binary::Demo, {"--gradient-source", "--gradgold", "x.gradgold"});
-  ASSERT_TRUE(gs.has_value()) << gs.error().message;
-  EXPECT_TRUE(gs->gradientSource);
-  EXPECT_EQ(gs->gradgoldPath, "x.gradgold");
-  // ... and refused without it: nothing else in this demo reads it.
+  // sidecar, so --gradgold is accepted beside --gradient-source -- and, #214,
+  // beside --sc-hessian / --sc-hessian-vector, whose FULL mode it selects ...
+  for (const std::string_view which :
+       {"--gradient-source", "--sc-hessian", "--sc-hessian-vector"}) {
+    const Result<Options> r = parse(Binary::Demo, {which, "--gradgold", "x.gradgold"});
+    ASSERT_TRUE(r.has_value()) << which << ": " << r.error().message;
+    EXPECT_EQ(r->gradientSource, which == "--gradient-source");
+    EXPECT_EQ(r->scHessian, which == "--sc-hessian");
+    EXPECT_EQ(r->scHessianVector, which == "--sc-hessian-vector");
+    EXPECT_EQ(r->gradgoldPath, "x.gradgold");
+  }
+  // ... and refused without one of them: nothing else in this demo reads it.
   for (const std::vector<std::string_view>& args :
        {std::vector<std::string_view>{"--gradgold", "x.gradgold"},
         std::vector<std::string_view>{"--sc-tangent", "--gradgold", "x.gradgold"}}) {
@@ -704,8 +713,9 @@ TEST(CliDemoFlagTests, GradgoldRidesOnGradientSource) {
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
     EXPECT_EQ(r.error().message,
-              "--gradgold is the sidecar --gradient-source reads the orbital energies' "
-              "response from; it does nothing on its own");
+              "--gradgold is the sidecar --gradient-source, --sc-hessian and "
+              "--sc-hessian-vector read the orbital energies' response from; it does nothing "
+              "on its own");
   }
 }
 
@@ -767,7 +777,8 @@ TEST(CliDemoFlagTests, EachCheckRefusesProfileItWouldNotPrint) {
 }
 
 // --sc-hessian (#153), nevpt2_demo alone: one check at a time, the tangent
-// RDM build's digests, SC only, no --profile, no --gradgold.
+// RDM build's digests, SC only, no --profile; --gradgold beside it selects
+// the FULL mode (#214).
 TEST(CliDemoFlagTests, ScHessianSetsItsFieldAndRefusesTheOtherChecks) {
   const Result<Options> h = parse(Binary::Demo, {"--sc-hessian", "--blas-digest"});
   ASSERT_TRUE(h.has_value()) << h.error().message;
@@ -805,9 +816,11 @@ TEST(CliDemoFlagTests, ScHessianRefusesWhatTheTangentRefuses) {
   const Result<Options> prof = parse(Binary::Demo, {"--sc-hessian", "--profile"});
   ASSERT_FALSE(prof.has_value());
   EXPECT_EQ(prof.error().kind, ErrorKind::Unsupported);
+  // #214: --gradgold beside it is no longer an invalid configuration -- it
+  // selects the FULL mode (CliDemoFlagTests.GradgoldRidesOnGradientSourceAndTheCiHessian).
   const Result<Options> gg = parse(Binary::Demo, {"--sc-hessian", "--gradgold", "x.gradgold"});
-  ASSERT_FALSE(gg.has_value());
-  EXPECT_EQ(gg.error().kind, ErrorKind::InvalidConfig);
+  ASSERT_TRUE(gg.has_value()) << gg.error().message;
+  EXPECT_EQ(gg->gradgoldPath, "x.gradgold");
 }
 
 // --sc-hessian-vector (#156), nevpt2_demo alone: one check at a time with all
@@ -852,10 +865,11 @@ TEST(CliDemoFlagTests, ScHessianVectorRefusesWhatTheHessianRefuses) {
   EXPECT_EQ(prof.error().kind, ErrorKind::Unsupported);
   EXPECT_EQ(prof.error().message,
             "--sc-hessian-vector prints no profile tables; --profile times the energy run");
+  // #214: the FULL mode, as --sc-hessian's.
   const Result<Options> gg =
       parse(Binary::Demo, {"--sc-hessian-vector", "--gradgold", "x.gradgold"});
-  ASSERT_FALSE(gg.has_value());
-  EXPECT_EQ(gg.error().kind, ErrorKind::InvalidConfig);
+  ASSERT_TRUE(gg.has_value()) << gg.error().message;
+  EXPECT_EQ(gg->gradgoldPath, "x.gradgold");
 }
 
 TEST(CliDemoFlagTests, RdmTangentRunsBesideEitherCheck) {
@@ -1468,6 +1482,22 @@ TEST(CliPcTangentFlagTests, PcHessianVectorIsAPlainSwitchAndNotWithPcHessian) {
     ASSERT_FALSE(r.has_value()) << flag;
     EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << flag;
   }
+}
+
+// #214: --gradgold selects the FULL mode of either PC CI Hessian check, and
+// is refused without one (the tangent check reads no sidecar).
+TEST(CliPcTangentFlagTests, GradgoldRidesOnThePcHessianFlags) {
+  for (const std::string_view which : {"--pc-hessian", "--pc-hessian-vector"}) {
+    const Result<Options> r = parse(Binary::PcTangent, {which, "--gradgold", "x.gradgold"});
+    ASSERT_TRUE(r.has_value()) << which << ": " << r.error().message;
+    EXPECT_EQ(r->gradgoldPath, "x.gradgold");
+  }
+  const Result<Options> r = parse(Binary::PcTangent, {"--gradgold", "x.gradgold"});
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+  EXPECT_EQ(r.error().message,
+            "--gradgold is the sidecar --pc-hessian and --pc-hessian-vector read the orbital "
+            "energies' response from; it does nothing on its own");
 }
 
 TEST(CliPcTangentFlagTests, ABadValueIsAConfigErrorNamingTheFlag) {

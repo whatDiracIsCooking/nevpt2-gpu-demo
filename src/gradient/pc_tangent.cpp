@@ -464,14 +464,72 @@ Tensor pcHessianControlDirection(const Tensor& ci, std::uint64_t seed) {
 
 // One RDM set on the device and the host, owning: dm1/dm2 uploaded from a
 // host build (nevpt2.rdm_host_dm) and dm3/f3ac/f3ca from a device build.
+// `hostDm1` is dm1's host copy: what the FULL mode's orbital-energy
+// derivatives read (#214).
 struct PcOwnedRdms {
   DeviceTensor dm1, dm2;
   RdmBuildResult rdm;
+  Tensor hostDm1;
   PcRdms view() const { return {&dm1, &dm2, &rdm.dm3, &rdm.f3ac, &rdm.f3ca}; }
 };
 
 PcOwnedRdms pcOwned(const HostDm12& host, RdmBuildResult rdm, const DeviceResources& res) {
-  return {uploadTensor(host.dm1, res), uploadTensor(host.dm2, res), std::move(rdm)};
+  return {uploadTensor(host.dm1, res), uploadTensor(host.dm2, res), std::move(rdm), host.dm1};
+}
+
+// --- the FULL mode's orbital energies (#214) -----------------------------------
+//
+// With a gradient sidecar the orbital energies respond to the CI vector,
+// e_p(c) = h^eff_pp + <dm1(c), W_p> (docs/gradients.md, Sec. 5.5), affine in
+// dm1: a derivative reads e' = <dm1', W> and e'' = <dm1'', W> off the same
+// 1-RDM sets the RDM side reads, and a displaced state's orbital energies are
+// the base state's plus <dm1(c') - dm1(c), W>, exactly. `w` null holds them
+// fixed everywhere below (every helper then returns the frozen answer).
+
+// e'[u], e'[v], e''[u, v] from three sets' host dm1, or nothing.
+std::optional<OrbitalEnergyHessianDots> pcEpsDots(const OrbitalEnergyResponse* w,
+                                                  const PcOwnedRdms& u, const PcOwnedRdms& v,
+                                                  const PcOwnedRdms& uv) {
+  if (w == nullptr) return std::nullopt;
+  return OrbitalEnergyHessianDots{orbitalEnergyDot(*w, u.hostDm1), orbitalEnergyDot(*w, v.hostDm1),
+                                  orbitalEnergyDot(*w, uv.hostDm1)};
+}
+
+// A displaced state's integrals: `ints`' own, viewed, with the orbital
+// energies at the state whose host dm1 is `dm1At` (`dm1Base` the base
+// state's, whose orbital energies `ints` carries). Views of the caller's
+// integrals and of the owned eCore / eVirt, so it must outlive every use.
+struct PcDisplacedInts {
+  DeviceTensor eCore, eVirt;
+  NevptIntegralsDevice ints;
+};
+
+PcDisplacedInts pcDisplacedInts(const NevptIntegralsDevice& ints, const OrbitalEnergyResponse* w,
+                                const Tensor& dm1Base, const Tensor& dm1At,
+                                const DeviceResources& res) {
+  PcDisplacedInts out;
+  if (w != nullptr) {
+    Tensor ec = downloadTensor(ints.e_core, res.stream());
+    Tensor ev = downloadTensor(ints.e_virt, res.stream());
+    Tensor shift = dm1At;
+    for (int64_t i = 0; i < shift.size(); ++i) shift.flatRef(i) -= dm1Base.flat(i);
+    const OrbitalEnergyDot d = orbitalEnergyDot(*w, shift);
+    for (int64_t i = 0; i < ec.size(); ++i) ec.flatRef(i) += d.core.flat(i);
+    for (int64_t r = 0; r < ev.size(); ++r) ev.flatRef(r) += d.virt.flat(r);
+    out.eCore = uploadTensor(ec, res);
+    out.eVirt = uploadTensor(ev, res);
+  }
+  const DeviceTensor& eCore = w != nullptr ? out.eCore : ints.e_core;
+  const DeviceTensor& eVirt = w != nullptr ? out.eVirt : ints.e_virt;
+  out.ints = NevptIntegralsDevice{ints.h1e.view(),        ints.h2e.view(),
+                                  eCore.view(),            eVirt.view(),
+                                  ints.h2e_v_Sr.view(),    ints.h1e_v_Sr.view(),
+                                  ints.h2e_v_Si.view(),    ints.h1e_v_Si.view(),
+                                  ints.cvcv.view(),        ints.h2e_v_Sijr.view(),
+                                  ints.h2e_v_Srsi.view(),  ints.h2e_v_Srs.view(),
+                                  ints.h2e_v_Sij.view(),   ints.h2e_v1_Sir.view(),
+                                  ints.h2e_v2_Sir.view(),  ints.h1e_v_Sir.view()};
+  return out;
 }
 
 // The tangent build at the vector pair (a, b) -- B(a, b) + B(b, a), the
@@ -501,13 +559,21 @@ Result<PcDisplacedTangents> pcHessianTangentAt(const RdmBuildOptions& opt,
                                                const NevptIntegralsDevice& ints,
                                                const HostDm12Builder& builder, const Tensor& c,
                                                const Tensor& v, const Tensor& h2e,
-                                               std::string_view what, const DeviceResources& res) {
+                                               std::string_view what,
+                                               const OrbitalEnergyResponse* w,
+                                               const Tensor& dm1Base,
+                                               const DeviceResources& res) {
   const int64_t norb = builder.norb(), na = builder.nelecA(), nb = builder.nelecB();
   const PcOwnedRdms base =
       pcOwned(builder.dm12(c), buildRdmsDevice(opt, c, norb, na, nb, h2e, res), res);
   const PcOwnedRdms dot = pcTangentSet(opt, builder, c, v, h2e, res);
-  const PcHessianSets sets{base.view(), dot.view(), dot.view()};
-  const PcHessianResult t = NEVPT2_TRY(pcHessianDevice(ints, sets, res));
+  // FULL mode (#214): this state's own orbital energies, and their tangent
+  // along v (the second-order slot is unread: no second-order set).
+  const PcDisplacedInts at = pcDisplacedInts(ints, w, dm1Base, base.hostDm1, res);
+  const std::optional<OrbitalEnergyHessianDots> eps = pcEpsDots(w, dot, dot, dot);
+  PcHessianSets sets{base.view(), dot.view(), dot.view()};
+  sets.eps = eps ? &*eps : nullptr;
+  const PcHessianResult t = NEVPT2_TRY(pcHessianDevice(at.ints, sets, res));
   PcDisplacedTangents out;
   out.minGap = std::numeric_limits<double>::infinity();
   bool anySpectrum = false;
@@ -533,12 +599,15 @@ Result<PcHessianCheck> pcHessianFdCheck(const RdmBuildOptions& rdmOpt,
                                         int64_t norb, int64_t nelecA, int64_t nelecB,
                                         const Tensor& h2e, std::span<const double> steps,
                                         std::uint64_t seedU, std::uint64_t seedV,
-                                        std::uint64_t seedControl, const DeviceResources& res) {
+                                        std::uint64_t seedControl,
+                                        const OrbitalEnergyResponse* eps,
+                                        const DeviceResources& res) {
   const auto t0 = std::chrono::steady_clock::now();
   const HostDm12Builder builder =
       NEVPT2_TRY(pcCheckInputs(ci, norb, nelecA, nelecB, steps, "PC Hessian check"));
 
   PcHessianCheck out;
+  out.orbitalEnergiesMove = eps != nullptr;
   const HostDm12 host = builder.dm12(ci);
   // Both directions are the tangent check's kind: spin-free number-operator
   // directions over the state's symmetry mask, orthogonal to it and of unit
@@ -568,13 +637,15 @@ Result<PcHessianCheck> pcHessianFdCheck(const RdmBuildOptions& rdmOpt,
     const PcEnergyResult ref = NEVPT2_TRY(pcEnergiesDevice(
         ints, base.dm1, base.dm2, base.rdm.dm3, base.rdm.f3ac, base.rdm.f3ca, res));
     std::printf("differentiating the PC-NEVPT2 solve along u and along v (pcTangentsDevice)...\n");
-    const auto tangentAlong = [&](const PcOwnedRdms& d) {
+    // FULL mode (#214): the orbital energies' derivatives along (u, v).
+    const std::optional<OrbitalEnergyHessianDots> epsUV = pcEpsDots(eps, dotU, dotV, ddot);
+    const auto tangentAlong = [&](const PcOwnedRdms& d, const OrbitalEnergyDot* epsDot) {
       return pcTangentsDevice(ints, base.dm1, base.dm2, base.rdm.dm3, base.rdm.f3ac,
                               base.rdm.f3ca, d.dm1, d.dm2, d.rdm.dm3, d.rdm.f3ac, d.rdm.f3ca,
-                              /*epsDot=*/nullptr, res);
+                              epsDot, res);
     };
-    const PcTangentResult tanU = NEVPT2_TRY(tangentAlong(dotU));
-    const PcTangentResult tanV = NEVPT2_TRY(tangentAlong(dotV));
+    const PcTangentResult tanU = NEVPT2_TRY(tangentAlong(dotU, epsUV ? &epsUV->u : nullptr));
+    const PcTangentResult tanV = NEVPT2_TRY(tangentAlong(dotV, epsUV ? &epsUV->v : nullptr));
     for (int i = 0; i < 8; ++i) {
       out.energyRef[i] = ref.classes[i].energy;
       out.edotURef[i] = tanU.classes[i].edot;
@@ -583,8 +654,10 @@ Result<PcHessianCheck> pcHessianFdCheck(const RdmBuildOptions& rdmOpt,
 
     std::printf("differentiating it twice, along (u, v)...\n");
     const PcRdms vUV = ddot.view(), vUU = ddotUU.view(), vVV = ddotVV.view();
-    const PcHessianResult hess = NEVPT2_TRY(
-        pcHessianDevice(ints, PcHessianSets{b, dotU.view(), dotV.view(), &vUV, &vUU, &vVV}, res));
+    const PcHessianResult hess = NEVPT2_TRY(pcHessianDevice(
+        ints,
+        PcHessianSets{b, dotU.view(), dotV.view(), &vUV, &vUU, &vVV, epsUV ? &*epsUV : nullptr},
+        res));
     out.classes = hess.classes;
     out.allDone = true;
     for (const PcClassHessian& k : out.classes) {
@@ -598,27 +671,34 @@ Result<PcHessianCheck> pcHessianFdCheck(const RdmBuildOptions& rdmOpt,
     // Euler at second order: Eddot(c, u). The first-order set along the
     // state itself is twice the RDMs (they are quadratic in the CI vector),
     // which is also the (c, c) set; the second-order set at (c, u) is the
-    // first-order set along u -- so no RDM build at all.
-    PcOwnedRdms two;
-    two.dm1 = pcTangentScaled(base.dm1, 2.0, res);
-    two.dm2 = pcTangentScaled(base.dm2, 2.0, res);
-    two.rdm.dm3 = pcTangentScaled(base.rdm.dm3, 2.0, res);
-    two.rdm.f3ac = pcTangentScaled(base.rdm.f3ac, 2.0, res);
-    two.rdm.f3ca = pcTangentScaled(base.rdm.f3ca, 2.0, res);
-    const PcRdms vC = two.view(), vU = dotU.view();
-    const PcHessianResult euler =
-        NEVPT2_TRY(pcHessianDevice(ints, PcHessianSets{b, vC, vU, &vU, &vC, &vUU}, res));
-    for (int i = 0; i < 8; ++i) out.eulerEddot[i] = euler.classes[i].eddot;
+    // first-order set along u -- so no RDM build at all. An identity at fixed
+    // orbital energies only (docs/hessian-theory.md, Sec. 4.3): in FULL mode
+    // it is not run, and the report says it was skipped.
+    const PcRdms vU = dotU.view();
+    if (eps == nullptr) {
+      PcOwnedRdms two;
+      two.dm1 = pcTangentScaled(base.dm1, 2.0, res);
+      two.dm2 = pcTangentScaled(base.dm2, 2.0, res);
+      two.rdm.dm3 = pcTangentScaled(base.rdm.dm3, 2.0, res);
+      two.rdm.f3ac = pcTangentScaled(base.rdm.f3ac, 2.0, res);
+      two.rdm.f3ca = pcTangentScaled(base.rdm.f3ca, 2.0, res);
+      const PcRdms vC = two.view();
+      const PcHessianResult euler =
+          NEVPT2_TRY(pcHessianDevice(ints, PcHessianSets{b, vC, vU, &vU, &vC, &vUU}, res));
+      for (int i = 0; i < 8; ++i) out.eulerEddot[i] = euler.classes[i].eddot;
+    }
 
-    // The negative control: (u, w) with w a random vector of amplitudes.
+    // The negative control: (u, w) with w a random vector of amplitudes, in
+    // the run's orbital-energy mode.
     std::printf("the negative control: the Hessian along u and a symmetry-breaking w...\n");
     const Tensor w = pcHessianControlDirection(ci, seedControl);
     const PcOwnedRdms dotW = pcTangentSet(rdmOpt, builder, ci, w, h2e, res);
     const PcOwnedRdms ddotUW = pcTangentSet(rdmOpt, builder, u, w, h2e, res);
     const PcOwnedRdms ddotWW = pcTangentSet(rdmOpt, builder, w, w, h2e, res);
     const PcRdms vW = dotW.view(), vUW = ddotUW.view(), vWW = ddotWW.view();
-    const PcHessianResult control =
-        NEVPT2_TRY(pcHessianDevice(ints, PcHessianSets{b, vU, vW, &vUW, &vUU, &vWW}, res));
+    const std::optional<OrbitalEnergyHessianDots> epsUW = pcEpsDots(eps, dotU, dotW, ddotUW);
+    const PcHessianResult control = NEVPT2_TRY(pcHessianDevice(
+        ints, PcHessianSets{b, vU, vW, &vUW, &vUU, &vWW, epsUW ? &*epsUW : nullptr}, res));
     out.control = control.classes;
   }
 
@@ -631,10 +711,10 @@ Result<PcHessianCheck> pcHessianFdCheck(const RdmBuildOptions& rdmOpt,
                 h);
     const PcDisplacedTangents plus = NEVPT2_TRY(
         pcHessianTangentAt(rdmOpt, ints, builder, pcTangentStep(ci, h, u), v, h2e,
-                           std::format("c + {:g} u", h), res));
+                           std::format("c + {:g} u", h), eps, host.dm1, res));
     const PcDisplacedTangents minus = NEVPT2_TRY(
         pcHessianTangentAt(rdmOpt, ints, builder, pcTangentStep(ci, -h, u), v, h2e,
-                           std::format("c - {:g} u", h), res));
+                           std::format("c - {:g} u", h), eps, host.dm1, res));
     for (int i = 0; i < 8; ++i) {
       st.fdClass[i] = (plus.edot[i] - minus.edot[i]) / (2.0 * h);
       st.fdTotal += st.fdClass[i];
@@ -656,9 +736,13 @@ Result<PcHessianCheck> pcHessianFdCheck(const RdmBuildOptions& rdmOpt,
 
 bool printPcHessianReport(const PcHessianCheck& c, double atol, double idtol, double edotTol,
                           double ratioTol) {
+  const bool full = c.orbitalEnergiesMove;
+  std::printf("\nPC-NEVPT2 second derivative with respect to the CI vector, Eddot(u, v) (the "
+              "integrals %s)\n",
+              full ? "held fixed, the orbital energies responding to c: FULL mode, Euler "
+                     "SKIPPED, not an identity there"
+                   : "and the orbital energies held fixed");
   std::printf(
-      "\nPC-NEVPT2 second derivative with respect to the CI vector, Eddot(u, v) (the integrals "
-      "and the orbital energies held fixed)\n"
       "  |d E|        the Hessian walk's class energy against pcEnergiesDevice's\n"
       "  |d Edot|     its three-term Edot(u) / Edot(v), worse of the two, against\n"
       "               pcTangentsDevice's two-term one (equal at the eigenstate, to its\n"
@@ -704,9 +788,10 @@ bool printPcHessianReport(const PcHessianCheck& c, double atol, double idtol, do
     ok = ok && dU < edotTol * std::max(1.0, std::fabs(c.edotURef[i])) &&
          dV < edotTol * std::max(1.0, std::fabs(c.edotVRef[i]));
     // Euler at second order, where the class is homogeneous: exact, no step.
+    // Skipped in FULL mode (not computed, not gated).
     const double eulerDelta = std::fabs(c.eulerEddot[i] - c.edotURef[i]);
-    std::string euler = std::format("[{:.2e}]", eulerDelta);
-    if (kPcHomogeneousInCi[i]) {
+    std::string euler = full ? std::string("skipped") : std::format("[{:.2e}]", eulerDelta);
+    if (!full && kPcHomogeneousInCi[i]) {
       maxEulerDelta = std::max(maxEulerDelta, eulerDelta);
       ok = ok && eulerDelta < idtol * std::max(1.0, std::fabs(c.edotURef[i]));
       euler = std::format("{:.2e}", eulerDelta);
@@ -732,8 +817,13 @@ bool printPcHessianReport(const PcHessianCheck& c, double atol, double idtol, do
   }
   ok = ok && computed == 8;
   std::printf("\nEddot (analytic, along u and v) = %.10f Ha\n", c.eddotTotal);
-  std::printf("Euler: worst |Eddot(c, u) - Edot(u)| over the five homogeneous classes = %.2e\n",
-              maxEulerDelta);
+  if (full)
+    std::printf("Euler: SKIPPED (FULL mode: the orbital energies respond to c, so no class is "
+                "homogeneous of degree 2)\n");
+  else
+    std::printf(
+        "Euler: worst |Eddot(c, u) - Edot(u)| over the five homogeneous classes = %.2e\n",
+        maxEulerDelta);
 
   // The negative control: along a direction that breaks the state's symmetry
   // the dropped modes lift, and the Hessian must REFUSE (never a zero, never a
@@ -772,12 +862,20 @@ bool printPcHessianReport(const PcHessianCheck& c, double atol, double idtol, do
   // which is what licenses the Euler half (docs/hessian-theory.md, Sec. 4.3
   // and 9.1), and the conditioning the rotation terms carry beside the gap
   // (Sec. 6.2).
-  std::printf("\n%s: the PC-NEVPT2 Hessian Eddot(u, v) matches Euler and the central difference "
-              "of Edot (orbital energies held fixed; smallest kept s/s_max %.1e (%s), smallest "
-              "gap %.1e against PC_MIN_GAP %.0e; Richardson to %.0e, every ratio 4 +- %.1f, a "
-              "run of %d)\n",
-              ok ? "PASS" : "FAIL", minKept, std::string(minKeptClass).c_str(), minGap,
-              PC_MIN_GAP, atol, ratioTol, kPcMinFourfoldRun);
+  if (full)
+    std::printf("\n%s: the PC-NEVPT2 Hessian Eddot(u, v) matches the central difference of Edot "
+                "(orbital-energy mode: FULL, the orbital energies responding to c, Euler skipped "
+                "there; smallest kept s/s_max %.1e (%s), smallest gap %.1e against PC_MIN_GAP "
+                "%.0e; Richardson to %.0e, every ratio 4 +- %.1f, a run of %d)\n",
+                ok ? "PASS" : "FAIL", minKept, std::string(minKeptClass).c_str(), minGap,
+                PC_MIN_GAP, atol, ratioTol, kPcMinFourfoldRun);
+  else
+    std::printf("\n%s: the PC-NEVPT2 Hessian Eddot(u, v) matches Euler and the central "
+                "difference of Edot (orbital energies held fixed; smallest kept s/s_max %.1e "
+                "(%s), smallest gap %.1e against PC_MIN_GAP %.0e; Richardson to %.0e, every "
+                "ratio 4 +- %.1f, a run of %d)\n",
+                ok ? "PASS" : "FAIL", minKept, std::string(minKeptClass).c_str(), minGap,
+                PC_MIN_GAP, atol, ratioTol, kPcMinFourfoldRun);
   return ok;
 }
 
@@ -800,6 +898,8 @@ PcOwnedRdms pcScaledSet(const PcOwnedRdms& o, double a, const DeviceResources& r
   out.rdm.dm3 = pcTangentScaled(o.rdm.dm3, a, res);
   out.rdm.f3ac = pcTangentScaled(o.rdm.f3ac, a, res);
   out.rdm.f3ca = pcTangentScaled(o.rdm.f3ca, a, res);
+  out.hostDm1 = o.hostDm1;
+  for (int64_t i = 0; i < out.hostDm1.size(); ++i) out.hostDm1.flatRef(i) *= a;
   return out;
 }
 
@@ -832,12 +932,16 @@ Result<PcDisplacedSource> pcThreeTermSourceAt(const RdmBuildOptions& opt,
                                               const HostDm12Builder& builder, const Tensor& c,
                                               const Tensor& h2e, std::string_view what,
                                               const SigmaVectorOptions& sigma,
+                                              const OrbitalEnergyResponse* w,
+                                              const Tensor& dm1Base,
                                               const DeviceResources& res) {
   const int64_t norb = builder.norb(), na = builder.nelecA(), nb = builder.nelecB();
   const PcOwnedRdms base =
       pcOwned(builder.dm12(c), buildRdmsDevice(opt, c, norb, na, nb, h2e, res), res);
-  PcCiHessianResult r = NEVPT2_TRY(
-      pcCiSourceThreeTermDevice(ints, c, na, nb, rdmTensorsOf(base), /*perClass=*/true, sigma, res));
+  // FULL mode (#214): the gated y, at this state's own orbital energies.
+  const PcDisplacedInts at = pcDisplacedInts(ints, w, dm1Base, base.hostDm1, res);
+  PcCiHessianResult r = NEVPT2_TRY(pcCiSourceThreeTermDevice(
+      at.ints, c, na, nb, rdmTensorsOf(base), /*perClass=*/true, sigma, res, w));
   if (!r.ok)
     return err_numerical(std::format(
         "the PC CI source term is refused at the displaced state {}: {}; no finite difference "
@@ -864,6 +968,7 @@ Result<PcHessianVectorCheck> pcHessianVectorCheck(const RdmBuildOptions& rdmOpt,
                                                   std::uint64_t seedU,
                                                   std::span<const std::uint64_t> seedsV,
                                                   std::uint64_t seedControl,
+                                                  const OrbitalEnergyResponse* eps,
                                                   const DeviceResources& res) {
   const auto t0 = std::chrono::steady_clock::now();
   const HostDm12Builder builder =
@@ -874,6 +979,7 @@ Result<PcHessianVectorCheck> pcHessianVectorCheck(const RdmBuildOptions& rdmOpt,
   sigma.nTiles = rdmOpt.nTiles;
 
   PcHessianVectorCheck out;
+  out.orbitalEnergiesMove = eps != nullptr;
   const HostDm12 host = builder.dm12(ci);
   // u the Hessian check's own (the tangent's kind: S's dropped modes turn
   // along it but do not lift); every v the same kind.
@@ -890,7 +996,7 @@ Result<PcHessianVectorCheck> pcHessianVectorCheck(const RdmBuildOptions& rdmOpt,
                 "class...\n");
     const PcCiHessianResult hu = NEVPT2_TRY(pcCiHessianVectorDevice(
         ints, ci, u, nelecA, nelecB, rdmTensorsOf(base), rdmTensorsOf(dotU),
-        rdmTensorsOf(ddotUU), /*perClass=*/true, sigma, res));
+        rdmTensorsOf(ddotUU), /*perClass=*/true, sigma, res, eps));
     for (std::size_t k = 0; k < 8; ++k) {
       out.result[k] = hu.walk.classes[k].result;
       out.lift[k] = hu.walk.classes[k].lift;
@@ -904,29 +1010,38 @@ Result<PcHessianVectorCheck> pcHessianVectorCheck(const RdmBuildOptions& rdmOpt,
     out.uy = pcDot(u, hu.y);
 
     // 4. Euler: H_cc c, the first-order set along c and the (c, c) set both
-    // 2 dm.
+    // 2 dm. An identity at fixed orbital energies only (docs/hessian-theory.md,
+    // Sec. 4.3): in FULL mode it is not run, and the report says it was
+    // skipped.
     const PcOwnedRdms two = pcScaledSet(base, 2.0, res);
-    std::printf("H_cc c, for Euler...\n");
-    const PcCiHessianResult hc = NEVPT2_TRY(pcCiHessianVectorDevice(
-        ints, ci, ci, nelecA, nelecB, rdmTensorsOf(base), rdmTensorsOf(two), rdmTensorsOf(two),
-        /*perClass=*/true, sigma, res));
-    for (std::size_t k = 0; k < 8; ++k) {
-      if (!hc.ok) {
-        out.euler[k] = std::numeric_limits<double>::infinity();  // refused along c: fails
-        continue;
+    if (eps == nullptr) {
+      std::printf("H_cc c, for Euler...\n");
+      const PcCiHessianResult hc = NEVPT2_TRY(pcCiHessianVectorDevice(
+          ints, ci, ci, nelecA, nelecB, rdmTensorsOf(base), rdmTensorsOf(two),
+          rdmTensorsOf(two), /*perClass=*/true, sigma, res));
+      for (std::size_t k = 0; k < 8; ++k) {
+        if (!hc.ok) {
+          out.euler[k] = std::numeric_limits<double>::infinity();  // refused along c: fails
+          continue;
+        }
+        const double yn = pcNorm(hu.yClass[k]);
+        const double d = pcDistance(hc.huClass[k], hu.yClass[k]);
+        out.euler[k] = yn > 0.0 ? d / yn : d;
       }
-      const double yn = pcNorm(hu.yClass[k]);
-      const double d = pcDistance(hc.huClass[k], hu.yClass[k]);
-      out.euler[k] = yn > 0.0 ? d / yn : d;
     }
 
     // 2. The duality, against pcHessianDevice; 3. the symmetry, on the first v.
-    const auto dualRow = [&](std::string what, const Tensor& v, const PcRdms& dotV,
-                             const PcRdms& ddotUV, const PcRdms& ddotVV) -> Status {
+    // Both sides in the run's orbital-energy mode.
+    const auto dualRow = [&](std::string what, const Tensor& v, const PcOwnedRdms& dotV,
+                             const PcOwnedRdms& ddotUV, const PcOwnedRdms& ddotVV) -> Status {
       std::printf("Eddot(u, v) for v = %s (pcHessianDevice)...\n", what.c_str());
-      const PcRdms vUU = ddotUU.view();
+      const PcRdms vUU = ddotUU.view(), vUV = ddotUV.view(), vVV = ddotVV.view();
+      const std::optional<OrbitalEnergyHessianDots> epsUV = pcEpsDots(eps, dotU, dotV, ddotUV);
       const PcHessianResult hess = NEVPT2_TRY(pcHessianDevice(
-          ints, PcHessianSets{base.view(), dotU.view(), dotV, &ddotUV, &vUU, &ddotVV}, res));
+          ints,
+          PcHessianSets{base.view(), dotU.view(), dotV.view(), &vUV, &vUU, &vVV,
+                        epsUV ? &*epsUV : nullptr},
+          res));
       PcHessianVectorCheck::Dual row;
       row.what = std::move(what);
       for (std::size_t k = 0; k < 8; ++k) {
@@ -948,28 +1063,27 @@ Result<PcHessianVectorCheck> pcHessianVectorCheck(const RdmBuildOptions& rdmOpt,
       const PcOwnedRdms dotV = pcOwned(builder.dm12Dot(ci, v), std::move(three.cv), res);
       const PcOwnedRdms ddotUV = pcOwned(builder.dm12Dot(u, v), std::move(three.uv), res);
       const PcOwnedRdms ddotVV = pcTangentSet(rdmOpt, builder, v, v, h2e, res);
-      NEVPT2_TRY(dualRow(std::format("seed 0x{:x}", seedsV[i]), v, dotV.view(), ddotUV.view(),
-                         ddotVV.view()));
+      NEVPT2_TRY(dualRow(std::format("seed 0x{:x}", seedsV[i]), v, dotV, ddotUV, ddotVV));
       if (i != 0) continue;
       std::printf("H_cc v, for the symmetry...\n");
       const PcCiHessianResult hv = NEVPT2_TRY(pcCiHessianVectorDevice(
           ints, ci, v, nelecA, nelecB, rdmTensorsOf(base), rdmTensorsOf(dotV),
-          rdmTensorsOf(ddotVV), /*perClass=*/false, sigma, res));
+          rdmTensorsOf(ddotVV), /*perClass=*/false, sigma, res, eps));
       out.vHu = pcDot(v, hu.hu);
       out.uHv = hv.ok ? pcDot(u, hv.hu) : std::numeric_limits<double>::quiet_NaN();
     }
     // v = c: the first-order set along c is 2 dm, the (u, c) set is the
     // tangent along u and the (c, c) set 2 dm.
-    NEVPT2_TRY(dualRow("the state itself", ci, two.view(), dotU.view(), two.view()));
+    NEVPT2_TRY(dualRow("the state itself", ci, two, dotU, two));
 
-    // 5. The negative control.
+    // 5. The negative control, in the run's orbital-energy mode.
     std::printf("the negative control: H_cc w along a symmetry-breaking w...\n");
     const Tensor w = pcHessianControlDirection(ci, seedControl);
     const PcOwnedRdms dotW = pcTangentSet(rdmOpt, builder, ci, w, h2e, res);
     const PcOwnedRdms ddotWW = pcTangentSet(rdmOpt, builder, w, w, h2e, res);
     const PcCiHessianResult hw = NEVPT2_TRY(pcCiHessianVectorDevice(
         ints, ci, w, nelecA, nelecB, rdmTensorsOf(base), rdmTensorsOf(dotW), rdmTensorsOf(ddotWW),
-        /*perClass=*/false, sigma, res));
+        /*perClass=*/false, sigma, res, eps));
     for (std::size_t k = 0; k < 8; ++k) {
       out.control[k] = hw.walk.classes[k].result;
       out.controlLift[k] = hw.walk.classes[k].lift;
@@ -990,10 +1104,10 @@ Result<PcHessianVectorCheck> pcHessianVectorCheck(const RdmBuildOptions& rdmOpt,
                 h);
     const PcDisplacedSource plus = NEVPT2_TRY(
         pcThreeTermSourceAt(rdmOpt, ints, builder, pcTangentStep(ci, h, u), h2e,
-                            std::format("c + {:g} u", h), sigma, res));
+                            std::format("c + {:g} u", h), sigma, eps, host.dm1, res));
     const PcDisplacedSource minus = NEVPT2_TRY(
         pcThreeTermSourceAt(rdmOpt, ints, builder, pcTangentStep(ci, -h, u), h2e,
-                            std::format("c - {:g} u", h), sigma, res));
+                            std::format("c - {:g} u", h), sigma, eps, host.dm1, res));
     PcHessianVectorCheck::Step st;
     st.h = h;
     st.displacedGap = {plus.minGap, minus.minGap};
@@ -1031,9 +1145,13 @@ bool printPcHessianVectorReport(const PcHessianVectorCheck& c, double idtol, dou
   const auto within = [](double a, double b, double tol) {
     return std::fabs(a - b) < tol * std::max(1.0, std::fabs(b));  // false on NaN
   };
+  const bool full = c.orbitalEnergiesMove;
+  std::printf("\nPC-NEVPT2 Hessian-vector product H_cc u with respect to the CI vector (the "
+              "integrals %s)\n",
+              full ? "held fixed, the orbital energies responding to c: FULL mode, Euler "
+                     "SKIPPED, not an identity there"
+                   : "and the orbital energies held fixed");
   std::printf(
-      "\nPC-NEVPT2 Hessian-vector product H_cc u with respect to the CI vector (the integrals "
-      "and the orbital energies held fixed)\n"
       "  walk Edot    the walk's own three-term Edot(u) from its tangent rows, against\n"
       "               pcHessianDevice's (|d Edot|)\n"
       "  |H_cc u|     the class's share of the vector\n"
@@ -1066,8 +1184,8 @@ bool printPcHessianVectorReport(const PcHessianVectorCheck& c, double idtol, dou
     if (!c.allDone) continue;
     const double dEdot = std::fabs(c.walkEdot[k] - c.edotRef[k]);
     ok = ok && within(c.walkEdot[k], c.edotRef[k], idtol);
-    std::string euler = std::format("[{:.2e}]", c.euler[k]);
-    if (kPcHomogeneousInCi[k]) {
+    std::string euler = full ? std::string("skipped") : std::format("[{:.2e}]", c.euler[k]);
+    if (!full && kPcHomogeneousInCi[k]) {
       ok = ok && c.euler[k] < idtol;
       euler = std::format("{:.2e}", c.euler[k]);
     }
@@ -1207,11 +1325,15 @@ bool printPcHessianVectorReport(const PcHessianVectorCheck& c, double idtol, dou
               computed, worstDual, c.seconds);
 
   std::printf("\n%s: the PC-NEVPT2 Hessian-vector product H_cc u matches Eddot(u, v) by duality "
-              "to %.0e and the finite difference of the three-term y per class (orbital energies "
-              "held fixed; smallest kept s/s_max %.1e (%s), smallest gap %.1e against "
-              "PC_MIN_GAP %.0e; Richardson to %.0e, every ratio 4 +- %.1f, a run of %d)\n",
-              ok ? "PASS" : "FAIL", dualTol, minKept, std::string(minKeptClass).c_str(), minGap,
-              PC_MIN_GAP, fdTol, ratioTol, kPcMinFourfoldRun);
+              "to %.0e and the finite difference of the three-term y per class (%s; smallest "
+              "kept s/s_max %.1e (%s), smallest gap %.1e against PC_MIN_GAP %.0e; Richardson to "
+              "%.0e, every ratio 4 +- %.1f, a run of %d)\n",
+              ok ? "PASS" : "FAIL", dualTol,
+              full ? "orbital-energy mode: FULL, the orbital energies responding to c, Euler "
+                     "skipped there"
+                   : "orbital energies held fixed",
+              minKept, std::string(minKeptClass).c_str(), minGap, PC_MIN_GAP, fdTol, ratioTol,
+              kPcMinFourfoldRun);
   return ok;
 }
 

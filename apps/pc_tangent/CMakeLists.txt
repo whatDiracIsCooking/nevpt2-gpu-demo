@@ -14,9 +14,12 @@ set_target_properties(nevpt2_pc_tangent
                       PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${NEVPT2_SRC_BINARY_DIR}")
 # nevpt2::pc_tangent re-exports nevpt2::energy, nevpt2::rdm_build and
 # nevpt2::rdm_host_dm; the golden reader, the string tables (for the
-# determinant count) and the shared flags come in beside it.
+# determinant count) and the shared flags come in beside it, and
+# nevpt2::ci_checks for its one sidecar reader, loadOrbitalEnergyResponse
+# (--gradgold beside --pc-hessian / --pc-hessian-vector, the FULL mode, #214).
 target_link_libraries(nevpt2_pc_tangent PRIVATE
   nevpt2::pc_tangent
+  nevpt2::ci_checks
   nevpt2::golden
   nevpt2::link_tables
   nevpt2::cli
