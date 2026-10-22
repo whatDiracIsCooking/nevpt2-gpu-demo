@@ -769,7 +769,17 @@ format, and is read by `np.load` (`nevpt2_grad.load_source_terms`, and
 the one file here the C++ side **writes**: `nevpt2_sc_pseudodensity
 --dump-source-terms` through `nevpt2.gradsrc` (`apps/sc_pseudodensity/`),
 whose `readGradSrc` exists only for that binary's round trip and
-`test/gradsrc/`. It is never committed. The other writers are in `generate_golden.py`
+`test/gradsrc/`. It is never committed. Since #246 its members are a table in
+`golden_format.py` too (`GRADSRC_MEMBERS`: the core seven, `pc`, the `edot_*`
+set and the 21 `ibar_*` members of the integral adjoint, each set whole or
+absent), with `read_gradsrc` (over `np.load`, every rule checked) and
+`write_gradsrc`, which writes the C++ writer's bytes exactly;
+`golden_layout_check.py` holds the two writers to one layout (its
+`--gradsrc DUMP...` compares a dump the binary wrote byte for byte) and the
+C++ `kIntegralAdjointNames` table to `GRADSRC_IBAR`. The `ibar_*` arrays are
+`.pertgold`'s per-coordinate arrays, by name, shape and frame, so a
+coordinate's skeleton derivative of `E_corr` is their contraction (#247;
+docs/gradients.md, §6.3). The other writers are in `generate_golden.py`
 (`write_golden`, `write_gradgold`, `write_mo_sidecar`) and `golden_format.py`
 (`write_srcgold`, `write_respgold`, `write_pertgold`, `write_erigold`), and pack their scalar headers from the same tables
 `golden_format.py` reads them by (`GOLDEN_HEADERS`, `GRADGOLD_HEADERS`,

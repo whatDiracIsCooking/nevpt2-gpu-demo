@@ -3256,20 +3256,65 @@ std::pair<std::vector<double>, std::vector<double>> summedEpsAdjoint(const Class
   return {std::move(core), std::move(virt)};
 }
 
-Result<Tensor> scFullRotationMatrixOnePass(const NevptIntegralsDevice& ints,
-                                           const GeneralIntegralsDevice& gen,
-                                           const DeviceTensor& dm1, const DeviceTensor& dm2,
-                                           const DeviceTensor& dm3, const DeviceTensor& f3ac,
-                                           const DeviceTensor& f3ca,
-                                           const DeviceTensor* digestAdjoint,
-                                           const DeviceResources& dr) {
+// The integral adjoint's two layouts, zeroed and shaped as `ints` / `gen`.
+IntegralAdjointDevice zeroIntegralAdjoint(const NevptIntegralsDevice& ints,
+                                          const GeneralIntegralsDevice& gen,
+                                          const DeviceResources& dr) {
+  IntegralAdjointDevice out;
+  for (const ScDottedField& f : kDottedFields)
+    out.stored.*f.member = DeviceTensor::zeros((ints.*f.member).dims, dr);
+  out.stored.e_core = DeviceTensor::zeros(ints.e_core.dims, dr);
+  out.stored.e_virt = DeviceTensor::zeros(ints.e_virt.dims, dr);
+  out.inventory.ncore = gen.ncore;
+  out.inventory.nact = gen.nact;
+  out.inventory.nvirt = gen.nvirt;
+  for (const InventoryArray& a : kInventoryArrays)
+    out.inventory.*a.member = DeviceTensor::zeros((gen.*a.member).dims, dr);
+  return out;
+}
+
+// The rest of the integral adjoint (gradient.cppm, "The integral adjoint"),
+// once the walk has filled `bars` (its external D_X into `adj.stored`, its
+// Dyall blocks' M_G onto bars.h1e / bars.h2e) and yFromBars has added the
+// digests' hbar to bars.h2e: the active integrals' and the orbital energies'
+// adjoints joined to the stored layout, then everything pulled back onto the
+// inventory.
+void finishIntegralAdjoint(IntegralAdjointDevice& adj, const ScYBars& bars,
+                           const std::vector<double>& dEdCore,
+                           const std::vector<double>& dEdVirt, const DeviceResources& dr) {
+  const wwrStream_t s = dr.stream();
+  addTensorInto(bars.h1e, adj.stored.h1e, s);
+  addTensorInto(bars.h2e, adj.stored.h2e, s);
+  const auto addHost = [&](const std::vector<double>& v, const DeviceTensor& out) {
+    if (v.empty()) return;
+    const DeviceTensor t = uploadTensor(Tensor::fromFlat({std::ssize(v)}, v), dr);
+    addTensorInto(t, out, s);
+  };
+  addHost(dEdCore, adj.stored.e_core);
+  addHost(dEdVirt, adj.stored.e_virt);
+  for (const ScDottedField& f : kDottedFields)
+    if ((adj.stored.*f.member).size() > 0)
+      storedBlockAdjoint(f.kind, adj.stored.*f.member, adj.inventory, dr);
+  storedEpsAdjoint(/*core=*/true, adj.stored.e_core, adj.inventory, dr);
+  storedEpsAdjoint(/*core=*/false, adj.stored.e_virt, adj.inventory, dr);
+}
+
+Result<OnePassSourceTerms> scOnePassSourceTerms(const NevptIntegralsDevice& ints,
+                                                const GeneralIntegralsDevice& gen,
+                                                const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                                const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                                const DeviceTensor& f3ca,
+                                                const DeviceTensor* digestAdjoint,
+                                                const DeviceResources& dr) {
   NEVPT2_TRY(checkGeneralShapes(ints, gen));
   if (digestAdjoint != nullptr && digestAdjoint->dims != ints.h2e.dims)
-    return err_config(
-        "scFullRotationMatrixOnePass: the digests' adjoint is not shaped like h2e");
+    return err_config("scOnePassSourceTerms: the digests' adjoint is not shaped like h2e");
   FullBlockSource src(ints);
   const ActiveIntegralsDevice ai = activeViewOf(ints);
+  OnePassSourceTerms out;
+  out.adjoint = zeroIntegralAdjoint(ints, gen, dr);
   ScYBars bars = ScYBars::zeros(gen, dr);
+  bars.stored = &out.adjoint.stored;
   ScRotation rot;
   rot.gen = &gen;
   rot.bars = &bars;
@@ -3277,23 +3322,27 @@ Result<Tensor> scFullRotationMatrixOnePass(const NevptIntegralsDevice& ints,
       assembleClasses(ai, src, /*batch=*/0, dm1, dm2, dm3, f3ac, f3ca, rot, /*adj=*/nullptr,
                       /*epsAdjoint=*/true, /*ci=*/nullptr, /*mix=*/nullptr, dr);
   const auto [dEdCore, dEdVirt] = summedEpsAdjoint(walk.classes, gen.ncore, gen.nvirt);
-  return yFromBars(bars, ai, dm1, digestAdjoint, dEdCore, dEdVirt, dr);
+  out.y = yFromBars(bars, ai, dm1, digestAdjoint, dEdCore, dEdVirt, dr);
+  finishIntegralAdjoint(out.adjoint, bars, dEdCore, dEdVirt, dr);
+  return out;
 }
 
-Result<Tensor> pcFullRotationMatrixOnePass(const NevptIntegralsDevice& ints,
-                                           const GeneralIntegralsDevice& gen,
-                                           const DeviceTensor& dm1, const DeviceTensor& dm2,
-                                           const DeviceTensor& dm3, const DeviceTensor& f3ac,
-                                           const DeviceTensor& f3ca,
-                                           const DeviceTensor* digestAdjoint,
-                                           const DeviceResources& dr) {
+Result<OnePassSourceTerms> pcOnePassSourceTerms(const NevptIntegralsDevice& ints,
+                                                const GeneralIntegralsDevice& gen,
+                                                const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                                const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                                const DeviceTensor& f3ca,
+                                                const DeviceTensor* digestAdjoint,
+                                                const DeviceResources& dr) {
   NEVPT2_TRY(checkGeneralShapes(ints, gen));
   if (digestAdjoint != nullptr && digestAdjoint->dims != ints.h2e.dims)
-    return err_config(
-        "pcFullRotationMatrixOnePass: the digests' adjoint is not shaped like h2e");
+    return err_config("pcOnePassSourceTerms: the digests' adjoint is not shaped like h2e");
   FullBlockSource src(ints);
   const ActiveIntegralsDevice ai = activeViewOf(ints);
+  OnePassSourceTerms out;
+  out.adjoint = zeroIntegralAdjoint(ints, gen, dr);
   ScYBars bars = ScYBars::zeros(gen, dr);
+  bars.stored = &out.adjoint.stored;
   ScRotation rot;
   rot.gen = &gen;
   rot.bars = &bars;
@@ -3306,7 +3355,51 @@ Result<Tensor> pcFullRotationMatrixOnePass(const NevptIntegralsDevice& ints,
         "(docs/pc-nevpt2.md, \"The singular-metric convention\")",
         walk.refusals()));
   const auto [dEdCore, dEdVirt] = summedEpsAdjoint(walk.classes, gen.ncore, gen.nvirt);
-  return yFromBars(bars, ai, dm1, digestAdjoint, dEdCore, dEdVirt, dr);
+  out.y = yFromBars(bars, ai, dm1, digestAdjoint, dEdCore, dEdVirt, dr);
+  finishIntegralAdjoint(out.adjoint, bars, dEdCore, dEdVirt, dr);
+  return out;
+}
+
+Result<Tensor> scFullRotationMatrixOnePass(const NevptIntegralsDevice& ints,
+                                           const GeneralIntegralsDevice& gen,
+                                           const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                           const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                           const DeviceTensor& f3ca,
+                                           const DeviceTensor* digestAdjoint,
+                                           const DeviceResources& dr) {
+  OnePassSourceTerms t = NEVPT2_TRY(
+      scOnePassSourceTerms(ints, gen, dm1, dm2, dm3, f3ac, f3ca, digestAdjoint, dr));
+  return std::move(t.y);
+}
+
+Result<Tensor> pcFullRotationMatrixOnePass(const NevptIntegralsDevice& ints,
+                                           const GeneralIntegralsDevice& gen,
+                                           const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                           const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                           const DeviceTensor& f3ca,
+                                           const DeviceTensor* digestAdjoint,
+                                           const DeviceResources& dr) {
+  OnePassSourceTerms t = NEVPT2_TRY(
+      pcOnePassSourceTerms(ints, gen, dm1, dm2, dm3, f3ac, f3ca, digestAdjoint, dr));
+  return std::move(t.y);
+}
+
+double integralAdjointPairing(const NevptIntegralsDevice& bar, const NevptIntegralsDevice& dot,
+                              const DeviceResources& dr) {
+  double sum = 0.0;
+  for (const ScDottedField& f : kDottedFields)
+    if ((bar.*f.member).size() > 0) sum += dotTensors(bar.*f.member, dot.*f.member, dr);
+  if (bar.e_core.size() > 0) sum += dotTensors(bar.e_core, dot.e_core, dr);
+  if (bar.e_virt.size() > 0) sum += dotTensors(bar.e_virt, dot.e_virt, dr);
+  return sum;
+}
+
+double inventoryAdjointPairing(const GeneralIntegralsDevice& bar,
+                               const GeneralIntegralsDevice& dot, const DeviceResources& dr) {
+  double sum = 0.0;
+  for (const InventoryArray& a : kInventoryArrays)
+    if ((bar.*a.member).size() > 0) sum += dotTensors(bar.*a.member, dot.*a.member, dr);
+  return sum;
 }
 
 // A host tensor of `dims` filled from `rng`, uniform in [-1, 1), uploaded.

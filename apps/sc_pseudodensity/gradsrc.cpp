@@ -33,8 +33,39 @@ NpyMember scalarMember(std::string name, const double v) {
   return m;
 }
 
+std::vector<int64_t> integralAdjointShape(const std::string_view axes, const int64_t ncore,
+                                          const int64_t nact, const int64_t nvirt) {
+  std::vector<int64_t> shape;
+  for (const char c : axes) {
+    switch (c) {
+      case 'n': shape.push_back(ncore + nact + nvirt); break;
+      case 'c': shape.push_back(ncore); break;
+      case 'a': shape.push_back(nact); break;
+      case 'v': shape.push_back(nvirt); break;
+      default: check(false, std::format("integralAdjointShape: no axis '{}'", c));
+    }
+  }
+  return shape;
+}
+
+// The member name of the integral adjoint's i-th array.
+std::string integralAdjointMember(const std::size_t i) {
+  return std::format("ibar_{}", kIntegralAdjointNames[i].name);
+}
+
 Status writeGradSrc(const std::string& path, const GradSrc& src) {
   const int64_t nmo = src.ncore + src.nact + src.nvirt;
+  if (src.hasIntegralAdjoint()) {
+    check(src.integralAdjoint.size() == kIntegralAdjointNames.size(),
+          "writeGradSrc: the integral adjoint is not one tensor per inventory array");
+    for (std::size_t i = 0; i < kIntegralAdjointNames.size(); ++i)
+      check(src.integralAdjoint[i].dims() ==
+                integralAdjointShape(kIntegralAdjointNames[i].axes, src.ncore, src.nact,
+                                     src.nvirt),
+            std::format("writeGradSrc: the integral adjoint's {} is not shaped for the "
+                        "partition",
+                        kIntegralAdjointNames[i].name));
+  }
   check(src.kappaSource.rank() == 2 && src.kappaSource.dim(0) == nmo &&
             src.kappaSource.dim(1) == nmo,
         "writeGradSrc: kappaSource is not (n_mo, n_mo) for the partition");
@@ -67,6 +98,10 @@ Status writeGradSrc(const std::string& path, const GradSrc& src) {
     members.push_back(floatMember("edot_frozen", src.edotFrozen));
     members.push_back(floatMember("edot_digest", src.edotDigest));
   }
+  // The integral adjoint (#246), last, so a dump without it is byte for byte
+  // what it was before it existed.
+  for (std::size_t i = 0; i < src.integralAdjoint.size(); ++i)
+    members.push_back(floatMember(integralAdjointMember(i), src.integralAdjoint[i]));
   const std::vector<std::uint8_t> bytes =
       NEVPT2_TRY(npzBytes(members, std::format("gradient source dump {}", path)));
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -157,6 +192,26 @@ Result<GradSrc> readGradSrc(const std::string& path) {
       return err_io(std::format(
           "{}: edot_kappa / edot_frozen / edot_digest are not (n_dir, {}, {}), (n_dir), (n_dir)",
           where, nmo, nmo));
+  }
+  // The integral adjoint (#246): all 21 members or none, each of its shape.
+  std::size_t adjoint = 0;
+  for (std::size_t i = 0; i < kIntegralAdjointNames.size(); ++i)
+    adjoint += has(integralAdjointMember(i)) ? 1 : 0;
+  if (adjoint != 0 && adjoint != kIntegralAdjointNames.size())
+    return err_io(std::format(
+        "{}: the integral adjoint's {} ibar_* members are a set, and only {} of them are here",
+        where, kIntegralAdjointNames.size(), adjoint));
+  if (adjoint != 0) {
+    for (std::size_t i = 0; i < kIntegralAdjointNames.size(); ++i) {
+      const std::string name = integralAdjointMember(i);
+      const NpyMember* m = NEVPT2_TRY(findMember(members, name, where));
+      const std::vector<int64_t> want = integralAdjointShape(
+          kIntegralAdjointNames[i].axes, src.ncore, src.nact, src.nvirt);
+      if (m->isInt || m->shape != want)
+        return err_io(std::format("{}: '{}' is not a float array of the partition's shape",
+                                  where, name));
+      src.integralAdjoint.push_back(Tensor::fromFlat(m->shape, m->f64));
+    }
   }
   return src;
 }

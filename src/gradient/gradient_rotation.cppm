@@ -264,6 +264,14 @@ struct ScYBars {
   DeviceTensor kActFull;  // (n_mo, n_act), the orbital energies' own
   DeviceTensor h1e;       // dE/d(h1e) through the Dyall blocks (and, later, the digests')
   DeviceTensor h2e;       // dE/d(h2e), likewise
+  // THE INTEGRAL ADJOINT (#246), or null: set, addExternalBars also adds
+  // each external pseudodensity D_X into the field of the block it is the
+  // adjoint of, untransposed -- dE/d(stored block) itself, before any kappa
+  // reads it. Every field shaped like the integrals' own (whole blocks: the
+  // walk runs one slab per block). V2tr's D is spread back over Sir2's
+  // active pair, SrsiT's lands on h2e_v_Srsi. Borrowed: the owner outlives
+  // every walk.
+  const NevptIntegralsDevice* stored = nullptr;
 
   static ScYBars zeros(const GeneralIntegralsDevice& g, const DeviceResources& res) {
     const int64_t n = g.nmo(), a = g.nact;
@@ -311,7 +319,18 @@ void addExternalBars(ScYBars& bars, const std::vector<const DeviceTensor*>& bloc
       const DeviceTensor eye = deviceEye(na, res);
       const DeviceTensor spread = deviceEinsumNew("ri,ab->rabi", {&d[i], &eye}, 1.0, res);
       generalBlockActionAdjoint(RotBlock::Sir2, *bars.gen, cols, spread, res);
+      if (bars.stored != nullptr) addTensorInto(spread, bars.stored->h2e_v2_Sir, res.stream());
       continue;
+    }
+    if (bars.stored != nullptr) {
+      const DeviceTensor& field = dottedField(*bars.stored, kinds[i]);
+      if (field.dims != d[i].dims)
+        check(false,
+              std::format("addExternalBars: {}'s pseudodensity is not shaped like its whole "
+                          "block -- the integral adjoint needs one slab per block",
+                          rotBlockName(kinds[i])),
+              loc);
+      addTensorInto(d[i], field, res.stream());
     }
     const std::vector<int> axes = activeAxesOf(kinds[i]);
     if (!axes.empty()) kappaActionAdjoint(*blocks[i], axes, d[i], bars.kaa, res.stream());

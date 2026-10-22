@@ -4463,6 +4463,75 @@ seeded directions, are 3.1e-11 and 1.6e-10 (against 1e-13 or below on the
 other cases). It is inside the bound, and the bound was not moved. Wall times are
 [`performance.md`](performance.md), "The one-pass `Y`".
 
+## The integral adjoint
+
+Every `--dump-source-terms` (SC and `--pc`) also writes the integral adjoint,
+`dE_corr/d(integrals)` on the gradient sidecar's 21 inventory arrays (#246;
+docs/gradients.md, §6.3), and gates it as check 9 before writing. The
+perturbation it is checked along scales every integral of the state by a
+seeded factor in ±0.1 (one factor per canonical index, so both symmetries
+hold), with its dotted inventory built by `integral_perturbation.py`'s
+definitions:
+
+- **9a**, that dotted inventory rebuilds its own `h^eff` and `f`: ≤5.3e-15
+  relative on every case below, both cards (gate 1e-10);
+- **9b**, the pairing on the inventory against the pairing on the stored
+  blocks derived from it: ≤2.1e-17 relative (gate 1e-10);
+- **9c**, the pairing against central differences of the binary's own
+  `E_corr` at `I + h Idot`, `h = 2^-6 … 2^-22`, the best rung within 1e-7 of
+  `max(1, |pairing|)` on a run of at least three fourfold halvings.
+
+Measured 2026-10-22 on every dump case, both cards, `--tiles 3`, Release:
+
+| case | scheme | 9c best, RTX 3080 | run | 9c best, RX 9060 XT | run |
+|---|---|---|---|---|---|
+| N2 CAS(4,4) | SC | 1.0e-10 | 10 | 2.9e-11 | 10 |
+| N2 CAS(4,4) | PC | 4.1e-12 | 11 | 2.2e-12 | 10 |
+| N2 CAS(4,4) `_casscf` | SC | 5.0e-12 | 9 | 1.4e-11 | 9 |
+| N2 CAS(4,4) `_casscf` | PC | 1.8e-12 | 10 | 7.3e-12 | 9 |
+| LiF CAS(4,6) | SC | 8.8e-11 | 8 | 1.9e-11 | 7 |
+| LiF CAS(4,6) `_casscf` | SC | 1.7e-11 | 8 | 2.3e-11 | 9 |
+| HSOH CAS(6,6) `_casscf` | SC | 6.8e-11 | 8 | 3.2e-11 | 8 |
+| HSOH CAS(6,6) `_casscf` | PC | 3.8e-11 | 7 | 4.3e-10 | 7 |
+| N2 CAS(4,4) `_df` | SC | 3.1e-11 | 9 | 5.3e-12 | 10 |
+| N2 CAS(8,8) | SC | 2.3e-11 | 8 | 9.1e-12 | 8 |
+| N2 CAS(8,8) | PC | 1.7e-11 | 10 | 1.1e-10 | 10 |
+
+Five more HSOH runs on the RTX 3080 (three through the `slow` ctest entries)
+ran 8 to 9 halvings for SC and 7 to 9 for PC.
+
+- **Why the integrals are scaled, not drawn whole.** The first version drew
+  every element of `(hdot, (pq|rs)dot)` uniformly in ±0.1, whatever the
+  integral. Along that direction HSOH SC's ladder was erratic down to
+  `h ~ 1e-4` (relative error by rung `2^-7 … 2^-13`: 1.1e-5, 1.4e-6, 1.8e-6,
+  9.4e-7, 1.4e-8, 6.5e-8, 2.1e-8) and then `h²` for only three or four
+  halvings before round-off: three halvings on both cards, and two in a
+  later run on the RTX 3080, which failed the check. A draw over
+  every element populates the perturbers the state's integrals leave empty,
+  and SC's energy along such a direction is smooth only on a very small scale
+  (the empty-perturber trait of docs/hessian-theory.md, §5.6). A nuclear
+  coordinate that keeps the point group populates none. Scaling each integral
+  keeps a zero integral zero, as such a coordinate does. With that change the
+  same case runs eight clean halvings (ratios 3.79–4.14 from `2^-7` to
+  `2^-14`), and no tolerance or rule changed.
+- **HSOH PC refuses its coarse rungs:** from `2^-6` to `2^-10` a `Sr`
+  denominator `lambda_k + Delta_t` turns negative at `I ± h Idot`. Those
+  rungs have no quotient (printed REFUSED, an infinite error that breaks any
+  run). From `2^-11` the ladder is clean.
+- **LiF has no PC row:** its goldens carry no PC answer ("LiF has no PC
+  gradient, and that is the answer"), so `--pc` stops before any dump.
+
+The ctest entries are the dump entries that already exist: every
+`nevpt2_sc_pseudodensity_dump_*` (SC and PC) gates check 9 through its PASS
+line. HSOH's two run as the `--probed-y` entries (`slow`). **One of those,
+`nevpt2_sc_pseudodensity_dump_probed_pc_hsoh_def2svp_cas66_casscf`, fails on
+the RTX 3080 independently of this work.** Its #240 check 8 (one-pass `Y` against probed,
+1e-9) straddles the bound on that card. On `origin/main` (988eddc), seven
+runs gave 3.8e-10 to 1.75e-9, four of them above the bound. With #246, five
+runs gave 5.5e-10 to 1.47e-9. That is the PC solve's conditioning ("The
+one-pass `Y` against the probed one" above; 5.8e-10 on the RX 9060 XT), now
+seen on the other card. It is left as found; the bound was not moved.
+
 ## The SC source terms against PySCF's, on a card
 
 `nevpt2_sc_pseudodensity --source-oracle golden/<case>.srcgold` (#92) is the
@@ -5273,10 +5342,14 @@ without the Richardson pass. Dumps on the RX 9060 XT; everything else CPU.
   turns that into multipliers 3.1e-6 apart and a gradient 1.5e-8 apart. PC
   differences at `KAPPA_STEP_PC = 1e-4`, whose round-off is ~1e-9: its 1.0e-9.
 
-So replacing `NUC_STEP`'s quotient alone would leave #217's ladder with the
-1.5e-8 spread. The step-independent part needs the CASSCF branch's
-`dE_CASCI/dkappa` taken analytically — on a converged state it is
-`gen_g_hop`'s `g_orb`, ~1e-11 here — rather than from the sweep.
+**So the guess-to-guess spread is the `kappa` sweep's, `KAPPA_STEP`'s
+round-off, and #246 and #247 do not fix it.** The integral adjoint (#246, "The
+integral adjoint" above) and the analytic nuclear term built on it (#247)
+replace `NUC_STEP`'s quotient, which removes the translational sum; #217's
+ladder still sees the 1.5e-8 spread until the CASSCF branch's
+`dE_CASCI/dkappa` is taken analytically — on a converged state it is
+`gen_g_hop`'s `g_orb`, ~1e-11 here — rather than from the sweep. That is a
+separate piece of work.
 
 ### A ladder can converge, cleanly, to the wrong branch
 

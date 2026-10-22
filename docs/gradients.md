@@ -38,6 +38,7 @@ respect to a nuclear coordinate.
 | the RDMs' own derivatives w.r.t. the CI vector | **in tree**, host `dm1`/`dm2` and device `dm3`/`f3ac`/`f3ca` (§4.1) |
 | the pseudocanonical multipliers `z^c` (Park Eqs. 56–57) | **in tree**, divided out of `Y`'s two inactive blocks, refusing a degeneracy the division cannot resolve (§6) |
 | the GPU's `Y_xy` and `y_I` **written out**, for a nuclear gradient to be built from | **in tree**, SC and (with `--pc`, #74) PC: `nevpt2_sc_pseudodensity --dump-source-terms PATH` writes both to a `.gradsrc` (§8), which `reference_data/nevpt2_grad.py --source dump` / `both` reads. A gradient built from it **is the SC-NEVPT2 nuclear gradient**: within the 1e-6 gate of `grad_num` on LiF, acrolein and N2 CAS(4,4), and componentwise PySCF-sourced's to well inside it ([`testing.md`](testing.md), "The GPU as the source-term provider", which keeps the #73 failure — `Y` holding the digests fixed — on record as superseded). **On a CASSCF reference too**: SC (#125), `--reference casscf --source dump` / `both` on LiF CAS(4,6) and N2 CAS(4,4) ([`testing.md`](testing.md), "SC on a CASSCF reference: LiF, and the N2 degeneracy probe"), and PC (#163), `--reference casscf --pc --source dump` / `both` on acrolein CAS(6,5) against the GPU-differenced `grad_num_pc`, beside block2-sourced on the same sweep ([`testing.md`](testing.md), "PC on a CASSCF reference: acrolein", "GPU-sourced"). **And density-fitted** (#166), SC on the CASCI reference: `nevpt2_grad.py --df` (the density-fitted row above) |
+| the **integral adjoint** `dE_corr/d(integrals)`, SC and PC (#246) | **in tree**, written by every `--dump-source-terms` (SC and `--pc`) beside `Y` and `y`: the same one reverse pass as `Y` (§6), stopped before `kappa`, pulled back onto the gradient sidecar's inventory and written as the 21 `ibar_*` members of the `.gradsrc` (§6.3). It is what a coordinate's frozen-path integral derivative (#220's `.pertgold`) is contracted with to give `E_corr`'s skeleton derivative with no step; the contraction in `nevpt2_grad.py` is #247's, **not in tree**. Gated in every dump against a ladder of the binary's own energy along a seeded integral perturbation ([`testing.md`](testing.md), "The integral adjoint") |
 | the CASCI branch's Z-vector solve: the CI Z-vector equation, the selection-boundary multipliers, the CPHF solve | **not in tree** — **offline Python only**, `reference_data/nevpt2_grad.py`, a `pyscf.grad.lagrange.Gradients` subclass ([`reference-data.md`](reference-data.md), "The analytic gradient"). Deliberately offline: this repo's shape is "offline Python generates the reference, the C++ GPU demo reproduces it", and a PySCF solve inside the runtime would invert that. Derived in [`gradient-theory.md`](gradient-theory.md), §2.2–§2.6; nothing in `src/` implements them |
 | the CASSCF branch: Park's Eq. 23 as written, and its coupled CP-CASSCF `(Z, z)` solve | **not in tree** — **offline Python only**, `reference_data/nevpt2_grad.py --reference casscf --mo-from FILE` (#122): `z^c`, then the coupled system built densely from `pyscf.mcscf.newton_casscf.gen_g_hop`'s orbital+CI Hessian and factorised, SC with PySCF's own source terms or the GPU's dumped ones (`--source dump` / `both`, #125), or, with `--pc`, PC with block2's (#126) or the GPU's dumped PC ones (#163) ([`reference-data.md`](reference-data.md), "The analytic gradient"). **What is validated, per reference:** SC on LiF CAS(4,6) and N2 CAS(4,4) componentwise, PySCF- and GPU-sourced, N2 being the inactive-degeneracy probe ([`testing.md`](testing.md), "SC on a CASSCF reference: LiF, and the N2 degeneracy probe"), and SC and PC on acrolein CAS(6,5), PC both block2- and GPU-sourced ([`testing.md`](testing.md), "PC on a CASSCF reference: acrolein"). The CASCI-on-RHF reference's cases, the GPU's PC dump among them, are [`testing.md`](testing.md), "What is run, and what it comes out at" and "The GPU as the source-term provider". Derived in [`gradient-theory.md`](gradient-theory.md), §1.4 and §2.7. Its numerical gradients are offline too: `nevpt2_numgrad.py --reference casscf` re-optimises every displaced state (SC), and `--pc-states` differences the GPU's PC energies on those states ([`testing.md`](testing.md), "PC on a CASSCF reference: acrolein"). The in-tree Lagrangian path still refuses a `casscf`-kind golden as `err_unsupported`, and the sidecars `--mo-from --gradgold` writes for one (`golden/n2_ccpvdz_cas44_casscf.gradgold`, LiF's and acrolein's) are read by the source-term path (`--gradient-source`, #121) and by the orbital Hessian flags (§1.1, #157), never by a Lagrangian ([`reference-data.md`](reference-data.md), "The CASSCF-reference gradient sidecar") |
 | derivative MO integrals — the one- and two-electron skeleton derivatives — and the nuclear-repulsion derivative | **not in tree**. In the reference data for the CASSCF reference: `reference_data/casscf_hessian.py`'s perturbed Hamiltonians (#215), and, written in the gradient sidecar's inventory per nuclear coordinate, the `.pertgold` sidecar `--sc-source-tangent` reads (#220; [`reference-data.md`](reference-data.md), "The integral perturbation sidecar") |
@@ -996,6 +997,65 @@ binary takes which flag", and `test/cli/` follow the decision: no binary
 parses `--df`, and `nevpt2_df_demo` refuses `--kappa-act`, `--kappa-full` and
 `--dump-source-terms`, naming `nevpt2_sc_pseudodensity`.
 
+### 6.3 The integral adjoint (#246)
+
+The one-pass `Y` above pulls the walk's adjoints back onto `kappa`. One step
+earlier they are the gradient of `E_corr` with respect to the **integrals**
+it reads, at fixed orbitals, CI vector and RDMs — and that is what a nuclear
+derivative along the frozen orthonormal path needs, because along that path
+nothing else moves: `dE_corr/dR_k = <Ibar, Idot_k>`, `Idot_k` the
+coordinate's integral derivative. `scOnePassSourceTerms` /
+`pcOnePassSourceTerms` return it beside `Y`, from the same walk, in two
+layouts:
+
+- **stored** — every `NevptIntegralsDevice` field the energy reads: the
+  external blocks' pseudodensities `D_X`, untransposed (`addExternalBars`
+  adds each into its block's field when `ScYBars::stored` is set; `V2tr`'s
+  spread over `Sir2`'s active pair, `SrsiT`'s onto `h2e_v_Srsi`), the active
+  `h1e` / `h2e` (the Dyall blocks' `M_G` through their builders' transposes,
+  plus the digests' `hbar` on `h2e`) and `e_core` / `e_virt` (the classes'
+  `R_t`);
+- **inventory** — the same pulled back onto the gradient sidecar's 21
+  general-range arrays (`h`, `heff`, `f` and the eighteen rows) by
+  `storedBlockFrom` / `storedEpsFrom` transposed (`storedBlockAdjoint`,
+  `storedEpsAdjoint`): each stored block is a slice of one inventory array —
+  `h^eff` for the one-electron blocks, less the active trace on `g_xa_aa` for
+  `h1e_v_Sr`; `f`'s diagonal for the orbital energies — so the pullback is a
+  scatter. `h`'s adjoint is zero: no block reads `h` itself.
+
+The inventory layout is the one an integral perturbation sidecar carries per
+coordinate, in the same order, shapes and frame (the golden's), so the
+contraction #247 needs is `sum_n <ibar_n, Idot_n[k]>` over the 21 arrays,
+with no index translation. The dump writes it as `ibar_<name>`
+(`nevpt2.gradsrc`'s `kIntegralAdjointNames`, `golden_format.GRADSRC_IBAR`,
+held equal by `golden_layout_check.py`).
+
+**What checks it** (the dump's check 9, `:integral_adjoint_check`): a seeded
+integral perturbation over the whole MO range — every integral of the state
+scaled by a seeded factor, one per canonical index, so `hdot` is symmetric,
+`(pq|rs)dot` keeps the eight-fold symmetry and an integral that is zero stays
+zero (a draw over every element populates the perturbers the integrals leave
+empty, along which SC's energy is too rough for a ladder) — has its dotted
+inventory built on the host by
+`integral_perturbation.py`'s definitions (the core dressing, `f` at the
+golden's `dm1`), so it is a perturbation of the kind #247 contracts. (a) That
+dot rebuilds its own `h^eff` and `f` (`scGeneralIntegralCheck`); (b) the
+pairing on the inventory equals the pairing on the stored blocks
+`integralPerturbationDevice` derives from it — the scatter is the
+restrictions' transpose; (c) the pairing matches central differences of the
+binary's own `E_corr` (`energiesDevice`, or `pcEnergiesDevice`) at `I + h
+Idot` — every stored block and orbital energy displaced, the digests rebuilt
+at the displaced `h2e` — at 1e-7 on the fourfold rule. A coarse rung that
+leaves the energy's domain (a PC denominator turned negative) has no
+quotient and breaks any run; it does not fail the check.
+
+**What it does not fix.** It replaces `NUC_STEP`'s quotient for `E_corr`'s
+half of the nuclear term, and with #247 that quotient's round-off. The
+~1.5e-8 guess-to-guess spread of `gradient_at`'s SC gradient is a different
+quotient's: the `kappa` sweep's `dE_CASCI/dkappa` at `KAPPA_STEP`, amplified
+by the CP-CASSCF solve ([`testing.md`](testing.md), "Where `gradient_at`'s
+~1e-8 noise comes from").
+
 ## 7. Where the path is differentiable
 
 Three conditions, each enforced in code rather than assumed.
@@ -1100,7 +1160,7 @@ its own, and each prints one `PASS:` line a ctest entry matches
 | `nevpt2_sc_pseudodensity --sc-hessian-kk` | the second term of the orbital block `H_kk`, the sandwich `I'^T Ehat'' I' = K3 + K4 + K5 + K6` (#158, #190; [`hessian-theory.md`](hessian-theory.md), §5.1 and §5.6), out of the sidecar (required): the forward finish against the reverse pairing of the pseudodensities' tangent (K6, the guarded tuples' term, against its own reverse half too), the per-tuple merge of the digests' share against the first-order `<k, Y>`, the intra-space exact zeros, the digests' curvature against `energiesHessianDevice` at the plain digest path's tangents, and the assembled `Eddot_kk` against ladders of the SC total. A pair along which the energy has no Hessian (an H class's empty perturbers both directions populate with non-proportional tables, `rho_t` above tolerance) is refused as Numerical, naming the class, the tuple count and the worst `rho_t` (§5.6), and `Eddot_kk` keeps #154's K2 refusal |
 | `nevpt2_sc_pseudodensity --sc-source-tangent PATH` | the SC source terms' tangent along every coordinate of the `.pertgold` at `PATH` (#220; [`hessian-theory.md`](hessian-theory.md), §8), the gradient sidecar required and the perturbation held to its frame. Per coordinate: the dotted `h^eff` and `f` against the dotted `h` and rows, every probe of `Ydot` in both modes, the duality `<Ydot, kappa> + <ydot, u>` against `d^2E/dh dtheta` forward over forward along four seeded `theta`, and Richardson-verified ladders of the whole gated `Y` and `y` recomputed at `I +- h Idot` (the digests and their transpose rebuilt, `W` displaced). A coordinate whose perturbation populates an H class's empty perturbers is refused whole, and the PASS line counts the refused ones; a `*_df` golden runs too, against its fitted perturbation, and its PASS line names the fitted case |
 | `nevpt2_sc_pseudodensity --pc --sc-source-tangent PATH` | PC's source terms' tangent along every coordinate of the same `.pertgold` (#234; [`hessian-theory.md`](hessian-theory.md), §6.4, §6.7 and §8): per coordinate the dotted inventory against itself, `Edot(Idot)` three ways (the pairing with `hbar_pc`, its forward tangent plus the digests' forward term, and the FULL mixed walk's own), every probe of `Ydot` in both modes, the duality along `(kappa, Epq)`, `(kappa, 0)`, `(0, rot)` and `(0, c)` with `:hessian_kc_pc_check`'s non-lifting CI directions, and ladders of `Y_pc` and the three-term `y_pc` at `I +- h Idot` from `h = 2^-4`. No coordinate is refused |
-| `nevpt2_sc_pseudodensity --dump-source-terms PATH` | not a check of the derivatives but their **export**: `Y_xy` over every MO pair (`scFullRotationMatrix`, out of the sidecar as `--kappa-full` reads it) and `y_I` (`scCiSourceDevice`, with the orbital energies' response out of the same sidecar), written to `PATH` as a `.gradsrc` — a NumPy `.npz` holding `kappa_source`, `ci_source`, the `ci` they were taken at, the partition and `e_corr`, all in the golden's own basis, and (#88) `edot_kappa` / `edot_frozen` / `edot_digest`: seeded directions — `--kappa-full`'s four full ones, one purely active–virtual, one purely core–active — and `Edot` along each in its two terms — then read back. `Y` carries the digests' transpose (#89). Its gate is that the matrix is the pairing, that each direction's exact `Edot` (frozen + digest) is `<kappa, Y>` off the matrix written, that `y`'s walk ran on this state and that the file reads back bit for bit. `reference_data/nevpt2_grad.py --source dump` builds the SC-NEVPT2 nuclear gradient from it, carrying both terms into its own active basis; `--source both` puts that gradient beside PySCF's and `grad_num`; `--edot-check` holds the directions' `Edot` against PySCF's exact directional derivative. On a `*_df` golden (#168, §6.2) the same file from the fitted inventory, with a sixth check: each direction's `edot_digest` against the transpose carried onto `B` |
+| `nevpt2_sc_pseudodensity --dump-source-terms PATH` | not a check of the derivatives but their **export**: `Y_xy` over every MO pair (`scFullRotationMatrix`, out of the sidecar as `--kappa-full` reads it) and `y_I` (`scCiSourceDevice`, with the orbital energies' response out of the same sidecar), written to `PATH` as a `.gradsrc` — a NumPy `.npz` holding `kappa_source`, `ci_source`, the `ci` they were taken at, the partition and `e_corr`, all in the golden's own basis, and (#88) `edot_kappa` / `edot_frozen` / `edot_digest`: seeded directions — `--kappa-full`'s four full ones, one purely active–virtual, one purely core–active — and `Edot` along each in its two terms — then read back. `Y` carries the digests' transpose (#89). Its gate is that the matrix is the pairing, that each direction's exact `Edot` (frozen + digest) is `<kappa, Y>` off the matrix written, that `y`'s walk ran on this state and that the file reads back bit for bit. `reference_data/nevpt2_grad.py --source dump` builds the SC-NEVPT2 nuclear gradient from it, carrying both terms into its own active basis; `--source both` puts that gradient beside PySCF's and `grad_num`; `--edot-check` holds the directions' `Edot` against PySCF's exact directional derivative. On a `*_df` golden (#168, §6.2) the same file from the fitted inventory, with a sixth check: each direction's `edot_digest` against the transpose carried onto `B`. And (#246, §6.3) the integral adjoint, `ibar_*` on the gradient sidecar's 21 inventory arrays, from the same reverse pass as `Y`, under a ninth check: its pairing with a seeded integral perturbation against a ladder of the binary's own energy |
 | `nevpt2_sc_pseudodensity --source-oracle PATH` | the dump's two terms checked against an **independent** provider: PySCF's exact `A = Y − Y^T` and `P y`, committed as `golden/<case>.srcgold` for N2 CAS(4,4) and LiF (`reference_data/sc_source_oracle.py`), compared block by block. Every block must meet the measured tolerance: `source_compare.cppm`'s `kKnownGaps`, which pinned the §6 digest omission's blocks until #89, is empty (docs/testing.md, "The SC source terms against PySCF's, on a card"). Refused on a `*_df` golden: there is no fitted oracle (§6.2) |
 | `nevpt2_sc_pseudodensity --pc --dump-source-terms PATH` / `--pc --source-oracle PATH` | the same two jobs for PC-NEVPT2's `Y` and `y` (§5.6, §6.1, #74): the dump marked `pc`, its four checks plus a fifth — the PC integral halves' duality on the six directions — and the oracle against block2's `golden/n2_ccpvdz_cas44_pc.srcgold`. Both require the golden's PC fields and first hold the PC energy to them |
 | `nevpt2_pc_tangent` | the PC tangent: Euler, and a Richardson-verified central difference. `--fd-steps` and `--fd-start-pow` set the sweep |
