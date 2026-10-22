@@ -915,6 +915,31 @@ if(NEVPT2_BUILD_TESTING)
       PASS_REGULAR_EXPRESSION "${_nevpt2_sc_source_tangent_pass} \\(density-fitted\\)")
   endif()
 
+  # --- PC's source terms' tangent, --pc --sc-source-tangent (#234) ---------------
+  #
+  # The same binary, flag and sidecar with --pc (apps/sc_pseudodensity/
+  # source_tangent_pc_check.cppm; docs/hessian-theory.md, Sec. 6.4, 6.7 and
+  # 8): PC's gated Y_pc and three-term y_pc differentiated along each
+  # coordinate's perturbed Hamiltonian, the orbital energies responding to c
+  # through W (PC's mixed block in its FULL mode). Per coordinate: Edot(Idot)
+  # three ways, every probe of Ydot in both modes, the DUALITY against
+  # d^2E_pc/dh dtheta forward over forward (1e-7), and ladders of the whole
+  # Y_pc and y_pc recomputed at I +- h Idot from h = 2^-4. PC has no
+  # empty-perturber term, so no coordinate is refused: 6 of 6. N2 CAS(4,4) on
+  # CASSCF orbitals only -- the PC gate's size (#194). Not `small`
+  # (docs/testing.md, "PC's source terms' tangent along an integral
+  # perturbation").
+  _add_golden_test_with(nevpt2_sc_pseudodensity
+                        nevpt2_sc_pseudodensity_cas44_casscf_pc_source_tangent
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_casscf.nevpt2gold"
+                        --tiles 3 --pc --sc-source-tangent
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_casscf.pertgold")
+  if(TEST nevpt2_sc_pseudodensity_cas44_casscf_pc_source_tangent)
+    set_tests_properties(nevpt2_sc_pseudodensity_cas44_casscf_pc_source_tangent PROPERTIES
+      PASS_REGULAR_EXPRESSION
+      "PASS: the PC source terms' tangent along the integral perturbation agrees with itself by duality to 1e-07 .* on 6 of 6 coordinates \\(orbital energies FULL\\)")
+  endif()
+
   # --- PC's mixed orbital-CI block H_kc, --pc --sc-hessian-kc (#201) --------------
   #
   # The same binary and flag with --pc (apps/sc_pseudodensity/

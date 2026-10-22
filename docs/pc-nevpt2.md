@@ -1299,6 +1299,23 @@ space by a sixteenth of a radian moves Sr's poorly conditioned `lambda` by
 tens of Hartrees, past `-Delta_t`, so the active ladders have no first rung.
 Every pair whose directions leave the active space alone converges.
 
+### The source terms' tangent along an integral perturbation
+
+#234 differentiates PC's gated source terms, `Y_pc` and the three-term
+`y_pc`, along each nuclear coordinate's perturbed Hamiltonian, #220's
+`.pertgold` input, on the card (`--pc --sc-source-tangent`;
+[`hessian-theory.md`](hessian-theory.md), §8's PC as-built note). `ydot` is
+the mixed block's reverse with `w -> Idot`, run in a FULL mode that the
+mixed block refuses along an orbital `w`: the gated `y_pc` folds the
+orbital energies' CI response through `W`, so its tangent must too. Its one
+entry is N2 CAS(4,4)'s CASSCF state, the only state with a committed
+`.pertgold`, and the PC gate's size anyway (#194). Its checks and numbers
+are [`testing.md`](testing.md), "PC's source terms' tangent along an
+integral perturbation". Unlike SC's entry, no coordinate is refused: PC has
+no empty-perturber term, and on the x and y coordinates `ydot` is a symmetry
+zero, which the ladder holds as one. No larger case has a perturbation
+sidecar, so there is no CAS(8,8) diagnostic.
+
 ## The source terms by reverse mode
 
 #74 gives PC what SC has had since #73–#89: `y_I = dE_pc/dc_I` and

@@ -1960,9 +1960,13 @@ Result<double> pcRestoredTracePairingDevice(const NevptIntegralsDevice& ints,
 // THE ORBITAL ENERGIES' MODE is the setup's, SC's fields: `epsKappa` lets
 // them respond to kappa (Delta'_w per tuple, out of the sidecar), or both
 // legs hold them fixed. `epsCi` -- the orbital energies responding to the
-// CI vector -- is REFUSED as Unsupported: this block's CI leg does not carry
-// that response (PC's CI block H_cc has a FULL mode, #214, which carries it;
-// the mixed block's counterpart is not built).
+// CI vector -- is REFUSED here as Unsupported. The walk carries that FULL
+// mode (#234: the CI leg's e'[u] and the pair's e^{wu} forward, R and Rdot
+// folded through W and W'[w] in reverse, Sijrs through SC's own class), but
+// it is gated only along an integral perturbation
+// (pcSourceTangentDevice below), never along an orbital w: --pc
+// --sc-hessian-kc runs EULER and FROZEN, so an orbital w's FULL element would
+// be an ungated number, and it is refused rather than answered.
 //
 // REFUSALS. A class the gap or the denominator check refuses, or -- forward
 // only, the one place a CI direction enters -- whose dropped modes lift along
@@ -2140,6 +2144,101 @@ struct PcOrbitalHessianResult {
 Result<std::vector<PcOrbitalHessianResult>> pcOrbitalHessianDevice(
     const ScOrbitalCurvatureSetup& setup, const std::vector<ScOrbitalCurvatureRequest>& pairs,
     bool epsKappa, const DeviceResources& res);
+
+// --- PC: the source terms' tangent along a SUPPLIED integral perturbation (#234)
+//
+// docs/hessian-theory.md, Sec. 6.4 / 6.7 and 8: the PC twin of #220's
+// scSourceTangentDevice, the NEVPT2 half of L_{R Theta} for the PC energy.
+// It differentiates PC's GATED source terms -- Y_pc with hbar_pc and the
+// orbital energies responding to kappa (pcFullRotationMatrixOnePass's, the
+// dump's), and the THREE-TERM y_pc with them responding to c through W
+// (pcCiSourceThreeTermDevice with the sidecar's W) -- along I -> I + h Idot:
+//
+//   <Ydot, kappa> + <ydot, u>  =  d^2 E_pc / dh dtheta.
+//
+// The same construction as SC's, one leg Idot (a first-order dotted input
+// set), with PC's pieces:
+//
+//   Ydot = (integrals) <Ehat'_pc, A_kappa(Idot)>: pairDottedSetsPc at the set
+//                      dottedAtMatrix builds from Idot's inventory, hbar_pc
+//                      included (Sec. 6.7);
+//        + (sandwich)  the PC sandwich's reverse with v = Idot
+//                      (assemblePcSandwichClasses, u = kappa): the bars of
+//                      Ehat'_pc differentiated along Idot paired with
+//                      kappa's first-order inputs, Sijrs SC's;
+//   ydot = PC's H_kc^T w at w -> Idot in the FULL mode (the mixed walk with
+//          the orbital energies responding to c: R and its tangent along Idot
+//          folded through W'[Idot] and W, Sijrs's included) -- the derivative
+//          along Idot of the three-term y, its rotation term's adjoint on S's
+//          dropped space included (Sec. 6.5).
+//
+// S DOES NOT MOVE along an integral perturbation (it is built from the RDMs
+// alone), so the cut's dropped space is the state's throughout and no lift
+// test runs on Idot's leg; a forward u is tested as the mixed block tests it
+// (a u along which the dropped modes lift is a Numerical Error naming the
+// class). PC has no empty-perturber term (Sec. 6.6), so nothing is censused
+// and no perturbation is refused for it; a class the solve refuses is a
+// Numerical Error, never a tangent with a class missing.
+//
+// WHY Ydot IS PROBED, not #240's one-pass transpose. #240 transposes the
+// FIRST-order walk: its bars are dE/dslab, dE/dK and R at the state, pulled
+// back through kappa's action on the state's own blocks. Ydot's sandwich term
+// needs those bars' TANGENTS along Idot pushed through the same transpose --
+// (dE/dslab)'[Idot], (dE/dK)'[Idot] with its digests' share as a tangent
+// digest adjoint, R'[Idot], and Sijrs's pair reverse -- a second-order
+// transpose the sandwich walk does not build; and the integrals term would
+// need kappa's intra-active action applied to Idot's blocks where the bars
+// apply it to the walk's own slabs. So, as SC's, one basis direction
+// E_xy - E_yx per pair x < y: `chunk` probes per walk for the integrals term,
+// one pair walk per probe for the sandwich, each probe's two modes held to
+// each other as it goes (docs/gradients.md, Sec. 1.1).
+//
+// The setup is SC's (ScSourceTangentSetup) with `hbar` PC's
+// (pcDigestAdjointDevice) and `eps` the sidecar's W. Integral-direct, one
+// slab per block, on res.stream() from res's pool; exact digests only, at
+// opt.nTiles (one RDM build per probe that moves h2e, one for Idot).
+struct PcSourceTangentResult {
+  Tensor kappaDot;           // Ydot (n_mo, n_mo), antisymmetric
+  Tensor kappaDotIntegrals;  // its integrals term
+  Tensor kappaDotSandwich;   // its sandwich term
+  Tensor ciDot;              // ydot, (nstringsA, nstringsB)
+  Tensor ciDotWalk;          // its walk tangent's sigma (the W fold included)
+  Tensor ciDotDigests;       // its digests' sigma at hdot2e
+  int64_t probes = 0;
+  double integralsDuality = 0.0;  // worst |adjoint - forward| over the probes, integral half
+  double sandwichDuality = 0.0;   // worst |reverse - forward| over the probes
+  // The first derivative along Idot itself, three ways: Ehat'_pc paired with
+  // Idot's set (hbar_pc in), its forward tangent plus the digests' forward
+  // term, and the FULL mixed walk's own Edot(Idot).
+  double edotAdjoint = 0.0;
+  double edotForward = 0.0;
+  double edotWalk = 0.0;
+  double h2eDotMax = 0.0;
+  double f3DotMax = 0.0;
+};
+
+Result<PcSourceTangentResult> pcSourceTangentDevice(const ScSourceTangentSetup& setup,
+                                                    const IntegralPerturbationDevice& pert,
+                                                    const SigmaVectorOptions& sigma,
+                                                    int64_t chunk, const DeviceResources& res);
+
+// The FORWARD side along each (kappa, u), as scSourceTangentForwardDevice's
+// (kappa or u empty for none): the integrals term's forward tangent at
+// A_kappa(Idot), its digests' forward term, the sandwich forward along
+// (kappa, Idot), and PC's FULL mixed block forward along (Idot, u), its
+// rotation term reported apart.
+struct PcSourceTangentForward {
+  double integrals = 0.0;
+  double integralsDigest = 0.0;
+  double sandwich = 0.0;
+  double mixed = 0.0;
+  double mixedRotation = 0.0;  // of `mixed`, Sec. 6.5's rotation term
+  double total() const { return integrals + integralsDigest + sandwich + mixed; }
+};
+
+Result<std::vector<PcSourceTangentForward>> pcSourceTangentForwardDevice(
+    const ScSourceTangentSetup& setup, const IntegralPerturbationDevice& pert,
+    const std::vector<std::pair<Tensor, Tensor>>& dirs, const DeviceResources& res);
 
 // The per-class PC table every PC source-term report prints: status (REFUSED
 // with its reason, or the energy), and the total.

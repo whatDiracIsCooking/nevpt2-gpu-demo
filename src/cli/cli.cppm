@@ -203,7 +203,8 @@ struct Options {
   // tangent along the integral perturbations of the `.pertgold` at PATH
   // (#220; docs/hessian-theory.md, Sec. 8); one job at a time with the seven
   // above, exact digests only (a second derivative, so the Hessian flags'
-  // refusal), SC only. It reads the gradient sidecar (required).
+  // refusal); with --pc, PC's source terms' tangent (#234). It reads the
+  // gradient sidecar (required).
   std::string scSourceTangentPath;
   std::string gradgoldPath;
   std::string dumpSourceTermsPath;

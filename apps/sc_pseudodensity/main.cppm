@@ -74,7 +74,11 @@
 // derivative by duality and against ladders of the gated Y and y recomputed
 // at the displaced integrals, out of the gradient sidecar (required); a
 // coordinate whose perturbation populates empty perturbers is refused and
-// counted. SC only. The partition :source_tangent_check, its own PASS line.
+// counted. The partition :source_tangent_check, its own PASS line. With --pc
+// it is PC-NEVPT2's (#234): Y_pc and the three-term y_pc, the orbital
+// energies responding to c through W (PC's mixed block's FULL mode), no
+// coordinate refused (PC has no empty-perturber term); the partition
+// :source_tangent_pc_check, its own PASS line.
 //
 // A DENSITY-FITTED golden (`generate_golden.py --df`) runs here too (#165),
 // with no flag of its own: it carries its fitted four-index blocks beside the
@@ -147,6 +151,9 @@ export import :hessian_kk_pc_check;
 // --sc-source-tangent PATH: the SC source terms' tangent along a supplied
 // integral perturbation (#220). Its own PASS line.
 export import :source_tangent_check;
+// --pc --sc-source-tangent PATH: the PC source terms' (#234). Its own PASS
+// line.
+export import :source_tangent_pc_check;
 
 import std;
 // nevpt2.cli: every flag this binary takes, and the ones it refuses.
@@ -495,6 +502,8 @@ int main(int argc, char** argv) {
   // integral perturbations of the `.pertgold` at PATH
   // (:source_tangent_check). Y is read out of the gradient sidecar, so it is
   // required; the perturbation is held to it (its frame, its calculation).
+  // With --pc it is PC's (#234, :source_tangent_pc_check), on a state the PC
+  // energy stage above has held to block2's.
   if (!parsedOpts.scSourceTangentPath.empty()) {
     if (const nevpt2::Status st = g.requireSourceTermReference("--sc-source-tangent"); !st) {
       nevpt2::report(st.error());
@@ -507,8 +516,10 @@ int main(int argc, char** argv) {
     }
     const nevpt2::GradGoldFile gg = *std::move(sidecar);
     const nevpt2::Result<bool> ok =
-        checkScSourceTangent(g, gg, parsedOpts.scSourceTangentPath, dInts, dDm1, dDm2, rdm,
-                             opt.rdm, *res);
+        opt.pc ? checkPcSourceTangent(g, gg, parsedOpts.scSourceTangentPath, dInts, dDm1, dDm2,
+                                      rdm, opt.rdm, *res)
+               : checkScSourceTangent(g, gg, parsedOpts.scSourceTangentPath, dInts, dDm1, dDm2,
+                                      rdm, opt.rdm, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

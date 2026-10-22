@@ -2442,17 +2442,18 @@ Result<PcCiHessianResult> pcCiSourceThreeTermDevice(const NevptIntegralsDevice& 
 // --- PC's mixed orbital-CI block, H_kc (#201) -----------------------------------
 
 // The PC setup's own refusal, then SC's prep (the direction, its digests'
-// tangent, h2e'[w]): PC's mixed block holds the orbital energies fixed in c.
-// (PC's CI block has a FULL mode, #214; its mixed block does not carry that
-// response, so it is refused here rather than paired with a leg that lacks it.)
+// tangent, h2e'[w]): along an orbital w PC's mixed block holds the orbital
+// energies fixed in c. The walk carries the FULL mode (#234), but it is gated
+// only along an integral perturbation (pcSourceTangentDevice), so along an
+// orbital w it is refused rather than answered ungated (gradient.cppm).
 Result<ScMixedPrep> preparePcMixed(const ScMixedHessianSetup& s, const Tensor& w,
                                    const DeviceResources& res) {
   if (s.epsCi)
     return err_unsupported(
-        "PC's mixed block H_kc with the orbital energies responding to the CI vector: PC's "
-        "mixed block holds them fixed in c (its CI leg does not carry their response; only the "
-        "CI block H_cc has that FULL mode) -- run it with them fixed in c (responding to kappa "
-        "or not)");
+        "PC's mixed block H_kc with the orbital energies responding to the CI vector: along an "
+        "orbital w PC's mixed block holds them fixed in c (that FULL mode is gated only along an "
+        "integral perturbation, --pc --sc-source-tangent; only the CI block H_cc has it here) "
+        "-- run it with them fixed in c (responding to kappa or not)");
   return prepareMixed(s, w, res);
 }
 
@@ -2470,11 +2471,14 @@ PcSumRdms pcSumOf(const RdmTensors& rdm, const DeviceTensor& dm1, const DeviceTe
                    sumOfTensors(rdm.f3ca, f3ca, dr)};
 }
 
-Result<std::vector<PcMixedHessianResult>> pcMixedHessianDevice(const ScMixedHessianSetup& s,
-                                                               const Tensor& w,
-                                                               const std::vector<Tensor>& us,
-                                                               const DeviceResources& res) {
-  ScMixedPrep p = NEVPT2_TRY(preparePcMixed(s, w, res));
+// F along the prepared direction and each of `us`: the body pcMixedHessianDevice
+// (an orbital w) and #234's perturbation (a dotted set, FULL mode) share. In
+// the FULL mode (`s.epsCi`) the CI leg carries e'[u] = <dm1'[u], W> and the
+// pair e^{wu} = <dm1'[u], W'[w]> (zero unless the prep's W'[w] is set).
+Result<std::vector<PcMixedHessianResult>> pcMixedForward(const ScMixedHessianSetup& s,
+                                                         const ScMixedPrep& p,
+                                                         const std::vector<Tensor>& us,
+                                                         const DeviceResources& res) {
   const NevptIntegralsDevice& ints = s.ints;
   const int64_t norb = ints.h1e.dims[0];
   Result<HostDm12Builder> builder = HostDm12Builder::create(norb, s.nelecA, s.nelecB);
@@ -2521,6 +2525,18 @@ Result<std::vector<PcMixedHessianResult>> pcMixedHessianDevice(const ScMixedHess
     mw.sumU = &vU;
     mw.sumUU = &vUU;
     mw.sumWU = &vWU;
+    // FULL (#234): e'[u] and e^{wu}, owned for the walk.
+    const int64_t nc = ints.e_core.dims[0], nv = ints.e_virt.dims[0];
+    OrbitalEnergyDot eU{Tensor({nc}), Tensor({nv})}, eWU{Tensor({nc}), Tensor({nv})};
+    if (s.epsCi) {
+      eU = orbitalEnergyDot(*s.epsResponse, dotU.dm1);
+      if (p.wDotSet) eWU = orbitalEnergyDot(p.wDot, dotU.dm1);
+      mw.epsCi = true;
+      mw.epsCoreU = &eU.core;
+      mw.epsVirtU = &eU.virt;
+      mw.epsCoreWU = &eWU.core;
+      mw.epsVirtWU = &eWU.virt;
+    }
     const std::array<ScRdmAdjoint*, 8> none{};
     PcMixedHessianResult r;
     r.walk = NEVPT2_TRY(assemblePcMixedClasses(ai, src, rdm, mw, none, none, none, none, res));
@@ -2543,12 +2559,23 @@ Result<std::vector<PcMixedHessianResult>> pcMixedHessianDevice(const ScMixedHess
   return out;
 }
 
-Result<PcMixedHessianVectorResult> pcMixedHessianVectorDevice(const ScMixedHessianSetup& s,
-                                                              const Tensor& w,
-                                                              const bool perClass,
-                                                              const SigmaVectorOptions& sigma,
-                                                              const DeviceResources& res) {
-  ScMixedPrep p = NEVPT2_TRY(preparePcMixed(s, w, res));
+Result<std::vector<PcMixedHessianResult>> pcMixedHessianDevice(const ScMixedHessianSetup& s,
+                                                               const Tensor& w,
+                                                               const std::vector<Tensor>& us,
+                                                               const DeviceResources& res) {
+  const ScMixedPrep p = NEVPT2_TRY(preparePcMixed(s, w, res));
+  return pcMixedForward(s, p, us, res);
+}
+
+// R1 along the prepared direction: the body pcMixedHessianVectorDevice and
+// #234's perturbation share. In the FULL mode (`s.epsCi`) every class's R and
+// its tangent along w, summed per accumulator, are folded onto the dm1
+// coefficient through W (Rdot) and W'[w] (R) -- mixedReverse's fold, Sijrs's
+// share included (its accumulator is otherwise never swept).
+Result<PcMixedHessianVectorResult> pcMixedReverse(const ScMixedHessianSetup& s,
+                                                  const ScMixedPrep& p, const bool perClass,
+                                                  const SigmaVectorOptions& sigma,
+                                                  const DeviceResources& res) {
   const wwrStream_t st = res.stream();
   const NevptIntegralsDevice& ints = s.ints;
   const int64_t norb = ints.h1e.dims[0];
@@ -2586,6 +2613,7 @@ Result<PcMixedHessianVectorResult> pcMixedHessianVectorDevice(const ScMixedHessi
   PcMixedWalk mw;
   mw.rot = &p.rot;
   mw.epsKappa = s.epsKappa;
+  mw.epsCi = s.epsCi;
   mw.aiW = &aiW;
   mw.aiZero = &aiZero;
   PcMixedHessianVectorResult out;
@@ -2610,17 +2638,35 @@ Result<PcMixedHessianVectorResult> pcMixedHessianVectorDevice(const ScMixedHessi
     for (int64_t i = 0; i < t.size(); ++i) t.flatRef(i) += tb.flat(i) - tf.flat(i);
     return t;
   };
+  // FULL (#234): the orbital-energy fold's tangent, per accumulator -- y's
+  // dm1 coefficient carries W^T dE/de, so along w it gains W^T (dE/de)'[w]
+  // and W'[w]^T dE/de.
+  std::vector<Tensor> fold;
+  if (s.epsCi) {
+    fold.assign(nAdj, Tensor({norb, norb}));
+    for (std::size_t c = 0; c < 8; ++c) {
+      const PcClassGradient& g = out.walk.classes[c];
+      Tensor& f = fold[perClass ? c : 0];
+      ciSourceAddInto(orbitalEnergyDm1Coefficient(*s.epsResponse, g.dEdCoreDot, g.dEdVirtDot),
+                      f);
+      if (p.wDotSet)
+        ciSourceAddInto(orbitalEnergyDm1Coefficient(p.wDot, g.dEdCore, g.dEdVirt), f);
+    }
+  }
   out.hkcTw = Tensor(s.ci.dims());
   out.fromWalkTangent = Tensor(s.ci.dims());
   out.fromDigests = Tensor(s.ci.dims());
   for (std::size_t k = 0; k < nAdj; ++k) {
-    // Sijrs (class 2, per class) was never swept into: its share is zero.
-    if (perClass && k == 2) {
+    // Sijrs (class 2, per class) was never swept into: with the orbital
+    // energies fixed in c its share is zero.
+    if (perClass && k == 2 && !s.epsCi) {
       out.hkcTwClass[k] = Tensor(s.ci.dims());
       continue;
     }
+    Tensor g1 = net(adjDot[k].dm1, adjW[k].dm1, adjFree[k].dm1);
+    if (s.epsCi) ciSourceAddInto(fold[k], g1);
     const Tensor walk = ciSourceVector(
-        sigma, s.ci, norb, s.nelecA, s.nelecB, net(adjDot[k].dm1, adjW[k].dm1, adjFree[k].dm1),
+        sigma, s.ci, norb, s.nelecA, s.nelecB, g1,
         net(adjDot[k].dm2, adjW[k].dm2, adjFree[k].dm2),
         net(adjDot[k].dm3, adjW[k].dm3, adjFree[k].dm3),
         net(adjDot[k].f3ac, adjW[k].f3ac, adjFree[k].f3ac),
@@ -2637,6 +2683,15 @@ Result<PcMixedHessianVectorResult> pcMixedHessianVectorDevice(const ScMixedHessi
     if (perClass) out.hkcTwClass[k] = std::move(hk);
   }
   return out;
+}
+
+Result<PcMixedHessianVectorResult> pcMixedHessianVectorDevice(const ScMixedHessianSetup& s,
+                                                              const Tensor& w,
+                                                              const bool perClass,
+                                                              const SigmaVectorOptions& sigma,
+                                                              const DeviceResources& res) {
+  const ScMixedPrep p = NEVPT2_TRY(preparePcMixed(s, w, res));
+  return pcMixedReverse(s, p, perClass, sigma, res);
 }
 
 // --- PC's orbital block: the solve's sandwich and Eddot_kk (#202) ---------------
@@ -2771,6 +2826,188 @@ Result<std::vector<PcOrbitalHessianResult>> pcOrbitalHessianDevice(
   out.reserve(pairs.size());
   for (std::size_t q = 0; q < pairs.size(); ++q)
     out.push_back(PcOrbitalHessianResult{curv[q], std::move(sand[q]), epsKappa});
+  return out;
+}
+
+// --- PC: the source terms' tangent along a supplied integral perturbation (#234)
+
+// One PC sandwich pair walk over `rot` (u = kappa, v = Idot, both with their
+// digests' tangents attached), the orbital energies responding: its forward
+// and, with `reverse`, reverse totals. A refused class is a Numerical Error.
+struct PcPairTotals {
+  double forward = 0.0;
+  double reverse = 0.0;
+};
+
+Result<PcPairTotals> pcPerturbationPairWalk(const ScSourceTangentSetup& s,
+                                            const ScPerturbationPrep& p, const ScRotation& rot,
+                                            const double scaleU, const bool reverse,
+                                            const std::size_t index, const DeviceResources& res) {
+  FullBlockSource src(s.ints);
+  const ActiveIntegralsDevice ai = activeViewOf(s.ints);
+  const PcRdms rdm{&s.rdm.dm1, &s.rdm.dm2, &s.rdm.dm3, &s.rdm.f3ac, &s.rdm.f3ca};
+  PcSandwichWalk sw;
+  sw.rot = &rot;
+  sw.epsKappa = true;
+  sw.reverse = reverse;
+  sw.zeroH1e = &p.zeroH1e;
+  sw.zeroH2e = &p.zeroH2e;
+  sw.scaleU = scaleU;
+  sw.scaleV = p.scale;
+  const PcGradientResult walk = NEVPT2_TRY(assemblePcSandwichClasses(ai, src, rdm, sw, res));
+  if (!walk.allDone())
+    return err_numerical(std::format(
+        "PC's sandwich along (kappa {}, the integral perturbation) has no value: {} refused",
+        index, walk.refusals()));
+  PcPairTotals t;
+  for (const PcClassGradient& c : walk.classes) {
+    t.forward += c.sandwich.forward;
+    t.reverse += c.sandwich.reverse;
+  }
+  return t;
+}
+
+Result<PcSourceTangentResult> pcSourceTangentDevice(const ScSourceTangentSetup& s,
+                                                    const IntegralPerturbationDevice& pert,
+                                                    const SigmaVectorOptions& sigma,
+                                                    const int64_t chunk,
+                                                    const DeviceResources& res) {
+  if (chunk < 1) return err_config("pcSourceTangentDevice: chunk must be at least 1");
+  const ScPerturbationPrep p = NEVPT2_TRY(preparePerturbation(s, pert, res));
+  PcSourceTangentResult out;
+  out.h2eDotMax = p.h2eDotMax;
+  out.f3DotMax = p.f3DotMax;
+
+  // The first derivative along Idot itself: the pairing in both modes, the
+  // digests' forward term at hdot2e beside the tangent.
+  {
+    const std::vector<ScFullRotationPairing> r = NEVPT2_TRY(
+        pairDottedSetsAny(/*pc=*/true, s.ints, s.rdm, &s.hbar, {&p.set()}, {true}, res));
+    out.edotAdjoint = r[0].adjoint;
+    out.edotForward =
+        r[0].tangent + NEVPT2_TRY(pcDigestTangentAt(s.opt, s.ci, s.nelecA, s.nelecB, s.ints,
+                                                    p.set().d.h2e, s.rdm, p.zeroDm1, p.zeroDm2,
+                                                    p.zeroDm3, res));
+  }
+
+  const int64_t nmo = s.gen.nmo();
+  std::vector<std::pair<int64_t, int64_t>> pairs;
+  for (int64_t a = 0; a < nmo; ++a)
+    for (int64_t b = a + 1; b < nmo; ++b) pairs.emplace_back(a, b);
+  const auto basis = [nmo](int64_t a, int64_t b) {
+    Tensor k({nmo, nmo});
+    k(a, b) = 1.0;
+    k(b, a) = -1.0;
+    return k;
+  };
+  out.probes = std::ssize(pairs);
+  out.kappaDotIntegrals = Tensor({nmo, nmo});
+  out.kappaDotSandwich = Tensor({nmo, nmo});
+
+  // The integrals term, `chunk` probes per walk: <kappa, Ydot_int> is PC's
+  // pairing at A_kappa(Idot), both modes, hbar_pc in the adjoint.
+  for (std::size_t c0 = 0; c0 < pairs.size(); c0 += static_cast<std::size_t>(chunk)) {
+    const std::size_t c1 = std::min(pairs.size(), c0 + static_cast<std::size_t>(chunk));
+    std::vector<ScDotted> sets;
+    sets.reserve(c1 - c0);
+    for (std::size_t i = c0; i < c1; ++i)
+      sets.push_back(NEVPT2_TRY(dottedAtMatrix(pert.d, pert.gen, s.rdm.dm1,
+                                               basis(pairs[i].first, pairs[i].second), res)));
+    std::vector<const ScDotted*> ptrs;
+    for (const ScDotted& d : sets) ptrs.push_back(&d);
+    const std::vector<ScFullRotationPairing> r = NEVPT2_TRY(pairDottedSetsAny(
+        /*pc=*/true, s.ints, s.rdm, &s.hbar, ptrs, std::vector<bool>(ptrs.size(), true), res));
+    for (std::size_t i = c0; i < c1; ++i) {
+      const ScFullRotationPairing& w = r[i - c0];
+      const auto [a, b] = pairs[i];
+      out.kappaDotIntegrals(a, b) = 0.5 * w.adjoint;
+      out.kappaDotIntegrals(b, a) = -0.5 * w.adjoint;
+      out.integralsDuality =
+          std::max(out.integralsDuality, std::fabs(w.integral - w.tangentIntegral));
+    }
+  }
+
+  // The sandwich, one pair walk per probe: <kappa, Ydot_sw> is the reverse
+  // pairing of Ehat'_pc's bars differentiated along Idot with kappa's inputs.
+  for (std::size_t i = 0; i < pairs.size(); ++i) {
+    const auto [a, b] = pairs[i];
+    std::optional<RdmBuildResult> kDig;
+    const ScRotation rot = NEVPT2_TRY(perturbationPairRotation(s, p, basis(a, b), kDig, res));
+    const PcPairTotals o =
+        NEVPT2_TRY(pcPerturbationPairWalk(s, p, rot, 2.0, /*reverse=*/true, i, res));
+    out.kappaDotSandwich(a, b) = 0.5 * o.reverse;
+    out.kappaDotSandwich(b, a) = -0.5 * o.reverse;
+    out.sandwichDuality = std::max(out.sandwichDuality, std::fabs(o.forward - o.reverse));
+  }
+  out.kappaDot = Tensor({nmo, nmo});
+  for (int64_t i = 0; i < out.kappaDot.size(); ++i)
+    out.kappaDot.flatRef(i) = out.kappaDotIntegrals.flat(i) + out.kappaDotSandwich.flat(i);
+
+  // ydot: PC's R1 with w -> Idot, FULL.
+  const ScMixedHessianSetup ms = mixedSetupOf(s);
+  const OrbitalEnergyResponse wDot = perturbationResponse(pert, res);
+  const ScMixedPrep mp = NEVPT2_TRY(prepareMixedDotted(ms, p.set(), &wDot, res));
+  PcMixedHessianVectorResult hv =
+      NEVPT2_TRY(pcMixedReverse(ms, mp, /*perClass=*/false, sigma, res));
+  if (!hv.walk.allDone())
+    return err_numerical(std::format(
+        "PC's three-term y has no tangent along the integral perturbation: {} refused",
+        hv.walk.refusals()));
+  out.ciDot = std::move(hv.hkcTw);
+  out.ciDotWalk = std::move(hv.fromWalkTangent);
+  out.ciDotDigests = std::move(hv.fromDigests);
+  out.edotWalk = hv.edotW;
+  return out;
+}
+
+Result<std::vector<PcSourceTangentForward>> pcSourceTangentForwardDevice(
+    const ScSourceTangentSetup& s, const IntegralPerturbationDevice& pert,
+    const std::vector<std::pair<Tensor, Tensor>>& dirs, const DeviceResources& res) {
+  const ScPerturbationPrep p = NEVPT2_TRY(preparePerturbation(s, pert, res));
+  const int64_t nmo = s.gen.nmo();
+  bool anyU = false;
+  for (std::size_t i = 0; i < dirs.size(); ++i) {
+    if (dirs[i].first.rank() != 0)
+      NEVPT2_TRY(checkCurvatureDirection(dirs[i].first, nmo, i, "kappa"));
+    if (dirs[i].second.rank() != 0) {
+      if (dirs[i].second.dims() != s.ci.dims())
+        return err_config(std::format(
+            "pcSourceTangentForwardDevice: direction {}'s u is not shaped like the state", i));
+      anyU = true;
+    }
+  }
+  const ScMixedHessianSetup ms = mixedSetupOf(s);
+  const OrbitalEnergyResponse wDot = perturbationResponse(pert, res);
+  std::optional<ScMixedPrep> mp;
+  if (anyU) mp.emplace(NEVPT2_TRY(prepareMixedDotted(ms, p.set(), &wDot, res)));
+  std::vector<PcSourceTangentForward> out;
+  out.reserve(dirs.size());
+  for (std::size_t i = 0; i < dirs.size(); ++i) {
+    const auto& [kappa, u] = dirs[i];
+    PcSourceTangentForward f;
+    if (kappa.rank() != 0) {
+      const ScDotted set = NEVPT2_TRY(dottedAtMatrix(pert.d, pert.gen, s.rdm.dm1, kappa, res));
+      const std::vector<ScFullRotationPairing> r = NEVPT2_TRY(
+          pairDottedSetsAny(/*pc=*/true, s.ints, s.rdm, /*hbar=*/nullptr, {&set}, {true}, res));
+      f.integrals = r[0].tangent;
+      f.integralsDigest = NEVPT2_TRY(pcDigestTangentAt(s.opt, s.ci, s.nelecA, s.nelecB, s.ints,
+                                                       set.d.h2e, s.rdm, p.zeroDm1, p.zeroDm2,
+                                                       p.zeroDm3, res));
+      std::optional<RdmBuildResult> kDig;
+      const ScRotation rot = NEVPT2_TRY(perturbationPairRotation(s, p, kappa, kDig, res));
+      double scale = 0.0;
+      for (int64_t k = 0; k < kappa.size(); ++k) scale += kappa.flat(k) * kappa.flat(k);
+      const PcPairTotals o =
+          NEVPT2_TRY(pcPerturbationPairWalk(s, p, rot, scale, /*reverse=*/false, i, res));
+      f.sandwich = o.forward;
+    }
+    if (u.rank() != 0) {
+      const std::vector<PcMixedHessianResult> m = NEVPT2_TRY(pcMixedForward(ms, *mp, {u}, res));
+      f.mixed = m[0].eddot;
+      f.mixedRotation = m[0].rotation;
+    }
+    out.push_back(f);
+  }
   return out;
 }
 

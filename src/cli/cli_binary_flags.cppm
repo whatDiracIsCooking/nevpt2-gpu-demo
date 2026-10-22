@@ -79,8 +79,11 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   the orbital source term Y and the sidecar it is read out
 //                   of are this binary's, and its ladders displace the stored
 //                   blocks and the sidecar's inventory as --kappa-full's do.
-//                   SC only, and refused the approximate digests with the
-//                   Hessian flags (a mixed second derivative).
+//                   With --pc, PC's (#234): the same flag rather than a twin
+//                   on nevpt2_pc_tangent, because Y_pc, the sidecar and the
+//                   PC orbital blocks it reuses are all this binary's.
+//                   Refused the approximate digests with the Hessian flags
+//                   (a mixed second derivative).
 //   each binary's own flags: that binary alone. --dump-source-terms is
 //                   nevpt2_sc_pseudodensity's because Y_xy needs the gradient
 //                   sidecar's full-MO-range arrays; nevpt2_demo computes y_I
@@ -416,8 +419,8 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
             "--sc-hessian-kk checks the orbital Hessian block; --kappa-act, --kappa-full, "
             "--sc-hessian-kc, --sc-hessian-kk-int, --dump-source-terms and --source-oracle are "
             "jobs of their own -- run one at a time");
-      // --sc-source-tangent (#220) likewise: one job per run, and SC's alone
-      // (it differentiates the SC source terms; PC's tangent is not built).
+      // --sc-source-tangent (#220) likewise: one job per run. With --pc it is
+      // PC's source terms' tangent (#234).
       if (!opt.scSourceTangentPath.empty() &&
           (opt.kappaAct || opt.kappaFull || opt.scHessianKc || opt.scHessianKkInt ||
            opt.scHessianKk || !opt.dumpSourceTermsPath.empty() ||
@@ -427,19 +430,17 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
             "perturbation; --kappa-act, --kappa-full, --sc-hessian-kc, --sc-hessian-kk-int, "
             "--sc-hessian-kk, --dump-source-terms and --source-oracle are jobs of their own -- "
             "run one at a time");
-      if (c.pc && !opt.scSourceTangentPath.empty())
-        return err_config(
-            "--sc-source-tangent differentiates the SC source terms along an integral "
-            "perturbation; it has no --pc path");
       // --pc picks PC-NEVPT2's source terms (#74), PC's orbital curvature
-      // (#200), PC's mixed block (#201) and PC's sandwich and Eddot_kk
-      // (#202): only the five jobs that assemble them take it.
+      // (#200), PC's mixed block (#201), PC's sandwich and Eddot_kk (#202) and
+      // PC's source terms' tangent along an integral perturbation (#234): only
+      // the six jobs that assemble them take it.
       if (c.pc && opt.dumpSourceTermsPath.empty() && opt.sourceOraclePath.empty() &&
-          !opt.scHessianKkInt && !opt.scHessianKc && !opt.scHessianKk)
+          !opt.scHessianKkInt && !opt.scHessianKc && !opt.scHessianKk &&
+          opt.scSourceTangentPath.empty())
         return err_config(
             "--pc makes --dump-source-terms, --source-oracle, --sc-hessian-kc, "
-            "--sc-hessian-kk-int and --sc-hessian-kk PC-NEVPT2's; the identities, --kappa-act "
-            "and --kappa-full are the SC energy's and have no --pc path");
+            "--sc-hessian-kk-int, --sc-hessian-kk and --sc-source-tangent PC-NEVPT2's; the "
+            "identities, --kappa-act and --kappa-full are the SC energy's and have no --pc path");
       if (!opt.gradgoldPath.empty() && !opt.kappaFull && !opt.scHessianKc &&
           !opt.scHessianKkInt && !opt.scHessianKk && opt.dumpSourceTermsPath.empty() &&
           opt.sourceOraclePath.empty() && opt.scSourceTangentPath.empty())
