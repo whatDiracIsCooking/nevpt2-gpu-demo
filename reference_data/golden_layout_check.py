@@ -440,6 +440,47 @@ def committed_sidecars(fail: Failures, tmp: Path) -> None:
                    f"no committed {'density-fitted' if fitted else 'conventional'} *.pertgold "
                    "was read, so that flavour is untested")
 
+    hessians = sorted(GOLDEN.glob("*.hessgold"))
+    fail.check(bool(hessians), "no committed *.hessgold was read, so that layout is untested")
+    for path in hessians:
+        # read_hessgold holds the not-computed contract itself: finite
+        # wherever a differenced coordinate reaches, NaN everywhere else.
+        r = fail.run(f"{path.name}: golden_format.read_hessgold", gf.read_hessgold, path)
+        if r is None:
+            continue
+        header, fields, arrays = r
+        out = tmp / path.name
+        fail.run(f"{path.name}: golden_format.write_hessgold",
+                 lambda o=out, h=header, f=fields, a=arrays: gf.write_hessgold(
+                     o, header=h, fields=f, arrays=a))
+        fail.check(out.exists() and out.read_bytes() == path.read_bytes(),
+                   f"{path.name}: golden_format.write_hessgold does not reproduce it")
+        out.unlink(missing_ok=True)
+        named = fail.run(f"{path.name}: golden_format.hessgold_case", gf.hessgold_case, path)
+        if named is None:
+            continue
+        case, scheme = named
+        fail.check((fields["case"], fields["scheme"]) == (case, scheme),
+                   f"{path.name}: its fields say {fields['case']} {fields['scheme']}, its "
+                   f"name {case} {scheme}")
+        # <case>_casscf[_pc].hessgold sits beside <case>_casscf.nevpt2gold, and
+        # is the Hessian at the geometry of the committed .mogold beside it.
+        twin = GOLDEN / f"{case}_casscf.nevpt2gold"
+        fail.check(twin.exists(), f"{path.name}: no {twin.name} beside it")
+        side = GOLDEN / f"{case}_casscf.mogold"
+        fail.check(side.exists(), f"{path.name}: no {side.name} beside it")
+        if side.exists():
+            _h, mf, ma = gf.read_mo_sidecar(side)
+            fail.check(mf.get("symbols", "").split() == fields["symbols"].split(),
+                       f"{path.name}: its atoms are not {side.name}'s")
+            fail.check(ma["geom"].shape == arrays["geom"].shape
+                       and np.allclose(ma["geom"], arrays["geom"], rtol=0, atol=1e-10),
+                       f"{path.name}: its geometry is not {side.name}'s")
+        kept = int(arrays["coords"].sum())
+        print(f"  {path.name}: {gf.HESSGOLD_MAGIC.decode()}, {fields['scheme'].upper()}, "
+              f"{kept} of {3 * header['natm']} coordinates differenced, "
+              f"{header['nsteps']} rungs", flush=True)
+
 
 def fresh_writer(fail: Failures, tmp: Path) -> None:
     """A small golden from the writer as it is now, both kinds, through every

@@ -58,6 +58,13 @@ PC), the converged orbitals as a :class:`MoGuess` for the next geometry, and
 the guard ledger: every number each refusal above read, so a caller can say
 why a geometry was taken.
 
+**Several schemes at one geometry**: :func:`gradients_at` (``schemes=("sc",
+"pc")``) runs steps 1, 2 and the state of step 4 once, one dump per scheme,
+and hands the first solve's ``kappa`` sweep -- on a dumped source it
+differences ``E_CASCI`` alone, the bulk of the solve -- to the second. Each
+gradient is bit for bit the single-scheme call's. The seminumerical Hessian
+(``nevpt2_seminum_hessian.py --both``) takes both this way.
+
 **The reference.** ``case`` is a committed ``nevpt2_numgrad.CASES`` entry with
 a committed ``golden/<case>_casscf.mogold``: its geometry fixes the point
 group and those orbitals fix the core/active irreps every call is held to,
@@ -386,10 +393,39 @@ def gradient_at(geom, case: str, *, pc: bool = False, reference: str = "casscf",
     ``kappa`` sweep runs in. Files go to ``work_dir`` (default: a fresh
     temporary directory) named by ``label``, and are deleted on return unless
     ``keep``."""
+    out = gradients_at(geom, case, schemes=("pc",) if pc else ("sc",), reference=reference,
+                       mo_guess=mo_guess, binary=binary, work_dir=work_dir,
+                       gpu_lock_path=gpu_lock_path, workers=workers, label=label, keep=keep,
+                       log=log)
+    return out["pc" if pc else "sc"]
+
+
+#: The schemes :func:`gradients_at` takes, by the name a ``.gradsrc`` dump
+#: and a ``.hessgold`` use.
+SCHEMES = ("sc", "pc")
+
+
+def gradients_at(geom, case: str, *, schemes: tuple[str, ...] = SCHEMES,
+                 reference: str = "casscf", mo_guess: MoGuess | Path | str | None = None,
+                 binary: Path | None = None, work_dir: Path | None = None,
+                 gpu_lock_path: str | None = None, workers: int = 1, label: str = "state",
+                 keep: bool = False, log=print) -> dict[str, GradientAt]:
+    """:func:`gradient_at` for several schemes at one geometry, sharing what
+    does not depend on the scheme: the CASSCF re-optimisation and its guard,
+    one transient golden (with block2's PC fields when ``"pc"`` is asked
+    for), the rebuilt state, and the solve's ``kappa`` sweep, which on a
+    dumped source differences ``E_CASCI`` alone and is a pure function of the
+    state (``nevpt2_grad.kappa_sweep``). Each scheme gets its own dump and its
+    own coupled solve. Every gradient is bit for bit the one
+    :func:`gradient_at` returns for that scheme alone. Returns ``{scheme:
+    GradientAt}``; ``wall`` in each ledger is the whole call's."""
     t0 = time.perf_counter()
     if reference not in REFERENCES:
         raise SystemExit(f"gradient_at: reference={reference!r} is not one of {REFERENCES}: "
                          "the CASCI-on-RHF gradient is nevpt2_grad.py --reference casci's")
+    schemes = tuple(schemes)
+    if not schemes or any(s not in SCHEMES for s in schemes) or len(set(schemes)) != len(schemes):
+        raise SystemExit(f"gradients_at: schemes {schemes!r} are not distinct ones of {SCHEMES}")
     spec = case_spec(case)
     geom = as_geometry(geom)
     ref_geom = reference_geometry(spec)
@@ -406,29 +442,31 @@ def gradient_at(geom, case: str, *, pc: bool = False, reference: str = "casscf",
     exe = find_binary(binary)
     written: list[Path] = []
     try:
-        out = _gradient_at(geom, spec, pc=pc, mo_guess=mo_guess, exe=exe, work=work,
-                           gpu_lock_path=gpu_lock_path, workers=workers, label=label,
-                           written=written, group=group, log=log)
+        out = _gradients_at(geom, spec, schemes=schemes, mo_guess=mo_guess, exe=exe,
+                            work=work, gpu_lock_path=gpu_lock_path, workers=workers,
+                            label=label, written=written, group=group, log=log)
     finally:
         if not keep:
             for p in written:
                 p.unlink(missing_ok=True)
             if own_dir:
                 shutil.rmtree(work, ignore_errors=True)
-    out.ledger["wall"] = time.perf_counter() - t0
-    out.ledger["work_dir"] = str(work)
-    out.ledger["kept"] = bool(keep)
+    for r in out.values():
+        r.ledger["wall"] = time.perf_counter() - t0
+        r.ledger["work_dir"] = str(work)
+        r.ledger["kept"] = bool(keep)
     return out
 
 
-def _gradient_at(geom: list, spec: dict, *, pc: bool, mo_guess, exe: Path, work: Path,
-                 gpu_lock_path: str | None, workers: int, label: str, written: list,
-                 group: tuple, log) -> GradientAt:
-    """:func:`gradient_at`'s four steps, once the free refusals have run."""
+def _gradients_at(geom: list, spec: dict, *, schemes: tuple[str, ...], mo_guess, exe: Path,
+                  work: Path, gpu_lock_path: str | None, workers: int, label: str,
+                  written: list, group: tuple, log) -> dict[str, GradientAt]:
+    """:func:`gradients_at`'s four steps, once the free refusals have run."""
     case = spec["case"]
     what = f"gradient_at({case})"
     walls: dict[str, float] = {}
-    ledger: dict = dict(case=case, pc=pc, reference="casscf", label=label,
+    want_pc = "pc" in schemes
+    ledger: dict = dict(case=case, reference="casscf", label=label,
                         point_group=group, binary=str(exe), tiles=TILES, workers=workers)
 
     # -- 1. the CASSCF state, re-optimised from the guess -------------------
@@ -480,40 +518,47 @@ def _gradient_at(geom: list, spec: dict, *, pc: bool, mo_guess, exe: Path, work:
     t = time.perf_counter()
     golden = work / f"{label}.nevpt2gold"
     written += [golden, golden.with_suffix(".gradgold")]
-    meta = write_transient(atom, spec, mogold, golden, name=label, pc=pc, gradgold=True)
+    meta = write_transient(atom, spec, mogold, golden, name=label, pc=want_pc, gradgold=True)
     walls["golden"] = time.perf_counter() - t
     log(f"  transient golden {golden} (+ .gradgold"
-        + (", block2's PC fields" if pc else "") + f", {walls['golden']:.1f}s)")
+        + (", block2's PC fields" if want_pc else "") + f", {walls['golden']:.1f}s)")
 
-    # -- 3. the GPU's source terms ------------------------------------------
-    t = time.perf_counter()
-    gradsrc = work / f"{label}.gradsrc"
-    gpu_log = work / f"{label}.dump.log"
-    written += [gradsrc, gpu_log]
-    cmd = [str(exe), "--golden", str(golden), "--tiles", str(TILES)] + (
-        ["--pc"] if pc else []) + ["--dump-source-terms", str(gradsrc)]
-    with gpu_lock(gpu_lock_path):
-        # The wait for the card's lock is not the dump's cost: timed apart.
-        walls["gpu_wait"] = time.perf_counter() - t
+    # -- 3. the GPU's source terms, one dump per scheme ---------------------
+    gradsrc: dict[str, Path] = {}
+    ledger["gpu"] = {}
+    walls["gpu_wait"] = walls["gpu"] = 0.0
+    for scheme in schemes:
+        pc = scheme == "pc"
         t = time.perf_counter()
-        p = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    gpu_log.write_text(f"$ {' '.join(cmd)}\n{p.stdout}{p.stderr}\nexit {p.returncode}\n")
-    walls["gpu"] = time.perf_counter() - t
-    ledger["gpu"] = dict(cmd=" ".join(cmd), exit=p.returncode, log=str(gpu_log))
-    if p.returncode != 0 or not gradsrc.exists():
-        tail = "\n".join((p.stdout + p.stderr).strip().splitlines()[-8:])
-        raise SystemExit(f"{what}: {exe.name} --dump-source-terms exited {p.returncode}"
-                         f" (log {gpu_log}):\n{tail}")
-    log(f"  GPU source terms {gradsrc} ({walls['gpu']:.1f}s)")
+        stem = label if len(schemes) == 1 else f"{label}.{scheme}"
+        gradsrc[scheme] = work / f"{stem}.gradsrc"
+        gpu_log = work / f"{stem}.dump.log"
+        written += [gradsrc[scheme], gpu_log]
+        cmd = [str(exe), "--golden", str(golden), "--tiles", str(TILES)] + (
+            ["--pc"] if pc else []) + ["--dump-source-terms", str(gradsrc[scheme])]
+        with gpu_lock(gpu_lock_path):
+            # The wait for the card's lock is not the dump's cost: timed apart.
+            walls["gpu_wait"] += time.perf_counter() - t
+            t = time.perf_counter()
+            p = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        gpu_log.write_text(f"$ {' '.join(cmd)}\n{p.stdout}{p.stderr}\nexit {p.returncode}\n")
+        walls["gpu"] += time.perf_counter() - t
+        ledger["gpu"][scheme] = dict(cmd=" ".join(cmd), exit=p.returncode, log=str(gpu_log))
+        if p.returncode != 0 or not gradsrc[scheme].exists():
+            tail = "\n".join((p.stdout + p.stderr).strip().splitlines()[-8:])
+            raise SystemExit(f"{what}: {exe.name} --dump-source-terms exited {p.returncode}"
+                             f" (log {gpu_log}):\n{tail}")
+        log(f"  GPU source terms {gradsrc[scheme]} ({time.perf_counter() - t:.1f}s)")
 
-    # -- 4. the state, the solve and the contraction -------------------------
+    # -- 4. the state, the solves and the contractions -----------------------
     t = time.perf_counter()
     ngr.PC_GUARD.__dict__.update(ngr.PcGuardLedger().__dict__)
     with contextlib.redirect_stdout(io.StringIO()):
-        st = ngr.build_state(case, spec, pc=pc, reference="casscf", mo_from=mogold, geom=geom)
+        st = ngr.build_state(case, spec, pc=want_pc, reference="casscf", mo_from=mogold,
+                             geom=geom)
     wiring = dict(d_e_casci=st.e_casci - meta["e_casci"],
                   d_e_corr=st.e_corr - meta["e_nevpt2_total"])
-    if pc:
+    if want_pc:
         wiring["d_e_corr_pc"] = st.e_corr_pc - ngrad.read_golden_pc_total(golden)
     ledger["wiring"] = wiring
     ledger["mo_gate"] = tuple(float(x) for x in st.mc.mo_gate)
@@ -521,30 +566,40 @@ def _gradient_at(geom: list, spec: dict, *, pc: bool, mo_guess, exe: Path, work:
         raise SystemExit(f"{what}: the rebuilt state is not the transient golden's: "
                          + ", ".join(f"{k} {v:+.2e}" for k, v in wiring.items())
                          + f" (> {ngrad.REF_STATE_TOL:g})")
-    src = ngr.load_source_terms(gradsrc, st, pc=pc)
-    g = ngr.solve_gradient(st, src, pc=pc, workers=workers, log=lambda *a: None)
-    walls["solve"] = time.perf_counter() - t
-    led = ngr.PC_GUARD
-    ledger["pc_guard"] = dict(
-        applies=pc, gap=st.pc_gap, displaced=led.displaced, guarded=led.displaced_guarded,
-        sampled=led.sampled, min_gap=led.min_gap, rank_changed=list(led.rank_changed))
-    if pc and (led.displaced != led.displaced_guarded or led.rank_changed):
-        raise SystemExit(f"{what}: the PC guard ledger fails: "
-                         f"{led.displaced_guarded} of {led.displaced} displaced CI vectors "
-                         f"guarded, {len(led.rank_changed)} rank change(s)")
-    ledger["residuals"] = {k: v for k, v in g.residuals.items()
-                           if isinstance(v, (int, float, bool, type(None)))}
+    walls["state"] = time.perf_counter() - t
     ledger["energies"] = dict(e_casscf=rec["e_casscf"], e_casci=st.e_casci,
                               e_corr_sc=st.e_corr, e_corr_pc=st.e_corr_pc)
-    ledger["walls"] = walls
-    energy = st.e_casci + (st.e_corr_pc if pc else st.e_corr)
-    log(f"  gradient ({'PC' if pc else 'SC'}) solved in {walls['solve']:.1f}s: E = "
-        f"{energy:+.12f}, max |g| = {np.abs(g.de).max():.6e}, sum over atoms "
-        f"{np.abs(g.de.sum(axis=0)).max():.1e}")
     nxt = MoGuess(geom=geom, mo_coeff=rec["mo"], ci=rec["ci_opt"], e_casscf=rec["e_casscf"],
                   origin=f"gradient_at({case}) {label}")
-    return GradientAt(geom=geom, grad=np.asarray(g.de), energy=float(energy), mo=nxt,
-                      ledger=ledger)
+    out: dict[str, GradientAt] = {}
+    sweep = None
+    for scheme in schemes:
+        pc = scheme == "pc"
+        t = time.perf_counter()
+        src = ngr.load_source_terms(gradsrc[scheme], st, pc=pc)
+        # The kappa sweep on a dumped source differences E_CASCI alone: the
+        # second scheme's solve takes the first's (solve_gradient's sweep=).
+        g = ngr.solve_gradient(st, src, pc=pc, workers=workers, sweep=sweep,
+                               log=lambda *a: None)
+        sweep = g.sweep
+        led = ngr.PC_GUARD
+        own = dict(ledger, pc=pc, walls=dict(walls, solve=time.perf_counter() - t))
+        own["pc_guard"] = dict(
+            applies=pc, gap=st.pc_gap, displaced=led.displaced, guarded=led.displaced_guarded,
+            sampled=led.sampled, min_gap=led.min_gap, rank_changed=list(led.rank_changed))
+        if pc and (led.displaced != led.displaced_guarded or led.rank_changed):
+            raise SystemExit(f"{what}: the PC guard ledger fails: "
+                             f"{led.displaced_guarded} of {led.displaced} displaced CI vectors "
+                             f"guarded, {len(led.rank_changed)} rank change(s)")
+        own["residuals"] = {k: v for k, v in g.residuals.items()
+                            if isinstance(v, (int, float, bool, type(None)))}
+        energy = st.e_casci + (st.e_corr_pc if pc else st.e_corr)
+        log(f"  gradient ({scheme.upper()}) solved in {own['walls']['solve']:.1f}s: E = "
+            f"{energy:+.12f}, max |g| = {np.abs(g.de).max():.6e}, sum over atoms "
+            f"{np.abs(g.de.sum(axis=0)).max():.1e}")
+        out[scheme] = GradientAt(geom=geom, grad=np.asarray(g.de), energy=float(energy),
+                                 mo=nxt, ledger=own)
+    return out
 
 
 # --------------------------------------------------------------------------

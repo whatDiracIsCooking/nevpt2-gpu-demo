@@ -4,8 +4,9 @@ formats in ``golden/``: the ``*.nevpt2gold`` golden, the ``*.gradgold``
 gradient sidecar (conventional or density-fitted) and the ``*.mogold`` MO
 sidecar -- and of the
 ``*.srcgold`` source-term oracle, the ``*.respgold`` CASSCF response
-sidecar and the ``*.pertgold`` integral perturbation sidecar, which end in
-the same array section. It
+sidecar, the ``*.pertgold`` integral perturbation sidecar and the
+``*.hessgold`` seminumerical nuclear Hessian sidecar, which end in the same
+array section. It
 also reads ``states.json``, the manifest a CASSCF-reference sweep keeps its
 displaced states' ``.mogold`` files under (:func:`read_states_manifest`).
 
@@ -13,7 +14,8 @@ Every reader in ``reference_data/`` goes through this module; none parses a
 header, or seeks to an offset, of its own. The scalar header of each format is
 written down **once**, as a field table keyed by magic (:data:`GOLDEN_HEADERS`,
 :data:`GRADGOLD_HEADERS`, :data:`MO_SIDECAR_HEADERS`,
-:data:`SRCGOLD_HEADERS`, :data:`RESPGOLD_HEADERS`, :data:`PERTGOLD_HEADERS`), and
+:data:`SRCGOLD_HEADERS`, :data:`RESPGOLD_HEADERS`, :data:`PERTGOLD_HEADERS`,
+:data:`HESSGOLD_HEADERS`), and
 both directions are
 driven by that table: :func:`pack_header` writes it, :func:`_read_header`
 reads it, and where the array table begins is wherever the header read stopped
@@ -130,6 +132,15 @@ RESPGOLD_MAGIC = b"NEVPT2R1"
 #: for the conventional integrals and the auxiliary basis size for the
 #: density-fitted ones, as a ``NEVPT2F1`` sidecar's is.
 PERTGOLD_MAGIC = b"NEVPT2I1"
+
+#: Magic bytes identifying a **seminumerical nuclear Hessian sidecar**
+#: (``*.hessgold``, #217): central differences of the GPU-sourced NEVPT2
+#: gradient (``gradient_at.py``) over the coordinates that keep the point
+#: group, through a Richardson step ladder (``nevpt2_seminum_hessian.py
+#: --write``; :data:`HESSGOLD_ARRAYS` has the arrays). The oracle the analytic
+#: nuclear Hessian is gated against (docs/hessian-theory.md, section 8). One
+#: magic for both schemes; the ``scheme`` text field says which.
+HESSGOLD_MAGIC = b"NEVPT2H1"
 
 #: A source-term oracle's ``(scheme, flavour)``, by magic: what
 #: :func:`read_srcgold` reports as ``header["scheme"]`` /
@@ -273,6 +284,46 @@ PERTGOLD_ARRAYS = (
     ("g_xc_cc_k", ("ncoord", "nmo", "ncore", "ncore")),
     ("g_xa_vv", ("ncoord", "nmo", "nact", "nvirt")),
     ("g_xc_vv", ("ncoord", "nmo", "ncore", "nvirt")),
+)
+
+#: THE seminumerical nuclear Hessian sidecar's scalar header (#217): the atom
+#: count (``3 natm`` is every per-coordinate array's extent), the number of
+#: rungs of the step ladder, the run of fourfold halvings every differenced
+#: column was required to show (``nevpt2_grad.LADDER_RUN``), and the energy
+#: (``E_CASCI + E_corr``, SC or PC) at the reference geometry. A text section
+#: (:data:`HESSGOLD_FIELDS`) and the array table follow, as in an MO sidecar.
+HESSGOLD_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
+    HESSGOLD_MAGIC: (("natm", "i"), ("nsteps", "i"), ("ladder_run", "i"), ("energy", "d")),
+}
+
+#: The arrays a Hessian sidecar holds, in file order, each with its shape in
+#: header fields (``ncoord`` = ``3 natm``). Coordinates are ``k = 3 atom +
+#: axis``, bohr; Eh/bohr^2 for every Hessian array. ``H[i, j] = d g_i /
+#: d R_j``: a column is one differenced coordinate. Where a coordinate was
+#: not differenced (it does not keep the point group), every element it
+#: would reach is NaN, never zero (:func:`_check_hessgold`).
+HESSGOLD_ARRAYS = (
+    # the reference geometry (bohr) and the gradient there (Eh/bohr)
+    ("geom", ("natm", "3")),
+    ("gradient", ("ncoord",)),
+    # 1.0 where the coordinate was differenced
+    ("coords", ("ncoord",)),
+    # the step ladder, bohr, coarse to fine
+    ("steps", ("nsteps",)),
+    # the symmetrised Hessian over the differenced block
+    ("hessian", ("ncoord", "ncoord")),
+    # the unsymmetrised columns: each the Richardson extrapolant of its ladder
+    ("hessian_raw", ("ncoord", "ncoord")),
+    # |H - H^T| over the differenced block, before symmetrising
+    ("asymmetry", ("ncoord", "ncoord")),
+    # per element, |R(end) - R(end - 1)|: the extrapolant's move from the
+    # coarser pair of the column's run
+    ("richardson_residual", ("ncoord", "ncoord")),
+    # the central-difference quotients themselves, fd[i][:, j] at steps[i]
+    ("fd", ("nsteps", "ncoord", "ncoord")),
+    # per column, the fourfold run found and the index of its finest rung
+    ("column_run", ("ncoord",)),
+    ("column_end", ("ncoord",)),
 )
 
 #: No array the generator writes has more than a handful of axes; a rank past
@@ -590,6 +641,133 @@ def read_pertgold(path) -> tuple[dict, dict[str, np.ndarray]]:
         arrays = _read_arrays(f, path, None)
     _check_pertgold(path, header, arrays)
     return header, arrays
+
+
+#: The text fields a seminumerical Hessian sidecar carries, in file order:
+#: the case, the scheme (``"sc"`` / ``"pc"``), the reference (``"casscf"``),
+#: the atom symbols (space-separated, the geometry's order), the
+#: generator revision every differenced gradient was computed at
+#: (``nevpt2_seminum_hessian.generator_rev``), and the guard ledger as one
+#: JSON object.
+HESSGOLD_FIELDS = ("case", "scheme", "reference", "symbols", "rev", "ledger")
+
+
+def _hessgold_masks(header: dict, arrays: dict[str, np.ndarray]):
+    """``(column mask, block mask)`` of a Hessian sidecar: which coordinates
+    were differenced, and the ``(ncoord, ncoord)`` block both of whose
+    indices were."""
+    kept = arrays["coords"] == 1.0
+    return kept, np.outer(kept, kept)
+
+
+def _check_hessgold(path, header: dict, fields: dict[str, str],
+                    arrays: dict[str, np.ndarray]) -> None:
+    """Exactly the :data:`HESSGOLD_FIELDS` and :data:`HESSGOLD_ARRAYS`, in
+    order, at the header's shapes, and the **not-computed contract**: every
+    element a differenced coordinate reaches is finite, and every element it
+    does not reach is NaN -- never a zero standing in for a number nobody
+    computed. ``coords`` is a 0/1 mask, ``steps`` strictly decreasing and
+    positive, the ledger a JSON object."""
+    if list(fields) != list(HESSGOLD_FIELDS):
+        raise FormatError(f"{path}: fields {list(fields)}, expected {list(HESSGOLD_FIELDS)}")
+    if fields["scheme"] not in ("sc", "pc"):
+        raise FormatError(f"{path}: scheme {fields['scheme']!r} is not 'sc' or 'pc'")
+    if len(fields["symbols"].split()) != header["natm"]:
+        raise FormatError(f"{path}: {len(fields['symbols'].split())} symbols, "
+                          f"natm = {header['natm']}")
+    try:
+        ledger = json.loads(fields["ledger"])
+    except json.JSONDecodeError as e:
+        raise FormatError(f"{path}: the ledger is not JSON ({e})") from None
+    if not isinstance(ledger, dict):
+        raise FormatError(f"{path}: the ledger is not a JSON object")
+    if header["natm"] < 1 or header["nsteps"] < 1:
+        raise FormatError(f"{path}: header {header} is not a usable layout")
+    dims = dict(header, ncoord=3 * header["natm"], **{"3": 3})
+    names = [n for n, _s in HESSGOLD_ARRAYS]
+    if list(arrays) != names:
+        raise FormatError(f"{path}: arrays {list(arrays)}, expected {names}")
+    for name, shape in HESSGOLD_ARRAYS:
+        want = tuple(dims[d] for d in shape)
+        if arrays[name].shape != want:
+            raise FormatError(f"{path}: {name} is {arrays[name].shape}, expected {shape} = {want}")
+    coords, steps = arrays["coords"], arrays["steps"]
+    if not np.isin(coords, (0.0, 1.0)).all() or not coords.any():
+        raise FormatError(f"{path}: coords is not a nonempty 0/1 mask")
+    if not (np.isfinite(steps).all() and (steps > 0).all() and (np.diff(steps) < 0).all()):
+        raise FormatError(f"{path}: steps {steps} are not positive and strictly decreasing")
+    for name in ("geom", "gradient"):
+        if not np.isfinite(arrays[name]).all():
+            raise FormatError(f"{path}: {name} is not finite")
+    kept, block = _hessgold_masks(header, arrays)
+    reach = {
+        "hessian": block, "asymmetry": block,
+        "hessian_raw": np.broadcast_to(kept, block.shape),
+        "richardson_residual": np.broadcast_to(kept, block.shape),
+        "fd": np.broadcast_to(kept, arrays["fd"].shape),
+        "column_run": kept, "column_end": kept,
+    }
+    for name, mask in reach.items():
+        a = arrays[name]
+        if not np.isfinite(a[mask]).all():
+            raise FormatError(f"{path}: {name} is not finite everywhere a differenced "
+                              "coordinate reaches")
+        if not np.isnan(a[~mask]).all():
+            raise FormatError(f"{path}: {name} holds a number where no differenced "
+                              "coordinate reaches: a block that was not computed is NaN, "
+                              "never filled")
+
+
+def write_hessgold(path, *, header: dict, fields: dict[str, str],
+                   arrays: dict[str, np.ndarray]) -> None:
+    """Write a seminumerical nuclear Hessian sidecar (``*.hessgold``,
+    ``NEVPT2H1``): the :data:`HESSGOLD_HEADERS` scalar header from
+    ``header``, the :data:`HESSGOLD_FIELDS` text section, then the
+    :data:`HESSGOLD_ARRAYS` in their order -- all held to
+    :func:`_check_hessgold`'s contract before a byte is written.
+    :func:`read_hessgold` reads it back into the same ``(header, fields,
+    arrays)``."""
+    names = [n for n, _s in HESSGOLD_ARRAYS]
+    if set(arrays) != set(names):
+        raise FormatError(f"{path}: arrays {sorted(arrays)}, expected {sorted(names)}")
+    arrays = {n: np.asarray(arrays[n], dtype=np.float64) for n in names}
+    fields = {k: fields[k] for k in HESSGOLD_FIELDS if k in fields}
+    _check_hessgold(path, header, fields, arrays)
+    with open(path, "wb") as f:
+        f.write(pack_header(HESSGOLD_HEADERS, HESSGOLD_MAGIC, header))
+        write_fields(f, fields)
+        write_arrays(f, arrays)
+
+
+def read_hessgold(path) -> tuple[dict, dict[str, str], dict[str, np.ndarray]]:
+    """``(header, fields, arrays)`` from a seminumerical Hessian sidecar,
+    held to :func:`_check_hessgold`'s contract, so :func:`write_hessgold`
+    writes the same file back."""
+    with open(path, "rb") as f:
+        header = _read_header(f, path, HESSGOLD_HEADERS, "Hessian sidecar")
+        del header["magic"]
+        fields = _read_text_fields(f, path)
+        arrays = _read_arrays(f, path, None)
+    _check_hessgold(path, header, fields, arrays)
+    return header, fields, arrays
+
+
+def hessgold_name(case: str, scheme: str) -> str:
+    """The file name a ``_casscf`` state's Hessian sidecar is committed under,
+    ``<case>_casscf[_pc].hessgold``, beside ``<case>_casscf.nevpt2gold``."""
+    return f"{case}_casscf" + ("_pc" if scheme == "pc" else "") + ".hessgold"
+
+
+def hessgold_case(path) -> tuple[str, str]:
+    """``(case, scheme)`` off a Hessian sidecar's file name
+    (:func:`hessgold_name` inverted)."""
+    stem = Path(path).stem
+    scheme = "sc"
+    if stem.endswith("_pc"):
+        stem, scheme = stem[: -len("_pc")], "pc"
+    if not stem.endswith("_casscf"):
+        raise FormatError(f"{path}: a Hessian sidecar is named <case>_casscf[_pc].hessgold")
+    return stem[: -len("_casscf")], scheme
 
 
 def srcgold_name(case: str, scheme: str, flavour: str) -> str:

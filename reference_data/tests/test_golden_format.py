@@ -275,9 +275,45 @@ def test_arrays_at_cli(tmp_path, capsys):
     assert gf.main(["nonsense"]) == 2
 
 
+def _write_hessgold(path):
+    """A two-atom Hessian sidecar with one coordinate (``0x``) not computed:
+    its column and row NaN, every other element finite."""
+    n, nsteps = 6, 5
+    m = np.ones(n, dtype=bool)
+    m[0] = False
+    rng = np.random.default_rng(217)
+    h = rng.standard_normal((n, n))
+    h = h + h.T
+    cols = np.where(m[None, :], h, np.nan)
+    block = np.where(np.outer(m, m), h, np.nan)
+    gf.write_hessgold(
+        path, header=dict(natm=2, nsteps=nsteps, ladder_run=3, energy=-109.25),
+        fields=dict(case="n2", scheme="sc", reference="casscf", symbols="N N", rev="r",
+                    ledger='{"points": {}}'),
+        arrays=dict(geom=rng.standard_normal((2, 3)), gradient=rng.standard_normal(n),
+                    coords=m.astype(float), steps=2.0 ** -np.arange(7.0, 7.0 + nsteps),
+                    hessian=block, hessian_raw=cols, asymmetry=np.abs(block) * 0.0,
+                    richardson_residual=np.abs(cols), fd=np.stack([cols] * nsteps),
+                    column_run=np.where(m, 3.0, np.nan), column_end=np.where(m, 4.0, np.nan)))
+
+
+def test_hessgold_round_trip_and_rewrite(tmp_path):
+    p = tmp_path / "h.hessgold"
+    _write_hessgold(p)
+    header, fields, arrays = gf.read_hessgold(p)
+    assert p.read_bytes()[:8] == gf.HESSGOLD_MAGIC == b"NEVPT2H1"
+    assert header == dict(natm=2, nsteps=5, ladder_run=3, energy=-109.25)
+    assert np.isnan(arrays["hessian_raw"][:, 0]).all()
+    assert np.isnan(arrays["hessian"][0]).all() and np.isnan(arrays["hessian"][:, 0]).all()
+    q = tmp_path / "q.hessgold"
+    gf.write_hessgold(q, header=header, fields=fields, arrays=arrays)
+    assert q.read_bytes() == p.read_bytes()
+
+
 # --- refusals ---------------------------------------------------------------
 
 WRITERS = {
+    "hessgold": (_write_hessgold, gf.read_hessgold),
     "golden": (_write_golden, gf.read_golden),
     "golden_v1": (_write_golden_v1, gf.read_golden),
     "gradgold": (_write_gradgold, gf.read_gradgold),
