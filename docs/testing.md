@@ -227,6 +227,16 @@ What they are, all on synthetic inputs, no PySCF solve, no card, no network:
   table's gaps to `_check_pc_conditioning` at 0.99 / 1.01 of 1e3. The
   transient golden's NaN PC placeholders round-trip through
   `read_golden_pc_total`, and a `--work-dir` inside `golden/` is refused.
+- **`test_gradient_at.py`** (#212) — `gradient_at.py`'s refusals, every one
+  before the first SCF. An out-of-plane displacement of acrolein (Cs → C1)
+  is refused with the group it breaks to, and writes nothing; the same atom
+  moved in the plane passes the group check. A work dir inside `golden/` is
+  refused, and `pc_on_states.py`'s guard is the same function, not a copy.
+  So are a CASCI reference, an unknown case, a case with no committed
+  `_casscf.mogold`, atoms out of order, placeholder PC fields on a PC golden
+  and a missing binary. The continuity guard's energy signal counts within
+  0.0025 bohr of the guess (written out) and not beyond it, where the other
+  two signals still do.
 - **`test_numgrad_df.py`** (#167) — `nevpt2_numgrad.py --df`. On the fitted
   route, a named out-of-plane component of acrolein (`0z`, Cs → C1) is
   refused with the group it breaks to, before any SCF: a stand-in for

@@ -1010,7 +1010,8 @@ class State:
 
 
 def build_state(case: str, spec: dict, *, pc: bool = False, reference: str = "casci",
-                mo_from: Path | None = None, auxbasis: str | None = None) -> State:
+                mo_from: Path | None = None, auxbasis: str | None = None,
+                geom: list | None = None) -> State:
     """``generate_golden._build_state``'s own state -- same single-threading,
     same Davidson tolerance, same auto-detected point group, same
     irrep-selected active space -- plus the generalized and RHF Fock matrices
@@ -1033,14 +1034,19 @@ def build_state(case: str, spec: dict, *, pc: bool = False, reference: str = "ca
     fitted calculation's (``generate_golden._gradient_matrices``, the
     density-fitted sidecar's own builder). SC on the CASCI branch only, as
     ``nevpt2_numgrad.py --df`` is: the GPU refuses a fitted PC dump, and no
-    fitted ``grad_num`` of a CASSCF reference exists."""
+    fitted ``grad_num`` of a CASSCF reference exists.
+
+    ``geom`` (Angstrom, in ``nevpt2_numgrad.read_xyz``'s form) replaces
+    ``spec["geometry"]``'s file: the state at an arbitrary geometry, which is
+    how ``gradient_at.py`` builds it."""
     casscf = reference == "casscf"
     if auxbasis is not None and (pc or casscf):
         raise SystemExit("build_state: a density-fitted state is SC on the CASCI branch only")
-    geom_path = Path(spec["geometry"])
-    if not geom_path.is_absolute():
-        geom_path = REPO / geom_path
-    geom = ngrad.read_xyz(geom_path)
+    if geom is None:
+        geom_path = Path(spec["geometry"])
+        if not geom_path.is_absolute():
+            geom_path = REPO / geom_path
+        geom = ngrad.read_xyz(geom_path)
     mc, pt = gg._build_state(
         geom, spec["basis"], spec["ncas"], spec["nelecas"], auxbasis,
         cas_irreps=spec.get("cas_irreps"), core_irreps=spec.get("core_irreps"),
@@ -3903,6 +3909,30 @@ def load_grad_num(path: Path, case: str, *, pc: bool,
         )
 
 
+def solve_gradient(st: State, src: SourceTerms, *, pc: bool, with_corr: bool = True,
+                   step: float | None = None, richardson: bool = True,
+                   kappa_step: float | None = None, cp_solve: str = "dense",
+                   workers: int = 1, sweep: dict | None = None, log=print) -> Gradients:
+    """The gradient from given source terms, end to end: the branch's
+    Lagrangian (:class:`CasscfGradients` on a CASSCF state, :class:`Gradients`
+    otherwise), its ``kappa`` sweep (or ``sweep``, another instance's), the
+    multipliers and the AO contraction. Returns the solved instance, whose
+    ``de`` is the gradient. :func:`run`'s second-provider solves under
+    ``--source both`` are this, and so is ``gradient_at.py``'s GPU-sourced
+    one; the residual-independent checks are :func:`run`'s own, between the
+    solve and the contraction."""
+    if st.casscf:
+        g = CasscfGradients(st, src, with_corr=with_corr, step=step, richardson=richardson,
+                            kappa_step=kappa_step, cp_solve=cp_solve, pc=pc, workers=workers)
+    else:
+        g = Gradients(st, src, with_corr=with_corr, step=step, richardson=richardson, pc=pc,
+                      kappa_step=kappa_step, workers=workers)
+    g.prepare(log=log, sweep=sweep)
+    g.solve_multipliers(log=log)
+    g.kernel()
+    return g
+
+
 # --------------------------------------------------------------------------
 # Driver and report
 # --------------------------------------------------------------------------
@@ -4268,17 +4298,10 @@ def run(args) -> dict:
             # The run's own scheme: the skeleton derivative the AO contraction
             # takes is PC's for a PC run (#74), as the GPU-sourced solve's is.
             # On the CASSCF branch the same coupled solve, dense or CG (#125).
-            if casscf:
-                gx = CasscfGradients(st, terms, with_corr=True, step=args.step,
-                                     richardson=args.richardson, kappa_step=args.kappa_step,
-                                     cp_solve=args.cp_solve, pc=args.pc)
-            else:
-                gx = Gradients(st, terms, with_corr=True, step=args.step,
-                               richardson=args.richardson, pc=args.pc,
-                               kappa_step=args.kappa_step)
-            gx.prepare(log=lambda *a: None, sweep=g.sweep)
-            gx.solve_multipliers(log=lambda *a: None)
-            return gx.kernel(), dict(gx.residuals)
+            gx = solve_gradient(st, terms, pc=args.pc, step=args.step,
+                                richardson=args.richardson, kappa_step=args.kappa_step,
+                                cp_solve=args.cp_solve, sweep=g.sweep, log=lambda *a: None)
+            return gx.de, dict(gx.residuals)
 
         rec["grad_pyscf"], rec["residuals_pyscf"] = solve_with(src_pyscf)
         rp = rec["residuals_pyscf"]

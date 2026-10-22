@@ -924,6 +924,82 @@ def _check_continuity(states: list[dict]) -> None:
     )
 
 
+def warm_start(spec: str, basis: str, mo: np.ndarray, ci) -> tuple[np.ndarray, object]:
+    """A warm start at the geometry ``spec``: converged orbitals from another
+    geometry carried into this geometry's AO basis, each projected onto its
+    own irrep and re-orthonormalised (the irrep blocks are exactly orthogonal,
+    so the Löwdin step keeps them pure and in order), with the CI vector they
+    came with. :func:`casscf_point`'s warm start, and ``gradient_at.py``'s
+    start from the neighbouring geometry's orbitals."""
+    from pyscf import symm
+
+    mol = gg._build_mol(spec, basis)
+    s_ao = mol.intor_symmetric("int1e_ovlp")
+    mo = symm.symmetrize_orb(mol, carry_orbitals(mo, s_ao), s=s_ao)
+    return carry_orbitals(mo, s_ao), ci
+
+
+def optimise_finished(case: dict, spec: str, label: str, start=None) -> tuple[dict, object, dict]:
+    """``generate_golden.casscf_optimise`` (cold, or from ``start``) then
+    :func:`finish_casscf`, their output swallowed: ``(o, mc, fin)``. Raises
+    ``SystemExit`` on impure orbitals, as the optimiser does."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        o = gg.casscf_optimise(
+            spec, case["basis"], case["ncas"], case["nelecas"], label,
+            cas_irreps=case["cas_irreps"], core_irreps=case["core_irreps"],
+            start=start, refuse=False, verbose=False,
+        )
+        mc, fin = finish_casscf(o)
+    return o, mc, fin
+
+
+def optimised_record(o: dict, mc, fin: dict) -> dict:
+    """What one optimised and finished state records: energies, the
+    optimiser's and the finish's diagnostics, the finished orbitals and CI
+    vector, and the AO overlap the continuity signals are taken in."""
+    s_ao = o["mol"].intor_symmetric("int1e_ovlp")
+    ncore, ncas = mc.ncore, mc.ncas
+    return dict(
+        e_casscf=float(mc.e_tot), converged=o["converged"],
+        first_converged=o["first_converged"], n_macro=o["n_macro"],
+        polish_macro=o["polish_macro"], g_gen=o["g_norm"], g_opt=fin["g_norm"],
+        finish_macro=fin["n_macro"], finish_converged=fin["converged"],
+        e_casscf_gen=float(o["meta"]["e_casscf"]), mo_gen=np.asarray(o["mc"].mo_coeff),
+        wall_opt=o["wall"] + fin["wall"],
+        mo=np.asarray(mc.mo_coeff), ci_opt=np.asarray(mc.ci), s_ao=s_ao,
+        act_irreps=o["names"][ncore : ncore + ncas], ncore=ncore, ncas=ncas,
+        nelecas=tuple(mc.nelecas),
+    )
+
+
+def continuity_signals(rec: dict, ref: dict | None, e_pred: float) -> dict:
+    """The continuity guard's three signals for one optimised state
+    (:func:`optimised_record`) against a reference ``ref`` (its ``mo``,
+    ``ci_opt`` and ``e_casscf``): the energy against its first-order
+    prediction ``ref["e_casscf"] + e_pred``, the optimiser's convergence, and
+    the active-space and CI-vector overlaps (:func:`overlap_signals`). With
+    no ``ref`` (the reference geometry itself) the energy and overlap signals
+    are 0."""
+    if ref is None:
+        act_defect = ci_defect = 0.0
+        e_jump = 0.0
+    else:
+        act_defect, ci_defect = overlap_signals(
+            rec["mo"], rec["ci_opt"], rec["s_ao"], ref["mo"], ref["ci_opt"], rec["ncore"],
+            rec["ncas"], rec["nelecas"])
+        e_jump = abs(rec["e_casscf"] - ref["e_casscf"] - e_pred)
+    return dict(e_jump=float(e_jump), converged=rec["converged"], g_opt=rec["g_opt"],
+                act_defect=act_defect, ci_defect=ci_defect)
+
+
+def write_state_mogold(path: Path, o: dict, mc) -> None:
+    """One finished state's MO sidecar: the generator's fingerprint with the
+    finished orbitals and energy -- the ``--mo-from`` input every later step
+    reads."""
+    gg.write_mo_sidecar(path, **dict(o["meta"], e_casscf=float(mc.e_tot)),
+                        arrays=dict(o["arrays"], mo_coeff=np.asarray(mc.mo_coeff)))
+
+
 def casscf_point(task: dict) -> dict:
     """One displaced CASSCF state, end to end: the optimiser (cold, unless the
     task carries a warm start), the three continuity signals against the
@@ -935,62 +1011,28 @@ def casscf_point(task: dict) -> dict:
     module is imported before numpy in each). Never raises a refusal: a
     ``SystemExit`` from a guard inside the CASCI is returned as ``refused`` so
     the parent can report every state before it refuses the sweep."""
-    from pyscf import symm
-
     t0 = time.perf_counter()
     case, geom, label = task["case"], task["geom"], task["label"]
     spec = geom_spec(geom)
     ref = task.get("ref")
     start = None
     if task.get("warm"):
-        # The warm start: the reference geometry's converged orbitals, carried
-        # into this geometry's AO basis, each projected onto its own irrep and
-        # re-orthonormalised (the irrep blocks are exactly orthogonal, so the
-        # Löwdin step keeps them pure and in order), with its CI vector.
-        mol = gg._build_mol(spec, case["basis"])
-        s_ao = mol.intor_symmetric("int1e_ovlp")
-        mo = symm.symmetrize_orb(mol, carry_orbitals(ref["mo"], s_ao), s=s_ao)
-        start = (carry_orbitals(mo, s_ao), ref["ci_opt"])
+        # The warm start: the reference geometry's converged orbitals and CI
+        # vector, carried into this geometry (warm_start).
+        start = warm_start(spec, case["basis"], ref["mo"], ref["ci_opt"])
     out = dict(label=label, atom=spec, warm=bool(task.get("warm")), s=task["s"],
                slope=task["slope"])
     buf = io.StringIO()
     try:
-        with contextlib.redirect_stdout(buf):
-            o = gg.casscf_optimise(
-                spec, case["basis"], case["ncas"], case["nelecas"], label,
-                cas_irreps=case["cas_irreps"], core_irreps=case["core_irreps"],
-                start=start, refuse=False, verbose=False,
-            )
-            mc, fin = finish_casscf(o)
+        o, mc, fin = optimise_finished(case, spec, label, start)
     except SystemExit as exc:  # impure orbitals: no label means anything
         out["refused"] = str(exc)
         out["wall"] = time.perf_counter() - t0
         return out
-    s_ao = o["mol"].intor_symmetric("int1e_ovlp")
-    ncore, ncas = mc.ncore, mc.ncas
-    out.update(
-        e_casscf=float(mc.e_tot), converged=o["converged"],
-        first_converged=o["first_converged"], n_macro=o["n_macro"],
-        polish_macro=o["polish_macro"], g_gen=o["g_norm"], g_opt=fin["g_norm"],
-        finish_macro=fin["n_macro"], finish_converged=fin["converged"],
-        e_casscf_gen=float(o["meta"]["e_casscf"]), mo_gen=np.asarray(o["mc"].mo_coeff),
-        wall_opt=o["wall"] + fin["wall"],
-        mo=np.asarray(mc.mo_coeff), ci_opt=np.asarray(mc.ci), s_ao=s_ao,
-        act_irreps=o["names"][ncore : ncore + ncas], ncore=ncore, ncas=ncas,
-        nelecas=tuple(mc.nelecas),
-    )
+    out.update(optimised_record(o, mc, fin))
     if task.get("keep_mc"):
         out["mc"] = mc
-    if ref is None:
-        act_defect = ci_defect = 0.0
-        e_jump = 0.0
-    else:
-        act_defect, ci_defect = overlap_signals(
-            out["mo"], out["ci_opt"], s_ao, ref["mo"], ref["ci_opt"], ncore, ncas,
-            mc.nelecas)
-        e_jump = abs(out["e_casscf"] - ref["e_casscf"] - task["s"] * task["slope"])
-    out["signals"] = dict(e_jump=float(e_jump), converged=o["converged"],
-                          g_opt=fin["g_norm"], act_defect=act_defect, ci_defect=ci_defect)
+    out["signals"] = continuity_signals(out, ref, task["s"] * task["slope"])
     out["tripped"] = continuity_tripped(out["signals"])
     if out["tripped"] or task.get("warm"):
         # A warm-started state is a probe of the cold one, never differenced,
@@ -998,8 +1040,7 @@ def casscf_point(task: dict) -> dict:
         out["wall"] = time.perf_counter() - t0
         return out
     path = Path(task["states_dir"]) / f"{label}.mogold"
-    gg.write_mo_sidecar(path, **dict(o["meta"], e_casscf=float(mc.e_tot)),
-                        arrays=dict(o["arrays"], mo_coeff=np.asarray(mc.mo_coeff)))
+    write_state_mogold(path, o, mc)
     out["mogold"] = path.name
     try:
         with contextlib.redirect_stdout(buf):
