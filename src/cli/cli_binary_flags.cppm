@@ -87,6 +87,9 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   too, but half a dump is not one.
 //                   --source-oracle is its too, for the same reason: it
 //                   compares the dump's two terms with a committed oracle.
+//                   --probed-y is its too, and rides on --dump-source-terms
+//                   (#240): the probed Y, one basis direction per MO pair,
+//                   as the oracle of the one-pass Y the dump writes.
 //                   --pc-hessian is nevpt2_pc_tangent's (#152): PC's second
 //                   directional derivative, checked by a finite difference of
 //                   the PC tangent that binary already owns. Like the rest of
@@ -137,6 +140,7 @@ constexpr std::array kFlagTable{
     FlagSpec{"--sc-source-tangent", "path", kScPd},
     FlagSpec{"--gradgold", "path", kDemo | kScPd | kPcTangent},
     FlagSpec{"--dump-source-terms", "path", kScPd},
+    FlagSpec{"--probed-y", "", kScPd},
     FlagSpec{"--source-oracle", "path", kScPd},
     FlagSpec{"--fd-steps", "N", kPcTangent},
     FlagSpec{"--fd-start-pow", "N", kPcTangent},
@@ -202,6 +206,8 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
     opt.gradgoldPath = std::string(args[++i]);
   } else if (a == "--dump-source-terms") {
     opt.dumpSourceTermsPath = std::string(args[++i]);
+  } else if (a == "--probed-y") {
+    opt.probedY = true;
   } else if (a == "--source-oracle") {
     opt.sourceOraclePath = std::string(args[++i]);
   } else if (a == "--batch") {
@@ -372,6 +378,12 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
         return err_config(
             "--dump-source-terms writes the source terms --kappa-act and --kappa-full check; "
             "run one at a time");
+      // --probed-y (#240) holds the dump's one-pass Y to the probed one --
+      // the oracle the one-pass route replaced -- so it rides on the dump.
+      if (opt.probedY && opt.dumpSourceTermsPath.empty())
+        return err_config(
+            "--probed-y holds the one-pass Y --dump-source-terms writes to the probed one; it "
+            "does nothing without --dump-source-terms");
       // --source-oracle CHECKS the dump's terms against a committed oracle:
       // one job per run again.
       if (!opt.sourceOraclePath.empty() &&

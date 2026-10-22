@@ -652,8 +652,9 @@ That is the oracle the reverse half below is checked against. Like every
 tangent path here it is formed from an exact digest only: `--kappa-full` and
 `--dump-source-terms` refuse `--cublas`, `--ozaki` and `--fused-digest` (§8).
 
-**The digests' term, reverse mode (#89): the transpose.** `Y` is probed basis
-direction by basis direction, so carrying the term into it needs it as a
+**The digests' term, reverse mode (#89): the transpose.** `Y` was probed basis
+direction by basis direction (and the one-pass route below adds `hbar` to
+`dE/d(h2e)` once, #240), so carrying the term into it needs it as a
 *pairing*, `<hbar, h2e_dot(kappa)>`, with `hbar = dE/d(h2e)` through the
 digests computed once. Two steps, each already its own checked piece. The
 slab walk's RDM sweep (§5.3, the one the CI source term runs) leaves
@@ -751,20 +752,61 @@ block builder is linear in the integrals it reads, so a block's tangent is
 that same builder called with the dotted integrals and its integral-free
 operands zeroed.
 
-**Why `Y` as a matrix has to be probed.** The class energies are gauge
-invariant under a *covariant* rotation of integrals and RDMs together
-([`gradient-theory.md`](gradient-theory.md), §1.3), which makes the
-directly-contractible part — the pseudodensities paired with one active index
-left open — exactly **symmetric**, hence invisible to an antisymmetric
-`kappa`. All of `Y_act`'s content therefore sits in the chain rule through the
-Dyall blocks, which is a map *into* the integrals, not out of them, and
-reverse mode does not run it backwards for free. So a matrix is assembled by
-probing the same linear functional with basis directions, in chunks, one slab
-walk per chunk; a caller who wants a *pairing* pays nothing extra. The
-active-block check skips the matrix above a fixed number of basis directions,
-and the full-space one probes only the index pairs its reader needs — the two
-inactive blocks, for Eqs. 56–57 — both policies of the check, not caps in the
-assembly.
+**`Y` as a matrix: one reverse pass (#240), the probed matrix its oracle.**
+The class energies are gauge invariant under a *covariant* rotation of
+integrals and RDMs together ([`gradient-theory.md`](gradient-theory.md),
+§1.3), which makes the directly-contractible part — the pseudodensities
+paired with one active index left open — exactly **symmetric**, hence
+invisible to an antisymmetric `kappa`. All of `Y_act`'s content therefore
+sits in the chain rule through the Dyall blocks, which is a map *into* the
+integrals. Until #240 that was read as the reason a matrix had to be
+**probed** — the same linear functional against the `n_mo (n_mo - 1) / 2`
+basis directions `E_xy - E_yx`, 16 to a slab walk — and that route is still
+in tree (`scFullRotationMatrix` / `pcFullRotationMatrix`, and
+`scActiveRotationMatrix` for the active block alone).
+
+It is not the only route, because every Dyall block builder is **linear in
+the integrals it reads** (the fact the tangent above rests on), so it has a
+transpose, and everything else in the pairing is linear in `kappa` already.
+`scFullRotationMatrixOnePass` / `pcFullRotationMatrixOnePass` run the walk
+**once, with no direction**, and pull its adjoints back instead of pairing
+them:
+
+1. each external block's pseudodensity `D_X` goes straight through that
+   block's dot transposed — the intra-active action and the promotion rule's
+   einsums, each rewritten for its `kappa` operand (`:general`'s emitters: the
+   forward and the transpose read one transcription of the rule, so the
+   probed and one-pass routes share it);
+2. each Dyall block's `M_G` goes through its builder's transpose onto
+   `dE/d(h1e)`, `dE/d(h2e)` (`:block_transpose`: each `make_*` term by term,
+   as `:rdm_adjoint` writes the RDM side, with the integral operand dropped;
+   for PC, `dE/dK` through the class's `K` builder, Sir's block pattern
+   included);
+3. the digests' `hbar` (#89) joins `dE/d(h2e)`, and `dE/d(h1e)`, `dE/d(h2e)`
+   and the classes' `dE/de` go back through `h1e_dot`, `h2e_dot` and the
+   orbital energies' response transposed;
+4. `Y_xy = (Ybar_xy - Ybar_yx) / 2` off what lands on `kappa`'s column
+   blocks.
+
+Two things hold it. The block transposes are new transcription, so each
+class's are held to its own builders by **duality** on seeded inputs —
+`<B^T(M), Idot> == <M, B(Idot)>` — in every dump (check 7, SC and PC); and the
+one-pass matrix is held to the probed one **element by element** within the
+probed matrix's own bound, `--dump-source-terms --probed-y` (check 8). What it
+saves is [`performance.md`](performance.md), "The one-pass `Y`"; the measured
+agreement is [`testing.md`](testing.md), "The one-pass `Y` against the probed
+one".
+
+The active-block check (`--kappa-act`) and the full-space one
+(`--kappa-full`) still probe — the former skips the matrix above a fixed
+number of basis directions, the latter probes only the two inactive blocks
+Eqs. 56–57 read — policies of those checks, not caps in the assembly.
+**Open, not built:** whether the same transposes serve the probed matrices
+that remain — `Ydot` along an integral perturbation (#220, `--sc-source-tangent`)
+and the orbital Hessian's bilinear forms (#222, #235). `Ydot` is the
+derivative of this same pairing, so its Dyall half is the transpose at the
+dotted RDM side; whether that and the sandwich's reverse factor the same way
+has not been worked out.
 Park Eqs. 44–47's active-space pseudodensities are not on this path
 and are not completed into Eq. 35's RDM-conjugate form, which has no consumer
 until the full `Y` needs the RDM side too.
@@ -881,8 +923,8 @@ four directions, along check 6's active direction, as one more exact zero on
 the two intra-space directions, and on every direction the dump writes — at
 the duality's 1e-7, the same functional in a different association. It does
 not *replace* the four-index pairing in the `Y` that is written: that `Y` is
-probed basis direction by basis direction through the integral halves, which
-already read the whole inventory built from `B` (#165's economy of code, not
+pulled back in one reverse pass (#240; probed before it) through the integral
+halves, which already read the whole inventory built from `B` (#165's economy of code, not
 of memory, above), so `g_xa_aa` is formed either way and routing one of
 `Y`'s terms around it would save nothing at these sizes. Where it matters —
 a fitted gradient that never forms the inventory — `D` is the digests' term

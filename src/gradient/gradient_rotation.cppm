@@ -212,11 +212,123 @@ struct ScRotationDir {
   }
 };
 
+// `kappaActionDevice`'s TRANSPOSE (#240): given `bar`, the adjoint of x's
+// tangent along kappa (shaped like x), accumulates d<bar, action(kappa)>/
+// dkappa into `kbar` (n_act, n_act) -- the same per-axis einsums, each
+// rewritten for its kappa operand by derivativeSubscripts.
+void kappaActionAdjoint(const DeviceTensor& x, const std::vector<int>& axes,
+                        const DeviceTensor& bar, const DeviceTensor& kbar, wwrStream_t stream,
+                        std::source_location loc = std::source_location::current()) {
+  static constexpr std::string_view kLabels = "abcdef";
+  if (axes.empty() || x.rank() < 1 || x.rank() > std::ssize(kLabels) || bar.dims != x.dims)
+    check(false,
+          "kappaActionAdjoint: needs at least one axis, a rank in [1, 6] and a bar shaped "
+          "like x",
+          loc);
+  const std::string base(kLabels.substr(0, static_cast<std::size_t>(x.rank())));
+  for (const int a : axes) {
+    if (a < 0 || a >= x.rank())
+      check(false, std::format("kappaActionAdjoint: axis {} is not an axis of a rank-{} tensor",
+                               a, x.rank()),
+            loc);
+    const std::size_t axis = static_cast<std::size_t>(a);
+    std::string in = base;
+    in[axis] = 'z';
+    const std::string subs = in + ",z" + base[axis] + "->" + base;
+    deviceEinsumAccum(derivativeSubscripts(subs, 1), {&x, &bar}, kbar, 1.0, stream);
+  }
+}
+
+// THE ONE-PASS Y's ACCUMULATORS (#240; gradient.cppm, "Y in one reverse
+// pass"). The probed route pairs every basis direction's dotted operands with
+// the walk's pseudodensities; this holds the SAME pairing's other side, built
+// once: the adjoint of every kappa column block the dotted operands are
+// linear in. A walk handed one (ScRotation::bars) pushes each external
+// pseudodensity through its block's dot TRANSPOSED (`addExternalBars`), and
+// each class pushes its Dyall blocks' M_G through its builders' transposes
+// onto `h1e` / `h2e` (:block_transpose); the caller then pushes those two,
+// the digests' hbar and dE/de through the active integrals' and the orbital
+// energies' dots transposed, and reads Y off the five column-block adjoints.
+//
+// Index order is the forward's: kCore[x, i] is dE/dkappa[x, i] for i core,
+// kAct / kActFull likewise over the active columns, kVirt over the virtual
+// ones, kaa[b, a] = dE/dkappa[act b, act a] through the intra-active action.
+// kAct is the general action's -- its ACTIVE rows belong to kaa's half and are
+// dropped at assembly -- while kActFull (the orbital energies') keeps them.
+struct ScYBars {
+  const GeneralIntegralsDevice* gen = nullptr;
+  DeviceTensor kaa;       // (n_act, n_act)
+  DeviceTensor kCore;     // (n_mo, n_core)
+  DeviceTensor kAct;      // (n_mo, n_act), active rows dropped at assembly
+  DeviceTensor kVirt;     // (n_mo, n_virt)
+  DeviceTensor kActFull;  // (n_mo, n_act), the orbital energies' own
+  DeviceTensor h1e;       // dE/d(h1e) through the Dyall blocks (and, later, the digests')
+  DeviceTensor h2e;       // dE/d(h2e), likewise
+
+  static ScYBars zeros(const GeneralIntegralsDevice& g, const DeviceResources& res) {
+    const int64_t n = g.nmo(), a = g.nact;
+    return ScYBars{&g,
+                   DeviceTensor::zeros({a, a}, res),
+                   DeviceTensor::zeros({n, g.ncore}, res),
+                   DeviceTensor::zeros({n, a}, res),
+                   DeviceTensor::zeros({n, g.nvirt}, res),
+                   DeviceTensor::zeros({n, a}, res),
+                   DeviceTensor::zeros({a, a}, res),
+                   DeviceTensor::zeros({a, a, a, a}, res)};
+  }
+  // The general action's column-block adjoints, as kbarFor reads them.
+  const DeviceTensor* columns(RotSpace s) const {
+    switch (s) {
+      case RotSpace::Core: return &kCore;
+      case RotSpace::Act: return &kAct;
+      case RotSpace::Virt: return &kVirt;
+    }
+    return nullptr;
+  }
+  // The orbital energies' column-block adjoints: the FULL active block.
+  const DeviceTensor* epsColumns(RotSpace s) const {
+    return s == RotSpace::Act ? &kActFull : columns(s);
+  }
+};
+
+// slabDots, transposed (#240): every external block's pseudodensity `d[i]`
+// (shaped like `blocks[i]`, a whole block) pushed back through that block's
+// dot -- the intra-active action on its active axes and the general action's
+// promotions -- onto the column-block adjoints. V2tr's dot is the trace of
+// Sir2's general part, so its pseudodensity is spread back over that trace
+// (delta on the active pair) and pushed through Sir2's general rule; its
+// intra-active half cancels exactly in the forward, so it has none here.
+void addExternalBars(ScYBars& bars, const std::vector<const DeviceTensor*>& blocks,
+                     const std::vector<RotBlock>& kinds, const std::vector<DeviceTensor>& d,
+                     const DeviceResources& res,
+                     std::source_location loc = std::source_location::current()) {
+  if (kinds.size() != blocks.size() || d.size() != blocks.size())
+    check(false, "addExternalBars: one kind and one pseudodensity per block", loc);
+  const auto cols = [&bars](RotSpace s) { return bars.columns(s); };
+  for (std::size_t i = 0; i < blocks.size(); ++i) {
+    if (kinds[i] == RotBlock::V2tr) {
+      const int64_t na = bars.gen->nact;
+      const DeviceTensor eye = deviceEye(na, res);
+      const DeviceTensor spread = deviceEinsumNew("ri,ab->rabi", {&d[i], &eye}, 1.0, res);
+      generalBlockActionAdjoint(RotBlock::Sir2, *bars.gen, cols, spread, res);
+      continue;
+    }
+    const std::vector<int> axes = activeAxesOf(kinds[i]);
+    if (!axes.empty()) kappaActionAdjoint(*blocks[i], axes, d[i], bars.kaa, res.stream());
+    generalBlockActionAdjoint(kinds[i], *bars.gen, cols, d[i], res);
+  }
+}
+
 struct ScRotation {
   std::vector<ScRotationDir> dirs;
   // The sidecar, or null for the active-active block alone: what says whether
   // a slab walk does the general work at all.
   const GeneralIntegralsDevice* gen = nullptr;
+  // The one-pass Y's accumulators (#240), or null: set, every walk the
+  // rotation enters also pushes its pseudodensities into them (in addition
+  // to whatever `dirs` asks for -- the one-pass entry points hand none).
+  // Borrowed: the owner outlives every walk.
+  ScYBars* bars = nullptr;
   std::size_t size() const { return dirs.size(); }
   bool empty() const { return dirs.empty(); }
   bool general() const { return gen != nullptr; }

@@ -74,6 +74,8 @@ import :rdm_adjoint;  // ScRdmAdjoint and the per-block adjoint sweeps
 import :rotation;
 import :general;
 import :terms;
+// The Dyall blocks' transposes in the integrals: the one-pass Y (#240).
+import :block_transpose;
 
 namespace nevpt2 {
 
@@ -190,6 +192,14 @@ void gradientSr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
+  // The one-pass Y (#240): the Dyall blocks' accumulators through their
+  // builders' transposes, onto the active integrals' adjoint.
+  if (rot.bars != nullptr) {
+    const DeviceTensor eyeT = deviceEye(dm1.dims[0], dr);
+    scClassIntegralSweep(dActive, {{&a16, DyallBlock::A16}, {&a17, DyallBlock::A17}, {&a19, DyallBlock::A19}},
+                         DyallOperands{&dm1, &dm2, &dm3, nullptr, nullptr, nullptr, nullptr, nullptr, &eyeT},
+                         ScIntegralBars{rot.bars->h1e, rot.bars->h2e}, dr);
+  }
 
   // The RDM sweep: dm1/dm2/dm3 are contracted RAW on the norm side, so their
   // accumulators ARE their Eq. 48 contributions; a16/a17/a19 are one chain
@@ -338,6 +348,14 @@ void gradientSi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t ba
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
+  // The one-pass Y (#240): the Dyall blocks' accumulators through their
+  // builders' transposes, onto the active integrals' adjoint.
+  if (rot.bars != nullptr) {
+    const DeviceTensor eyeT = deviceEye(dm1.dims[0], dr);
+    scClassIntegralSweep(dActive, {{&a22, DyallBlock::A22}, {&a23, DyallBlock::A23}, {&a25, DyallBlock::A25}},
+                         DyallOperands{&dm1, &dm2, &dm3, nullptr, nullptr, nullptr, nullptr, nullptr, &eyeT},
+                         ScIntegralBars{rot.bars->h1e, rot.bars->h2e}, dr);
+  }
 
   // The RDM sweep: six blocks, none of which reads another, so no ordering
   // question. a22 is the second (and last) block that reads the f3 digests.
@@ -444,6 +462,12 @@ void gradientSijrs(IntegralSource& src, int64_t batch, const Tensor& hostECore,
     deviceEinsumAccum("iajb,iajb->iajb", {&p, &slab}, d, 2.0, s);
     deviceEinsumAccum("ibja,ibja->iajb", {&p, &slab}, d, -1.0, s);
     acc.extContraction += 0.5 * dotTensors(slab, d, dr);
+    // The one-pass Y (#240): cvcv's pseudodensity through its dot, transposed.
+    if (rot.bars != nullptr) {
+      std::vector<DeviceTensor> dv;
+      dv.push_back(d.view());
+      addExternalBars(*rot.bars, {&slab}, {RotBlock::Sijrs}, dv, dr);
+    }
 
     for (std::size_t k = 0; k < rot.size(); ++k) {
       const ScRotationDir& dir = rot.dirs[k];
@@ -693,6 +717,14 @@ void gradientSijr(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
+  // The one-pass Y (#240): the Dyall blocks' accumulators through their
+  // builders' transposes, onto the active integrals' adjoint.
+  if (rot.bars != nullptr) {
+    const DeviceTensor eyeT = deviceEye(dm1.dims[0], dr);
+    scClassIntegralSweep(dActive, {{&a3, DyallBlock::A3}},
+                         DyallOperands{&dm1, &dm2, nullptr, &hdm1, nullptr, nullptr, nullptr, nullptr, &eyeT},
+                         ScIntegralBars{rot.bars->h1e, rot.bars->h2e}, dr);
+  }
 
   // The RDM sweep: hdm1 is both this class's own metric and an operand of a3,
   // so its accumulator is seeded from the walk and then added to by a3's
@@ -1108,6 +1140,8 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
       }
     }
     ext += dotTensors(slab, dBlocks[0], dr) + dotTensors(slabT, dBlocks[1], dr);
+    // The one-pass Y (#240): both slabs' pseudodensities, transposed once.
+    if (rot.bars != nullptr) addExternalBars(*rot.bars, {&slab, &slabT}, kinds, dBlocks, dr);
     // The external half of the pairing, now that this slab's D exists.
     for (std::size_t d = 0; d < rot.size(); ++d)
       acc.rotExt[d] +=
@@ -1117,6 +1151,14 @@ void gradientSrsi(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t 
   acc.extContraction += 0.5 * ext;
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
+  // The one-pass Y (#240): the Dyall blocks' accumulators through their
+  // builders' transposes, onto the active integrals' adjoint.
+  if (rot.bars != nullptr) {
+    const DeviceTensor eyeT = deviceEye(dm1.dims[0], dr);
+    scClassIntegralSweep(dActive, {{&k27, DyallBlock::K27}},
+                         DyallOperands{&dm1, &dm2, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &eyeT},
+                         ScIntegralBars{rot.bars->h1e, rot.bars->h2e}, dr);
+  }
 
   // The RDM sweep: dm1 raw on the norm side, k27 one chain rule away.
   const auto sweep = [&](const std::vector<ScActiveAccum>& acts, const DeviceTensor& i1,
@@ -1219,6 +1261,16 @@ void gradientSrs(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
+  // The one-pass Y (#240): a7's accumulator through make_a7's transpose,
+  // against its hole RDMs rm2 and rm3, onto the active integrals' adjoint.
+  if (rot.bars != nullptr) {
+    const DeviceTensor eyeT = deviceEye(dm1.dims[0], dr);
+    const DeviceTensor rm3T = make_rm3(dm2, dm3, rm2, dr);
+    scClassIntegralSweep(dActive, {{&a7, DyallBlock::A7}},
+                         DyallOperands{&dm1, &dm2, &dm3, nullptr, nullptr, nullptr, &rm2,
+                                       &rm3T, &eyeT},
+                         ScIntegralBars{rot.bars->h1e, rot.bars->h2e}, dr);
+  }
 
   // Eqs. 44-47: one more derivative, now of the Dyall block itself. a7 is
   // linear in the active integrals (h1e, h2e) AND in the hole RDMs make_a7
@@ -1364,6 +1416,14 @@ void gradientSij(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
+  // The one-pass Y (#240): the Dyall blocks' accumulators through their
+  // builders' transposes, onto the active integrals' adjoint.
+  if (rot.bars != nullptr) {
+    const DeviceTensor eyeT = deviceEye(dm1.dims[0], dr);
+    scClassIntegralSweep(dActive, {{&a9, DyallBlock::A9}},
+                         DyallOperands{&dm1, &dm2, &dm3, &hdm1, &hdm2, &hdm3, nullptr, nullptr, &eyeT},
+                         ScIntegralBars{rot.bars->h1e, rot.bars->h2e}, dr);
+  }
 
   // The RDM sweep, reverse-topologically: a9 reads hdm2 and hdm3, hdm3 reads
   // hdm2 as well, so a9, then hdm3, then hdm2 -- whose accumulator is seeded
@@ -1507,6 +1567,14 @@ void gradientSir(const ActiveIntegralsDevice& ai, IntegralSource& src, int64_t b
   });
   acc.actContraction += activeContraction(dActive, dr);
   rotationPairActive(rot, gDots, dActive, gdot, acc.rotAct, dr);
+  // The one-pass Y (#240): the Dyall blocks' accumulators through their
+  // builders' transposes, onto the active integrals' adjoint.
+  if (rot.bars != nullptr) {
+    const DeviceTensor eyeT = deviceEye(dm1.dims[0], dr);
+    scClassIntegralSweep(dActive, {{&a12, DyallBlock::A12}, {&a13, DyallBlock::A13}},
+                         DyallOperands{&dm1, &dm2, &dm3, nullptr, nullptr, nullptr, nullptr, nullptr, &eyeT},
+                         ScIntegralBars{rot.bars->h1e, rot.bars->h2e}, dr);
+  }
 
   // The RDM sweep: dm1 and dm2 raw on the norm side, a12 and a13 one chain
   // rule away. The hoisted v2tr block is an INTEGRAL trace, not an RDM, so

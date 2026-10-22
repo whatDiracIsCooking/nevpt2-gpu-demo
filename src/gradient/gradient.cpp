@@ -22,6 +22,7 @@ import :rotation;
 import :sc_classes;
 import :terms;
 import :pc_classes;   // PC-NEVPT2's reverse mode (#74)
+import :block_transpose;  // the Dyall blocks' transposes: the one-pass Y (#240)
 
 namespace nevpt2 {
 
@@ -2911,6 +2912,197 @@ Result<std::vector<ScDigestTangent>> pcDigestRotationTangentDevice(
       out[d].classes[c] = t.classes[c].edot;
       out[d].total += t.classes[c].edot;
     }
+  }
+  return out;
+}
+
+// --- Y in one reverse pass (#240) ---------------------------------------------
+
+// Steps 2-4 of gradient.cppm's "Y in one reverse pass": the walk has filled
+// `bars` (its external pseudodensities already pulled back onto the column
+// blocks, its Dyall blocks' onto bars.h1e / bars.h2e); `hbar` joins dE/d(h2e),
+// the active integrals' and the orbital energies' adjoints go back through
+// h1e_dot / h2e_dot / edot transposed -- makeGeneralRotation's construction,
+// read the other way -- and Y is the antisymmetric part of what lands.
+Tensor yFromBars(ScYBars& bars, const ActiveIntegralsDevice& ai, const DeviceTensor& dm1,
+                 const DeviceTensor* hbar, const std::vector<double>& dEdCore,
+                 const std::vector<double>& dEdVirt, const DeviceResources& dr) {
+  const wwrStream_t s = dr.stream();
+  const GeneralIntegralsDevice& gen = *bars.gen;
+  if (hbar != nullptr) addTensorInto(*hbar, bars.h2e, s);
+  // h1e_dot / h2e_dot: the intra-active action on the stored blocks plus the
+  // general part (makeGeneralRotation), each transposed.
+  kappaActionAdjoint(ai.h1e, {0, 1}, bars.h1e, bars.kaa, s);
+  kappaActionAdjoint(ai.h2e, {0, 1, 2, 3}, bars.h2e, bars.kaa, s);
+  const auto cols = [&bars](RotSpace sp) { return bars.columns(sp); };
+  generalBlockActionAdjoint(RotBlock::H1e, gen, cols, bars.h1e, dr);
+  generalBlockActionAdjoint(RotBlock::H2e, gen, cols, bars.h2e, dr);
+  // edot, against dE/de: the full active column block (every row counts).
+  const auto upload = [&dr](const std::vector<double>& v) {
+    return v.empty() ? DeviceTensor::zeros({0}, dr)
+                     : uploadTensor(Tensor::fromFlat({std::ssize(v)}, v), dr);
+  };
+  const DeviceTensor barCore = upload(dEdCore);
+  const DeviceTensor barVirt = upload(dEdVirt);
+  const auto epsCols = [&bars](RotSpace sp) { return bars.epsColumns(sp); };
+  generalEpsResponseAdjoint(gen, dm1, epsCols, barCore, barVirt, dr);
+
+  // dE/dkappa[x, y] over the whole MO range, column block by column block:
+  // the general action's active columns lose their active rows (that half is
+  // kaa's), the orbital energies' keep theirs.
+  const int64_t nc = gen.ncore, na = gen.nact, nv = gen.nvirt, n = gen.nmo();
+  const int64_t aLo = nc, vLo = nc + na;
+  const auto host = [s](const DeviceTensor& t) {
+    return t.size() > 0 ? downloadTensor(t, s) : Tensor(t.dims);
+  };
+  const Tensor kC = host(bars.kCore), kA = host(bars.kAct), kV = host(bars.kVirt);
+  const Tensor kAF = host(bars.kActFull), kaa = host(bars.kaa);
+  Tensor ybar({n, n});
+  for (int64_t x = 0; x < n; ++x) {
+    const bool active = x >= aLo && x < vLo;
+    for (int64_t i = 0; i < nc; ++i) ybar(x, i) += kC(x, i);
+    for (int64_t a = 0; a < na; ++a) ybar(x, aLo + a) += (active ? 0.0 : kA(x, a)) + kAF(x, a);
+    for (int64_t r = 0; r < nv; ++r) ybar(x, vLo + r) += kV(x, r);
+  }
+  for (int64_t b = 0; b < na; ++b)
+    for (int64_t a = 0; a < na; ++a) ybar(aLo + b, aLo + a) += kaa(b, a);
+  // <E_pq - E_qp, Ybar> = Ybar_pq - Ybar_qp, and Y_pq is half the pairing --
+  // scFullRotationMatrix's convention.
+  Tensor y({n, n});
+  for (int64_t p = 0; p < n; ++p)
+    for (int64_t q = 0; q < n; ++q) y(p, q) = 0.5 * (ybar(p, q) - ybar(q, p));
+  return y;
+}
+
+// dE/de summed over the classes: what each class's R_t scattered onto.
+template <class Classes>
+std::pair<std::vector<double>, std::vector<double>> summedEpsAdjoint(const Classes& classes,
+                                                                     int64_t nc, int64_t nv) {
+  std::vector<double> core(static_cast<std::size_t>(nc), 0.0);
+  std::vector<double> virt(static_cast<std::size_t>(nv), 0.0);
+  for (const auto& c : classes) {
+    for (std::size_t i = 0; i < c.dEdCore.size(); ++i) core[i] += c.dEdCore[i];
+    for (std::size_t r = 0; r < c.dEdVirt.size(); ++r) virt[r] += c.dEdVirt[r];
+  }
+  return {std::move(core), std::move(virt)};
+}
+
+Result<Tensor> scFullRotationMatrixOnePass(const NevptIntegralsDevice& ints,
+                                           const GeneralIntegralsDevice& gen,
+                                           const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                           const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                           const DeviceTensor& f3ca,
+                                           const DeviceTensor* digestAdjoint,
+                                           const DeviceResources& dr) {
+  NEVPT2_TRY(checkGeneralShapes(ints, gen));
+  if (digestAdjoint != nullptr && digestAdjoint->dims != ints.h2e.dims)
+    return err_config(
+        "scFullRotationMatrixOnePass: the digests' adjoint is not shaped like h2e");
+  FullBlockSource src(ints);
+  const ActiveIntegralsDevice ai = activeViewOf(ints);
+  ScYBars bars = ScYBars::zeros(gen, dr);
+  ScRotation rot;
+  rot.gen = &gen;
+  rot.bars = &bars;
+  const ScGradientResult walk =
+      assembleClasses(ai, src, /*batch=*/0, dm1, dm2, dm3, f3ac, f3ca, rot, /*adj=*/nullptr,
+                      /*epsAdjoint=*/true, /*ci=*/nullptr, /*mix=*/nullptr, dr);
+  const auto [dEdCore, dEdVirt] = summedEpsAdjoint(walk.classes, gen.ncore, gen.nvirt);
+  return yFromBars(bars, ai, dm1, digestAdjoint, dEdCore, dEdVirt, dr);
+}
+
+Result<Tensor> pcFullRotationMatrixOnePass(const NevptIntegralsDevice& ints,
+                                           const GeneralIntegralsDevice& gen,
+                                           const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                           const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                           const DeviceTensor& f3ca,
+                                           const DeviceTensor* digestAdjoint,
+                                           const DeviceResources& dr) {
+  NEVPT2_TRY(checkGeneralShapes(ints, gen));
+  if (digestAdjoint != nullptr && digestAdjoint->dims != ints.h2e.dims)
+    return err_config(
+        "pcFullRotationMatrixOnePass: the digests' adjoint is not shaped like h2e");
+  FullBlockSource src(ints);
+  const ActiveIntegralsDevice ai = activeViewOf(ints);
+  ScYBars bars = ScYBars::zeros(gen, dr);
+  ScRotation rot;
+  rot.gen = &gen;
+  rot.bars = &bars;
+  const PcGradientResult walk =
+      NEVPT2_TRY(assemblePcClasses(ai, src, /*batch=*/0, dm1, dm2, dm3, f3ac, f3ca, rot,
+                                   /*adj=*/nullptr, /*epsAdjoint=*/true, dr));
+  if (!walk.allDone())
+    return err_numerical(std::format(
+        "the PC orbital source term has no value: {} refused by the solve the energy runs "
+        "(docs/pc-nevpt2.md, \"The singular-metric convention\")",
+        walk.refusals()));
+  const auto [dEdCore, dEdVirt] = summedEpsAdjoint(walk.classes, gen.ncore, gen.nvirt);
+  return yFromBars(bars, ai, dm1, digestAdjoint, dEdCore, dEdVirt, dr);
+}
+
+// A host tensor of `dims` filled from `rng`, uniform in [-1, 1), uploaded.
+DeviceTensor seededDeviceTensor(const std::vector<int64_t>& dims, std::mt19937_64& rng,
+                                const DeviceResources& dr) {
+  std::uniform_real_distribution<double> u(-1.0, 1.0);
+  Tensor t(dims);
+  for (int64_t i = 0; i < t.size(); ++i) t.flatRef(i) = u(rng);
+  return uploadTensor(t, dr);
+}
+
+std::vector<BlockTransposeDuality> scBlockTransposeDuality(const DeviceTensor& dm1,
+                                                           const DeviceTensor& dm2,
+                                                           const DeviceTensor& dm3,
+                                                           const std::uint64_t seed,
+                                                           const DeviceResources& dr) {
+  const int64_t n = dm1.dims[0];
+  const DyallOperandSet set = dyallOperandSet(dm1, dm2, dm3, dr);
+  const DyallOperands ops = set.operands();
+  std::mt19937_64 rng(seed);
+  const DeviceTensor h1Dot = seededDeviceTensor({n, n}, rng, dr);
+  const DeviceTensor h2Dot = seededDeviceTensor({n, n, n, n}, rng, dr);
+  std::vector<BlockTransposeDuality> out;
+  for (int cls = 0; cls < 8; ++cls) {
+    const std::vector<DyallBlock> blocks = scClassDyallBlocks(cls);
+    if (blocks.empty()) continue;
+    const DeviceTensor h1Bar = DeviceTensor::zeros({n, n}, dr);
+    const DeviceTensor h2Bar = DeviceTensor::zeros({n, n, n, n}, dr);
+    BlockTransposeDuality row{CLASSES[static_cast<std::size_t>(cls)]};
+    for (const DyallBlock b : blocks) {
+      const DeviceTensor g = dyallBlockForward(b, h1Dot, h2Dot, ops, dr);
+      const DeviceTensor m = seededDeviceTensor(g.dims, rng, dr);
+      row.forward += dotTensors(m, g, dr);
+      dyallBlockTranspose(b, m, ops, ScIntegralBars{h1Bar, h2Bar}, dr);
+    }
+    row.transpose = dotTensors(h1Bar, h1Dot, dr) + dotTensors(h2Bar, h2Dot, dr);
+    out.push_back(std::move(row));
+  }
+  return out;
+}
+
+std::vector<BlockTransposeDuality> pcBlockTransposeDuality(const DeviceTensor& dm1,
+                                                           const DeviceTensor& dm2,
+                                                           const DeviceTensor& dm3,
+                                                           const std::uint64_t seed,
+                                                           const DeviceResources& dr) {
+  const int64_t n = dm1.dims[0];
+  const DyallOperandSet set = dyallOperandSet(dm1, dm2, dm3, dr);
+  const DyallOperands ops = set.operands();
+  const DeviceTensor z3 = DeviceTensor::zeros({n, n, n, n, n, n}, dr);
+  const PcRdms zeroF3{&dm1, &dm2, &dm3, &z3, &z3};
+  std::mt19937_64 rng(seed);
+  const DeviceTensor h1Dot = seededDeviceTensor({n, n}, rng, dr);
+  const DeviceTensor h2Dot = seededDeviceTensor({n, n, n, n}, rng, dr);
+  std::vector<BlockTransposeDuality> out;
+  for (const int cls : {0, 1, 3, 4, 5, 6, 7}) {
+    const DeviceTensor h1Bar = DeviceTensor::zeros({n, n}, dr);
+    const DeviceTensor h2Bar = DeviceTensor::zeros({n, n, n, n}, dr);
+    BlockTransposeDuality row{CLASSES[static_cast<std::size_t>(cls)]};
+    const PcMatrices k = pcClassMatrices(cls, h1Dot, h2Dot, zeroF3, dr);
+    const DeviceTensor gK = seededDeviceTensor(k.K.dims, rng, dr);
+    row.forward = dotTensors(gK, k.K, dr);
+    pcKIntegralTranspose(cls, gK, ops, ScIntegralBars{h1Bar, h2Bar}, dr);
+    row.transpose = dotTensors(h1Bar, h1Dot, dr) + dotTensors(h2Bar, h2Dot, dr);
+    out.push_back(std::move(row));
   }
   return out;
 }

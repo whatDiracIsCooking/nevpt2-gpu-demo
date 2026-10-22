@@ -1756,6 +1756,82 @@ Result<Tensor> pcFullRotationMatrix(const NevptIntegralsDevice& ints,
                                     const std::vector<std::pair<int64_t, int64_t>>& pairs,
                                     int64_t chunk, const DeviceResources& res);
 
+// --- Y in one reverse pass (#240) ---------------------------------------------
+//
+// The same Y as scFullRotationMatrix / pcFullRotationMatrix over EVERY pair,
+// without probing it. The pairing those probe is
+//
+//   <kappa, Y> = sum_X <D_X, Xdot(kappa)> + sum_G <M_G, G(h1e_dot, h2e_dot)>
+//              + <dE/de, edot(kappa)> + <hbar, h2e_dot(kappa)>
+//
+// -- and every dotted operand on the right is LINEAR in kappa, through the
+// kappa action (intra-active) and the sidecar's promotion rule (general).
+// docs/gradients.md, Sec. 6 used to say why that still had to be probed: the
+// Dyall half is a map INTO the integrals. But each builder G is linear in the
+// integrals it reads, so it has a transpose, and the whole right-hand side is
+// one adjoint pulled back once:
+//
+//   1. the walk, run once with no direction, leaves D_X per external block
+//      (pushed straight through Xdot's transpose onto kappa's column-block
+//      adjoints), M_G per Dyall block (pushed through G's transpose onto
+//      dE/d(h1e), dE/d(h2e) -- :block_transpose; for PC dE/dK through the
+//      class's K builder), and dE/de (the classes' R_t, as #87's CI source
+//      term reads them);
+//   2. hbar, the digests' transpose (#89), joins dE/d(h2e);
+//   3. dE/d(h1e), dE/d(h2e) and dE/de go back through h1e_dot, h2e_dot and
+//      edot's transposes onto the same column-block adjoints;
+//   4. Y_pq = (Ybar_pq - Ybar_qp) / 2 off the assembled dE/dkappa.
+//
+// Every transpose is the forward's own einsum list read for its kappa operand
+// (:general's emitters, :rotation's kappaActionAdjoint), so the probed and
+// one-pass routes share every transcription but the block transposes, which
+// the duality below holds exactly. Same refusals and inputs as the probed
+// entry points (a refused PC class is a Numerical Error naming it); exact
+// digests, integral-direct, whole blocks. The probed route stays in tree as
+// the oracle (apps/sc_pseudodensity's --probed-y).
+Result<Tensor> scFullRotationMatrixOnePass(const NevptIntegralsDevice& ints,
+                                           const GeneralIntegralsDevice& gen,
+                                           const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                           const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                           const DeviceTensor& f3ca,
+                                           const DeviceTensor* digestAdjoint,
+                                           const DeviceResources& res);
+Result<Tensor> pcFullRotationMatrixOnePass(const NevptIntegralsDevice& ints,
+                                           const GeneralIntegralsDevice& gen,
+                                           const DeviceTensor& dm1, const DeviceTensor& dm2,
+                                           const DeviceTensor& dm3, const DeviceTensor& f3ac,
+                                           const DeviceTensor& f3ca,
+                                           const DeviceTensor* digestAdjoint,
+                                           const DeviceResources& res);
+
+// THE DUALITY THE BLOCK TRANSPOSES ARE HELD TO, per class: with seeded M_G
+// (one per integral-reading Dyall block of the class; PC: one dE/dK) and
+// seeded integral directions (h1e_dot, h2e_dot),
+//
+//   forward   = sum_G <M_G, G(h1e_dot, h2e_dot)>        the builders themselves
+//   transpose = <G^T(M), h1e_dot> + <G^T(M), h2e_dot>   :block_transpose
+//
+// equal to round-off, because every builder is linear in the integrals at
+// fixed RDMs (the f3 addends, integral-free, zeroed as the rotation's tangent
+// zeroes them). SC's seven classes with a Dyall block (Sijrs has none) and
+// PC's seven K's, CLASSES order. `seed` fixes every draw.
+struct BlockTransposeDuality {
+  std::string cls;
+  double forward = 0.0;
+  double transpose = 0.0;
+};
+
+std::vector<BlockTransposeDuality> scBlockTransposeDuality(const DeviceTensor& dm1,
+                                                           const DeviceTensor& dm2,
+                                                           const DeviceTensor& dm3,
+                                                           std::uint64_t seed,
+                                                           const DeviceResources& res);
+std::vector<BlockTransposeDuality> pcBlockTransposeDuality(const DeviceTensor& dm1,
+                                                           const DeviceTensor& dm2,
+                                                           const DeviceTensor& dm3,
+                                                           std::uint64_t seed,
+                                                           const DeviceResources& res);
+
 // hbar = dE_pc/d(h2e) THROUGH THE DIGESTS: the PC sweep's dE/d(f3ac),
 // dE/d(f3ca) (Sr's a16 and Si's a22 read them) taken back onto h2e by
 // nevpt2.rdm_build's transpose -- scDigestAdjointDevice's two steps, PC's

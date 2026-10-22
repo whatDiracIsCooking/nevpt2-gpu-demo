@@ -827,6 +827,42 @@ binary invocation; every probe of `Y` then pairs `hbar` with that
 direction's `h2e_dot`, one `n^4` dot product. The ctest walls it moved are in
 [`testing.md`](testing.md), "The digests' orbital response, reverse mode".
 
+### The one-pass `Y`
+
+`--dump-source-terms` (and `--source-oracle`, which reads the same assembly)
+writes `Y` from one reverse pass since #240
+([`gradients.md`](gradients.md), §6): one slab walk with no direction, the
+Dyall blocks' transposes, and the pull-back through the `kappa` action and the
+promotion rule. Before it, `Y` was probed with the `n_mo (n_mo - 1) / 2` basis
+directions, 16 to a slab walk — the route `--probed-y` still runs beside it
+as the oracle, so both times below come out of the same binary and the same
+run.
+
+Acrolein CAS(6,5) on CASSCF orbitals (`n_mo` = 76, 2,850 directions),
+2026-10-22, RTX 3080, `default` preset (Release), `--tiles 3`, about 1 GiB of
+the card held by other processes (`nvidia-smi`), one run per row, under the
+card lock:
+
+| scheme | `Y`, probed | `Y`, one pass | whole dump, `--probed-y` | whole dump |
+|---|---:|---:|---:|---:|
+| SC | 190.21 s | 0.54 s | 192.56 s | 2.13 s |
+| PC | 191.40 s | 0.60 s | 193.68 s | 2.13 s |
+
+So the dump drops from about 193 s to about 2 s on both schemes, and what is
+left is `y`, the digests' transpose and forward terms along the six written
+directions, and start-up. The one pass costs about half of one probed chunk
+(the probed route's 179 chunks cost 1.06 s each): the walk itself, the block
+transposes and the pull-backs.
+
+On the RX 9060 XT (`hip` preset, Release, the same day), HSOH CAS(6,6) on
+CASSCF orbitals (`n_mo` = 42, 861 directions), SC: probed 159.10 s (54
+chunks, 2.95 s each), one pass 7.99 s — about 2.7 chunks — whole dump with
+`--probed-y` 217.97 s; PC's one pass 6.32 s. At N2
+CAS(4,4) (378 directions) the probe is about 2.0 s and the one pass
+0.04–0.05 s on that card. Why the one pass costs 8 s at HSOH on the RX 9060 XT
+against 0.6 s at the larger acrolein on the RTX 3080 has not been separated
+(HSOH was not run on the RTX 3080, nor acrolein on the RX 9060 XT).
+
 ### The density-fitted orbital source term
 
 `nevpt2_sc_pseudodensity --kappa-full` on a `*_df` golden (#165;

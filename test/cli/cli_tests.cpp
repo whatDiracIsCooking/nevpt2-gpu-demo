@@ -424,6 +424,7 @@ constexpr std::array kExpectedMatrix{
     MatrixRow{"--sc-hessian-kk-int", "S"},  MatrixRow{"--sc-hessian-kk", "S"},
     MatrixRow{"--sc-source-tangent", "S"},
     MatrixRow{"--gradgold", "DSP"},         MatrixRow{"--dump-source-terms", "S"},
+    MatrixRow{"--probed-y", "S"},
     MatrixRow{"--source-oracle", "S"},      MatrixRow{"--fd-steps", "P"},
     MatrixRow{"--fd-start-pow", "P"},       MatrixRow{"--pc-hessian", "P"},
     MatrixRow{"--pc-hessian-vector", "P"},
@@ -659,6 +660,10 @@ TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
       {Binary::ScPseudodensity, {"--tiles", "3", "--kappa-act"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--kappa-full"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--dump-source-terms", "x.gradsrc"}},
+      {Binary::ScPseudodensity,
+       {"--tiles", "3", "--dump-source-terms", "x.gradsrc", "--probed-y"}},
+      {Binary::ScPseudodensity,
+       {"--tiles", "3", "--pc", "--dump-source-terms", "x.gradsrc", "--probed-y"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--source-oracle", "x.srcgold"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--sc-hessian-kc"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--sc-hessian-kk-int"}},
@@ -1037,6 +1042,34 @@ TEST(CliScPseudodensityFlagTests, DumpSourceTermsSetsItsPath) {
                                   {"--dump-source-terms", "x.gradsrc", "--gradgold", "s.gradgold"});
   ASSERT_TRUE(g.has_value()) << g.error().message;
   EXPECT_EQ(g->gradgoldPath, "s.gradgold");
+}
+
+TEST(CliScPseudodensityFlagTests, ProbedYRidesOnTheDump) {
+  // #240: the probed Y is the one-pass Y's oracle, compared inside the dump.
+  const Result<Options> r =
+      parse(Binary::ScPseudodensity, {"--dump-source-terms", "x.gradsrc", "--probed-y"});
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_TRUE(r->probedY);
+  const Result<Options> off = parse(Binary::ScPseudodensity, {"--dump-source-terms", "x.gradsrc"});
+  ASSERT_TRUE(off.has_value()) << off.error().message;
+  EXPECT_FALSE(off->probedY);
+  for (const std::vector<std::string_view>& args :
+       {std::vector<std::string_view>{"--probed-y"},
+        std::vector<std::string_view>{"--probed-y", "--kappa-full"},
+        std::vector<std::string_view>{"--probed-y", "--source-oracle", "x.srcgold"}}) {
+    const Result<Options> bad = parse(Binary::ScPseudodensity, args);
+    ASSERT_FALSE(bad.has_value()) << args.size();
+    EXPECT_EQ(bad.error().kind, ErrorKind::InvalidConfig);
+    EXPECT_EQ(bad.error().message,
+              "--probed-y holds the one-pass Y --dump-source-terms writes to the probed one; it "
+              "does nothing without --dump-source-terms");
+  }
+  // The other binaries refuse it, naming this one.
+  for (const Binary b : {Binary::Demo, Binary::DfDemo, Binary::PcTangent}) {
+    const Result<Options> o = parse(b, {"--probed-y"});
+    ASSERT_FALSE(o.has_value()) << binaryName(b);
+    EXPECT_EQ(o.error().kind, ErrorKind::Unsupported) << binaryName(b);
+  }
 }
 
 TEST(CliScPseudodensityFlagTests, DumpSourceTermsRefusesTheChecks) {

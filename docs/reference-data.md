@@ -2104,6 +2104,11 @@ degeneracy probe" and "PC on a CASSCF reference: acrolein".
 | acrolein CAS(6,5) SC | 16 | 6.7e-8 (C2 y) | 2.3e-8 | 7.5e-8 | 1e-6: **PASS** | 444 s (176 s) |
 | acrolein CAS(6,5) PC | 16 | 6.3e-8 (C2 y) | 2.1e-8 | 6.9e-8 | 1e-6: **PASS** | 1209 s (178 s) |
 
+The GPU-dump walls above are the probed `Y`'s, before #240 made it one
+reverse pass; the acrolein dump alone then drops from about 193 s to about
+2 s ([`performance.md`](performance.md), "The one-pass `Y`"). `gradient_at`
+itself has not been re-timed since.
+
 Every worst component sits below its numerical side's own Richardson
 residual. The rebuilt state matches the transient golden to ≤ 1.1e-16 in
 `E_corr` (0 in `E_CASCI`), and the PC rebuild matches block2's field to

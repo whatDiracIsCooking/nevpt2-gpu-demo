@@ -3884,8 +3884,12 @@ digests' orbital response, reverse mode" below.
 
 ### What it costs, and what is a ctest entry
 
-The dump's `Y` is one basis direction per MO pair, 16 to a slab walk
-(`scFullRotationMatrix`); `y` is one reverse sweep. On the RX 9060 XT: `Y`
+Until #240 the dump's `Y` was one basis direction per MO pair, 16 to a slab
+walk (`scFullRotationMatrix`); since #240 it is one reverse pass, and the
+probed route is its oracle (`--probed-y`; "The one-pass `Y` against the
+probed one" below, and [`performance.md`](performance.md), "The one-pass
+`Y`", for what it saves). `y` is one reverse sweep. The probed route's walls,
+as #73 measured them, on the RX 9060 XT: `Y`
 in 1.9 s (378 pairs) at N2 CAS(4,4), 27.6 s at CAS(8,8), 4.8 s (253 pairs) at
 LiF and 385 s (2850 pairs) at acrolein; `y` in 0.02 s to 1.2 s. The PySCF
 side's walls are "What is run"'s plus one `y` sweep and two more solves; at
@@ -4206,6 +4210,51 @@ initcheck; HIP: `hip-asan`, `hip-ubsan`), each preset's own tier passing —
 CUDA preset's build, as #88's were (`ctest --test-dir build-<preset> -R
 'nevpt2_sc_pseudodensity_(kappa_full|dump|oracle)_'`, with the presets'
 `ASAN_OPTIONS` / `LSAN_OPTIONS` / `UBSAN_OPTIONS`): all eight pass under all four tools, no ASan, LSan, UBSan or compute-sanitizer report. Seconds per entry, `kappa_full` CAS(4,4) / CAS(8,8) / LiF, `dump` the same, `oracle` CAS(4,4) / LiF: `asan` 18.0 / 20.4 / 3.6, 4.2 / 26.0 / 4.0, 4.0 / 3.6; `ubsan` 3.5 / 19.6 / 3.3, 3.2 / 25.2 / 3.4, 3.0 / 3.1; memcheck 12.3 / 475.1 / 42.3, 17.7 / 734.0 / 60.5, 17.2 / 55.8; initcheck 9.1 / 156.7 / 17.0, 11.9 / 257.1 / 24.5, 11.4 / 22.6. The HIP presets ran their own tiers only (the unit suite above in each), not these entries by name.
+
+## The one-pass `Y` against the probed one
+
+Since #240 the dump's `Y` comes from one reverse pass
+([`gradients.md`](gradients.md), §6, "`Y` as a matrix: one reverse pass").
+Two checks in `nevpt2_sc_pseudodensity --dump-source-terms` hold it:
+
+- **check 7, every dump:** each class's Dyall-block transposes in the
+  integrals against its own builders, by duality on one seeded draw
+  (`<B^T(M), Idot>` vs `<M, B(Idot)>`, relative to `max(1, |<M, B(Idot)>|)`,
+  bound 1e-10) — SC's seven classes with a Dyall block, or with `--pc` PC's
+  seven `K`'s;
+- **check 8, `--probed-y`:** the probed matrix computed beside it and the two
+  held element by element, `|Y_onepass - Y_probed| / max(1, |Y_probed|)`,
+  within the probed matrix's own bound `kDumpMatrixTol` = 1e-9. The ctest
+  entries are `nevpt2_sc_pseudodensity_dump_probed[_pc]_<case>`, next to the
+  dump's own; HSOH's and acrolein's are `slow`, acrolein's registered only
+  where its gitignored sidecar has been regenerated.
+
+Measured 2026-10-22, RX 9060 XT (`hip` preset, Release), `--tiles 3`,
+acrolein on the RTX 3080 (`default` preset) — every run `PASS`:
+
+| case | scheme | check 8: max element gap | check 7: max duality gap |
+|---|---|---:|---:|
+| N2 CAS(4,4) | SC | 1.2e-13 | 6.2e-15 |
+| N2 CAS(4,4) | PC | 3.1e-16 | 9.3e-15 |
+| N2 CAS(4,4) `_casscf` | SC | 1.6e-14 | 2.4e-14 |
+| N2 CAS(4,4) `_casscf` | PC | 2.3e-16 | 1.1e-14 |
+| LiF CAS(4,6) | SC | 1.1e-13 | 9.9e-15 |
+| LiF CAS(4,6) `_casscf` | SC | 3.6e-15 | 1.6e-14 |
+| HSOH CAS(6,6) `_casscf` (C1) | SC | 7.0e-14 | 2.8e-14 |
+| HSOH CAS(6,6) `_casscf` (C1) | PC | 5.8e-10 | 3.2e-14 |
+| N2 CAS(4,4) `_df` | SC | 1.2e-13 | 1.3e-14 |
+| N2 CAS(4,4) `_casscf_df` | SC | 5.3e-14 | 1.1e-14 |
+| acrolein CAS(6,5) `_casscf` | SC | 2.2e-12 | 2.1e-14 |
+| acrolein CAS(6,5) `_casscf` | PC | 3.1e-13 | 9.3e-14 |
+
+LiF's goldens carry no PC reference, so it has no PC row. **HSOH PC's
+5.8e-10 is the PC solve's conditioning, not the route:** its Sr and Si
+metrics keep eigenvalues down to 1.2e-10 (the solve's table in the same run),
+so every association of the same pairing differs at that level — the same
+run's checks 1 and 4, which hold the written matrix to direct pairings along
+seeded directions, are 3.1e-11 and 1.6e-10 (against 1e-13 or below on the
+other cases). It is inside the bound, and the bound was not moved. Wall times are
+[`performance.md`](performance.md), "The one-pass `Y`".
 
 ## The SC source terms against PySCF's, on a card
 
@@ -4555,7 +4604,9 @@ ctest walls (the `cpp-tier.sh` run, RTX 3080 / RX 9060 XT): the three
 N2/LiF directional entries 1.37 / 2.25 s, 1.54 / 2.37 s and 2.33 / 5.54 s,
 the same as their full twins, since both are dominated by the dump's `Y`;
 **acrolein SC 175.8 / 388.5 s, acrolein PC 177.7 / 310.3 s**, in which
-`Y`'s 2,850 basis directions are 175–385 s. That is why the two acrolein
+`Y`'s 2,850 basis directions are 175–385 s — walls of the probed `Y`, before
+#240 made it one reverse pass (about 0.6 s at acrolein, [`performance.md`](performance.md),
+"The one-pass `Y`"); these entries' walls have not been re-measured since. That is why the two acrolein
 entries are `slow`, and why they are not `small`: the sanitizer tier would
 run the probe at Debug speed (below).
 
@@ -4590,7 +4641,8 @@ Every non-empty block passes. The closest is SC's core–virt, 3.5e-9 against
 1e-8, a factor of 2.9 to spare: less than the factor of five the CASCI files
 were set with, and still inside the tolerance, which is not moved. PC is at
 least a factor of 25 inside its 2e-8. Wall, the binary run directly: SC
-180.6 s, PC 183.8 s, of which `Y`'s 2,850 basis directions are about 180 s,
+180.6 s, PC 183.8 s, of which `Y`'s 2,850 basis directions are about 180 s
+(the probed route, before #240),
 the same as the CASCI twins. ctest walls in the `cpp-tier.sh --preset
 default` run (RTX 3080): SC 180.5 s, PC 182.2 s, both passing.
 
