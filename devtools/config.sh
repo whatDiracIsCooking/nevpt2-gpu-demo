@@ -372,3 +372,26 @@ INSTALL_AGY=${INSTALL_AGY:-1}
 AGY_MANIFEST_BASE=${AGY_MANIFEST_BASE:-https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests}
 AGY_MANIFEST_PLATFORM=${AGY_MANIFEST_PLATFORM:-linux_amd64}
 AGY_MANIFEST_TIMEOUT=${AGY_MANIFEST_TIMEOUT:-8}
+
+# --- openmolcas in the images ----------------------------------------------
+
+# OpenMolcas, built from source by docker/install-openmolcas.sh for ONE
+# offline script: reference_data/molcas_casscf_hessian.py (#223), which
+# checks casscf_nuclear_hessian.py's analytic CASSCF Hessian against
+# OpenMolcas's McKinley. Nothing in the build, ctest or the golden tier
+# needs it. The pin is `ARG OPENMOLCAS_VERSION=` (a release tag) plus
+# `ARG OPENMOLCAS_COMMIT=` (the commit that tag must resolve to; the script
+# refuses otherwise) in each of these files, and doctor.sh warns when they
+# disagree or when a container's install is not the pin. There is no
+# version-bump script: a bump is the two lines in three files, by hand.
+OPENMOLCAS_PIN_FILES=${OPENMOLCAS_PIN_FILES:-"docker/Dockerfile.cuda
+docker/Dockerfile.hip
+docker/Dockerfile.combined"}
+
+# Whether docker/build.sh installs OpenMolcas into the GPU images. OFF by
+# default: it is a from-source Fortran build (and gfortran with it) that only
+# the offline reference_data/molcas_casscf_hessian.py needs. The Dockerfile's
+# own ARG default is 0 too. Turn it on for one build with
+# INSTALL_OPENMOLCAS=1 before docker/build.sh; its leaf layer is then cached
+# until the pin moves.
+INSTALL_OPENMOLCAS=${INSTALL_OPENMOLCAS:-0}

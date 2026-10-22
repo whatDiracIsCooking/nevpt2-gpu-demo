@@ -654,6 +654,62 @@ if [ -n "${AGY_RELEASE:-}" ] && command -v agy >/dev/null 2>&1; then
   fi
 fi
 
+# --- openmolcas pin (the one offline cross-check's tool) --------------------
+# docker/install-openmolcas.sh builds OpenMolcas from source at ARG
+# OPENMOLCAS_VERSION (a tag) + ARG OPENMOLCAS_COMMIT (what the tag must
+# resolve to) in each GPU Dockerfile, for reference_data/
+# molcas_casscf_hessian.py (#223) alone; nothing in the build or ctest needs
+# it, so its absence is a note, never a WARN. Two checks: the copies of the
+# pin agree, and inside an image built from that pin (OPENMOLCAS_VERSION in
+# the environment is the image's own ENV) the installed tree is the pin --
+# $prefix/VERSION holds "<tag> <commit>", written by the install script only
+# after its smoke job passed. OPENMOLCAS_PIN_FILES in config.sh lists the
+# files carrying the pin; empty drops the section.
+if [ -n "${OPENMOLCAS_PIN_FILES:-}" ]; then
+  echo "openmolcas pin"
+  om_pins=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    v=$(sed -n 's/^ARG OPENMOLCAS_VERSION=//p' "$TOP/$f" 2>/dev/null | head -1)
+    c=$(sed -n 's/^ARG OPENMOLCAS_COMMIT=//p' "$TOP/$f" 2>/dev/null | head -1)
+    om_pins+="${v:-?} ${c:-?}"$'\n'
+  done <<< "$OPENMOLCAS_PIN_FILES"
+  om_distinct=$(printf '%s' "$om_pins" | sort -u)
+  if [ "$(printf '%s\n' "$om_distinct" | wc -l)" -ne 1 ] || [[ "$om_distinct" == *"?"* ]]; then
+    warn "the OpenMolcas pin disagrees across (or is missing from) the Dockerfiles"
+    note "$(printf '%s' "$om_pins" | paste -sd ';' -)"
+    note "fix: set ARG OPENMOLCAS_VERSION / ARG OPENMOLCAS_COMMIT alike in each of OPENMOLCAS_PIN_FILES"
+    om_pinned=""
+  else
+    om_pinned=$om_distinct
+    ok "OpenMolcas pinned at $om_pinned"
+  fi
+  om_prefix=${OPENMOLCAS_PREFIX:-/opt/openmolcas}
+  om_installed=""
+  [ -f "$om_prefix/VERSION" ] && om_installed=$(cat "$om_prefix/VERSION")
+  if command -v pymolcas >/dev/null 2>&1; then
+    om_where="pymolcas at $(command -v pymolcas)"
+  else
+    om_where="no pymolcas on PATH"
+  fi
+  if [ -n "${OPENMOLCAS_VERSION:-}" ] && [ -z "$om_installed" ]; then
+    note "no OpenMolcas in this image (built with INSTALL_OPENMOLCAS=0, or by hand off the Dockerfile)"
+    note "only reference_data/molcas_casscf_hessian.py needs it"
+  elif [ -n "${OPENMOLCAS_VERSION:-}" ]; then
+    if [ "$om_installed" != "${OPENMOLCAS_VERSION} ${OPENMOLCAS_COMMIT:-}" ]; then
+      warn "$om_prefix holds OpenMolcas $om_installed, this image pinned ${OPENMOLCAS_VERSION} ${OPENMOLCAS_COMMIT:-}"
+      note "something installed over the image's copy; rebuild the container"
+    elif [ -n "$om_pinned" ] && [ "$om_installed" != "$om_pinned" ]; then
+      warn "this image was built at OpenMolcas $om_installed, the tree now pins $om_pinned"
+      note "rebuild: docker/build.sh cuda && devtools/devcontainer.sh rebuild"
+    else
+      ok "OpenMolcas in here is the pinned $om_installed ($om_where)"
+    fi
+  else
+    note "OpenMolcas here: ${om_installed:-not installed at $om_prefix}; $om_where (a host, unrelated to the pin)"
+  fi
+fi
+
 # --- docker hygiene (report-only) -----------------------------------------
 # Worktree containers/volumes/images leak when a worktree is removed with plain
 # `git worktree remove` (bypassing worktree.sh rm), or via an agent's worktrees

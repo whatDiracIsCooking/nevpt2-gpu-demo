@@ -2676,6 +2676,128 @@ uv run python reference_data/casscf_nuclear_hessian.py --case hsoh_def2svp_cas66
     --write golden/hsoh_def2svp_cas66_casscf.respgold
 ```
 
+### The CASSCF Hessian against OpenMolcas
+
+`reference_data/molcas_casscf_hessian.py` (#223) checks the Hessian above
+against an independent **analytic** one: OpenMolcas's single-state CASSCF
+Hessian (`MCKINLEY` for the second-derivative integrals, `MCLR` for the
+CP-CASSCF response and the assembly). That checks the reference side —
+`casscf_hessian.py`'s skeleton terms, the responses, the assembly — against
+another program rather than only against finite differences. It cannot check
+the `Z`-weighted third-derivative term (#216) or any NEVPT2 piece: CASSCF's
+own multipliers vanish.
+
+**The tool.** OpenMolcas `v26.06` (commit `8355057f`), built from source by
+`docker/install-openmolcas.sh` and pinned in the three GPU Dockerfiles,
+installed only in an image built with `INSTALL_OPENMOLCAS=1` (off by default;
+`docker/README.md`, "OpenMolcas, for one offline cross-check"). It runs
+through `pymolcas`: `$PYMOLCAS`, else `pymolcas` on `PATH`, else
+`--pymolcas`.
+
+**The run.** Both programs see the same molecule and basis. The molecule
+is the state's own bohr coordinates, in the frame the `.respgold` Hessian is
+written in, with no symmetry. The basis is OpenMolcas's library copy of the
+same name. RASSCF uses `Inactive = ncore`, `Ras2 = ncas`, the same electron
+count and spin. RASSCF starts (`LUMORB`) from a case's own orbitals and
+converges to `THRS 1e-12 1e-8 5e-8`. `ALASKA` then gives a gradient, which is
+reported. `MCKINLEY` (prescreening `CUTOFF 1e-14`, both defaults being 1e-7)
+and `MCLR` (absolute PCG `RESIDUAL`, 1e-9 on N2 and 1e-7 on HSOH, the
+tightest each reaches) produce the Hessian. The script reads it from MCLR's
+`UNSYM` file (13 significant digits, Cartesian, not projected).
+
+- **Why it starts from the committed orbitals.** From its own SCF guess,
+  OpenMolcas converges HSOH to a different CASSCF solution, 0.042 Eh higher
+  (−473.37933). The script does not feed in PySCF's orbitals as they are.
+  It builds OpenMolcas's library entry as a PySCF basis and projects the
+  orbitals onto it through the overlap. The two libraries segment the same
+  space differently: PySCF's cc-pVDZ drops the diffuse primitive from its
+  contracted `s` functions. It then reorders them to OpenMolcas's AO order:
+  centre, `l`, component, contracted function.
+- **The import, checked three ways.** The projection keeps the orbitals'
+  overlap (5e-14 or better). RASSCF's first iteration, a CASCI on the
+  guess, reproduces the committed energy to its printed 8 decimals. The run
+  refuses unless OpenMolcas's converged energy matches the committed one to
+  1e-9. That energy is read with 12 decimals from the title of the
+  `RasOrb.1` file.
+
+**Neither state is stationary.** The committed states sit at `|g_orb|`
+1.8e-7 and 9.3e-7 (the table above). So OpenMolcas runs **twice**, from the
+committed orbitals and from the **polished** ones (`casscf_nuclear_hessian.
+polished`, `|g_all|` ≤ 1e-11). Each OpenMolcas Hessian is gated against the
+polished PySCF Hessian. The committed `.respgold` one is reported alongside.
+
+**The tolerance** is derived from OpenMolcas's convergence, printed, and
+never tuned. It is 10 × (state term + response term).
+
+- **The response term** is `max_A |Θ_A| · eps`. An absolute PCG residual
+  `r_B` moves `H_AB` by `−Θ_A · r_B`, because `J` is symmetric.
+- **The state term** is the larger of two things. One is OpenMolcas's own
+  **spread**: its two converged Hessians of the one state, compared. The
+  other is `κ · g_M`. Here `κ = max|H_committed − H_polished| / |g_orb|` is
+  measured on the state, and `g_M` is RASSCF's final electronic-gradient
+  norm.
+- **The factor 10** covers the two programs' different scalings of the
+  orbital gradient and the residual.
+
+**A disagreement, investigated.** The first tolerance had `κ · g_M` alone
+as its state term, with one OpenMolcas run, from the committed orbitals. It
+failed N2. OpenMolcas, started from the committed orbitals, stops at
+`g_M` 2.4e-8 with max BLB 1.1e-8, taking zero-length steps. A BLB threshold
+of 1e-8 runs out its 200 iterations. That Hessian sat 5.41e-8 from the
+polished one, against an allowed 4.6e-8.
+
+The cause is OpenMolcas's own convergence floor, not a disagreement between
+the programs, as three measurements show:
+
+- Two OpenMolcas runs of the same N2 state differ by **4.3e-8** (largest
+  at `zz`). One started from its SCF guess (`g_M` 2.0e-8); the other from
+  the committed orbitals (2.4e-8).
+- `κ` is the Hessian's sensitivity along the committed state's residual
+  direction. RASSCF's residual points elsewhere, so `κ · g_M` (3.8e-9)
+  under-states what it does.
+- Started from the polished orbitals, RASSCF reaches `g_M` 1e-12. Its
+  Hessian then matches the polished PySCF one to **7.9e-12**.
+
+The state term now carries the measured spread. Read the committed-start
+row with that in mind: its distance to the polished Hessian is close to the
+spread by construction. The polished-start row is the substantive
+comparison.
+
+**Measured** (2026-10-22; CPU only, OpenMolcas built with
+`LINALG=Internal`, single process; every check passes on both):
+
+| | N2 CAS(4,4) | HSOH CAS(6,6) |
+|---|---|---|
+| projection: overlap kept | 4.7e-14 / 3.0e-14 | 5.3e-15 / 6.9e-15 |
+| `E_OpenMolcas − E_committed` (committed / polished start) | +9.4e-13 / +9.4e-13 | −1.8e-12 / −3.8e-12 |
+| RASSCF iterations; final `g_M` (committed / polished start) | 4, 2.4e-8 / 4, 1.1e-12 | 18, 2.9e-8 / 5, 3.4e-12 |
+| MCLR `RESIDUAL`; most PCG steps | 1e-9; 20 | 1e-7; 191 |
+| OpenMolcas's spread (two starts) | 5.4e-8 | 6.5e-9 |
+| tolerance (state + response, × 10) | 5.5e-7 | 8.9e-7 |
+| **`max \|H_M − H_polished\|`, polished start** | **7.9e-12** | **3.2e-10** |
+| `max \|H_M − H_polished\|`, committed start | 5.4e-8 | 6.5e-9 |
+| `max \|H_M − H_committed\|` (the `.respgold`), polished / committed start | 2.9e-8 / 8.3e-8 | 4.2e-8 / 4.1e-8 |
+| ALASKA gradient − polished PySCF, polished start | 1.7e-10 | 7.3e-9 |
+| OpenMolcas `H`: asymmetry; translational rule | 0; 2.1e-14 | 0; 1.2e-13 |
+| wall (whole script; each OpenMolcas run) | 9 s; 2.1 s | 44 s; 13 s |
+
+Units: Eh/bohr² for the Hessian rows, Eh/bohr for the gradient. The eigenvalues
+agree as the elements do. N2's `−4.037532e-3` pair (`−g/R` along the two
+rotations at this non-equilibrium bond length) is the same to all printed
+digits from the polished start. HSOH's three small rotational eigenvalues,
+1.9e-8, 8.4e-8 and 5.6e-7, agree to 3e-11.
+
+**Two MCLR findings.** HSOH's PCG reaches an absolute residual of 1e-7 in
+under 200 steps. At 1e-8 its second perturbation stagnates: no convergence
+in 3000 steps. MCLR's own default is a relative 1e-4. These residuals enter
+the tolerance through the response term, which dominates HSOH's.
+
+```bash
+uv run python reference_data/molcas_casscf_hessian.py --case n2_ccpvdz_cas44
+uv run python reference_data/molcas_casscf_hessian.py --case hsoh_def2svp_cas66
+#   --pymolcas PATH if pymolcas is not on PATH; --keep DIR keeps both OpenMolcas runs
+```
+
 ### The integral perturbation sidecar
 
 `reference_data/integral_perturbation.py` (#220) writes the input of
@@ -3463,6 +3585,7 @@ not used.
 | `reference_data/sc_empty_perturber_probe.py` | **what SC's guarded (empty) perturbers do to the orbital Hessian**: transcribes PySCF's eight SC class formulas onto a golden's stored blocks (reproducing its `class_energies`), classifies the guarded tuples as empty by their integrals or merely small, and along seeded intra-space direction pairs evaluates the sixth term, the proportionality defect `rho`, the polarisation a four-point ladder converges to (checked against one, under real rotations), the parallelogram defect, and what the guard drops at first order. Reuses `pc_null_mode_probe.State` for the RDMs. CPU only, writes nothing ([`testing.md`](testing.md), "The empty-perturber term, offline"; [`hessian-theory.md`](hessian-theory.md), §5.6) |
 | `reference_data/casscf_hessian.py` | the **CASSCF reference's skeleton nuclear derivatives** (#215): the perturbed Hamiltonians `dh/dR`, `d(pq\|rs)/dR` in the MO basis along `nevpt2_grad.py`'s frozen orthonormal path (`frozen_coeff`, imported), and the second partial `L_RR` from `pyscf.hessian.rhf`'s integral drivers contracted with the CASSCF densities, plus the connection's second-order terms. Checked against ladders of the path energy and the translational sum rules on a case's committed `_casscf.mogold` state. CPU only; writes nothing unless `--out` (see "The CASSCF skeleton nuclear derivatives" above) |
 | `reference_data/casscf_nuclear_hessian.py` | the **analytic CASSCF nuclear Hessian** (#219): the `3N` CP-CASSCF parameter responses (the coupled operator built densely from `gen_g_hop`'s `h_op` and factorised once, the right-hand sides `gen_g_hop`'s gradient at `casscf_hessian.py`'s perturbed Hamiltonians) and the assembly `L_RR + L_{RΘ} Θ⁽¹⁾`, in the `_casscf` golden's own frame. Checked against ladders of `pyscf.grad.casscf` and of the re-optimised parameters along every point-group-keeping direction, and the exact identities. CPU only; `--write` writes the `.respgold` sidecar (see "The analytic CASSCF nuclear Hessian" above) |
+| `reference_data/molcas_casscf_hessian.py` | the **CASSCF Hessian against OpenMolcas** (#223): runs OpenMolcas's analytic single-state CASSCF Hessian (`MCKINLEY` + `MCLR`, through `pymolcas`, `docker/install-openmolcas.sh`'s pinned build) on a committed `_casscf` state, started from its orbitals carried exactly into OpenMolcas's basis and AO order, and from the polished ones, and gates both against `casscf_nuclear_hessian.py`'s polished Hessian within a tolerance derived from OpenMolcas's convergence. CPU only; writes nothing (see "The CASSCF Hessian against OpenMolcas" above) |
 | `reference_data/integral_perturbation.py` | the **integral perturbation sidecar** (#220): every nuclear coordinate's perturbed Hamiltonian of a committed `_casscf` state, `casscf_hessian.py`'s skeleton plus connection (and, `--df`, the fitted integrals', metric and auxiliary functions included), pushed through the gradient sidecar's definitions at fixed orbitals and active density: `h`, `h^eff`, `f` and the eighteen one-general-index rows, stacked per coordinate. Checked against the committed frame, the committed gradient sidecar's arrays at the reference and per-coordinate derivative ladders of rebuilt integrals. CPU only; `--write` writes the `.pertgold` (see "The integral perturbation sidecar" above) |
 | `reference_data/casscf_third_derivative.py` | **level 2's CASSCF-branch term** (#216): `T(u, v) = Z . d²g_all/dθdθ [u, v]`, the gradient's multipliers contracted with the second derivative of `gen_g_hop`'s constraint, as an exact truncated Taylor series of the CASSCF energy (no step error), over full-range `(kappa, c)` directions. Checked against a ladder of `g_all` differenced along both directions, for orbital, CI, mixed and full pairs, with the SC-NEVPT2 multipliers on a case's committed `_casscf` state. CPU only; writes nothing (see "Level 2's CASSCF third-derivative term" above) |
 | `reference_data/casscf_constraint_mixed.py` | **the CASSCF constraint's R-mixed terms** (#232): `Z . d²g/dθdR [u]` (an action, one number per coordinate) and `Z . d²g/dR²`, as `casscf_hessian.py`'s perturbed-Hamiltonian gradient and `L_RR` at Z-weighted densities built from `casscf_third_derivative.py`'s exact series. Checked against ladders of `gen_g_hop`'s `g_all` along the frozen path, and against the exact identities (symmetry, translational sum rules, #219's `dg_all/dR` formula), with the SC-NEVPT2 multipliers on N2, LiF and HSOH's committed `_casscf` states. CPU only; writes nothing (see "The CASSCF constraint's R-mixed terms" above) |
