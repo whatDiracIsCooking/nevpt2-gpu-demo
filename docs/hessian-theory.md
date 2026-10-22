@@ -2253,8 +2253,30 @@ the Jacobian of `g_all` only at a stationary point, and `h_op(theta + h v)`
 applies `u` in the displaced point's frame; so `h_op` differenced along `v`
 is **not** `T` on any pair with an orbital part. The oracle differences
 `g_all` itself along both directions ([`reference-data.md`](reference-data.md),
-"Level 2's CASSCF third-derivative term"). The R-mixed constraint terms
-(`Z . d^2 g / dtheta dR`, `Z . d^2 g / dR^2`) are the analytic assembly's.
+"Level 2's CASSCF third-derivative term").
+
+**As built, the R-mixed constraint terms (#232).**
+`reference_data/casscf_constraint_mixed.py` delivers the constraint's two
+coordinate terms on the CASSCF branch. One is `Z . d^2 g / dtheta dR_A [u]`,
+an action on a full-range `(kappa, c)` direction with one number per
+Cartesian coordinate. The other is `Z . d^2 g / dR_A dR_B`, a symmetric
+`3N x 3N` matrix. Both are taken with `g` along #215's frozen-connection
+path: `C_f(R) exp(K(x))` with a fixed CI step, and `Z` stepped from the
+displaced point as in #216. No new integral code is needed, because
+`frozen_coeff` is linear in the orbitals it carries. So the energy at any
+rotation `U` and CI vector `c` is #215's path energy at the densities
+`U_o D(c) U_o^T` and `U_o^(x4) G(c)`, carried into the full MO range. Every
+`R`-derivative is then #215's perturbed-Hamiltonian gradient, or its
+`L_RR`, at **Z-weighted densities**, with the nuclear-repulsion term
+dropped. Those densities are the `s` coefficient for `Z . d^2 g / dR^2` and
+the `a s` coefficient for the mixed term, both taken from #216's exact
+truncated series, so no step enters either term. The same finding as #216
+holds here: `h_op` is the Jacobian of `g_all` only at a stationary point, so
+the oracle differences `g_all` itself along the path. It uses four-point
+quotients along `(u, d)` and second and four-point differences along `d`,
+`d'` ([`reference-data.md`](reference-data.md), "The CASSCF constraint's
+R-mixed terms"). Assembling these terms into the nuclear Hessian is §8's
+job and is not built.
 
 ## 8. Level 3: the nuclear Hessian, and why its oracle is the hard part
 
@@ -2689,8 +2711,9 @@ block ([`gradients.md`](gradients.md), §1.1).
   Eddot(u, v)").
 - Level 2's CASSCF-branch third-derivative term (§7) is built offline
   (#216), and nothing in PySCF reaches it: differentiating `gen_g_hop`'s
-  operator does not give it (§7, "As built"). Its R-mixed partners and the
-  GPU side are not built.
+  operator does not give it (§7, "As built"). Its R-mixed partners are built
+  offline too (#232, §7). Their assembly into the Hessian and the GPU side
+  are not built.
 - Whether the Euler check's frozen-orbital-energy restriction (§4.3) can be
   lifted by carrying the affine part explicitly, which would recover an
   identity in the sidecar-fed mode rather than leaving that mode checked only
