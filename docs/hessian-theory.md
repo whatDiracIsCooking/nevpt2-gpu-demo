@@ -14,7 +14,8 @@ what is in the tree, what is refused and what is deliberately not built is
 [`gradients.md`](gradients.md), §1.1, and the "as built" notes below
 (§9.1's second table among them) say where the code sits. Levels 2 and 3
 (§7–§8) are not in the tree, but for §8's one "as built" piece, the NEVPT2
-half of `L_{R Θ}` (#220). Size formulas in `n_mo`, `n_core`, `n_act`,
+half of `L_{R Θ}` (#220), and the offline, reference-side pieces §7's and
+§8's as-built notes name. Size formulas in `n_mo`, `n_core`, `n_act`,
 `n_virt` and `ndet` are algebra and stay here; what any of them works out to in bytes or seconds belongs in
 [`performance.md`](performance.md) or [`reference-data.md`](reference-data.md).
 
@@ -2236,6 +2237,25 @@ touches it. On the CASCI branch it is reachable from the same CPHF operator the
 offline gradient already builds; on the CASSCF branch there is no PySCF entry
 point for it, which is the same gap §8 runs into.
 
+**As built, CASSCF branch (#216).** `reference_data/casscf_third_derivative.py`
+delivers the term as an action, `T(u, v) = Z . d^2 g / dtheta dtheta [u, v]`,
+with `g = gen_g_hop`'s `g_all` evaluated at the parameters exactly as the
+gradient's Lagrangian evaluates it (`C0 exp(K(x))`, `(c0 + y) / |c0 + y|`)
+and `(Z, z)` in `g_all`'s normalisation. Because `Z . g_all` is the energy's
+slope along `Z` **from the displaced point**, `T` is the mixed
+coefficient of `E(C0 exp(K(a u + b v)) exp(s K(Z)), ...)`: a third
+derivative of the CASSCF energy, symmetric in `(u, v)`, but not the
+symmetric `d^3 E[u, v, Z]` of one global chart — the two differ by the
+connection. It is evaluated exactly, as a truncated Taylor series in three
+nilpotent units, so no step enters it. Two things the obvious route gets
+wrong: `gen_g_hop`'s `h_op` is the local Hessian of the energy, which is
+the Jacobian of `g_all` only at a stationary point, and `h_op(theta + h v)`
+applies `u` in the displaced point's frame; so `h_op` differenced along `v`
+is **not** `T` on any pair with an orbital part. The oracle differences
+`g_all` itself along both directions ([`reference-data.md`](reference-data.md),
+"Level 2's CASSCF third-derivative term"). The R-mixed constraint terms
+(`Z . d^2 g / dtheta dR`, `Z . d^2 g / dR^2`) are the analytic assembly's.
+
 ## 8. Level 3: the nuclear Hessian, and why its oracle is the hard part
 
 With `L` stationary in **every** variable at the solution — the multipliers
@@ -2667,9 +2687,10 @@ block ([`gradients.md`](gradients.md), §1.1).
   that stands off the analytic one, so the PC Hessian's gated entries are the
   CAS(4,4) ones ([`pc-nevpt2.md`](pc-nevpt2.md), "The second derivative,
   Eddot(u, v)").
-- Level 2's CASSCF-branch third-derivative term (§7): whether anything in PySCF
-  reaches it, or whether it would have to be built from `gen_g_hop`'s operator
-  by differentiation.
+- Level 2's CASSCF-branch third-derivative term (§7) is built offline
+  (#216), and nothing in PySCF reaches it: differentiating `gen_g_hop`'s
+  operator does not give it (§7, "As built"). Its R-mixed partners and the
+  GPU side are not built.
 - Whether the Euler check's frozen-orbital-energy restriction (§4.3) can be
   lifted by carrying the affine part explicitly, which would recover an
   identity in the sidecar-fed mode rather than leaving that mode checked only

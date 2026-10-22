@@ -330,6 +330,21 @@ What they are, all on synthetic inputs, no PySCF solve, no card, no network:
   of the integrals rebuilt along the frozen path (1e-8). About 4 s of CPU
   ([`reference-data.md`](reference-data.md), "The integral perturbation
   sidecar").
+- **`test_casscf_third_derivative.py`** (#216) — `casscf_third_derivative.py`'s
+  level-2 term `T(u, v) = Z . d²g_all/dθdθ [u, v]`, on a bent C1 water
+  CASSCF(4,4) in 6-31G with a seeded `(Z, z)`. The series' lower
+  coefficients against `gen_g_hop` at a point far from stationarity
+  (`g_all . u` and `u . h_op(v)` to 1e-10, the `a s` coefficient against a
+  central difference of `g_all` to 1e-7, and `h_op` off that Jacobian on
+  every pair with an orbital part); `T` against the ladder of `g_all`
+  differenced along both directions for orbital, CI, mixed and full pairs
+  (1e-6, three fourfold halvings); `T`'s symmetry, bilinearity and
+  linearity in `Z`, and `action(u) . v = T(u, v)` (1e-10); the ladder
+  rejecting the global-chart `d³E[u, v, Z]`; the `h_op`-differenced ladder
+  hitting `T` on a CI pair and missing it on an orbital one; and the script
+  end to end on the committed N2 CAS(4,4) CASSCF state with seeded
+  multipliers. About 8 s of CPU ([`reference-data.md`](reference-data.md),
+  "Level 2's CASSCF third-derivative term").
 
 **The thresholds are written into the tests as numbers**, not read from the
 module: a test comparing against `DEGENERACY_TOL` would move with it.
