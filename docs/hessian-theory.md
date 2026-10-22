@@ -2278,7 +2278,16 @@ Three things are needed that the gradient did not need:
    would be `3N(3N+1)/2` of those — because the zeroth-order multiplier absorbs
    them all. That is the same economy the gradient uses, applied one order up,
    and it is the difference between a feasible calculation and an infeasible
-   one.
+   one. For the **CASSCF reference** the `3N` solves are in the reference
+   data: `reference_data/casscf_nuclear_hessian.py` (#219) builds the coupled
+   CP-CASSCF operator densely from `gen_g_hop`'s `h_op`, factorises it once,
+   and solves it against `gen_g_hop`'s gradient evaluated at the perturbed
+   Hamiltonians; the responses, in `gen_g_hop`'s gauge (zero on the
+   core–core, active–active and virtual–virtual blocks), assemble the bare
+   CASSCF nuclear Hessian `L_RR + L_{R_A Theta} . Theta^(1)_B`, and are
+   written as the `.respgold` sidecar the GPU's bilinear form reads
+   ([`reference-data.md`](reference-data.md), "The analytic CASSCF nuclear
+   Hessian").
 
 None of that is conceptually hard. The **oracle** is, and that is the argument
 for not starting here:

@@ -109,7 +109,11 @@ checked in two halves:
   `read_states_manifest`, and a transient golden with NaN PC placeholders
   (`pc_on_states.py`'s) must pass every golden reader. A committed golden
   holding any NaN or infinity is refused, so such a transient file cannot
-  land in `golden/`. Ends `PASS:` or `FAIL:` with an exit status.
+  land in `golden/`. Since #219 every committed `.respgold` response
+  sidecar goes through `read_respgold` / `write_respgold` byte for byte and
+  is held to the `_casscf` golden and gradient sidecar beside it: partition,
+  `ci` and `mo_coeff` bit for bit, the frame its directions are written in;
+  at least one must be committed. Ends `PASS:` or `FAIL:` with an exit status.
 
 The Python half registers **no ctest entry**, for the same reasons the
 gradient comparison does not ("Why there is no ctest entry for it", below):
@@ -287,6 +291,25 @@ What they are, all on synthetic inputs, no PySCF solve, no card, no network:
   incomplete MO basis. A few seconds of CPU, no golden
   ([`reference-data.md`](reference-data.md), "The CASSCF skeleton nuclear
   derivatives").
+- **`test_casscf_nuclear_hessian.py`** (#219) — `casscf_nuclear_hessian.py`'s
+  responses and assembled Hessian, on a bent C1 water CASSCF(4,4) in 6-31G
+  polished to `|g_all|` ≤ 1e-11 by the module's own chord. Each piece against
+  something it does not compute: the `dE/dΘ` formula against `gen_g_hop`'s
+  `g_all` at a non-stationary point (orbitals rotated, CI vector moved; 1e-12),
+  the `3N` right-hand sides against central differences of `g_all` along the
+  frozen path (1e-7), and along two coordinates the responses (`kappa`, CI)
+  and the Hessian column against re-optimised states and
+  `pyscf.grad.casscf` there, Richardson from `2^-8` and `2^-9` bohr (1e-7,
+  and the plain quotient must be further off). Also: the exact identities
+  (symmetry, translation, `|J Θ + b|`, the responses' zero blocks and
+  orthogonality to `c`), the rotational sum rule and that it trips on one
+  off-diagonal pair moved by 1e-6, the gauge decomposition recovering a known
+  `exp(K) W`, the point-group-keeping directions of the four committed
+  geometries (N2's stretch alone), and the two committed `.respgold` files
+  read, re-written byte for byte, in their golden's frame, and equal to a
+  fresh solve (1e-10), with a misshapen array refused. About 25 s of CPU
+  ([`reference-data.md`](reference-data.md), "The analytic CASSCF nuclear
+  Hessian").
 
 **The thresholds are written into the tests as numbers**, not read from the
 module: a test comparing against `DEGENERACY_TOL` would move with it.
@@ -301,7 +324,8 @@ It is the `pytest` phase of `cpp-tier.sh` ("No CI, and the local gate",
 above), after `ruff`. Measured: 343 tests, 32 s, no card (RTX 3080 box's
 CPU, 2026-10-20, with two other CPU jobs running; the ten empty-perturber
 cases take 1 s of it, and the eleven PC orbital-Hessian cases (#199) another
-1 s). Negative controls, run once in scratch and reverted: setting
+1 s). With #219's eleven CASSCF-Hessian cases: 369 tests, 46 s (2026-10-22,
+a sibling build sharing the CPU). Negative controls, run once in scratch and reverted: setting
 `DEGENERACY_TOL` to 1e-5 fails 4 tests (the pinned value and the three
 0.99e-4 refusals); leaving the constant alone and loosening the comparison
 inside `_check_degeneracy` to `DEGENERACY_TOL / 10` fails the same three
@@ -318,8 +342,8 @@ nothing skips.
 `devtools/golden-repro.sh` re-runs the promise CLAUDE.md makes — the
 generators are bit-reproducible, so a regenerated file that differs from the
 committed one means something changed — for every committed N2 CAS(4,4) /
-CAS(8,8) reference and the C1 case's three HSOH files (#213). Twenty-three
-files from eighteen generator runs, each with the
+CAS(8,8) reference, the C1 case's three HSOH files (#213) and the two CASSCF
+response sidecars (#219). Twenty-five files from twenty generator runs, each with the
 generator's own settings (`--out` into a scratch directory is the only flag
 added):
 
@@ -334,6 +358,7 @@ added):
 | `n2_ccpvdz_cas44_casscf[_pc][_dir].srcgold` | `sc_source_oracle.py --case n2_ccpvdz_cas44_casscf --mo-from` the **committed** sidecar `[--pc] [--directional]` (#117) |
 | `hsoh_def2svp_cas66_casscf.mogold` | `generate_golden.py --casscf --mo-out` (a fresh optimisation) |
 | `hsoh_def2svp_cas66_casscf.nevpt2gold`, `.gradgold` | `generate_golden.py --mo-from` the **committed** `.mogold` `--gradgold`, then `nevpt2_numgrad.py --reference casscf --workers 12` on the sidecar it just wrote, in the same run, so the sidecar's `grad_num*` arrays are regenerated too (#213) |
+| `n2_ccpvdz_cas44_casscf.respgold`, `hsoh_def2svp_cas66_casscf.respgold` | `casscf_nuclear_hessian.py --no-ladders --write`, on the state `--mo-from` the **committed** `.mogold` builds, refused unless it is the committed golden's frame bit for bit (#219) |
 
 The comparison is `cmp` on the whole file — the one place in this tree a
 byte comparison is right. One exception, the documented one
@@ -343,7 +368,7 @@ four the state fields must be byte-identical, the new `reference_kind` must
 be `casci`, and everything from the array count on byte-identical, each
 file's header length read with `golden_format.py arrays-at`. It prints one
 `PASS:`/`FAIL:` line per file (naming it) and exits 0 only if all
-twenty-three reproduce. `--committed DIR` compares against a copy instead of `golden/`
+twenty-five reproduce. `--committed DIR` compares against a copy instead of `golden/`
 (the generator inputs stay `golden/`'s), `--only REGEX` narrows the set,
 `--out DIR` keeps the regenerated files and each run's log.
 
@@ -369,6 +394,7 @@ before #105 added the two directional files:
 | `-j 6`, twenty files, #164 (RTX 3080 box's CPU, a sibling build sharing it) | 179 s, all twenty `PASS:` |
 | `-j 6`, twenty files, `n2_ccpvdz_cas44_df.gradgold` with its `grad_num`, #167 (same box, a sibling agent sharing it) | 178 s, all twenty `PASS:`; the `cas44_df` run, generator plus `nevpt2_numgrad.py --df`, 33 s |
 | `-j 6`, twenty-three files, the HSOH three added, #213 (the two-card box's CPU) | 227 s, all twenty-three `PASS:`; the `hsoh_casscf` run, generator plus the 72-state `--reference casscf` sweep at `--workers 12`, 198 s, the `hsoh_casscf_mo` run 16 s |
+| `-j 6`, twenty-five files, the two `.respgold` added, #219 (the 12-core reference box, a sibling build sharing it) | 236 s, all twenty-five `PASS:`; `cas44_casscf_resp` 4 s, `hsoh_casscf_resp` 11 s |
 
 Per generator run (the `-j 1` run): `--casscf` sidecars 2–3 s,
 `n2_ccpvdz_cas44.srcgold` 9 s, the CAS(4,4) goldens 26–27 s, the CAS(8,8)
@@ -3392,6 +3418,39 @@ So this is a **manual gate**, like the sanitizer tier and the cross-backend
 check: the commands are above, they print `PASS:`/`FAIL:` and set an exit
 status, and the protocol is the same one "No CI, and the local gate" states —
 run them and say what they printed.
+
+## The analytic CASSCF nuclear Hessian
+
+`reference_data/casscf_nuclear_hessian.py` (#219) is offline Python with no
+card and no ctest entry, for the gradient comparison's reasons ("Why there
+is no ctest entry for it", above). It ends `PASS`/`FAIL`, and its gates are:
+
+| what | gate | why this number |
+|---|---|---|
+| `H d` against a Richardson ladder of `pyscf.grad.casscf` at re-optimised states, along every point-group-keeping direction `d` (the polished state's `H`, and the committed one's) | 1e-6 Eh/bohr², worst element of the column | `nevpt2_grad.LADDER_TOL`, what the gradient and `L_RR` are held to; the ladder's own floor is two decades under it |
+| the responses along `d`, `kappa` and CI, against the ladder of the re-optimised parameters read back in `gen_g_hop`'s gauge (the polished state's) | 1e-6 per bohr, worst element | the same |
+| each ladder's run rule | three fourfold halvings on the whole quotient vector's max-norm change (`casscf_hessian.judge_column`) | `nevpt2_grad.LADDER_RUN` |
+| the response's CI part outside the state's irrep, along `d` | 1e-9 | an exact zero by symmetry |
+| `H`'s symmetry, the translational sum rule, `\|J Θ + b\|` dense and through `h_op`, the `dE/dΘ` formula against `gen_g_hop`'s `g_all` at the state, `\|c · c⁽¹⁾\|` | 1e-9 | exact identities, read to round-off |
+| the rotational sum rule `H (Ω R) = Ω g` | 1e-6 Eh/bohr | exact only at a stationary state: the committed state's residual orbital gradient (≤ 1e-6 by the `--mo-from` gate) enters it at first order |
+| every re-optimised state | `\|g_all\|` ≤ 1e-11 | what lets a quotient at `2^-13` bohr still see truncation |
+
+**Why the response ladders read the polished state, not the committed
+one.** A re-optimised ladder differentiates the exactly stationary branch,
+and at `h = 0` that branch passes through the stationary point, not through
+the committed state, which misses it by its residual orbital gradient. The
+committed state's responses therefore differ from the ladder's limit by
+`O(|g_orb| / λ_min)`. On LiF, HSOH and acrolein that offset is over the gate
+in `kappa`, even over the point-group-keeping coordinates alone (the "committed − polished" rows of the measured table), and it is
+not an error in the solve: the same comparison around the state polished in
+memory to `|g_all|` ≤ 1e-11 passes by two decades. So the response ladders
+are run about the polished state, the committed-minus-polished difference is
+printed beside them, and the Hessian column is gated for both, since the
+Hessian's own offset is well inside the gate. The sidecar holds the
+committed state's responses, because that is the state the golden and the
+GPU hold. The measured numbers are in
+[`reference-data.md`](reference-data.md), "The analytic CASSCF nuclear
+Hessian".
 
 ## The GPU as the source-term provider
 
