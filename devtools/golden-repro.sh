@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Regenerate the committed N2 CAS(4,4) / CAS(8,8) references, and the C1
-# case's three HSOH CAS(6,6) files (#213), with the generators' own settings, into a scratch directory, and compare each with
+# case's three HSOH CAS(6,6) files (#213), and the two CASSCF response
+# sidecars (#219), with the generators' own settings, into a scratch directory, and compare each with
 # the committed file BYTE FOR BYTE. The regeneration gate of docs/testing.md,
 # "The golden regeneration gate".
 #
@@ -13,7 +14,7 @@
 # place that re-runs the promise, and the one place a byte comparison is right:
 # everywhere else compares against a tolerance.
 #
-# What it regenerates (twenty-three files, eighteen generator runs):
+# What it regenerates (twenty-five files, twenty generator runs):
 #   generate_golden.py     n2_ccpvdz_cas44 / cas88 .nevpt2gold + .gradgold,
 #                          their _df twins (each with its density-fitted
 #                          NEVPT2F1 .gradgold, #164), the two .mogold sidecars (a fresh
@@ -47,6 +48,12 @@
 #                          cold, deterministic like the reference, so the
 #                          sidecar is compared whole
 #                          (docs/reference-data.md, "HSOH, the C1 case").
+#   casscf_nuclear_hessian.py  n2_ccpvdz_cas44_casscf.respgold and
+#                          hsoh_def2svp_cas66_casscf.respgold (#219), the
+#                          CASSCF response sidecars, --mo-from the COMMITTED
+#                          .mogold and held to the committed golden's frame
+#                          (docs/reference-data.md, "The analytic CASSCF
+#                          nuclear Hessian").
 #
 # What it deliberately does NOT regenerate: golden/n2_ccpvdz_cas44_casscf.gradgold,
 # the CASSCF-reference gradient sidecar (#120). An orbital optimiser sits
@@ -172,6 +179,16 @@ add_run hsoh_casscf_mo "hsoh_def2svp_cas66_casscf.mogold" \
 add_run hsoh_casscf "hsoh_def2svp_cas66_casscf.nevpt2gold hsoh_def2svp_cas66_casscf.gradgold" \
   "python $gen --atom reference_data/geometries/hsoh.xyz --basis def2-svp --ncas 6 --nelecas 6 --name hsoh_def2svp_cas66_casscf --mo-from $G/hsoh_def2svp_cas66_casscf.mogold --gradgold --out $S/hsoh_def2svp_cas66_casscf.nevpt2gold" \
   "python $num --case hsoh_def2svp_cas66 --reference casscf --workers 12 --states-dir $S/hsoh_states --sidecar $S/hsoh_def2svp_cas66_casscf.gradgold"
+# The CASSCF response sidecars (#219): the 3N responses and the analytic
+# CASSCF Hessian of each committed _casscf state, from --mo-from the COMMITTED
+# .mogold, held (and refused otherwise) to the committed golden's ci and
+# gradient sidecar's mo_coeff bit for bit. --no-ladders: the sidecar is the
+# solve alone; the re-optimised ladders that check it write nothing.
+hes="$REPO_ROOT/reference_data/casscf_nuclear_hessian.py"
+add_run cas44_casscf_resp "n2_ccpvdz_cas44_casscf.respgold" \
+  "python $hes --case n2_ccpvdz_cas44 --no-ladders --write $S/n2_ccpvdz_cas44_casscf.respgold"
+add_run hsoh_casscf_resp "hsoh_def2svp_cas66_casscf.respgold" \
+  "python $hes --case hsoh_def2svp_cas66 --no-ladders --write $S/hsoh_def2svp_cas66_casscf.respgold"
 add_run cas44_src "n2_ccpvdz_cas44.srcgold" \
   "python $src --case n2_ccpvdz_cas44 --out $S/n2_ccpvdz_cas44.srcgold"
 add_run cas44_src_pc "n2_ccpvdz_cas44_pc.srcgold" \

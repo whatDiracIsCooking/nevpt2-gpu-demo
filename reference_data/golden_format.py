@@ -3,7 +3,8 @@ r"""The one Python reader (and the byte-level writer) of the three binary
 formats in ``golden/``: the ``*.nevpt2gold`` golden, the ``*.gradgold``
 gradient sidecar (conventional or density-fitted) and the ``*.mogold`` MO
 sidecar -- and of the
-``*.srcgold`` source-term oracle, which ends in the same array section. It
+``*.srcgold`` source-term oracle and the ``*.respgold`` CASSCF response
+sidecar, which end in the same array section. It
 also reads ``states.json``, the manifest a CASSCF-reference sweep keeps its
 displaced states' ``.mogold`` files under (:func:`read_states_manifest`).
 
@@ -11,7 +12,7 @@ Every reader in ``reference_data/`` goes through this module; none parses a
 header, or seeks to an offset, of its own. The scalar header of each format is
 written down **once**, as a field table keyed by magic (:data:`GOLDEN_HEADERS`,
 :data:`GRADGOLD_HEADERS`, :data:`MO_SIDECAR_HEADERS`,
-:data:`SRCGOLD_HEADERS`), and both directions are
+:data:`SRCGOLD_HEADERS`, :data:`RESPGOLD_HEADERS`), and both directions are
 driven by that table: :func:`pack_header` writes it, :func:`_read_header`
 reads it, and where the array table begins is wherever the header read stopped
 (``f.tell()``) -- derived, never known. A header change is therefore an edit to
@@ -108,6 +109,14 @@ SRCGOLD_MAGIC_PC = b"NEVPT2P1"
 SRCGOLD_MAGIC_DIR = b"NEVPT2SD"
 SRCGOLD_MAGIC_PC_DIR = b"NEVPT2PD"
 
+#: Magic bytes identifying a CASSCF **response sidecar** (``*.respgold``,
+#: #219): the ``3N`` first-order parameter responses of a ``_casscf`` state
+#: to the nuclear coordinates, as full-range ``(kappa, c)`` directions in the
+#: golden's own frame, with the analytic CASSCF nuclear Hessian they assemble
+#: (``casscf_nuclear_hessian.py --write``; :data:`RESPGOLD_ARRAYS` has the
+#: arrays). The direction set the GPU's bilinear form reads (#222).
+RESPGOLD_MAGIC = b"NEVPT2R1"
+
 #: A source-term oracle's ``(scheme, flavour)``, by magic: what
 #: :func:`read_srcgold` reports as ``header["scheme"]`` /
 #: ``header["flavour"]`` and :func:`write_srcgold` picks the magic from
@@ -170,6 +179,40 @@ _SRCGOLD_LAYOUT = tuple(
 SRCGOLD_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
     magic: _SRCGOLD_LAYOUT for magic in SRCGOLD_KINDS
 }
+
+#: THE response sidecar's scalar header: the atom count (``3 natm`` is every
+#: per-coordinate array's leading extent), the orbital-space partition, the
+#: active electron counts, the determinant count and the state's CASSCF
+#: energy.
+RESPGOLD_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
+    RESPGOLD_MAGIC: tuple(
+        (n, "i") for n in ("natm", "nao", "nmo", "ncore", "nact", "nvirt", "nelec_a",
+                           "nelec_b")
+    ) + (("ndet", "q"), ("e_casscf", "d")),
+}
+
+#: The arrays a response sidecar holds, in file order, each with its shape in
+#: header fields (``ncoord`` = ``3 natm``; ``ci`` keeps the golden's own
+#: ``(n_alpha_strings, n_beta_strings)`` shape, whose product is ``ndet``).
+#: Coordinates are ``k = 3 atom + axis``, bohr.
+RESPGOLD_ARRAYS = (
+    # the frame the directions are written in: the _casscf golden's own
+    # orbitals and CI vector (its gradient sidecar's mo_coeff, its ci)
+    ("mo_coeff", ("nao", "nmo")),
+    ("ci", None),
+    # kappa^(1)_k, antisymmetric: C(R0 + h e_k) = C_f exp(h kappa_k) + O(h^2)
+    # on the frozen path C_f = S^-1/2 S0^1/2 C0; zero on the core-core,
+    # active-active and virtual-virtual blocks (the redundancy's gauge)
+    ("kappa", ("ncoord", "nmo", "nmo")),
+    # c^(1)_k, orthogonal to ci, in the same orbitals
+    ("ci_response", ("ncoord", "ndet")),
+    # d^2 E_CASSCF / dR dR (Eh/bohr^2), its skeleton half L_RR, and dE/dR
+    ("hessian", ("ncoord", "ncoord")),
+    ("l_rr", ("ncoord", "ncoord")),
+    ("gradient", ("ncoord",)),
+    # 1.0 where a displacement along the coordinate keeps the point group
+    ("kept", ("ncoord",)),
+)
 
 #: No array the generator writes has more than a handful of axes; a rank past
 #: this is a misread header (``loadGolden``'s ``kMaxRank``).
@@ -392,6 +435,52 @@ def read_srcgold(path) -> tuple[dict, dict[str, np.ndarray]]:
         header = _read_header(f, path, SRCGOLD_HEADERS, "source-term oracle")
         header["scheme"], header["flavour"] = SRCGOLD_KINDS[header.pop("magic")]
         arrays = _read_arrays(f, path, None)
+    return header, arrays
+
+
+def _check_respgold(path, header: dict, arrays: dict[str, np.ndarray]) -> None:
+    """Exactly the :data:`RESPGOLD_ARRAYS`, in order, each at the shape the
+    header gives it."""
+    dims = dict(header, ncoord=3 * header["natm"])
+    names = [n for n, _s in RESPGOLD_ARRAYS]
+    if list(arrays) != names:
+        raise FormatError(f"{path}: arrays {list(arrays)}, expected {names}")
+    for name, shape in RESPGOLD_ARRAYS:
+        got = arrays[name].shape
+        if shape is None:
+            if int(np.prod(got)) != dims["ndet"]:
+                raise FormatError(f"{path}: {name} has {int(np.prod(got))} elements, "
+                                  f"ndet = {dims['ndet']}")
+        elif got != tuple(dims[d] for d in shape):
+            raise FormatError(f"{path}: {name} is {got}, expected {shape} = "
+                              f"{tuple(dims[d] for d in shape)}")
+
+
+def write_respgold(path, *, header: dict, arrays: dict[str, np.ndarray]) -> None:
+    """Write a CASSCF response sidecar (``*.respgold``, ``NEVPT2R1``): the
+    :data:`RESPGOLD_HEADERS` scalar header from ``header``, then the
+    :data:`RESPGOLD_ARRAYS` in their order, held to their shapes before a
+    byte is written. :func:`read_respgold` reads it back into the same
+    ``(header, arrays)``."""
+    names = [n for n, _s in RESPGOLD_ARRAYS]
+    if set(arrays) != set(names):
+        raise FormatError(f"{path}: arrays {sorted(arrays)}, expected {sorted(names)}")
+    arrays = {n: np.asarray(arrays[n], dtype=np.float64) for n in names}
+    _check_respgold(path, header, arrays)
+    with open(path, "wb") as f:
+        f.write(pack_header(RESPGOLD_HEADERS, RESPGOLD_MAGIC, header))
+        write_arrays(f, arrays)
+
+
+def read_respgold(path) -> tuple[dict, dict[str, np.ndarray]]:
+    """``(header, arrays)`` from a CASSCF response sidecar, every array held
+    to :data:`RESPGOLD_ARRAYS`' order and shapes, so :func:`write_respgold`
+    writes the same file back."""
+    with open(path, "rb") as f:
+        header = _read_header(f, path, RESPGOLD_HEADERS, "response sidecar")
+        del header["magic"]
+        arrays = _read_arrays(f, path, None)
+    _check_respgold(path, header, arrays)
     return header, arrays
 
 

@@ -34,7 +34,11 @@ different times, the last by luck (issue #71). Since then there is one parser,
    beside it (partition, determinant count and CI vector, bit for bit); all
    four kinds, ``NEVPT2S1`` (SC) and ``NEVPT2P1`` (PC, #95, named
    ``<case>_pc.srcgold``) and their directional flavours ``NEVPT2SD`` /
-   ``NEVPT2PD`` (#105, ``<case>[_pc]_dir.srcgold``), must be present.
+   ``NEVPT2PD`` (#105, ``<case>[_pc]_dir.srcgold``), must be present. Each
+   ``golden/*.respgold`` CASSCF response sidecar (#219, ``NEVPT2R1``)
+   through ``golden_format.read_respgold`` / ``write_respgold``, held to the
+   ``_casscf`` golden and gradient sidecar beside it (partition, ``ci`` and
+   ``mo_coeff`` bit for bit: the frame its directions are written in).
 3. **The writer as it is now.** A golden written by the current
    ``generate_golden.write_golden`` (both reference kinds) is read back by
    every reader, so a field added to the writer and not to the readers fails
@@ -346,6 +350,47 @@ def committed_sidecars(fail: Failures, tmp: Path) -> None:
                    f"no committed {scheme.upper()} {flavour} *.srcgold was read, so that "
                    "kind is untested")
 
+    responses = sorted(GOLDEN.glob("*.respgold"))
+    fail.check(bool(responses), "no committed *.respgold was read, so that layout is untested")
+    for path in responses:
+        r = fail.run(f"{path.name}: golden_format.read_respgold", gf.read_respgold, path)
+        if r is None:
+            continue
+        header, arrays = r
+        bad = non_finite(arrays)
+        fail.check(not bad, f"{path.name}: non-finite values in {', '.join(bad)}")
+        out = tmp / path.name
+        fail.run(f"{path.name}: golden_format.write_respgold",
+                 lambda o=out, h=header, a=arrays: gf.write_respgold(o, header=h, arrays=a))
+        fail.check(out.exists() and out.read_bytes() == path.read_bytes(),
+                   f"{path.name}: golden_format.write_respgold does not reproduce it")
+        out.unlink(missing_ok=True)
+        # <case>_casscf.respgold sits beside <case>_casscf.nevpt2gold / .gradgold,
+        # and its directions are written in their frame, bit for bit.
+        twin = path.with_suffix(".nevpt2gold")
+        fail.check(twin.exists(), f"{path.name}: no golden beside it")
+        if twin.exists():
+            g, ga = gf.read_golden(twin, want={"ci"})
+            fail.check(g["reference_kind"] == "casscf",
+                       f"{path.name}: its golden is not a casscf one")
+            fail.check((header["nact"], header["ncore"], header["ndet"], header["nelec_a"],
+                        header["nelec_b"])
+                       == (g["ncas"], g["ncore"], g["ndet"], g["nelec_a"], g["nelec_b"]),
+                       f"{path.name}: its partition is not its golden's")
+            fail.check(np.array_equal(arrays["ci"], ga["ci"]),
+                       f"{path.name}: its ci is not its golden's, bit for bit")
+        side = path.with_suffix(".gradgold")
+        fail.check(side.exists(), f"{path.name}: no gradient sidecar beside it")
+        if side.exists():
+            s, sa = gf.read_gradgold(side)
+            fail.check((header["nao"], header["nmo"], header["nvirt"])
+                       == (s["nao"], s["nmo"], s["nvirt"]),
+                       f"{path.name}: its orbital space is not its gradient sidecar's")
+            fail.check(np.array_equal(arrays["mo_coeff"], sa["mo_coeff"]),
+                       f"{path.name}: its mo_coeff is not its gradient sidecar's, bit for bit")
+        print(f"  {path.name}: {gf.RESPGOLD_MAGIC.decode()}, {3 * header['natm']} "
+              f"coordinates, {len(arrays)} arrays", flush=True)
+
 
 def fresh_writer(fail: Failures, tmp: Path) -> None:
     """A small golden from the writer as it is now, both kinds, through every
@@ -464,8 +509,8 @@ def main() -> int:
         for item in fail.items:
             print(f"  {item}")
         return 1
-    print("PASS: every golden, gradient sidecar, MO sidecar and source-term oracle "
-          "round-trips through "
+    print("PASS: every golden, gradient sidecar, MO sidecar, source-term oracle and "
+          "response sidecar round-trips through "
           f"every reader, layouts {sorted(m.decode() for m in layouts)}")
     return 0
 
