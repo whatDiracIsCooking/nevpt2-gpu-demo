@@ -16,6 +16,10 @@
 //                  -- or, in its PC flavour, block2's PC ones (#95); and
 //                  each in a directional flavour (#105): seeded directions
 //                  per block and the oracle's derivative along each.
+//   loadPertGold   `*.pertgold`: the integral perturbation sidecar (#220),
+//                  every nuclear coordinate's derivative of the gradient
+//                  sidecar's inventory, written by
+//                  reference_data/integral_perturbation.py.
 //
 // They are two files and not one on purpose: the golden format is extensible
 // (magic + array count), but adding arrays would change every committed
@@ -220,6 +224,74 @@ struct GradGoldFile {
 // [nao, nmo] -- or a `B_cc` / `B_vv` not [naux, ncore, ncore] /
 // [naux, nvirt, nvirt].
 [[nodiscard]] Result<GradGoldFile> loadGradGold(const std::string& path);
+
+// ---------------------------------------------------------------------------
+// The integral perturbation sidecar (`*.pertgold`, #220).
+// ---------------------------------------------------------------------------
+
+// The first derivative of a state's MO integrals along every nuclear
+// coordinate, on the frozen orthonormal path, at fixed orbitals and fixed
+// active density (reference_data/integral_perturbation.py writes it, out of
+// casscf_hessian.py's perturbed Hamiltonians). Every array but `mo_coeff` is
+// the gradient sidecar's array of the same name DIFFERENTIATED along
+// coordinate k = 3 atom + axis (bohr), stacked on a leading `ncoord()` axis:
+//
+//   mo_coeff            [nao, nmo]               the frame: the gradient
+//                                                sidecar's own, bit for bit
+//   h, heff, f          [ncoord, nmo, nmo]       hdot, its core dressing's,
+//                                                the generalized Fock's at dm1
+//   g_xP_QR, ...        [ncoord, nmo, ...]       the eighteen one-general-index
+//                                                rows, GradGoldFile's shapes
+//
+// -- the general-range inventory (docs/hessian-theory.md, Sec. 5.4), which is
+// what an orbital promotion of the perturbation reads; the golden's blocks
+// and orbital energies are slices of it and are derived, not stored.
+// `naux` > 0 marks a perturbation of the FITTED integrals (still in this
+// four-index form, which unlike B is gauge-free), pairing only with a
+// density-fitted golden and sidecar of that naux.
+struct PertGoldFile {
+  // Stored as int32 in the file; held as int64_t like every host size.
+  int64_t natm = 0;
+  int64_t nao = 0;
+  int64_t nmo = 0;  // = ncore + nact + nvirt, checked on load
+  int64_t ncore = 0;
+  int64_t nact = 0;
+  int64_t nvirt = 0;
+  int64_t naux = 0;  // 0: the conventional integrals
+  std::unordered_map<std::string, Tensor> arrays;
+
+  [[nodiscard]] int64_t ncoord() const { return 3 * natm; }
+  [[nodiscard]] bool densityFitted() const { return naux > 0; }
+
+  // The dotted inventory's names, in file order after mo_coeff (the
+  // gradient sidecar's conventional inventory, GradGoldFile's).
+  [[nodiscard]] static std::span<const std::string_view> inventoryNames();
+
+  // An IO Error unless this perturbation was written for `golden`'s state and
+  // `sidecar`'s frame: the same partition, the same calculation (fitted or
+  // not, and the same naux), and `mo_coeff` the sidecar's, bit for bit -- a
+  // perturbation in another orbital basis would be differentiated against the
+  // wrong integrals with nothing downstream to notice.
+  [[nodiscard]] Status checkAgainst(const GoldenFile& golden, const GradGoldFile& sidecar) const;
+
+  // Coordinate k's slice of the dotted array `name`, the leading axis
+  // dropped: a fresh host tensor shaped as the gradient sidecar's array.
+  // loadPertGold has held every array to its shape, so a name it does not
+  // carry or a k out of range is our bug (check).
+  [[nodiscard]] Tensor coordinate(const std::string& name, int64_t k) const;
+
+  // The array `name` (mo_coeff, or a whole stacked one); our bug if absent.
+  const Tensor& get(const std::string& name) const;
+};
+
+// The parsed sidecar, or an IO Error if it cannot be opened, ends early, has
+// another magic than "NEVPT2I1", carries a partition that does not add up (or
+// a negative naux, or no atom), a malformed array header, bytes after its last
+// array, an array that is not one of its own -- or LACKS ANY ONE of them: a
+// perturbation missing an array is refused whole, never read in part, since
+// a derivative with one input held fixed would pass every identity its two
+// modes share -- or one shaped otherwise than its header says.
+[[nodiscard]] Result<PertGoldFile> loadPertGold(const std::string& path);
 
 // ---------------------------------------------------------------------------
 // The source-term oracle (`*.srcgold`), SC and PC.

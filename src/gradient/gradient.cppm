@@ -1360,6 +1360,159 @@ Result<std::vector<ScOrbitalHessianResult>> scOrbitalHessianDevice(
     const ScOrbitalCurvatureSetup& setup, const std::vector<ScOrbitalCurvatureRequest>& pairs,
     const DeviceResources& res);
 
+// --- the source terms' tangent along a SUPPLIED integral perturbation (#220) --
+//
+// docs/hessian-theory.md, Sec. 8: the NEVPT2 half of the nuclear Hessian's
+// mixed term L_{R Theta} is the source terms' derivative along a nuclear
+// coordinate at FIXED parameters -- along the coordinate's perturbed
+// Hamiltonian Idot = (hdot, (pq|rs)dot), with the inactive Fock and the
+// orbital energies that follow from it at the state's active density. Every
+// orbital tangent above perturbs the integrals only through a rotation; this
+// takes an arbitrary Idot as its input (an integral perturbation sidecar,
+// nevpt2.golden's loadPertGold) and differentiates
+//
+//   Y_xy = dE/dkappa_xy  and  y_I = dE/dc_I        along I -> I + h Idot,
+//
+// the GATED source terms both: Y with the digests' transpose and the orbital
+// energies responding to kappa (--dump-source-terms' Y), y with the orbital
+// energies responding to c through W (its y). So, along a parameter
+// direction theta = (kappa, u),
+//
+//   <Ydot, kappa> + <ydot, u>  =  d^2 E / dh dtheta,
+//
+// the energy's mixed second derivative along (Idot, theta), and the two
+// sides are computed in opposite modes -- the duality the caller gates.
+//
+// NO NEW CONTRACTION, by the argument of Sec. 5.1 one leg over: Idot is a
+// first-order DOTTED INPUT SET (:rotation's ScDotted) like the ones K1 / K2
+// hand the existing walk, and its cross term with a rotation kappa is the
+// first-order promotion rule APPLIED TO Idot -- I(h, U) = U^T (I + h Idot) U
+// has d^2/dh ds = A_kappa(Idot), with no W term and no second general index
+// (Idot is a perturbation of the integrals, not a rotation of them). So:
+//
+//   Ydot = (integrals)  <Ehat', A_kappa(Idot)>: the first-order pairing at
+//                       the dotted set dottedAtMatrix builds from Idot's own
+//                       inventory, the digests' hbar term included;
+//        + (sandwich)   <Ehat'' Idot, A_kappa(I)>: the pseudodensities'
+//                       tangent along Idot paired with kappa's dotted inputs,
+//                       scOrbitalSandwichDevice's reverse with v = Idot --
+//                       K3-K6, the digests' share merged per tuple in both
+//                       legs (Idot's is the RDM build at hdot2e);
+//   ydot = H_kc^T w at w -> Idot: scMixedHessianVectorDevice's R1 with Idot's
+//          dotted set for w's, the orbital energies' mixed response W'[w]
+//          being W at Idot's own inventory (W is linear in it).
+//
+// Ydot is a MATRIX, so it is probed: one basis direction E_xy - E_yx per pair
+// x < y, the integrals term `chunk` probes per walk and the sandwich one walk
+// per probe (the pair walk carries two directions), each probe's two modes
+// held to each other as it goes. Forward, scSourceTangentForwardDevice takes
+// the scalar d^2 E / dh dtheta along caller directions by forward over
+// forward: the integrals term's forward tangent with the digests' forward
+// term (the RDM build at A_kappa(Idot)'s h2e), the sandwich's forward finish,
+// and the mixed block's F with w -> Idot.
+//
+// THE EMPTY PERTURBERS (Sec. 5.6). A tuple the integrals leave empty
+// contributes to Ydot only through K6, which needs BOTH legs to populate it;
+// a perturbation that keeps the point group populates none, so then K6 is
+// zero for every probe and nothing is refused. One that leaves it (a
+// symmetry-breaking displacement, out of this milestone's scope) can populate
+// an H class's empty tuples, along which the energy need not be twice
+// differentiable with every orbital direction: such a perturbation is
+// REFUSED whole, as a Numerical Error naming the classes and counts, before
+// any probe -- never probed into a partial matrix. (The census comes from one
+// pair walk with Idot on both legs.) A guarded tuple empty by the state is
+// refused as the sandwich refuses it.
+//
+// Integral-direct, one slab per block, everything on res.stream() from res's
+// pool; exact digests only (`opt`), at `opt.nTiles` -- the plain build's
+// floors (one RDM build per probe that moves h2e, one for Idot).
+
+// An integral perturbation, device-resident: the dotted inventory (shaped as
+// the gradient sidecar's: h, heff, f and the eighteen rows; no B) and every
+// stored block's dot derived from it, e_core / e_virt as f's diagonal.
+struct IntegralPerturbationDevice {
+  NevptIntegralsDevice d;
+  GeneralIntegralsDevice gen;
+};
+
+// `dotGen` is the perturbation's dotted inventory (uploaded by the caller,
+// conventional layout whatever the case's calculation); the stored blocks'
+// dots are built from it (the restrictions scGeneralIntegralCheck reads,
+// taken the other way round). A shape that does not fit `ints` is the
+// caller's input: an Error, before any work.
+Result<IntegralPerturbationDevice> integralPerturbationDevice(const NevptIntegralsDevice& ints,
+                                                              GeneralIntegralsDevice dotGen,
+                                                              const DeviceResources& res);
+
+// The integrals at I + h Idot: every stored block, e_core / e_virt and every
+// inventory array displaced by h times its dot. What a finite difference of
+// the gated source terms runs at. The fitted case's B is not carried: nothing
+// of first order reads it, and I + h Idot is a four-index displacement.
+struct DisplacedIntegralsDevice {
+  NevptIntegralsDevice ints;
+  GeneralIntegralsDevice gen;
+};
+
+Result<DisplacedIntegralsDevice> displacedIntegralsDevice(const NevptIntegralsDevice& ints,
+                                                          const GeneralIntegralsDevice& gen,
+                                                          const IntegralPerturbationDevice& pert,
+                                                          double h, const DeviceResources& res);
+
+// What both orientations share: the state, its sidecar, its orbital
+// energies' response W (y's), and the digests' transpose hbar at the state
+// (scDigestAdjointDevice, Y's).
+struct ScSourceTangentSetup {
+  const NevptIntegralsDevice& ints;
+  const GeneralIntegralsDevice& gen;
+  const RdmTensors& rdm;
+  const Tensor& ci;  // (nstringsA, nstringsB)
+  int64_t nelecA = 0;
+  int64_t nelecB = 0;
+  const RdmBuildOptions& opt;           // exact digests only, at opt.nTiles
+  const OrbitalEnergyResponse& eps;     // W
+  const DeviceTensor& hbar;             // dE/d(h2e) through the digests
+};
+
+struct ScSourceTangentResult {
+  Tensor kappaDot;           // Ydot (n_mo, n_mo), antisymmetric
+  Tensor kappaDotIntegrals;  // its integrals term, <Ehat', A_kappa(Idot)>
+  Tensor kappaDotSandwich;   // its sandwich term, the pseudodensities' tangent
+  Tensor ciDot;              // ydot, (nstringsA, nstringsB)
+  Tensor ciDotWalk;          // its walk tangent's sigma (the W fold included)
+  Tensor ciDotDigests;       // its digests' sigma at hdot2e
+  int64_t probes = 0;        // basis directions probed
+  // Each probe's two modes against each other, the worst over the probes:
+  // the integrals term's integral half (adjoint against forward tangent)
+  // and the sandwich (reverse against forward).
+  double integralsDuality = 0.0;
+  double sandwichDuality = 0.0;
+  // The census of the (Idot, Idot) pair walk: what the refusal reads.
+  std::array<ScGuardedCensus, 8> guarded{};
+  double h2eDotMax = 0.0;  // max |hdot2e|, max |f3'[Idot]|: did Idot move
+  double f3DotMax = 0.0;   // the active integrals and the digests at all
+  std::array<double, 8> edotPert{};  // the mixed walk's own Edot(Idot) per class
+};
+
+Result<ScSourceTangentResult> scSourceTangentDevice(const ScSourceTangentSetup& setup,
+                                                    const IntegralPerturbationDevice& pert,
+                                                    const SigmaVectorOptions& sigma,
+                                                    int64_t chunk, const DeviceResources& res);
+
+// The FORWARD side along each (kappa, u): kappa an (n_mo, n_mo) antisymmetric
+// direction or empty (rank 0) for none, u shaped like the state or empty for
+// none. Its terms, and their sum d^2 E / dh dtheta.
+struct ScSourceTangentForward {
+  double integrals = 0.0;        // the integrals term's forward tangent, digests frozen, eps in
+  double integralsDigest = 0.0;  // its digests' forward term (the RDM build at its h2e)
+  double sandwich = 0.0;         // K3 + K4 + K5 + K6 along (kappa, Idot), forward
+  double mixed = 0.0;            // Eddot_kc(Idot, u), forward over forward
+  double total() const { return integrals + integralsDigest + sandwich + mixed; }
+};
+
+Result<std::vector<ScSourceTangentForward>> scSourceTangentForwardDevice(
+    const ScSourceTangentSetup& setup, const IntegralPerturbationDevice& pert,
+    const std::vector<std::pair<Tensor, Tensor>>& dirs, const DeviceResources& res);
+
 // --- PC-NEVPT2's reverse mode (#74) -------------------------------------------
 //
 // The PC source terms -- y_I = dE_pc/dc_I and Y_xy = dE_pc/dkappa_xy -- by the

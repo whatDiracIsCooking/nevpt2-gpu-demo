@@ -14,14 +14,15 @@
 # place that re-runs the promise, and the one place a byte comparison is right:
 # everywhere else compares against a tolerance.
 #
-# What it regenerates (twenty-five files, twenty generator runs):
+# What it regenerates (twenty-eight files, twenty-two generator runs):
 #   generate_golden.py     n2_ccpvdz_cas44 / cas88 .nevpt2gold + .gradgold,
 #                          their _df twins (each with its density-fitted
 #                          NEVPT2F1 .gradgold, #164), the two .mogold sidecars (a fresh
 #                          --casscf each) and the two *_casscf[_df] goldens
 #                          (--mo-from the COMMITTED sidecar, as
 #                          docs/reference-data.md's commands do, so a sidecar
-#                          that drifted fails as itself, not as its golden too)
+#                          that drifted fails as itself, not as its golden too),
+#                          the _casscf_df one with its NEVPT2F1 .gradgold (#220)
 #   sc_source_oracle.py    n2_ccpvdz_cas44.srcgold and n2_ccpvdz_cas44_pc.srcgold,
 #                          and their directional twins (#105) *_dir.srcgold /
 #                          *_pc_dir.srcgold (all four read
@@ -54,6 +55,12 @@
 #                          .mogold and held to the committed golden's frame
 #                          (docs/reference-data.md, "The analytic CASSCF
 #                          nuclear Hessian").
+#   integral_perturbation.py  n2_ccpvdz_cas44_casscf[_df].pertgold (#220),
+#                          the integral perturbation sidecars, --mo-from the
+#                          COMMITTED .mogold and held to the committed
+#                          golden's ci and gradient sidecar's mo_coeff
+#                          (docs/reference-data.md, "The integral
+#                          perturbation sidecar").
 #
 # What it deliberately does NOT regenerate: golden/n2_ccpvdz_cas44_casscf.gradgold,
 # the CASSCF-reference gradient sidecar (#120). An orbital optimiser sits
@@ -64,7 +71,8 @@
 # for that sidecar adds; the golden it writes is byte-identical either way.
 # (The HSOH sidecar above is the exception by construction: it is built from
 # the committed .mogold, as every --mo-from file here is, so the byte claim
-# is the same one its golden's is.)
+# is the same one its golden's is -- and so is the density-fitted
+# n2_ccpvdz_cas44_casscf_df.gradgold, #220's, for the same reason.)
 #
 # The comparison is `cmp` on the whole file, with ONE documented exception
 # (docs/reference-data.md, "Regenerating the golden file"): a committed CASCI
@@ -162,8 +170,8 @@ add_run cas44_casscf "n2_ccpvdz_cas44_casscf.nevpt2gold" \
   "python $gen --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_casscf --mo-from $G/n2_ccpvdz_cas44_casscf.mogold --out $S/n2_ccpvdz_cas44_casscf.nevpt2gold"
 add_run cas44_casscf_df_mo "n2_ccpvdz_cas44_casscf_df.mogold" \
   "python $gen --df --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_casscf_df --casscf --mo-out $S/n2_ccpvdz_cas44_casscf_df.mogold"
-add_run cas44_casscf_df "n2_ccpvdz_cas44_casscf_df.nevpt2gold" \
-  "python $gen --df --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_casscf_df --mo-from $G/n2_ccpvdz_cas44_casscf_df.mogold --out $S/n2_ccpvdz_cas44_casscf_df.nevpt2gold"
+add_run cas44_casscf_df "n2_ccpvdz_cas44_casscf_df.nevpt2gold n2_ccpvdz_cas44_casscf_df.gradgold" \
+  "python $gen --df --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_casscf_df --mo-from $G/n2_ccpvdz_cas44_casscf_df.mogold --gradgold --out $S/n2_ccpvdz_cas44_casscf_df.nevpt2gold"
 # The C1 case (#213): HSOH CAS(6,6), CASSCF orbitals only. The .mogold is a
 # fresh --casscf; the golden and its gradient sidecar come from --mo-from the
 # COMMITTED .mogold, and the sidecar's grad_num from a --reference casscf
@@ -189,6 +197,17 @@ add_run cas44_casscf_resp "n2_ccpvdz_cas44_casscf.respgold" \
   "python $hes --case n2_ccpvdz_cas44 --no-ladders --write $S/n2_ccpvdz_cas44_casscf.respgold"
 add_run hsoh_casscf_resp "hsoh_def2svp_cas66_casscf.respgold" \
   "python $hes --case hsoh_def2svp_cas66 --no-ladders --write $S/hsoh_def2svp_cas66_casscf.respgold"
+# The integral perturbation sidecars (#220): every coordinate's perturbed
+# Hamiltonian of the committed _casscf[_df] state, in its gradient sidecar's
+# inventory, from --mo-from the COMMITTED .mogold and held (and refused
+# otherwise) to the committed golden's ci and gradient sidecar's mo_coeff bit
+# for bit. --no-ladders: the sidecar is the analytic derivative alone; the
+# ladders that check it write nothing.
+ipt="$REPO_ROOT/reference_data/integral_perturbation.py"
+add_run cas44_casscf_pert "n2_ccpvdz_cas44_casscf.pertgold" \
+  "python $ipt --case n2_ccpvdz_cas44 --no-ladders --write $S/n2_ccpvdz_cas44_casscf.pertgold"
+add_run cas44_casscf_df_pert "n2_ccpvdz_cas44_casscf_df.pertgold" \
+  "python $ipt --case n2_ccpvdz_cas44 --df --no-ladders --write $S/n2_ccpvdz_cas44_casscf_df.pertgold"
 add_run cas44_src "n2_ccpvdz_cas44.srcgold" \
   "python $src --case n2_ccpvdz_cas44 --out $S/n2_ccpvdz_cas44.srcgold"
 add_run cas44_src_pc "n2_ccpvdz_cas44_pc.srcgold" \

@@ -422,6 +422,7 @@ constexpr std::array kExpectedMatrix{
     MatrixRow{"--check-blocks", "F"},       MatrixRow{"--kappa-act", "S"},
     MatrixRow{"--kappa-full", "S"},         MatrixRow{"--sc-hessian-kc", "S"},
     MatrixRow{"--sc-hessian-kk-int", "S"},  MatrixRow{"--sc-hessian-kk", "S"},
+    MatrixRow{"--sc-source-tangent", "S"},
     MatrixRow{"--gradgold", "DSP"},         MatrixRow{"--dump-source-terms", "S"},
     MatrixRow{"--source-oracle", "S"},      MatrixRow{"--fd-steps", "P"},
     MatrixRow{"--fd-start-pow", "P"},       MatrixRow{"--pc-hessian", "P"},
@@ -665,6 +666,7 @@ TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
       {Binary::ScPseudodensity, {"--tiles", "3", "--pc", "--sc-hessian-kc"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--pc", "--sc-hessian-kk-int"}},
       {Binary::ScPseudodensity, {"--tiles", "3", "--pc", "--sc-hessian-kk"}},
+      {Binary::ScPseudodensity, {"--tiles", "3", "--sc-source-tangent", "x.pertgold"}},
       {Binary::PcTangent, {"--tiles", "3"}},
       {Binary::PcTangent, {"--tiles", "40", "--fd-steps", "3"}},
       {Binary::PcTangent, {"--tiles", "3", "--pc-hessian"}},
@@ -1019,8 +1021,8 @@ TEST(CliScPseudodensityFlagTests, GradgoldNeedsKappaFull) {
     EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
     EXPECT_EQ(r.error().message,
               "--gradgold is the sidecar --kappa-full, --sc-hessian-kc, --sc-hessian-kk-int, "
-              "--sc-hessian-kk, --dump-source-terms and --source-oracle read; it does nothing on "
-              "its own");
+              "--sc-hessian-kk, --sc-source-tangent, --dump-source-terms and --source-oracle "
+              "read; it does nothing on its own");
   }
 }
 
@@ -1290,6 +1292,87 @@ TEST(CliScPseudodensityFlagTests, ScHessianKkTakesPcAndRefusesTheApproximateDige
     ASSERT_FALSE(r.has_value()) << digest.front();
     EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << digest.front();
     EXPECT_EQ(r.error().message, hessianDigestMessage("--sc-hessian-kk", digest.front()));
+  }
+}
+
+// --sc-source-tangent PATH (#220), nevpt2_sc_pseudodensity alone: the SC
+// source terms' tangent along a `.pertgold`'s integral perturbations, one job
+// at a time, SC only, exact digests only (refused the approximate ones as
+// every Hessian flag is); --gradgold rides on it.
+TEST(CliScPseudodensityFlagTests, ScSourceTangentSetsItsPathAndTakesGradgold) {
+  const Result<Options> r = parse(Binary::ScPseudodensity, {"--sc-source-tangent", "p.pertgold"});
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(r->scSourceTangentPath, "p.pertgold");
+  EXPECT_FALSE(r->scHessianKk);
+  const Result<Options> g =
+      parse(Binary::ScPseudodensity,
+            {"--sc-source-tangent", "p.pertgold", "--gradgold", "s.gradgold", "--blas-digest"});
+  ASSERT_TRUE(g.has_value()) << g.error().message;
+  EXPECT_EQ(g->gradgoldPath, "s.gradgold");
+  for (const std::vector<std::string_view>& digest :
+       {std::vector<std::string_view>{"--digest-emitted"},
+        std::vector<std::string_view>{"--consume-emitted"}}) {
+    std::vector<std::string_view> args{"--sc-source-tangent", "p.pertgold"};
+    args.insert(args.end(), digest.begin(), digest.end());
+    const Result<Options> e = parse(Binary::ScPseudodensity, args);
+    EXPECT_TRUE(e.has_value()) << digest.front() << ": " << e.error().message;
+  }
+}
+
+TEST(CliScPseudodensityFlagTests, ScSourceTangentNeedsAPath) {
+  const Result<Options> r = parse(Binary::ScPseudodensity, {"--sc-source-tangent"});
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
+}
+
+TEST(CliScPseudodensityFlagTests, ScSourceTangentRefusesTheOtherJobsAndPc) {
+  for (const std::vector<std::string_view>& other :
+       {std::vector<std::string_view>{"--kappa-act"}, std::vector<std::string_view>{"--kappa-full"},
+        std::vector<std::string_view>{"--sc-hessian-kc"},
+        std::vector<std::string_view>{"--sc-hessian-kk-int"},
+        std::vector<std::string_view>{"--sc-hessian-kk"},
+        std::vector<std::string_view>{"--dump-source-terms", "x.gradsrc"},
+        std::vector<std::string_view>{"--source-oracle", "x.srcgold"}}) {
+    std::vector<std::string_view> args{"--sc-source-tangent", "p.pertgold"};
+    args.insert(args.end(), other.begin(), other.end());
+    const Result<Options> r = parse(Binary::ScPseudodensity, args);
+    ASSERT_FALSE(r.has_value()) << other.front();
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig) << other.front();
+    // --sc-hessian-kk's and the others' own one-job refusals name themselves
+    // first where they see the pair; either way it is the one-job rule.
+    EXPECT_NE(r.error().message.find("run one at a time"), std::string::npos)
+        << r.error().message;
+  }
+  const Result<Options> pc =
+      parse(Binary::ScPseudodensity, {"--sc-source-tangent", "p.pertgold", "--pc"});
+  ASSERT_FALSE(pc.has_value());
+  EXPECT_EQ(pc.error().kind, ErrorKind::InvalidConfig);
+  EXPECT_EQ(pc.error().message,
+            "--sc-source-tangent differentiates the SC source terms along an integral "
+            "perturbation; it has no --pc path");
+}
+
+TEST(CliScPseudodensityFlagTests, ScSourceTangentRefusesTheApproximateDigests) {
+  for (const std::vector<std::string_view>& digest :
+       {std::vector<std::string_view>{"--cublas"}, std::vector<std::string_view>{"--ozaki"},
+        std::vector<std::string_view>{"--fused-digest", "--blas-digest"}}) {
+    if (digest.front() == "--cublas" && !kHaveCublasEmul) continue;
+    std::vector<std::string_view> args{"--sc-source-tangent", "p.pertgold"};
+    args.insert(args.end(), digest.begin(), digest.end());
+    const Result<Options> r = parse(Binary::ScPseudodensity, args);
+    ASSERT_FALSE(r.has_value()) << digest.front();
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << digest.front();
+    EXPECT_EQ(r.error().message, hessianDigestMessage("--sc-source-tangent", digest.front()));
+  }
+}
+
+TEST(CliScPseudodensityFlagTests, OtherBinariesRefuseScSourceTangent) {
+  for (const Binary b : {Binary::Demo, Binary::DfDemo, Binary::PcTangent}) {
+    const Result<Options> r = parse(b, {"--sc-source-tangent", "p.pertgold"});
+    ASSERT_FALSE(r.has_value()) << binaryName(b);
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << binaryName(b);
+    EXPECT_NE(r.error().message.find("only nevpt2_sc_pseudodensity"), std::string::npos)
+        << r.error().message;
   }
 }
 

@@ -3,8 +3,9 @@ r"""The one Python reader (and the byte-level writer) of the three binary
 formats in ``golden/``: the ``*.nevpt2gold`` golden, the ``*.gradgold``
 gradient sidecar (conventional or density-fitted) and the ``*.mogold`` MO
 sidecar -- and of the
-``*.srcgold`` source-term oracle and the ``*.respgold`` CASSCF response
-sidecar, which end in the same array section. It
+``*.srcgold`` source-term oracle, the ``*.respgold`` CASSCF response
+sidecar and the ``*.pertgold`` integral perturbation sidecar, which end in
+the same array section. It
 also reads ``states.json``, the manifest a CASSCF-reference sweep keeps its
 displaced states' ``.mogold`` files under (:func:`read_states_manifest`).
 
@@ -12,7 +13,8 @@ Every reader in ``reference_data/`` goes through this module; none parses a
 header, or seeks to an offset, of its own. The scalar header of each format is
 written down **once**, as a field table keyed by magic (:data:`GOLDEN_HEADERS`,
 :data:`GRADGOLD_HEADERS`, :data:`MO_SIDECAR_HEADERS`,
-:data:`SRCGOLD_HEADERS`, :data:`RESPGOLD_HEADERS`), and both directions are
+:data:`SRCGOLD_HEADERS`, :data:`RESPGOLD_HEADERS`, :data:`PERTGOLD_HEADERS`), and
+both directions are
 driven by that table: :func:`pack_header` writes it, :func:`_read_header`
 reads it, and where the array table begins is wherever the header read stopped
 (``f.tell()``) -- derived, never known. A header change is therefore an edit to
@@ -117,6 +119,18 @@ SRCGOLD_MAGIC_PC_DIR = b"NEVPT2PD"
 #: arrays). The direction set the GPU's bilinear form reads (#222).
 RESPGOLD_MAGIC = b"NEVPT2R1"
 
+#: Magic bytes identifying an **integral perturbation sidecar**
+#: (``*.pertgold``, #220): the first derivative of a ``_casscf`` state's MO
+#: integrals along each nuclear coordinate on the frozen orthonormal path --
+#: ``casscf_hessian.Skeleton``'s perturbed Hamiltonians, written in the
+#: gradient sidecar's general-range inventory (``integral_perturbation.py
+#: --write``; :data:`PERTGOLD_ARRAYS` has the arrays). What
+#: ``nevpt2_sc_pseudodensity --sc-source-tangent`` differentiates the source
+#: terms along. One magic for both calculations: ``naux`` in the header is 0
+#: for the conventional integrals and the auxiliary basis size for the
+#: density-fitted ones, as a ``NEVPT2F1`` sidecar's is.
+PERTGOLD_MAGIC = b"NEVPT2I1"
+
 #: A source-term oracle's ``(scheme, flavour)``, by magic: what
 #: :func:`read_srcgold` reports as ``header["scheme"]`` /
 #: ``header["flavour"]`` and :func:`write_srcgold` picks the magic from
@@ -212,6 +226,53 @@ RESPGOLD_ARRAYS = (
     ("gradient", ("ncoord",)),
     # 1.0 where a displacement along the coordinate keeps the point group
     ("kept", ("ncoord",)),
+)
+
+#: THE integral perturbation sidecar's scalar header: the atom count (``3
+#: natm`` is every dotted array's leading extent), the orbital-space partition
+#: and the auxiliary basis size (0: the conventional integrals).
+PERTGOLD_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
+    PERTGOLD_MAGIC: tuple(
+        (n, "i") for n in ("natm", "nao", "nmo", "ncore", "nact", "nvirt", "naux")
+    ),
+}
+
+#: The arrays an integral perturbation sidecar holds, in file order, each with
+#: its shape in header fields (``ncoord`` = ``3 natm``; ``nmo``, ``ncore``,
+#: ``nact``, ``nvirt``). Coordinates are ``k = 3 atom + axis``, bohr. Every
+#: array after ``mo_coeff`` is the gradient sidecar's array of the same name
+#: (``generate_golden._gradient_arrays``; docs/gradient-theory.md, sections
+#: 3.3 and 3.5) DIFFERENTIATED along coordinate ``k`` at fixed orbitals and
+#: fixed active density, stacked on a leading ``ncoord`` axis: ``h`` the bare
+#: one-electron matrix, ``heff`` its core dressing, ``f`` the generalized
+#: Fock at the golden's ``dm1``, and the eighteen one-general-index
+#: two-electron rows. The golden's own blocks are slices of these and are not
+#: stored again (docs/reference-data.md, "The integral perturbation sidecar").
+PERTGOLD_ARRAYS = (
+    # the frame the perturbations are written in: the golden's own orbitals
+    # (its gradient sidecar's mo_coeff, bit for bit)
+    ("mo_coeff", ("nao", "nmo")),
+    ("h", ("ncoord", "nmo", "nmo")),
+    ("heff", ("ncoord", "nmo", "nmo")),
+    ("f", ("ncoord", "nmo", "nmo")),
+    ("g_xa_aa", ("ncoord", "nmo", "nact", "nact", "nact")),
+    ("g_xv_aa", ("ncoord", "nmo", "nvirt", "nact", "nact")),
+    ("g_xc_aa", ("ncoord", "nmo", "ncore", "nact", "nact")),
+    ("g_xa_va", ("ncoord", "nmo", "nact", "nvirt", "nact")),
+    ("g_xv_va", ("ncoord", "nmo", "nvirt", "nvirt", "nact")),
+    ("g_xc_va", ("ncoord", "nmo", "ncore", "nvirt", "nact")),
+    ("g_xa_ca", ("ncoord", "nmo", "nact", "ncore", "nact")),
+    ("g_xv_ca", ("ncoord", "nmo", "nvirt", "ncore", "nact")),
+    ("g_xc_ca", ("ncoord", "nmo", "ncore", "ncore", "nact")),
+    ("g_xa_cv", ("ncoord", "nmo", "nact", "ncore", "nvirt")),
+    ("g_xv_cv", ("ncoord", "nmo", "nvirt", "ncore", "nvirt")),
+    ("g_xc_cv", ("ncoord", "nmo", "ncore", "ncore", "nvirt")),
+    ("g_xa_cc", ("ncoord", "nmo", "nact", "ncore", "ncore")),
+    ("g_xv_cc", ("ncoord", "nmo", "nvirt", "ncore", "ncore")),
+    ("g_xc_cc_j", ("ncoord", "nmo", "ncore", "ncore")),
+    ("g_xc_cc_k", ("ncoord", "nmo", "ncore", "ncore")),
+    ("g_xa_vv", ("ncoord", "nmo", "nact", "nvirt")),
+    ("g_xc_vv", ("ncoord", "nmo", "ncore", "nvirt")),
 )
 
 #: No array the generator writes has more than a handful of axes; a rank past
@@ -481,6 +542,53 @@ def read_respgold(path) -> tuple[dict, dict[str, np.ndarray]]:
         del header["magic"]
         arrays = _read_arrays(f, path, None)
     _check_respgold(path, header, arrays)
+    return header, arrays
+
+
+def _check_pertgold(path, header: dict, arrays: dict[str, np.ndarray]) -> None:
+    """Exactly the :data:`PERTGOLD_ARRAYS`, in order, each at the shape the
+    header gives it; a partition that does not add up, or a negative
+    ``naux``, is refused before any shape is read against it. A sidecar
+    missing any array is refused whole, never read in part."""
+    if header["ncore"] + header["nact"] + header["nvirt"] != header["nmo"] or header["naux"] < 0:
+        raise FormatError(f"{path}: header {header} is not a usable partition")
+    dims = dict(header, ncoord=3 * header["natm"])
+    names = [n for n, _s in PERTGOLD_ARRAYS]
+    if list(arrays) != names:
+        missing = [n for n in names if n not in arrays]
+        raise FormatError(f"{path}: arrays {list(arrays)}, expected {names}"
+                          + (f" (missing {', '.join(missing)})" if missing else ""))
+    for name, shape in PERTGOLD_ARRAYS:
+        want = tuple(dims[d] for d in shape)
+        if arrays[name].shape != want:
+            raise FormatError(f"{path}: {name} is {arrays[name].shape}, expected {shape} = {want}")
+
+
+def write_pertgold(path, *, header: dict, arrays: dict[str, np.ndarray]) -> None:
+    """Write an integral perturbation sidecar (``*.pertgold``, ``NEVPT2I1``):
+    the :data:`PERTGOLD_HEADERS` scalar header from ``header``, then the
+    :data:`PERTGOLD_ARRAYS` in their order, held to their shapes before a
+    byte is written. :func:`read_pertgold` reads it back into the same
+    ``(header, arrays)``."""
+    names = [n for n, _s in PERTGOLD_ARRAYS]
+    if set(arrays) != set(names):
+        raise FormatError(f"{path}: arrays {sorted(arrays)}, expected {sorted(names)}")
+    arrays = {n: np.asarray(arrays[n], dtype=np.float64) for n in names}
+    _check_pertgold(path, header, arrays)
+    with open(path, "wb") as f:
+        f.write(pack_header(PERTGOLD_HEADERS, PERTGOLD_MAGIC, header))
+        write_arrays(f, arrays)
+
+
+def read_pertgold(path) -> tuple[dict, dict[str, np.ndarray]]:
+    """``(header, arrays)`` from an integral perturbation sidecar, every array
+    held to :data:`PERTGOLD_ARRAYS`' order and shapes, so
+    :func:`write_pertgold` writes the same file back."""
+    with open(path, "rb") as f:
+        header = _read_header(f, path, PERTGOLD_HEADERS, "integral perturbation sidecar")
+        del header["magic"]
+        arrays = _read_arrays(f, path, None)
+    _check_pertgold(path, header, arrays)
     return header, arrays
 
 

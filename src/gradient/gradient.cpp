@@ -909,11 +909,56 @@ ScMixedDirection mixedDirectionOf(const ScMixedHessianSetup& s, const ScMixedPre
   return m;
 }
 
-Result<std::vector<ScMixedHessianResult>> scMixedHessianDevice(const ScMixedHessianSetup& s,
-                                                               const Tensor& w,
-                                                               const std::vector<Tensor>& us,
-                                                               const DeviceResources& res) {
-  ScMixedPrep p = NEVPT2_TRY(prepareMixed(s, w, res));
+// The same prep along a DOTTED INPUT SET in place of w (#220): an integral
+// perturbation, whose dotted inputs are the set itself, whose digests'
+// tangent is the RDM build at its h2e, and whose orbital-energy response
+// W'[w] is `wDot` -- W at the perturbation's own inventory, W being linear in
+// it. The set is borrowed by the returned prep's rotation and must outlive it.
+Result<ScMixedPrep> prepareMixedDotted(const ScMixedHessianSetup& s, const ScDotted& set,
+                                       const OrbitalEnergyResponse* wDot,
+                                       const DeviceResources& res) {
+  check(!s.opt.cublas && !s.opt.ozaki && !s.opt.fusedDigest,
+        "the source terms' tangent runs the emitted or the native-fp64 BLAS digest (cli "
+        "refuses --cublas / --ozaki / --fused-digest with --sc-source-tangent)");
+  const NevptIntegralsDevice& ints = s.ints;
+  const int64_t nc = ints.e_core.dims[0], na = ints.h1e.dims[0], nv = ints.e_virt.dims[0];
+  if (s.epsCi && s.epsResponse == nullptr)
+    return err_config(
+        "the mixed block with the orbital energies responding to the CI vector needs their "
+        "response W (an OrbitalEnergyResponse, out of the gradient sidecar)");
+  if (s.epsResponse != nullptr &&
+      (s.epsResponse->core.dims() != std::vector<int64_t>{na, na, nc} ||
+       s.epsResponse->virt.dims() != std::vector<int64_t>{na, na, nv}))
+    return err_config("the orbital energies' response W does not fit this partition");
+  if (s.epsKappa && s.epsCi &&
+      (wDot == nullptr || wDot->core.dims() != std::vector<int64_t>{na, na, nc} ||
+       wDot->virt.dims() != std::vector<int64_t>{na, na, nv}))
+    return err_config(
+        "the mixed block along a perturbation with the orbital energies responding to both "
+        "needs W at the perturbation's inventory, shaped as W");
+  ScMixedPrep p;
+  p.rot = makeDottedRotation({&set}, {true}, res);
+  p.rot.gen = s.gen;
+  ScRotationDir& d = p.rot.dirs[0];
+  p.digests = attachDigestTangents(p.rot, s.opt, s.ci, s.nelecA, s.nelecB, res);
+  p.h2eDot = downloadTensor(d.h2eDot, res.stream());
+  p.h2eDotMax = maxAbs(p.h2eDot);
+  p.h1eDotMax = maxAbs(downloadTensor(d.h1eDot, res.stream()));
+  if (s.epsKappa && s.epsCi) {
+    p.wDot = *wDot;
+    p.wDotSet = true;
+  }
+  p.zeroH1e = DeviceTensor::zeros(ints.h1e.dims, res);
+  p.zeroH2e = DeviceTensor::zeros(ints.h2e.dims, res);
+  return p;
+}
+
+// F along the prepared direction and each of `us`: the body both entry points
+// share (scMixedHessianDevice's w, #220's perturbation).
+Result<std::vector<ScMixedHessianResult>> mixedForward(const ScMixedHessianSetup& s,
+                                                       const ScMixedPrep& p,
+                                                       const std::vector<Tensor>& us,
+                                                       const DeviceResources& res) {
   const NevptIntegralsDevice& ints = s.ints;
   const int64_t norb = ints.h1e.dims[0];
   Result<HostDm12Builder> builder = HostDm12Builder::create(norb, s.nelecA, s.nelecB);
@@ -976,11 +1021,18 @@ Result<std::vector<ScMixedHessianResult>> scMixedHessianDevice(const ScMixedHess
   return out;
 }
 
-Result<ScMixedHessianVectorResult> scMixedHessianVectorDevice(const ScMixedHessianSetup& s,
-                                                              const Tensor& w,
-                                                              const SigmaVectorOptions& sigma,
-                                                              const DeviceResources& res) {
-  ScMixedPrep p = NEVPT2_TRY(prepareMixed(s, w, res));
+Result<std::vector<ScMixedHessianResult>> scMixedHessianDevice(const ScMixedHessianSetup& s,
+                                                               const Tensor& w,
+                                                               const std::vector<Tensor>& us,
+                                                               const DeviceResources& res) {
+  const ScMixedPrep p = NEVPT2_TRY(prepareMixed(s, w, res));
+  return mixedForward(s, p, us, res);
+}
+
+// R1 along the prepared direction: the body both entry points share.
+ScMixedHessianVectorResult mixedReverse(const ScMixedHessianSetup& s, const ScMixedPrep& p,
+                                        const SigmaVectorOptions& sigma,
+                                        const DeviceResources& res) {
   const wwrStream_t st = res.stream();
   const NevptIntegralsDevice& ints = s.ints;
   const int64_t norb = ints.h1e.dims[0];
@@ -1064,6 +1116,14 @@ Result<ScMixedHessianVectorResult> scMixedHessianVectorDevice(const ScMixedHessi
   out.hkcTw = out.fromWalkTangent;
   ciSourceAddInto(out.fromDigests, out.hkcTw);
   return out;
+}
+
+Result<ScMixedHessianVectorResult> scMixedHessianVectorDevice(const ScMixedHessianSetup& s,
+                                                              const Tensor& w,
+                                                              const SigmaVectorOptions& sigma,
+                                                              const DeviceResources& res) {
+  const ScMixedPrep p = NEVPT2_TRY(prepareMixed(s, w, res));
+  return mixedReverse(s, p, sigma, res);
 }
 
 // --- the orbital block's integral curvature, <Ehat', I''> (#154) ---------------
@@ -1608,6 +1668,95 @@ Result<double> pcRestoredTracePairingDevice(const NevptIntegralsDevice& ints,
 
 // --- the orbital block's sandwich, I'^T Ehat'' I' (#158) -----------------------
 
+// One pair's walk: `rot` holds u = dirs[0] and v = dirs[1], both tangent with
+// their digests' tangents attached, and `scaleU` / `scaleV` are the two
+// directions' population scales (|u|^2, |v|^2: the guarded tuples' floor is
+// relative to them). The pairs with no Hessian are refused here, `index`
+// naming the pair; the h2e / f3 maxima and the digests' reference are the
+// caller's. What scOrbitalSandwichDevice runs per pair, and #220's
+// perturbation runs per probe with v the integral perturbation's dotted set.
+Result<ScOrbitalSandwichResult> sandwichPairWalk(const ScOrbitalSandwichSetup& s,
+                                                 const ScRotation& rot, const double scaleU,
+                                                 const double scaleV, const bool reverse,
+                                                 const std::size_t index,
+                                                 const DeviceTensor& zeroH1e,
+                                                 const DeviceTensor& zeroH2e,
+                                                 const DeviceResources& res) {
+  FullBlockSource src(s.ints);
+  const ActiveIntegralsDevice ai = activeViewOf(s.ints);
+  const int64_t nc = s.gen.ncore, nv = s.gen.nvirt;
+  ScMixedDirection mix;
+  mix.epsKappa = true;
+  mix.pairForward = true;
+  mix.pairReverse = reverse;
+  mix.pairScaleU = scaleU;
+  mix.pairScaleV = scaleV;
+  if (!(mix.pairScaleU > 0.0) || !(mix.pairScaleV > 0.0))
+    return err_config(std::format("the orbital sandwich: pair {} has a zero direction", index));
+  mix.zeroH1e = &zeroH1e;
+  mix.zeroH2e = &zeroH2e;
+  // The CI side's orbital-energy tangents, which the walk state points at
+  // and the orbital pair never reads.
+  mix.epsCoreU = Tensor({nc});
+  mix.epsVirtU = Tensor({nv});
+  mix.epsCoreWU = Tensor({nc});
+  mix.epsVirtWU = Tensor({nv});
+  const ScGradientResult g =
+      assembleClasses(ai, src, /*batch=*/0, s.rdm.dm1, s.rdm.dm2, s.rdm.dm3, s.rdm.f3ac,
+                      s.rdm.f3ca, rot, /*adj=*/nullptr, /*epsAdjoint=*/false, /*ci=*/nullptr,
+                      &mix, res);
+
+  // The guarded tuples (docs/hessian-theory.md, Sec. 5.6 and Sec. 9.1;
+  // #190): K6 is in the walk's totals wherever the energy is a quadratic
+  // form along the pair. Where an H class's empty tuples both directions
+  // populate carry non-proportional tables (rho_t above kRhoTol) the energy
+  // is not twice differentiable along the pair -- there is no Hessian
+  // element to return -- and a guarded tuple empty by the state is not
+  // derived; either refuses the pair, never answered with a zero.
+  std::string noHessian, byState;
+  for (std::size_t c = 0; c < 8; ++c) {
+    const ScGuardedCensus& gc = g.classes[c].guarded;
+    if (gc.rhoAbove > 0)
+      noHessian += std::format(
+          "{}{}: {} empty tuples both directions populate, {} of them with rho_t above {:.0e}, "
+          "the worst {:.3e}",
+          noHessian.empty() ? "" : "; ", CLASSES[c], gc.populated, gc.rhoAbove, kRhoTol,
+          gc.rhoMax);
+    if (gc.emptyByState > 0)
+      byState += std::format("{}{}: {} guarded tuples empty by the state",
+                             byState.empty() ? "" : "; ", CLASSES[c], gc.emptyByState);
+  }
+  if (!noHessian.empty())
+    return err_numerical(std::format(
+        "pair {}: the SC energy is not twice differentiable along this pair -- {} -- so its "
+        "empty perturbers' energy is not a quadratic form on the plane and the orbital "
+        "Hessian has no element here (docs/hessian-theory.md, Sec. 5.6); refused",
+        index, noHessian));
+  if (!byState.empty())
+    return err_numerical(std::format(
+        "pair {}: {} -- a guarded perturber empty by the state, whose second-order term "
+        "docs/hessian-theory.md, Sec. 5.6 does not derive; refused",
+        index, byState));
+
+  ScOrbitalSandwichResult o;
+  for (std::size_t c = 0; c < 8; ++c) {
+    o.guarded[c] = g.classes[c].guarded;
+    o.classes[c] = g.classes[c].pair;
+    o.total += g.classes[c].pair;
+    o.edotU[c] = g.classes[c].mixedEdotW;
+    o.edotV[c] = g.classes[c].pairEdotV;
+    o.edotUTotal += o.edotU[c];
+    o.edotVTotal += o.edotV[c];
+    o.reverseClasses[c] = g.classes[c].pairReverse;
+    if (reverse) o.reverse += o.reverseClasses[c];
+    o.reverseK6Classes[c] = g.classes[c].pairReverseK6;
+    if (reverse) o.reverseK6 += o.reverseK6Classes[c];
+  }
+  o.forward = o.total.total();
+  o.hasReverse = reverse;
+  return o;
+}
+
 Result<std::vector<ScOrbitalSandwichResult>> scOrbitalSandwichDevice(
     const ScOrbitalSandwichSetup& s, const std::vector<ScOrbitalSandwichRequest>& pairs,
     const DeviceResources& res) {
@@ -1628,7 +1777,6 @@ Result<std::vector<ScOrbitalSandwichResult>> scOrbitalSandwichDevice(
 
   FullBlockSource src(s.ints);
   const ActiveIntegralsDevice ai = activeViewOf(s.ints);
-  const int64_t nc = s.gen.ncore, nv = s.gen.nvirt;
   // The integrals the digest-only blocks are built at (:sc_classes' vDigest /
   // wDigest), and the zero RDM sets the digests' reference walk reads.
   const DeviceTensor zeroH1e = DeviceTensor::zeros(s.ints.h1e.dims, res);
@@ -1655,82 +1803,14 @@ Result<std::vector<ScOrbitalSandwichResult>> scOrbitalSandwichDevice(
     const std::vector<RdmBuildResult> digests =
         attachDigestTangents(rot, s.opt, s.ci, s.nelecA, s.nelecB, res);
 
-    ScMixedDirection mix;
-    mix.epsKappa = true;
-    mix.pairForward = true;
-    mix.pairReverse = r.reverse;
     // |u|^2, |v|^2: the guarded tuples' population floor is relative to them.
     const auto norm2 = [](const Tensor& k) {
       double n = 0.0;
       for (int64_t i = 0; i < k.size(); ++i) n += k.flat(i) * k.flat(i);
       return n;
     };
-    mix.pairScaleU = norm2(r.u);
-    mix.pairScaleV = norm2(r.v);
-    if (!(mix.pairScaleU > 0.0) || !(mix.pairScaleV > 0.0))
-      return err_config(std::format("scOrbitalSandwichDevice: pair {} has a zero direction",
-                                    out.size()));
-    mix.zeroH1e = &zeroH1e;
-    mix.zeroH2e = &zeroH2e;
-    // The CI side's orbital-energy tangents, which the walk state points at
-    // and the orbital pair never reads.
-    mix.epsCoreU = Tensor({nc});
-    mix.epsVirtU = Tensor({nv});
-    mix.epsCoreWU = Tensor({nc});
-    mix.epsVirtWU = Tensor({nv});
-    const ScGradientResult g =
-        assembleClasses(ai, src, /*batch=*/0, s.rdm.dm1, s.rdm.dm2, s.rdm.dm3, s.rdm.f3ac,
-                        s.rdm.f3ca, rot, /*adj=*/nullptr, /*epsAdjoint=*/false, /*ci=*/nullptr,
-                        &mix, res);
-
-    // The guarded tuples (docs/hessian-theory.md, Sec. 5.6 and Sec. 9.1;
-    // #190): K6 is in the walk's totals wherever the energy is a quadratic
-    // form along the pair. Where an H class's empty tuples both directions
-    // populate carry non-proportional tables (rho_t above kRhoTol) the energy
-    // is not twice differentiable along the pair -- there is no Hessian
-    // element to return -- and a guarded tuple empty by the state is not
-    // derived; either refuses the pair, never answered with a zero.
-    std::string noHessian, byState;
-    for (std::size_t c = 0; c < 8; ++c) {
-      const ScGuardedCensus& gc = g.classes[c].guarded;
-      if (gc.rhoAbove > 0)
-        noHessian += std::format(
-            "{}{}: {} empty tuples both directions populate, {} of them with rho_t above {:.0e}, "
-            "the worst {:.3e}",
-            noHessian.empty() ? "" : "; ", CLASSES[c], gc.populated, gc.rhoAbove, kRhoTol,
-            gc.rhoMax);
-      if (gc.emptyByState > 0)
-        byState += std::format("{}{}: {} guarded tuples empty by the state",
-                               byState.empty() ? "" : "; ", CLASSES[c], gc.emptyByState);
-    }
-    if (!noHessian.empty())
-      return err_numerical(std::format(
-          "pair {}: the SC energy is not twice differentiable along this pair -- {} -- so its "
-          "empty perturbers' energy is not a quadratic form on the plane and the orbital "
-          "Hessian has no element here (docs/hessian-theory.md, Sec. 5.6); refused",
-          out.size(), noHessian));
-    if (!byState.empty())
-      return err_numerical(std::format(
-          "pair {}: {} -- a guarded perturber empty by the state, whose second-order term "
-          "docs/hessian-theory.md, Sec. 5.6 does not derive; refused",
-          out.size(), byState));
-
-    ScOrbitalSandwichResult o;
-    for (std::size_t c = 0; c < 8; ++c) {
-      o.guarded[c] = g.classes[c].guarded;
-      o.classes[c] = g.classes[c].pair;
-      o.total += g.classes[c].pair;
-      o.edotU[c] = g.classes[c].mixedEdotW;
-      o.edotV[c] = g.classes[c].pairEdotV;
-      o.edotUTotal += o.edotU[c];
-      o.edotVTotal += o.edotV[c];
-      o.reverseClasses[c] = g.classes[c].pairReverse;
-      if (r.reverse) o.reverse += o.reverseClasses[c];
-      o.reverseK6Classes[c] = g.classes[c].pairReverseK6;
-      if (r.reverse) o.reverseK6 += o.reverseK6Classes[c];
-    }
-    o.forward = o.total.total();
-    o.hasReverse = r.reverse;
+    ScOrbitalSandwichResult o = NEVPT2_TRY(sandwichPairWalk(
+        s, rot, norm2(r.u), norm2(r.v), r.reverse, out.size(), zeroH1e, zeroH2e, res));
     o.h2eDotMaxU = maxAbsDevice(rot.dirs[0].h2eDot, res);
     o.h2eDotMaxV = maxAbsDevice(rot.dirs[1].h2eDot, res);
     o.f3DotMaxU = std::max(maxAbsDevice(digests[0].f3ac, res), maxAbsDevice(digests[0].f3ca, res));
@@ -1774,6 +1854,338 @@ Result<std::vector<ScOrbitalHessianResult>> scOrbitalHessianDevice(
   out.reserve(pairs.size());
   for (std::size_t q = 0; q < pairs.size(); ++q)
     out.push_back(ScOrbitalHessianResult{curv[q], sand[q]});
+  return out;
+}
+
+// --- the source terms' tangent along a supplied integral perturbation (#220) --
+
+// The inventory's arrays, by member: what a perturbation carries and what a
+// displacement moves (h, heff, f and the eighteen rows).
+constexpr std::array<DeviceTensor GeneralIntegralsDevice::*, 21> kInventoryMembers{
+    &GeneralIntegralsDevice::h,         &GeneralIntegralsDevice::heff,
+    &GeneralIntegralsDevice::f,         &GeneralIntegralsDevice::g_xa_aa,
+    &GeneralIntegralsDevice::g_xv_aa,   &GeneralIntegralsDevice::g_xc_aa,
+    &GeneralIntegralsDevice::g_xa_va,   &GeneralIntegralsDevice::g_xv_va,
+    &GeneralIntegralsDevice::g_xc_va,   &GeneralIntegralsDevice::g_xa_ca,
+    &GeneralIntegralsDevice::g_xv_ca,   &GeneralIntegralsDevice::g_xc_ca,
+    &GeneralIntegralsDevice::g_xa_cv,   &GeneralIntegralsDevice::g_xv_cv,
+    &GeneralIntegralsDevice::g_xc_cv,   &GeneralIntegralsDevice::g_xa_cc,
+    &GeneralIntegralsDevice::g_xv_cc,   &GeneralIntegralsDevice::g_xc_cc_j,
+    &GeneralIntegralsDevice::g_xc_cc_k, &GeneralIntegralsDevice::g_xa_vv,
+    &GeneralIntegralsDevice::g_xc_vv};
+
+Result<IntegralPerturbationDevice> integralPerturbationDevice(const NevptIntegralsDevice& ints,
+                                                              GeneralIntegralsDevice dotGen,
+                                                              const DeviceResources& res) {
+  NEVPT2_TRY(checkGeneralShapes(ints, dotGen));
+  if (dotGen.densityFitted())
+    return err_config(
+        "an integral perturbation is a four-index inventory; a three-index B does not belong "
+        "in it");
+  IntegralPerturbationDevice out;
+  for (const ScDottedField& f : kDottedFields)
+    out.d.*f.member = storedBlockFrom(f.kind, dotGen, res);
+  out.d.e_core = storedEpsFrom(/*core=*/true, dotGen, res);
+  out.d.e_virt = storedEpsFrom(/*core=*/false, dotGen, res);
+  // The restrictions are taken on the inventory's own spans, which
+  // checkGeneralShapes has held to the integrals': a block shaped otherwise is
+  // our bug.
+  for (const ScDottedField& f : kDottedFields)
+    check((out.d.*f.member).dims == (ints.*f.member).dims,
+          std::format("integralPerturbationDevice: the derived {} is not shaped like the "
+                      "integrals' own",
+                      rotBlockName(f.kind)));
+  out.gen = std::move(dotGen);
+  return out;
+}
+
+Result<DisplacedIntegralsDevice> displacedIntegralsDevice(const NevptIntegralsDevice& ints,
+                                                          const GeneralIntegralsDevice& gen,
+                                                          const IntegralPerturbationDevice& pert,
+                                                          const double h,
+                                                          const DeviceResources& res) {
+  NEVPT2_TRY(checkGeneralShapes(ints, gen));
+  NEVPT2_TRY(checkGeneralShapes(ints, pert.gen));
+  const wwrStream_t s = res.stream();
+  const auto axpy = [&](const DeviceTensor& base, const DeviceTensor& dot) {
+    DeviceTensor t = DeviceTensor::zeros(base.dims, res);
+    addScaledInto(base, t, 1.0, s);
+    addScaledInto(dot, t, h, s);
+    return t;
+  };
+  DisplacedIntegralsDevice out;
+  for (const ScDottedField& f : kDottedFields)
+    out.ints.*f.member = axpy(ints.*f.member, pert.d.*f.member);
+  out.ints.e_core = axpy(ints.e_core, pert.d.e_core);
+  out.ints.e_virt = axpy(ints.e_virt, pert.d.e_virt);
+  out.gen.ncore = gen.ncore;
+  out.gen.nact = gen.nact;
+  out.gen.nvirt = gen.nvirt;
+  for (DeviceTensor GeneralIntegralsDevice::* m : kInventoryMembers)
+    out.gen.*m = axpy(gen.*m, pert.gen.*m);
+  return out;
+}
+
+// What both orientations build once per perturbation: Idot as a dotted
+// input set, its digests' tangent (the RDM build at hdot2e), its population
+// scale, the zero blocks and digests a pair walk reads, and the zero RDM
+// sets the digests' forward term reads.
+struct ScPerturbationPrep {
+  std::vector<ScDotted> owned;  // one: Idot's set, viewing pert.d
+  RdmBuildResult digests;       // f3'[Idot]
+  double scale = 0.0;           // |Idot|^2 over every dotted field
+  double h2eDotMax = 0.0;
+  double f3DotMax = 0.0;
+  DeviceTensor zeroH1e, zeroH2e, zeroF3ac, zeroF3ca, zeroDm1, zeroDm2, zeroDm3;
+  const ScDotted& set() const { return owned[0]; }
+};
+
+Result<ScPerturbationPrep> preparePerturbation(const ScSourceTangentSetup& s,
+                                               const IntegralPerturbationDevice& pert,
+                                               const DeviceResources& res) {
+  check(!s.opt.cublas && !s.opt.ozaki && !s.opt.fusedDigest,
+        "the source terms' tangent runs the emitted or the native-fp64 BLAS digest (cli "
+        "refuses --cublas / --ozaki / --fused-digest with --sc-source-tangent)");
+  NEVPT2_TRY(checkGeneralShapes(s.ints, s.gen));
+  NEVPT2_TRY(checkGeneralShapes(s.ints, pert.gen));
+  if (s.hbar.dims != s.ints.h2e.dims)
+    return err_config("the source terms' tangent: the digests' adjoint is not shaped like h2e");
+  if (s.ci.rank() != 2)
+    return err_config("the source terms' tangent: the state is not an (nstringsA, nstringsB) "
+                      "CI vector");
+  ScPerturbationPrep p;
+  p.owned = NEVPT2_TRY(incrementSets("the source terms' tangent", s.ints, &s.hbar, {&pert.d}, res));
+  const int64_t norb = s.ints.h1e.dims[0];
+  // downloadTensor synchronizes the stream; the build takes h2e on the host.
+  const Tensor h2eDot = downloadTensor(pert.d.h2e, res.stream());
+  p.h2eDotMax = maxAbs(h2eDot);
+  p.digests = buildRdmsDevice(s.opt, s.ci, norb, s.nelecA, s.nelecB, h2eDot, res);
+  p.f3DotMax = std::max(maxAbsDevice(p.digests.f3ac, res), maxAbsDevice(p.digests.f3ca, res));
+  for (const ScDottedField& f : kDottedFields)
+    if ((pert.d.*f.member).size() > 0)
+      p.scale += dotTensors(pert.d.*f.member, pert.d.*f.member, res);
+  if (!(p.scale > 0.0))
+    return err_config("the source terms' tangent: the integral perturbation is zero");
+  p.zeroH1e = DeviceTensor::zeros(s.ints.h1e.dims, res);
+  p.zeroH2e = DeviceTensor::zeros(s.ints.h2e.dims, res);
+  p.zeroF3ac = DeviceTensor::zeros(s.rdm.f3ac.dims, res);
+  p.zeroF3ca = DeviceTensor::zeros(s.rdm.f3ca.dims, res);
+  p.zeroDm1 = DeviceTensor::zeros(s.rdm.dm1.dims, res);
+  p.zeroDm2 = DeviceTensor::zeros(s.rdm.dm2.dims, res);
+  p.zeroDm3 = DeviceTensor::zeros(s.rdm.dm3.dims, res);
+  return p;
+}
+
+// The sandwich's pair along (kappa, Idot): kappa as u, a general rotation
+// with its digests' tangent (the RDM build at h2e'[kappa], or exactly zero
+// when kappa moves no active integral, as a core-core, core-virtual or
+// virtual-virtual direction does), and Idot as v with the prep's. `owned`
+// holds kappa's build for as long as the returned rotation is walked.
+Result<ScRotation> perturbationPairRotation(const ScSourceTangentSetup& s,
+                                            const ScPerturbationPrep& p, const Tensor& kappa,
+                                            std::optional<RdmBuildResult>& owned,
+                                            const DeviceResources& res) {
+  ScRotation rot = NEVPT2_TRY(makeGeneralRotation({ScRotationRequest{kappa, /*tangent=*/true}},
+                                                  s.ints.h1e, s.ints.h2e, s.gen, s.rdm.dm1,
+                                                  res));
+  ScRotation pr = makeDottedRotation({&p.set()}, {true}, res);
+  rot.dirs.push_back(std::move(pr.dirs[0]));
+  ScRotationDir& u = rot.dirs[0];
+  const Tensor h2eDot = downloadTensor(u.h2eDot, res.stream());
+  if (maxAbs(h2eDot) > 0.0) {
+    const int64_t norb = s.ints.h1e.dims[0];
+    owned.emplace(buildRdmsDevice(s.opt, s.ci, norb, s.nelecA, s.nelecB, h2eDot, res));
+    u.f3acDot = &owned->f3ac;
+    u.f3caDot = &owned->f3ca;
+  } else {
+    u.f3acDot = &p.zeroF3ac;
+    u.f3caDot = &p.zeroF3ca;
+  }
+  rot.dirs[1].f3acDot = &p.digests.f3ac;
+  rot.dirs[1].f3caDot = &p.digests.f3ca;
+  return rot;
+}
+
+ScOrbitalSandwichSetup sandwichSetupOf(const ScSourceTangentSetup& s) {
+  return ScOrbitalSandwichSetup{s.ints, s.gen, s.rdm, s.ci, s.nelecA, s.nelecB, s.opt};
+}
+
+ScMixedHessianSetup mixedSetupOf(const ScSourceTangentSetup& s) {
+  // Y's orbital energies respond to kappa and y's to c: the gated pair's
+  // modes, so FULL (#184's epsKappa and epsCi both).
+  return ScMixedHessianSetup{s.ints, &s.gen, s.rdm,          s.ci, s.nelecA,
+                             s.nelecB, s.opt, /*epsKappa=*/true, /*epsCi=*/true, &s.eps};
+}
+
+// W at the perturbation's own inventory: W'[Idot], W being linear in it.
+OrbitalEnergyResponse perturbationResponse(const IntegralPerturbationDevice& pert,
+                                           const DeviceResources& res) {
+  const wwrStream_t st = res.stream();
+  return orbitalEnergyResponse(pert.gen.ncore, pert.gen.nact, pert.gen.nvirt,
+                               downloadTensor(pert.gen.g_xa_cc, st),
+                               downloadTensor(pert.gen.g_xc_ca, st),
+                               downloadTensor(pert.gen.g_xa_vv, st),
+                               downloadTensor(pert.gen.g_xv_va, st));
+}
+
+Result<ScSourceTangentResult> scSourceTangentDevice(const ScSourceTangentSetup& s,
+                                                    const IntegralPerturbationDevice& pert,
+                                                    const SigmaVectorOptions& sigma,
+                                                    const int64_t chunk,
+                                                    const DeviceResources& res) {
+  if (chunk < 1) return err_config("scSourceTangentDevice: chunk must be at least 1");
+  const ScPerturbationPrep p = NEVPT2_TRY(preparePerturbation(s, pert, res));
+  const ScOrbitalSandwichSetup ss = sandwichSetupOf(s);
+  ScSourceTangentResult out;
+  out.h2eDotMax = p.h2eDotMax;
+  out.f3DotMax = p.f3DotMax;
+
+  // The census, from one pair walk with Idot on both legs: an H class's empty
+  // tuple Idot populates refuses the perturbation whole (the header).
+  {
+    ScRotation rot = makeDottedRotation({&p.set(), &p.set()}, {true, true}, res);
+    rot.gen = &s.gen;
+    for (ScRotationDir& d : rot.dirs) {
+      d.f3acDot = &p.digests.f3ac;
+      d.f3caDot = &p.digests.f3ca;
+    }
+    const ScOrbitalSandwichResult c = NEVPT2_TRY(sandwichPairWalk(
+        ss, rot, p.scale, p.scale, /*reverse=*/false, 0, p.zeroH1e, p.zeroH2e, res));
+    out.guarded = c.guarded;
+    std::string populated;
+    for (std::size_t k = 0; k < 8; ++k) {
+      if (k == 2 || c.guarded[k].populated == 0) continue;  // Sijrs: exact on every tuple
+      populated += std::format("{}{}: {} of {} empty tuples", populated.empty() ? "" : "; ",
+                               CLASSES[k], c.guarded[k].populated, c.guarded[k].empty);
+    }
+    if (!populated.empty())
+      return err_numerical(std::format(
+          "the integral perturbation populates perturbers its state leaves empty -- {} -- "
+          "along which the SC energy need not be twice differentiable with every orbital "
+          "direction (docs/hessian-theory.md, Sec. 5.6): a perturbation that leaves the "
+          "point group; the source terms' tangent along it is refused whole, not probed",
+          populated));
+  }
+
+  const int64_t nmo = s.gen.nmo();
+  std::vector<std::pair<int64_t, int64_t>> pairs;
+  for (int64_t a = 0; a < nmo; ++a)
+    for (int64_t b = a + 1; b < nmo; ++b) pairs.emplace_back(a, b);
+  const auto basis = [nmo](int64_t a, int64_t b) {
+    Tensor k({nmo, nmo});
+    k(a, b) = 1.0;
+    k(b, a) = -1.0;
+    return k;
+  };
+  out.probes = std::ssize(pairs);
+  out.kappaDotIntegrals = Tensor({nmo, nmo});
+  out.kappaDotSandwich = Tensor({nmo, nmo});
+
+  // The integrals term, `chunk` probes per walk: <kappa, Ydot_int> is the
+  // pairing at A_kappa(Idot), both modes, the digests' hbar in the adjoint.
+  for (std::size_t c0 = 0; c0 < pairs.size(); c0 += static_cast<std::size_t>(chunk)) {
+    const std::size_t c1 = std::min(pairs.size(), c0 + static_cast<std::size_t>(chunk));
+    std::vector<ScDotted> sets;
+    sets.reserve(c1 - c0);
+    for (std::size_t i = c0; i < c1; ++i)
+      sets.push_back(NEVPT2_TRY(dottedAtMatrix(pert.d, pert.gen, s.rdm.dm1,
+                                               basis(pairs[i].first, pairs[i].second), res)));
+    std::vector<const ScDotted*> ptrs;
+    for (const ScDotted& d : sets) ptrs.push_back(&d);
+    const ScFullRotationResult r = pairDottedSets(s.ints, s.rdm, &s.hbar, ptrs,
+                                                  std::vector<bool>(ptrs.size(), true), res);
+    for (std::size_t i = c0; i < c1; ++i) {
+      const ScFullRotationPairing& w = r.dirs[i - c0];
+      const auto [a, b] = pairs[i];
+      out.kappaDotIntegrals(a, b) = 0.5 * w.adjoint;
+      out.kappaDotIntegrals(b, a) = -0.5 * w.adjoint;
+      out.integralsDuality =
+          std::max(out.integralsDuality, std::fabs(w.integral - w.tangentIntegral));
+    }
+  }
+
+  // The sandwich, one pair walk per probe: <kappa, Ydot_sw> is the reverse
+  // pairing of the pseudodensities' tangent along Idot with kappa's inputs.
+  for (std::size_t i = 0; i < pairs.size(); ++i) {
+    const auto [a, b] = pairs[i];
+    std::optional<RdmBuildResult> kDig;
+    const ScRotation rot =
+        NEVPT2_TRY(perturbationPairRotation(s, p, basis(a, b), kDig, res));
+    const ScOrbitalSandwichResult o = NEVPT2_TRY(sandwichPairWalk(
+        ss, rot, 2.0, p.scale, /*reverse=*/true, i, p.zeroH1e, p.zeroH2e, res));
+    out.kappaDotSandwich(a, b) = 0.5 * o.reverse;
+    out.kappaDotSandwich(b, a) = -0.5 * o.reverse;
+    out.sandwichDuality = std::max(out.sandwichDuality, std::fabs(o.forward - o.reverse));
+  }
+  out.kappaDot = Tensor({nmo, nmo});
+  for (int64_t i = 0; i < out.kappaDot.size(); ++i)
+    out.kappaDot.flatRef(i) = out.kappaDotIntegrals.flat(i) + out.kappaDotSandwich.flat(i);
+
+  // ydot: R1 with w -> Idot.
+  const ScMixedHessianSetup ms = mixedSetupOf(s);
+  const OrbitalEnergyResponse wDot = perturbationResponse(pert, res);
+  const ScMixedPrep mp = NEVPT2_TRY(prepareMixedDotted(ms, p.set(), &wDot, res));
+  ScMixedHessianVectorResult hv = mixedReverse(ms, mp, sigma, res);
+  out.ciDot = std::move(hv.hkcTw);
+  out.ciDotWalk = std::move(hv.fromWalkTangent);
+  out.ciDotDigests = std::move(hv.fromDigests);
+  out.edotPert = hv.edotW;
+  return out;
+}
+
+Result<std::vector<ScSourceTangentForward>> scSourceTangentForwardDevice(
+    const ScSourceTangentSetup& s, const IntegralPerturbationDevice& pert,
+    const std::vector<std::pair<Tensor, Tensor>>& dirs, const DeviceResources& res) {
+  const ScPerturbationPrep p = NEVPT2_TRY(preparePerturbation(s, pert, res));
+  const int64_t nmo = s.gen.nmo();
+  // Every direction is checked before any device work past the prep.
+  bool anyU = false;
+  for (std::size_t i = 0; i < dirs.size(); ++i) {
+    if (dirs[i].first.rank() != 0)
+      NEVPT2_TRY(checkCurvatureDirection(dirs[i].first, nmo, i, "kappa"));
+    if (dirs[i].second.rank() != 0) {
+      if (dirs[i].second.dims() != s.ci.dims())
+        return err_config(std::format(
+            "scSourceTangentForwardDevice: direction {}'s u is not shaped like the state", i));
+      anyU = true;
+    }
+  }
+  const ScOrbitalSandwichSetup ss = sandwichSetupOf(s);
+  const ScMixedHessianSetup ms = mixedSetupOf(s);
+  const OrbitalEnergyResponse wDot = perturbationResponse(pert, res);
+  std::optional<ScMixedPrep> mp;
+  if (anyU) mp.emplace(NEVPT2_TRY(prepareMixedDotted(ms, p.set(), &wDot, res)));
+  std::vector<ScSourceTangentForward> out;
+  out.reserve(dirs.size());
+  for (std::size_t i = 0; i < dirs.size(); ++i) {
+    const auto& [kappa, u] = dirs[i];
+    ScSourceTangentForward f;
+    if (kappa.rank() != 0) {
+      // The integrals term forward: P.Ndot + Q.Hdot + R.Ddot at A_kappa(Idot),
+      // digests frozen, and the digests' own forward term at its h2e.
+      const ScDotted set = NEVPT2_TRY(dottedAtMatrix(pert.d, pert.gen, s.rdm.dm1, kappa, res));
+      const ScFullRotationResult r =
+          pairDottedSets(s.ints, s.rdm, /*hbar=*/nullptr, {&set}, {true}, res);
+      f.integrals = r.dirs[0].tangent;
+      f.integralsDigest =
+          digestTangentAt(s.opt, s.ci, s.nelecA, s.nelecB, s.ints, set.d.h2e, s.rdm.dm1,
+                          s.rdm.dm2, s.rdm.dm3, s.rdm.f3ac, s.rdm.f3ca, p.zeroDm1, p.zeroDm2,
+                          p.zeroDm3, std::nullopt, res)
+              .total;
+      std::optional<RdmBuildResult> kDig;
+      const ScRotation rot = NEVPT2_TRY(perturbationPairRotation(s, p, kappa, kDig, res));
+      double scale = 0.0;
+      for (int64_t k = 0; k < kappa.size(); ++k) scale += kappa.flat(k) * kappa.flat(k);
+      const ScOrbitalSandwichResult o = NEVPT2_TRY(sandwichPairWalk(
+          ss, rot, scale, p.scale, /*reverse=*/false, i, p.zeroH1e, p.zeroH2e, res));
+      f.sandwich = o.forward;
+    }
+    if (u.rank() != 0) {
+      const std::vector<ScMixedHessianResult> m = NEVPT2_TRY(mixedForward(ms, *mp, {u}, res));
+      f.mixed = m[0].eddot;
+    }
+    out.push_back(f);
+  }
   return out;
 }
 

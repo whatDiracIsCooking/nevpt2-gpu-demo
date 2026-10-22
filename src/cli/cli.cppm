@@ -199,6 +199,12 @@ struct Options {
   // at a time with the six above, exact digests only; with --pc, PC's
   // sandwich and Eddot_kk (#202). It reads the sidecar (required).
   bool scHessianKk = false;
+  // nevpt2_sc_pseudodensity: --sc-source-tangent PATH, the SC source terms'
+  // tangent along the integral perturbations of the `.pertgold` at PATH
+  // (#220; docs/hessian-theory.md, Sec. 8); one job at a time with the seven
+  // above, exact digests only (a second derivative, so the Hessian flags'
+  // refusal), SC only. It reads the gradient sidecar (required).
+  std::string scSourceTangentPath;
   std::string gradgoldPath;
   std::string dumpSourceTermsPath;
   std::string sourceOraclePath;

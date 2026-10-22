@@ -680,4 +680,55 @@ double epsResidual(bool core, const GeneralIntegralsDevice& gen, const DeviceTen
   return relativeResidual(diag, eps, res);
 }
 
+// --- the stored blocks OUT OF the inventory (#220) ---------------------------
+//
+// The same restrictions read the other way round: the stored block a rule's
+// source array restricts to, BUILT from the inventory instead of held against
+// it. For a two-electron block that is the slot-p rule's array on the
+// promoted slot's own space; a one-electron block is h^eff's slice (less the
+// active trace T_rt = sum_b (r b | b t) for h1e_v_Sr, read off g_xa_aa); and
+// an orbital-energy vector is f's diagonal on its space. Every one is a
+// slice of a slice -- linear in the inventory -- so handed a DOTTED
+// inventory (an integral perturbation's) it returns the stored block's own
+// dot, which is how an integral perturbation sidecar carries no block of the
+// golden's: the reverse of what scGeneralIntegralCheck holds, on the same
+// tables, so a block it would pass is the block this builds.
+DeviceTensor storedBlockFrom(RotBlock b, const GeneralIntegralsDevice& gen,
+                             const DeviceResources& res) {
+  const RotBlockInfo info = rotBlockInfo(b);
+  if (info.rank == 4) {
+    const PromotionPlan pl = promotionPlan(b, 0);
+    const auto [lo, hi] = spanOf(gen, pl.promoted.space);
+    const DeviceTensor rows = sliceAxis(generalArray(gen, pl.pick.array), 0, lo, hi);
+    std::string subs(1, kAxisLabels[static_cast<std::size_t>(pl.promoted.axis)]);
+    subs += kAxisLabels[static_cast<std::size_t>(pl.partner.axis)];
+    subs += kAxisLabels[static_cast<std::size_t>(pl.firstAxis)];
+    subs += kAxisLabels[static_cast<std::size_t>(pl.lastAxis)];
+    subs += "->";
+    subs += kAxisLabels;
+    return deviceEinsumNew(subs, {&rows}, 1.0, res);
+  }
+  check(info.rank == 2, std::format("storedBlockFrom: {} is not a stored block", rotBlockName(b)));
+  const auto [pLo, pHi] = spanOf(gen, info.roles[0].space);
+  const auto [qLo, qHi] = spanOf(gen, info.roles[1].space);
+  const DeviceTensor rows = sliceAxis(sliceAxis(gen.heff, 0, pLo, pHi), 1, qLo, qHi);
+  DeviceTensor out = deviceEinsumNew("ij->ij", {&rows}, 1.0, res);
+  if (info.trace) {
+    const DeviceTensor tTr = deviceEinsumNew("zmmj->zj", {&gen.g_xa_aa}, 1.0, res);
+    const DeviceTensor tTrRows = sliceAxis(tTr, 0, pLo, pHi);  // (v, a)
+    deviceEinsumAccum("ij->ij", {&tTrRows}, out, -1.0, res.stream());
+  }
+  return out;
+}
+
+// f's diagonal on the core (`core`) or the virtual space: e_core / e_virt,
+// as (O2) says the golden's are.
+DeviceTensor storedEpsFrom(bool core, const GeneralIntegralsDevice& gen,
+                           const DeviceResources& res) {
+  const auto [lo, hi] = spanOf(gen, core ? RotSpace::Core : RotSpace::Virt);
+  if (hi <= lo) return DeviceTensor::zeros({0}, res);
+  const DeviceTensor fPP = sliceAxis(sliceAxis(gen.f, 0, lo, hi), 1, lo, hi);
+  return deviceEinsumNew("ii->i", {&fPP}, 1.0, res);
+}
+
 }  // namespace nevpt2

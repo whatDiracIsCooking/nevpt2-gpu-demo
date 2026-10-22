@@ -101,3 +101,54 @@ unset(_gradgold_cas44_df)
 add_gtest_suite_tests(
   TARGET gradgold_tests
   SUITES GradGoldRoundTripTests GradGoldLoadErrorTests GradGoldCas44Tests GradGoldDfCas44Tests)
+
+# Host-only suites for the integral perturbation sidecar reader (#220):
+# loadPertGold, `*.pertgold`. The same contract -- a malformed sidecar is a
+# value-tier IO Error, never an abort -- and the one #220 adds: a sidecar
+# missing ANY ONE of its arrays is refused whole. Plus the committed N2
+# CAS(4,4) CASSCF pair (conventional and density-fitted) against the golden
+# and gradient sidecar each belongs to, and refused beside the others. No
+# device, so NOT REQUIRES_GPU.
+add_gtest_executable(
+  NAME pertgold_tests
+  SOURCES pertgold_tests.cpp
+  LINK nevpt2::golden)
+
+# The committed files, read only: each perturbation sidecar, the golden and
+# gradient sidecar it pairs with, and the CASCI pair it must refuse.
+set(_pert_defs "")
+foreach(_spec "CASSCF|n2_ccpvdz_cas44_casscf" "CASSCF_DF|n2_ccpvdz_cas44_casscf_df"
+              "CAS44|n2_ccpvdz_cas44")
+  string(REPLACE "|" ";" _spec "${_spec}")
+  list(GET _spec 0 _tag)
+  list(GET _spec 1 _stem)
+  set(_exts nevpt2gold gradgold)
+  if(NOT _tag STREQUAL "CAS44")
+    list(APPEND _exts pertgold)
+  endif()
+  foreach(_ext ${_exts})
+    set(_file "${PROJECT_SOURCE_DIR}/golden/${_stem}.${_ext}")
+    if(NOT EXISTS "${_file}")
+      message(FATAL_ERROR "test/golden: committed file missing: ${_file}")
+    endif()
+    if(_ext STREQUAL "nevpt2gold")
+      set(_kind GOLDEN)
+    else()
+      string(TOUPPER "${_ext}" _kind)
+    endif()
+    list(APPEND _pert_defs "NEVPT2_TEST_${_kind}_${_tag}=\"${_file}\"")
+  endforeach()
+endforeach()
+target_compile_definitions(pertgold_tests PRIVATE ${_pert_defs})
+unset(_pert_defs)
+unset(_spec)
+unset(_tag)
+unset(_stem)
+unset(_exts)
+unset(_ext)
+unset(_file)
+unset(_kind)
+
+add_gtest_suite_tests(
+  TARGET pertgold_tests
+  SUITES PertGoldRoundTripTests PertGoldLoadErrorTests PertGoldCommittedTests)

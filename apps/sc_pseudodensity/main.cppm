@@ -67,6 +67,15 @@
 // total, and the step-free gauge against #201's H_kc (:hessian_kk_pc_check,
 // its own PASS line).
 //
+// WITH --sc-source-tangent PATH IT CHECKS THE SOURCE TERMS' TANGENT (#220):
+// Y and y differentiated along every nuclear coordinate's perturbed
+// Hamiltonian, the integral perturbation sidecar at PATH
+// (`reference_data/integral_perturbation.py`), against the forward second
+// derivative by duality and against ladders of the gated Y and y recomputed
+// at the displaced integrals, out of the gradient sidecar (required); a
+// coordinate whose perturbation populates empty perturbers is refused and
+// counted. SC only. The partition :source_tangent_check, its own PASS line.
+//
 // A DENSITY-FITTED golden (`generate_golden.py --df`) runs here too (#165),
 // with no flag of its own: it carries its fitted four-index blocks beside the
 // B blocks, so the identities and --kappa-act read it as they read any
@@ -135,6 +144,9 @@ export import :hessian_kk_sandwich_check;
 // --pc --sc-hessian-kk: the same block of the PC energy (#202). Its own PASS
 // line.
 export import :hessian_kk_pc_check;
+// --sc-source-tangent PATH: the SC source terms' tangent along a supplied
+// integral perturbation (#220). Its own PASS line.
+export import :source_tangent_check;
 
 import std;
 // nevpt2.cli: every flag this binary takes, and the ones it refuses.
@@ -471,6 +483,32 @@ int main(int argc, char** argv) {
     const nevpt2::Result<bool> ok =
         opt.pc ? checkPcHessianKk(g, gg, dInts, dDm1, dDm2, rdm, opt.rdm, *res)
                : checkScHessianKk(g, gg, dInts, dDm1, dDm2, rdm, opt.rdm, *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
+
+  // --sc-source-tangent PATH (#220): the SC source terms' tangent along the
+  // integral perturbations of the `.pertgold` at PATH
+  // (:source_tangent_check). Y is read out of the gradient sidecar, so it is
+  // required; the perturbation is held to it (its frame, its calculation).
+  if (!parsedOpts.scSourceTangentPath.empty()) {
+    if (const nevpt2::Status st = g.requireSourceTermReference("--sc-source-tangent"); !st) {
+      nevpt2::report(st.error());
+      return 1;
+    }
+    nevpt2::Result<nevpt2::GradGoldFile> sidecar = loadSidecar();
+    if (!sidecar) {
+      nevpt2::report(sidecar.error());
+      return 1;
+    }
+    const nevpt2::GradGoldFile gg = *std::move(sidecar);
+    const nevpt2::Result<bool> ok =
+        checkScSourceTangent(g, gg, parsedOpts.scSourceTangentPath, dInts, dDm1, dDm2, rdm,
+                             opt.rdm, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

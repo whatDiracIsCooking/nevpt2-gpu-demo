@@ -650,6 +650,21 @@ was 4.9 MB (CAS(4,4)), 72.6 MB (CAS(8,8), the RDM build's own figure) and
 7.3 MB (CAS(4,4) density-fitted), on the RTX 3080 (CUDA, `default` preset),
 2026-10-20.
 
+**`--sc-source-tangent` (#220) has no floors of its own measured.** Its RDM
+work is the plain build: once for the state, once per probe that moves `h2e`
+for that probe's digests' tangent, once for the perturbation's, once per
+duality direction for the integrals term's digests' forward term, and once
+per ladder side at the displaced `h2e`. It also runs #89's transpose, once
+for the state and once per ladder side, and the tangent build for the mixed
+block's forward orientation, twice per CI direction. So the plain build's,
+the transpose's and the tangent build's floors are its own. Beside the
+builds it holds the perturbation's dotted inventory and its derived blocks
+(one copy of every array the energy reads), up to 16 dotted sets per walk of
+the integrals term, and the mixed block's three coefficient sets. At the
+ctest entries' `--tiles 3` the pool's used high-water for the whole run was
+7.9 MB (N2 CAS(4,4) on CASSCF orbitals) and 8.8 MB (its density-fitted
+twin), on the RTX 3080 (CUDA, `default` preset), 2026-10-22.
+
 **`--sc-hessian-kk` (#158): floor 1 on every case it runs.** Its RDM work is
 the plain build only — once for the state, once per direction of every pair
 for the digests' tangent, the curvature's builds at `h2e''`, and one per
@@ -747,6 +762,7 @@ live there and are not repeated here:
 | `--pc --sc-hessian-kc` (#201) | the tangent build, three times per CI direction (forward: at `(c, u)`, `(u, u)` and `(c, u)` with `h2e'[w]`), and the plain build (reverse) | the `--rdm-tangent` rows, as a lower bound | no; pool high-water at the ctest entries only |
 | `--sc-hessian-kk` (#158, #190) | the plain build and the digests' transpose | the plain rows and the transpose's | **yes**, on the three cases with a sidecar it reads: floor 1 (the table above) |
 | `--pc --sc-hessian-kk` (#202) | the plain build, the digests' transpose, and the gauge's tangent builds (#201's) | the plain rows, the transpose's and the `--rdm-tangent` rows | **yes**, on the four cases with a sidecar and PC fields: floor 1 (the table above) |
+| `--sc-source-tangent` (#220) | the plain build, the digests' transpose, and the tangent build (the mixed block's forward orientation) | the plain rows, the transpose's and the `--rdm-tangent` rows | no; pool high-water at the ctest entries only |
 | `--pc-hessian` (#152) | the three-argument build, beside the PC stage's own buffers | the `--sc-hessian` rows, as a lower bound | **no**. Its only entries are CAS(4,4) (`docs/testing.md`, "The Hessian tier's entries") |
 | `--pc-hessian-vector` (#155) | the three-argument build, beside the PC adjoint walk's buffers | the `--sc-hessian` rows, as a lower bound | **no**, likewise |
 

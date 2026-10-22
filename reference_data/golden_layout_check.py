@@ -38,7 +38,12 @@ different times, the last by luck (issue #71). Since then there is one parser,
    ``golden/*.respgold`` CASSCF response sidecar (#219, ``NEVPT2R1``)
    through ``golden_format.read_respgold`` / ``write_respgold``, held to the
    ``_casscf`` golden and gradient sidecar beside it (partition, ``ci`` and
-   ``mo_coeff`` bit for bit: the frame its directions are written in).
+   ``mo_coeff`` bit for bit: the frame its directions are written in). Each
+   ``golden/*.pertgold`` integral perturbation sidecar (#220, ``NEVPT2I1``)
+   through ``golden_format.read_pertgold`` / ``write_pertgold``, held to the
+   golden and gradient sidecar beside it (partition, calculation -- ``naux``
+   -- and ``mo_coeff`` bit for bit); both flavours, conventional and
+   density-fitted, must be present.
 3. **The writer as it is now.** A golden written by the current
    ``generate_golden.write_golden`` (both reference kinds) is read back by
    every reader, so a field added to the writer and not to the readers fails
@@ -94,7 +99,7 @@ PY_PARSER = re.compile(
 )
 #: What only src/golden/ may do in the C++ tree: open, read or seek a file, or
 #: spell a magic.
-CPP_PARSER = re.compile(r"\bfopen\b|\bfread\b|\bfseek\b|\bseekg\b|\bifstream\b|NEVPT2[GDFM]\d")
+CPP_PARSER = re.compile(r"\bfopen\b|\bfread\b|\bfseek\b|\bseekg\b|\bifstream\b|NEVPT2[GDFMI]\d")
 #: C++ files outside src/golden/ that read a file which is NOT one of the three
 #: golden layouts, each with why. They may open a file; they are still held to
 #: CPP_GOLDEN_SIGNS, so one that grows a seek or a golden magic fails as before.
@@ -105,7 +110,7 @@ CPP_NON_GOLDEN_READERS = {
     "apps/sc_pseudodensity/gradsrc.cpp": ".gradsrc (.npz) reader",
 }
 #: What even a CPP_NON_GOLDEN_READERS file may not do: seek, or spell a magic.
-CPP_GOLDEN_SIGNS = re.compile(r"\bfseek\b|\bseekg\b|NEVPT2[GDFM]\d")
+CPP_GOLDEN_SIGNS = re.compile(r"\bfseek\b|\bseekg\b|NEVPT2[GDFMI]\d")
 
 
 class Failures:
@@ -391,6 +396,50 @@ def committed_sidecars(fail: Failures, tmp: Path) -> None:
         print(f"  {path.name}: {gf.RESPGOLD_MAGIC.decode()}, {3 * header['natm']} "
               f"coordinates, {len(arrays)} arrays", flush=True)
 
+    perts = sorted(GOLDEN.glob("*.pertgold"))
+    pert_kinds: set[bool] = set()
+    fail.check(bool(perts), "no committed *.pertgold was read, so that layout is untested")
+    for path in perts:
+        r = fail.run(f"{path.name}: golden_format.read_pertgold", gf.read_pertgold, path)
+        if r is None:
+            continue
+        header, arrays = r
+        pert_kinds.add(header["naux"] > 0)
+        bad = non_finite(arrays)
+        fail.check(not bad, f"{path.name}: non-finite values in {', '.join(bad)}")
+        out = tmp / path.name
+        fail.run(f"{path.name}: golden_format.write_pertgold",
+                 lambda o=out, h=header, a=arrays: gf.write_pertgold(o, header=h, arrays=a))
+        fail.check(out.exists() and out.read_bytes() == path.read_bytes(),
+                   f"{path.name}: golden_format.write_pertgold does not reproduce it")
+        out.unlink(missing_ok=True)
+        # <stem>.pertgold sits beside <stem>.nevpt2gold / .gradgold, perturbs
+        # the same calculation's integrals and is written in their frame.
+        twin = path.with_suffix(".nevpt2gold")
+        fail.check(twin.exists(), f"{path.name}: no golden beside it")
+        if twin.exists():
+            g, ga = gf.read_golden(twin, want={"B_aa"})
+            fail.check((header["nact"], header["ncore"]) == (g["ncas"], g["ncore"]),
+                       f"{path.name}: its partition is not its golden's")
+            fail.check((header["naux"] > 0) == ("B_aa" in ga)
+                       and (header["naux"] == 0 or ga["B_aa"].shape[0] == header["naux"]),
+                       f"{path.name}: naux {header['naux']} is not its golden's calculation")
+        side = path.with_suffix(".gradgold")
+        fail.check(side.exists(), f"{path.name}: no gradient sidecar beside it")
+        if side.exists():
+            s, sa = gf.read_gradgold(side)
+            fail.check((header["nao"], header["nmo"], header["nvirt"], header["naux"])
+                       == (s["nao"], s["nmo"], s["nvirt"], s.get("naux", 0)),
+                       f"{path.name}: its orbital space is not its gradient sidecar's")
+            fail.check(np.array_equal(arrays["mo_coeff"], sa["mo_coeff"]),
+                       f"{path.name}: its mo_coeff is not its gradient sidecar's, bit for bit")
+        print(f"  {path.name}: {gf.PERTGOLD_MAGIC.decode()}, {3 * header['natm']} "
+              f"coordinates, {len(arrays)} arrays, naux {header['naux']}", flush=True)
+    for fitted in (False, True):
+        fail.check(fitted in pert_kinds,
+                   f"no committed {'density-fitted' if fitted else 'conventional'} *.pertgold "
+                   "was read, so that flavour is untested")
+
 
 def fresh_writer(fail: Failures, tmp: Path) -> None:
     """A small golden from the writer as it is now, both kinds, through every
@@ -509,8 +558,8 @@ def main() -> int:
         for item in fail.items:
             print(f"  {item}")
         return 1
-    print("PASS: every golden, gradient sidecar, MO sidecar, source-term oracle and "
-          "response sidecar round-trips through "
+    print("PASS: every golden, gradient sidecar, MO sidecar, source-term oracle, "
+          "response sidecar and integral perturbation sidecar round-trips through "
           f"every reader, layouts {sorted(m.decode() for m in layouts)}")
     return 0
 
