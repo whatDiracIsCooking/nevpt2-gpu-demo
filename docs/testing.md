@@ -318,7 +318,8 @@ nothing skips.
 `devtools/golden-repro.sh` re-runs the promise CLAUDE.md makes — the
 generators are bit-reproducible, so a regenerated file that differs from the
 committed one means something changed — for every committed N2 CAS(4,4) /
-CAS(8,8) reference. Twenty files from sixteen generator runs, each with the
+CAS(8,8) reference and the C1 case's three HSOH files (#213). Twenty-three
+files from eighteen generator runs, each with the
 generator's own settings (`--out` into a scratch directory is the only flag
 added):
 
@@ -331,6 +332,8 @@ added):
 | `n2_ccpvdz_cas44.srcgold`, `n2_ccpvdz_cas44_pc.srcgold` | `sc_source_oracle.py [--pc]`, reading the committed golden |
 | `n2_ccpvdz_cas44_dir.srcgold`, `n2_ccpvdz_cas44_pc_dir.srcgold` | `sc_source_oracle.py --directional [--pc]` (#105) |
 | `n2_ccpvdz_cas44_casscf[_pc][_dir].srcgold` | `sc_source_oracle.py --case n2_ccpvdz_cas44_casscf --mo-from` the **committed** sidecar `[--pc] [--directional]` (#117) |
+| `hsoh_def2svp_cas66_casscf.mogold` | `generate_golden.py --casscf --mo-out` (a fresh optimisation) |
+| `hsoh_def2svp_cas66_casscf.nevpt2gold`, `.gradgold` | `generate_golden.py --mo-from` the **committed** `.mogold` `--gradgold`, then `nevpt2_numgrad.py --reference casscf --workers 12` on the sidecar it just wrote, in the same run, so the sidecar's `grad_num*` arrays are regenerated too (#213) |
 
 The comparison is `cmp` on the whole file — the one place in this tree a
 byte comparison is right. One exception, the documented one
@@ -340,7 +343,7 @@ four the state fields must be byte-identical, the new `reference_kind` must
 be `casci`, and everything from the array count on byte-identical, each
 file's header length read with `golden_format.py arrays-at`. It prints one
 `PASS:`/`FAIL:` line per file (naming it) and exits 0 only if all
-twenty reproduce. `--committed DIR` compares against a copy instead of `golden/`
+twenty-three reproduce. `--committed DIR` compares against a copy instead of `golden/`
 (the generator inputs stay `golden/`'s), `--only REGEX` narrows the set,
 `--out DIR` keeps the regenerated files and each run's log.
 
@@ -365,6 +368,7 @@ before #105 added the two directional files:
 | `-j 2`, eighteen files, #117 (RTX 3080 box's CPU, measured with a concurrent sweep on the CPU) | 307 s, all eighteen `PASS:` |
 | `-j 6`, twenty files, #164 (RTX 3080 box's CPU, a sibling build sharing it) | 179 s, all twenty `PASS:` |
 | `-j 6`, twenty files, `n2_ccpvdz_cas44_df.gradgold` with its `grad_num`, #167 (same box, a sibling agent sharing it) | 178 s, all twenty `PASS:`; the `cas44_df` run, generator plus `nevpt2_numgrad.py --df`, 33 s |
+| `-j 6`, twenty-three files, the HSOH three added, #213 (the two-card box's CPU) | 227 s, all twenty-three `PASS:`; the `hsoh_casscf` run, generator plus the 72-state `--reference casscf` sweep at `--workers 12`, 198 s, the `hsoh_casscf_mo` run 16 s |
 
 Per generator run (the `-j 1` run): `--casscf` sidecars 2–3 s,
 `n2_ccpvdz_cas44.srcgold` 9 s, the CAS(4,4) goldens 26–27 s, the CAS(8,8)
@@ -373,7 +377,10 @@ PC oracle's alone. In the `-j 12` run the directional pair took 6 s (SC) and
 56 s (PC), and the full PC oracle 150 s, again the whole wall. In the `-j 2`
 run the four CASSCF-orbital oracles took 9 s (SC), 145 s (PC), 3 s (SC
 directional) and 44 s (PC directional). **Nothing is left out** of the N2 CAS(4,4)/CAS(8,8) set
-for cost: the whole set was 330 s at `-j 1` against the 30-minute budget. The larger
+for cost: the whole set was 330 s at `-j 1` against the 30-minute budget.
+The HSOH run adds the one multi-process step in the gate, its sweep's
+`--workers 12`, which oversubscribes the CPU under `-j N` but changes no
+byte. The other larger
 committed references are outside its scope, not left out for time; theirs,
 where measured, are in [`reference-data.md`](reference-data.md),
 "Regenerating the golden file", "The SC source-term oracle" and "The files
@@ -395,12 +402,13 @@ char 299953 …)` — the offset past the 48-byte `G1` header — exit 1; byte
 
 ## The CASSCF-orbital entries
 
-Seven golden entries read a reference whose orbitals came from a converged
+Ten golden entries read a reference whose orbitals came from a converged
 `mcscf.CASSCF` rather than from RHF ([`reference-data.md`](reference-data.md),
 "The MO sidecar: committed CASSCF orbitals"). They are ordinary golden checks
 — the unmodified binaries, the unmodified flags, every class and the total to
-1e-7 — on a file whose header says `reference_kind = CASSCF`, which both demos
-print in their first line:
+1e-7 (the `--gradient-source` one: its duality, to the same 1e-7) — on a
+file whose header says `reference_kind = CASSCF`, which both demos print in
+their first line:
 
 | entry | binary | flags | labels |
 |---|---|---|---|
@@ -411,12 +419,23 @@ print in their first line:
 | `nevpt2_cas1010_casscf` | `nevpt2_demo` | `--tiles 3` | `gpu` |
 | `nevpt2_cas1010_casscf_pc` | `nevpt2_demo` | `--pc --tiles 3` | `gpu` |
 | `nevpt2_lif_cas46_casscf` | `nevpt2_demo` | `--tiles 3` | `gpu` |
+| `nevpt2_hsoh_cas66_casscf` | `nevpt2_demo` | `--tiles 3` | `gpu` |
+| `nevpt2_hsoh_cas66_casscf_pc` | `nevpt2_demo` | `--pc --tiles 3` | `gpu` |
+| `nevpt2_gradient_source_hsoh_cas66_casscf` | `nevpt2_demo` | `--tiles 3 --gradient-source --gradgold <its sidecar>` | `gpu` |
 
 The CAS(4,4) four are `small`, so the sanitizer tier runs a `NEVPT2G2` file
 too; CAS(10,10) is the production size at the shipped `--tiles 3`. The three
 N2 goldens carry PC fields. LiF's (#123's golden, registered by #125 beside
 its CASCI twin `nevpt2_lif_cas46`) is SC only, like that twin, so it has no
-`_pc` entry.
+`_pc` entry. The last three are the C1 case, HSOH CAS(6,6) (#213;
+[`reference-data.md`](reference-data.md), "HSOH, the C1 case"): SC, PC, and
+the CI source term's forward-reverse duality with the orbital energies
+moving, read from the committed sidecar beside it. That entry is the
+`n2_ccpvdz_cas44_casscf` one of "The CI source term's forward-reverse
+duality" on a molecule with no symmetry. Not `small`: the sanitizer tier
+stays on N2. On the RX 9060 XT (preset `hip`) the three passed in 2.77 s,
+0.86 s and 20.87 s; on the RTX 3080 (preset `default`), in 0.55 s, 0.52 s
+and 0.71 s (one run each, #213).
 
 **Two gates, and which paths each one admits.** `nevpt2.golden` has two
 reference-kind gates. The **source-term** gate
@@ -2931,6 +2950,56 @@ uv run python reference_data/nevpt2_grad.py --case n2_ccpvdz_cas44 \
     --grad-num /tmp/n2_casscf.numgrad.npz                         # GPU-sourced
 # LiF: the same with --case lif_def2svp_cas46, and its numerical gradient from
 # "The sweeps" in reference-data.md (nevpt2_numgrad.py ... --npz /tmp/lif_casscf.numgrad.npz)
+```
+
+### SC on a CASSCF reference: the C1 case
+
+**HSOH CAS(6,6)'s SC-NEVPT2 nuclear gradient on its CASSCF reference agrees
+with the committed `grad_num` to 7.7e-8 Eh/bohr in the worst of all 12
+components, from the GPU's source terms and from PySCF's: two PASS against
+the 1e-6 gate.** This is #213's acceptance run. It is the first case with no
+component zero by symmetry: C1 keeps every displacement in the group, so the
+numerical side differences all 3N and nothing is skipped.
+The `grad_num` is the one in `golden/hsoh_def2svp_cas66_casscf.gradgold`,
+read by default ([`reference-data.md`](reference-data.md), "HSOH, the C1
+case", has the sweep, its residuals and its guard).
+
+| comp | numerical | analytic, GPU / PySCF | \|Δ\| GPU / PySCF |
+|---|---:|---:|---:|
+| S x | +0.0019603247 | +0.0019603628 / +0.0019603621 | 3.8e-8 / 3.7e-8 |
+| S y | −0.0012523810 | −0.0012523676 / −0.0012523679 | 1.4e-8 / 1.3e-8 |
+| S z | +0.0048977289 | +0.0048977201 / +0.0048977203 | 8.8e-9 / 8.6e-9 |
+| O x | −0.0016700685 | −0.0016700699 / −0.0016700698 | 1.4e-9 / 1.3e-9 |
+| O y | +0.0007632585 | +0.0007632807 / +0.0007632811 | 2.2e-8 / 2.3e-8 |
+| O z | −0.0051249837 | −0.0051249625 / −0.0051249632 | 2.1e-8 / 2.1e-8 |
+| H(S) x | −0.0001810602 | −0.0001811367 / −0.0001811360 | **7.7e-8** / 7.6e-8 |
+| H(S) y | −0.0000462156 | −0.0000462019 / −0.0000462019 | 1.4e-8 / 1.4e-8 |
+| H(S) z | −0.0022474316 | −0.0022474285 / −0.0022474284 | 3.1e-9 / 3.2e-9 |
+| H(O) x | −0.0001091780 | −0.0001091795 / −0.0001091795 | 1.5e-9 / 1.6e-9 |
+| H(O) y | +0.0005353341 | +0.0005352919 / +0.0005352918 | 4.2e-8 / 4.2e-8 |
+| H(O) z | +0.0024746871 | +0.0024746397 / +0.0024746401 | 4.7e-8 / 4.7e-8 |
+
+The worst difference sits below the numerical side's own largest Richardson
+residual, 3.8e-7 (S x). The two providers agree to 7.2e-10; the GPU's `Y`
+alone moves the gradient by 7.0e-10 and its `y` alone by 2.4e-10. The
+coupled (orbital + CI) system has dimension 875 with **no negative
+eigenvalue** (smallest +6.98e-3, condition number 5.5e4), and the right-hand
+side on its five lowest modes is ≤ 4.3e-2 of `|b|`. (O2) divides all 370 pairs
+(`|M_oo zc + Y|` 2.7e-16); none is degenerate, so none is left at zero. The
+residual-independent checks hold, 14 of 14. The skeleton quotient's
+Richardson bar is 4.4e-9. Translational sums are ≤ 3.1e-8.
+
+The dump was taken on the RX 9060 XT (gfx1200, preset `hip`, `--tiles 3`)
+in 3 min 29 s. `nevpt2_grad.py --source both --workers 12` took 158 s
+(budget 300 s, `CASSCF_WALL_BUDGET`). Re-run with:
+
+```bash
+build-hip/src/nevpt2_sc_pseudodensity \
+    --golden golden/hsoh_def2svp_cas66_casscf.nevpt2gold --tiles 3 \
+    --dump-source-terms /tmp/hsoh_casscf.gradsrc
+uv run python reference_data/nevpt2_grad.py --case hsoh_def2svp_cas66 \
+    --reference casscf --source both --source-path /tmp/hsoh_casscf.gradsrc \
+    --workers 12          # grad_num: the committed sidecar's, by default
 ```
 
 ### PC on a CASSCF reference: acrolein

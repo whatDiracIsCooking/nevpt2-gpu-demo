@@ -1,0 +1,6 @@
+4
+HSOH (sulfenic acid, H-S-O-H), the CASSCF(6,6)/def2-SVP minimum on generate_golden.py's own --casscf path; C1, no point-group symmetry (docs/reference-data.md, "HSOH, the C1 case")
+S 0.0124169964 0.0069378914 -0.0132983479
+O 0.0041028414 -0.0011913442 1.6800237104
+H 1.3374827239 -0.0119304558 -0.2080544791
+H -0.0171405617 0.9265239086 1.9636231166
