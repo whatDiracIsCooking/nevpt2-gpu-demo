@@ -377,6 +377,20 @@ What they are, all on synthetic inputs, no PySCF solve, no card, no network:
 
   About 20 s of CPU ([`reference-data.md`](reference-data.md), "The CASSCF
   constraint's R-mixed terms").
+- **`test_molcas_casscf_hessian.py`** (#223) — `molcas_casscf_hessian.py`'s
+  OpenMolcas plumbing, none of which needs OpenMolcas. On a toy library in
+  OpenMolcas's layout (generally contracted, an `e-4` exponent):
+  - an entry is parsed, and a missing one refused;
+  - the AO order is OpenMolcas's (centre, `l`, component, contracted
+    function);
+  - RHF orbitals of a water whose PySCF basis segments the same space
+    differently are carried into that basis and back (1e-10);
+  - the `INPORB 2.2` file's layout holds.
+
+  Also: the `UNSYM` Hessian and coordinates are read back exactly, and the
+  atom-order map swaps blocks. About 1 s of CPU
+  ([`reference-data.md`](reference-data.md), "The CASSCF Hessian against
+  OpenMolcas").
 
 **The thresholds are written into the tests as numbers**, not read from the
 module: a test comparing against `DEGENERACY_TOL` would move with it.
@@ -394,7 +408,9 @@ cases take 1 s of it, and the eleven PC orbital-Hessian cases (#199) another
 1 s). With #219's eleven CASSCF-Hessian cases: 369 tests, 46 s (2026-10-22,
 a sibling build sharing the CPU). With #220's 27 integral-perturbation cases
 (and whatever landed between): 396 tests, 74 s (2026-10-22, the golden
-regeneration gate running beside it on the same CPU). Negative controls, run once in scratch and reverted: setting
+regeneration gate running beside it on the same CPU). With #223's six
+OpenMolcas-plumbing cases (and whatever landed between): 430 tests, 51 s
+(2026-10-22, a sibling GPU job sharing the box). Negative controls, run once in scratch and reverted: setting
 `DEGENERACY_TOL` to 1e-5 fails 4 tests (the pinned value and the three
 0.99e-4 refusals); leaving the constant alone and loosening the comparison
 inside `_check_degeneracy` to `DEGENERACY_TOL / 10` fails the same three

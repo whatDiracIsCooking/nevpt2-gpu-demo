@@ -55,6 +55,35 @@ ENV GPU_TARGETS=${GPU_TARGETS} \
     ROCM_PATH=/opt/rocm \
     PATH=/opt/rocm/bin:${PATH}
 
+# OpenMolcas, OPT-IN and PINNED, for ONE offline script:
+# reference_data/molcas_casscf_hessian.py (#223), the cross-check of the
+# analytic CASSCF nuclear Hessian against OpenMolcas's McKinley. Nothing in the
+# build, ctest or the golden tier needs it. docker/install-openmolcas.sh
+# carries the rest: why from source (no pip, conda-forge or Ubuntu package),
+# why LINALG=Internal, and how the driver's one Python dependency is pinned.
+# Placed BEFORE the two agents' layers because it is the slow one (a Fortran
+# build) and the rarely-bumped one: an agent bump then re-runs only the cheap
+# layers after it.
+#
+# The pin is TWO lines in each GPU Dockerfile: the release tag, and the commit
+# that tag must resolve to (the script refuses a moved tag). Bump both, in all
+# three files; doctor.sh warns when the copies disagree. ENV too, so doctor.sh
+# can compare a running container's install ($prefix/VERSION) with what its
+# image pinned.
+ARG OPENMOLCAS_VERSION=v26.06
+ARG OPENMOLCAS_COMMIT=8355057f32d65706a35996b5ab07cac2962bb728
+ENV OPENMOLCAS_VERSION=${OPENMOLCAS_VERSION} \
+    OPENMOLCAS_COMMIT=${OPENMOLCAS_COMMIT}
+# OPT-IN AT THIS LAYER, as the two agents below are: INSTALL_OPENMOLCAS=0, this
+# ARG's default, skips it (and the gfortran it brings), so a plain `docker
+# build` of this file does not get it. docker/build.sh ALWAYS forwards the value
+# from devtools/config.sh, where this project sets it to 1; turn it off for one
+# build with `INSTALL_OPENMOLCAS=0 docker/build.sh <target>`.
+ARG INSTALL_OPENMOLCAS=0
+ENV INSTALL_OPENMOLCAS=${INSTALL_OPENMOLCAS}
+RUN --mount=type=bind,source=docker/install-openmolcas.sh,target=/tmp/install-openmolcas.sh \
+    bash /tmp/install-openmolcas.sh
+
 # Claude Code, OPT-IN and PINNED -- the last root layer in this file on purpose: a version
 # bump re-runs only this and the two lines after it, never the SDK above it.
 # docker/install-claude-code.sh carries the rest (why not Dockerfile.base, and

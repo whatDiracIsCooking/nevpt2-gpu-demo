@@ -200,7 +200,10 @@ them. There are three variants under `.devcontainer/`, driven by
   neither — those `ARG`s default to off — and leaves Node out with Claude
   Code. The devcontainers bind-mount the host's `~/.claude` and `~/.gemini`
   (created empty if missing) and read `GH_TOKEN` for that tooling either way.
-  None of it is needed to build or test.
+  None of it is needed to build or test. The same goes for OpenMolcas
+  (`INSTALL_OPENMOLCAS`, built from source at a pinned tag and commit), which
+  only the offline `reference_data/molcas_casscf_hessian.py` uses
+  (`docker/README.md`, "OpenMolcas, for one offline cross-check").
 
 ```bash
 docker/build.sh cuda && devtools/devcontainer.sh up && devtools/devcontainer.sh shell

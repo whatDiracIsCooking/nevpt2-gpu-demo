@@ -217,6 +217,48 @@ host copy there, exactly as they bind `~/.claude` — see `//agy` in
 `.devcontainer/cuda/devcontainer.json`; in an image built without the CLI,
 nothing reads it.
 
+### OpenMolcas, for one offline cross-check
+
+`reference_data/molcas_casscf_hessian.py` (#223) checks the analytic CASSCF
+nuclear Hessian against OpenMolcas's. Nothing in the build, ctest or the
+golden tier needs it. OpenMolcas is not pip-installable, so it is not in
+`uv.lock`. It has no conda-forge or Ubuntu package either. Each GPU file
+therefore runs `docker/install-openmolcas.sh`, which builds it from source:
+
+- **The pin is two lines.** `ARG OPENMOLCAS_VERSION` holds a release tag.
+  `ARG OPENMOLCAS_COMMIT` holds the commit that tag must resolve to; the
+  script clones the tag and refuses if it resolves elsewhere. Bump both, in
+  all three files, by hand: there is no version script. `doctor.sh` warns
+  when the copies disagree, and inside a container when the install is not
+  the image's pin.
+- **What it builds.** OpenMolcas's own bundled BLAS/LAPACK
+  (`LINALG=Internal`, the `External/lapack` submodule at the superproject's
+  gitlink). It uses gfortran, which the layer installs, with gcc and g++.
+  MPI, OpenMP, HDF5 and the unit tests are off. Libxc, which OpenMolcas
+  always links, is fetched by its CMake at the hash its `CMakeLists.txt`
+  names.
+- **The driver.** `pymolcas` needs `pyparsing`. One wheel of it is pinned
+  by URL and sha256 and unpacked into the install's own `driver-lib/`. It
+  is not put in `/opt/venv`, which holds `uv.lock`'s contents and nothing
+  else. A wrapper at `/usr/local/bin/pymolcas` sets `MOLCAS` and that
+  `PYTHONPATH`.
+- **The guard.** An H2 SCF must run to "Happy landing" before the script
+  writes `/opt/openmolcas/VERSION` (`<tag> <commit>`), which is what
+  `doctor.sh` reads.
+
+It is opt-in at the layer like the two agents, and placed before them
+because it is the slow layer and the rarely bumped one. `devtools/config.sh`
+turns it on (`INSTALL_OPENMOLCAS=1`), so `docker/build.sh` installs it; the
+`ARG` defaults to `0`, so a by-hand build does not. To drop it from one
+build:
+
+```bash
+INSTALL_OPENMOLCAS=0 docker/build.sh cuda
+```
+
+`Dockerfile.combined` inherits the `cuda` image's copy when it is already at
+the pin.
+
 ### The `-ci` variants, and the registry
 
 Three more environment knobs turn a local build into a published one. Only
