@@ -2640,6 +2640,58 @@ uv run python reference_data/integral_perturbation.py --case n2_ccpvdz_cas44 --d
     --write golden/n2_ccpvdz_cas44_casscf_df.pertgold
 ```
 
+### Level 2's CASSCF third-derivative term
+
+`reference_data/casscf_third_derivative.py` (#216) is level 2's
+parameter–parameter term on the CASSCF branch
+([`hessian-theory.md`](hessian-theory.md), §7): the gradient's multipliers
+`(Z, z)` contracted with the second derivative of the constraint,
+`gen_g_hop`'s `g_all`, as an action `T(u, v)` over full-range `(kappa, c)`
+directions in `gen_g_hop`'s variables. It is computed **exactly**, as the
+`a b s` coefficient of the CASSCF energy carried as a truncated Taylor
+series in three nilpotent units (`a`, `b` the two directions, `s` the
+multipliers' local step), so it has no step error of its own. The R-mixed
+constraint terms (`Z . d²g/dθdR`, `Z . d²g/dR²`) are not in it.
+
+**The oracle differences `g_all`, not `h_op`.** `gen_g_hop`'s `h_op` is the
+energy's Hessian in the local chart at any point (the series' `a b`
+coefficient equals `u . h_op(v)` to round-off far from stationarity), which
+is the Jacobian of `g_all` only at a stationary point; and `h_op(θ + h v)[u]`
+steps along `u` from the displaced point's frame, so its `v`-derivative
+also carries a connection term antisymmetric in `(u, v)`. Differencing it
+along `v` therefore converges to `T` on CI pairs and misses it on any pair
+with an orbital part, measured below. The gate is instead the four-point
+quotient of `Z . g_all` along `u` and `v` (the Jacobian along `u` at
+`θ + h v` as a central difference of `g_all`, differenced along `v`), over
+`h = 2^-3 … 2^-11`, by `nevpt2_grad.ladder_check`'s run rule and Richardson
+extrapolant at `nevpt2_grad.LADDER_TOL`.
+
+Measured on the two committed `_casscf` states, with the SC-NEVPT2
+gradient's own multipliers (solved by `nevpt2_grad.CasscfGradients` in the
+run), three seeded unit pairs per kind; every pair passes:
+
+| | N2/cc-pVDZ CAS(4,4) | LiF/def2-SVP CAS(4,6) |
+|---|---|---|
+| orbital variables + determinants | 191 + 36 | 154 + 225 |
+| multipliers: max `\|Z\|`, `\|z\|` | 3.0e-2, 3.8e-2 | 6.3e-1, 1.8e-2 |
+| `\|Richardson − T\|`, orbital / CI / mixed / full (worst of three) | 1.4e-10 / 4.4e-11 / 7.6e-11 / 6.6e-10 | 2.6e-10 / 3.4e-11 / 1.1e-11 / 6.0e-11 |
+| `\|T\|` over the twelve pairs | 2.2e-4 … 2.5e-2 | 1.4e-3 … 3.2e-1 |
+| `\|T(u, v) − T(v, u)\|` | 6.9e-18 | 3.5e-18 |
+| series vs `g_all . u` and `u . h_op(v)` | 1.8e-14 | 1.4e-14 |
+| the `h_op` ladder's miss, orbital / CI / mixed / full | 1.6e-3–2.6e-2 / ≤ 7.0e-14 / 8.2e-4–4.9e-3 / 4.4e-4–1.4e-2 | 0.15–1.0 / ≤ 1.3e-13 / 6.4e-3–1.2e-2 / 3.8e-4–0.15 |
+| whole run, wall (multipliers included) | 7 s | 24 s |
+
+Gates: 1e-6 on `|Richardson − T|`, 1e-10 on the symmetry and the two
+series identities. The `h_op` row is informational (the Richardson
+extrapolant of its two finest rungs, `2^-10` and `2^-11`).
+`--seeded-multipliers` runs the same checks with a seeded unit `(Z, z)` and
+no NEVPT2 (`T` is linear in it).
+
+```bash
+uv run python reference_data/casscf_third_derivative.py --case n2_ccpvdz_cas44 --workers 6
+uv run python reference_data/casscf_third_derivative.py --case lif_def2svp_cas46 --workers 6
+```
+
 ## Density fitting
 
 `nevpt2_df_demo` computes SC-NEVPT2 from three-index `(L|pq)` tensors
@@ -3185,6 +3237,7 @@ not used.
 | `reference_data/casscf_hessian.py` | the **CASSCF reference's skeleton nuclear derivatives** (#215): the perturbed Hamiltonians `dh/dR`, `d(pq\|rs)/dR` in the MO basis along `nevpt2_grad.py`'s frozen orthonormal path (`frozen_coeff`, imported), and the second partial `L_RR` from `pyscf.hessian.rhf`'s integral drivers contracted with the CASSCF densities, plus the connection's second-order terms. Checked against ladders of the path energy and the translational sum rules on a case's committed `_casscf.mogold` state. CPU only; writes nothing unless `--out` (see "The CASSCF skeleton nuclear derivatives" above) |
 | `reference_data/casscf_nuclear_hessian.py` | the **analytic CASSCF nuclear Hessian** (#219): the `3N` CP-CASSCF parameter responses (the coupled operator built densely from `gen_g_hop`'s `h_op` and factorised once, the right-hand sides `gen_g_hop`'s gradient at `casscf_hessian.py`'s perturbed Hamiltonians) and the assembly `L_RR + L_{RΘ} Θ⁽¹⁾`, in the `_casscf` golden's own frame. Checked against ladders of `pyscf.grad.casscf` and of the re-optimised parameters along every point-group-keeping direction, and the exact identities. CPU only; `--write` writes the `.respgold` sidecar (see "The analytic CASSCF nuclear Hessian" above) |
 | `reference_data/integral_perturbation.py` | the **integral perturbation sidecar** (#220): every nuclear coordinate's perturbed Hamiltonian of a committed `_casscf` state, `casscf_hessian.py`'s skeleton plus connection (and, `--df`, the fitted integrals', metric and auxiliary functions included), pushed through the gradient sidecar's definitions at fixed orbitals and active density: `h`, `h^eff`, `f` and the eighteen one-general-index rows, stacked per coordinate. Checked against the committed frame, the committed gradient sidecar's arrays at the reference and per-coordinate derivative ladders of rebuilt integrals. CPU only; `--write` writes the `.pertgold` (see "The integral perturbation sidecar" above) |
+| `reference_data/casscf_third_derivative.py` | **level 2's CASSCF-branch term** (#216): `T(u, v) = Z . d²g_all/dθdθ [u, v]`, the gradient's multipliers contracted with the second derivative of `gen_g_hop`'s constraint, as an exact truncated Taylor series of the CASSCF energy (no step error), over full-range `(kappa, c)` directions. Checked against a ladder of `g_all` differenced along both directions, for orbital, CI, mixed and full pairs, with the SC-NEVPT2 multipliers on a case's committed `_casscf` state. CPU only; writes nothing (see "Level 2's CASSCF third-derivative term" above) |
 | `reference_data/casscf_repro_probe.py` | the **CASSCF reproducibility** measurement: ≥5 back-to-back RHF → symmetry-adapted `mcscf.CASSCF` → orbital-gradient → fresh `mcscf.CASCI` → SC-NEVPT2 runs under `generate_golden`'s own settings (imported, so single-threaded with the same Davidson tolerance), reporting the spread of E_CASSCF / E_corr / ‖g_orb‖ and whether any run changed stationary point. `--perturb EPS` starts the optimiser from a random same-irrep rotation instead. `--case NAME --displace COMP --steps …` runs `nevpt2_numgrad.py --reference casscf`'s own state path along a ladder of displacements and prints the continuity guard's three signals per step (where its thresholds come from). Writes no golden; its output is what "A fresh CASSCF reproduces, measured" above quotes, and where the `--mo-from` gate thresholds come from |
 | `reference_data/sc_source_oracle.py` | **PySCF's exact SC source terms** for N2 CAS(4,4) and LiF, written as `golden/<case>.srcgold` out of `nevpt2_grad.py`'s own machinery at its converged steps; the oracle `nevpt2_sc_pseudodensity --source-oracle` gates the GPU's against (see "The SC source-term oracle" above). With `--pc`, **block2's PC ones** for N2 CAS(4,4), `golden/n2_ccpvdz_cas44_pc.srcgold` ("The PC flavour"). With `--directional`, the **directional flavour** for acrolein, N2 and LiF, `golden/<case>[_pc]_dir.srcgold` ("The directional flavour"). With `--case n2_ccpvdz_cas44_casscf --mo-from FILE`, all four kinds on **converged CASSCF orbitals** ("On CASSCF orbitals"), and with `--case acrolein_def2svp_cas65_casscf --mo-from FILE --directional`, acrolein's directional pair on them (#135), with the sidecar fingerprint-checked as `generate_golden.py --mo-from` checks it. Byte-reproducible |
 | `reference_data/golden_format.py` | the **one Python parser** of the three formats in `golden/` (and of the `.srcgold` oracle, the `.respgold` response sidecar and the `.pertgold` integral perturbation sidecar, plus their writers `write_srcgold` / `write_respgold` / `write_pertgold`): the header tables (keyed by magic) the writers pack from and the readers read by, `read_golden` / `read_golden_header` / `read_gradgold` / `read_mo_sidecar` / `read_srcgold` / `read_respgold` / `read_pertgold`, and `arrays-at FILE` for the regeneration check's `cmp -i`. `struct` and NumPy only, and no thread settings, so the timing script can use it (see "The file format" above) |
