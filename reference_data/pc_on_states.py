@@ -84,9 +84,6 @@ import generate_golden as gg
 
 # isort: split
 import argparse
-import contextlib
-import fcntl
-import io
 import re
 import shutil
 import subprocess
@@ -98,6 +95,15 @@ from pathlib import Path
 import golden_format as gf
 import nevpt2_numgrad as ngrad
 import numpy as np
+
+# The work-dir guard, the transient golden and the card's lock are shared with
+# gradient_at.py (#212), which defines them; with_placeholder_pc is re-exported.
+from gradient_at import (  # noqa: F401
+    check_work_dir,
+    gpu_lock,
+    with_placeholder_pc,
+    write_transient,
+)
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -121,26 +127,6 @@ SC_FULL = re.compile(r"^E_corr full precision \(SC-NEVPT2\) = (\S+) Ha$", re.M)
 SC_PASS = re.compile(r"^PASS: per-class norms/energies and the total match", re.M)
 
 
-def with_placeholder_pc(arrays: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    """A ``--no-pc`` golden's arrays plus NaN for block2's two PC fields.
-    ``nevpt2_demo --pc`` refuses a golden without them, and a NaN matches no
-    energy, so the file can never pass for a block2 reference."""
-    if "pc_class_energies" in arrays or "e_pc_total" in arrays:
-        raise SystemExit("with_placeholder_pc: this golden already has PC fields")
-    return dict(arrays, pc_class_energies=np.full(len(gg.CLASSES), np.nan),
-                e_pc_total=np.array([np.nan]))
-
-
-def check_work_dir(work_dir: Path) -> None:
-    """Refuse a ``--work-dir`` inside ``golden/``: the transient goldens are
-    never committed and never sit beside files that are."""
-    golden = (REPO / "golden").resolve()
-    w = work_dir.resolve()
-    if w == golden or golden in w.parents:
-        raise SystemExit(f"--work-dir {work_dir} is inside {golden}: the transient "
-                         "goldens are never written there")
-
-
 def build_transient(task: dict) -> dict:
     """One state's transient golden (step 1), returning the energies the
     wiring check reads. A top-level function of one picklable dict, so
@@ -149,18 +135,10 @@ def build_transient(task: dict) -> dict:
     ``SystemExit`` from a guard inside ``_build_state`` comes back as
     ``refused``."""
     t0 = time.perf_counter()
-    case = task["case"]
     out = dict(label=task["label"])
-    buf = io.StringIO()
     try:
-        with contextlib.redirect_stdout(buf):
-            meta, arrays, _ = gg.generate(
-                task["atom"], case["basis"], case["ncas"], case["nelecas"],
-                task["label"], pc=False, cas_irreps=case["cas_irreps"],
-                core_irreps=case["core_irreps"], mo_from=task["mogold"],
-            )
-            gg.write_golden(Path(task["out"]), **meta,
-                            arrays=with_placeholder_pc(arrays))
+        meta = write_transient(task["atom"], task["case"], task["mogold"], Path(task["out"]),
+                               name=task["label"], pc=False, placeholder_pc=True)
     except SystemExit as exc:
         out["refused"] = str(exc)
     else:
@@ -258,21 +236,6 @@ def run_demo(demo: Path, golden: Path, log: Path, *, pc: bool) -> str:
     text = p.stdout + p.stderr
     log.write_text(f"$ {' '.join(cmd)}\n{text}\nexit {p.returncode}\n")
     return text
-
-
-@contextlib.contextmanager
-def gpu_lock(path: str | None):
-    """Hold ``flock(path)`` for the GPU stage, the box's per-card lock, so
-    another agent's runs on the same card wait rather than interleave."""
-    if path is None:
-        yield
-        return
-    with open(path, "a") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def run(args) -> int:
