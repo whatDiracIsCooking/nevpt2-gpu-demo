@@ -631,7 +631,7 @@ wrong.
 | # | term | what it is | existing contraction it reuses | arrays it reads |
 |---|---|---|---|---|
 | K1 | **same-slot curvature** (§5.1's first term, half one) | `<Ehat', z'[W]>`: the full first-order pairing at `W` | `scFullRotationDevice`'s pairing, either mode — `adjoint` = `ext + act + eps` plus the digests' `<hbar, h2e'[W]>` (#89), or `tangent` plus #88's digest term — at `W` instead of an antisymmetric `kappa` | **exactly `Y`'s**: the sidecar's eighteen integral arrays (§3.3's seventeen rows, `(xc\|cc)` on its two slices), `h`, `heff`, `f`, plus the golden's stored blocks for the intra-active part |
-| K2 | **cross-slot curvature** (§5.1's first term, half two) | `<Ehat', z^x[u,v]>` | the same pairings — `<D, X>` per external block, `<M_G, G>` per active block, `<hbar, h2e>` for the digests, `R_t` against `Delta_t` — at a new input | **two-general-index arrays**: §5.4's table. **Not in the sidecar** |
+| K2 | **cross-slot curvature** (§5.1's first term, half two) | `<Ehat', z^x[u,v]>` | the same pairings — `<D, X>` per external block, `<M_G, G>` per active block, `<hbar, h2e>` for the digests, `R_t` against `Delta_t` — at a new input | **two-general-index arrays**: §5.4's table. **Not in the gradient sidecar**; the opt-in `.erigold` sidecar carries them (#180) |
 | K3 | **the finish's curvature** (§5.1's second term) | `sum_t (Ndot, Hdot, Ddot)_t[u] . Hess f_t . (Ndot, Hdot, Ddot)_t[v]` | the forward tangent's per-tuple `Ndot_t` / `Hdot_t` (`assembleSlab`'s `normDot` / `hDot`, before they meet `P` and `Q`) and `Ddot_t` (the class's `deltaOf` at `deps`), at `u` and at `v`; §2's 3×3 between them | the sidecar only: first-order dotted inputs `z'[u]`, `z'[v]` |
 | K4 | **both external slots, one per direction** (second term) | `sum_t [ P_t N_t^{uv} + Q_t H_t^{uv} ]`: every norm and H term with its two `x` slots filled by `X'[u]` and `X'[v]`, symmetrised, `K` undotted | the class term lists under the product rule (`:terms`' `evalTermsTangent`), with the two slots' dotted operands drawn from different directions | the sidecar only |
 | K5 | **one external slot and the Dyall block** (second term) | `sum_t Q_t [ H terms with one x slot at X'[u] and K at K'[v] ] + (u <-> v)` | the same evaluator; `K'[v]` is the forward tangent's own block tangent — `make_*` at `h1e'[v]`, `h2e'[v]` (`rotationTangentBlocks`) — plus `f3'[v]`, `buildRdmsDevice` at `h2e'[v]` (#88) | the sidecar only (`h2e'` reads `g_xa_aa`, `h1e'` reads `heff`) |
@@ -755,7 +755,7 @@ where the expectation was that the answer would be cheap.
 |---|---|
 | `H_kc` | **no.** One `kappa` derivative (§5.5's C1–C5): the first-order dotted inputs `z'[w]` (sidecar), the RDM tangent at `(c, u)` (§3), the tangent build at dotted `h2e` (§5.2), and the orbital energies' mixed response — whose `gamma` line reads the tied rows `deps` already does (`g_xa_cc`, `g_xc_ca`, `g_xa_vv`, `g_xv_va`) and whose Fock line, the generalized Fock's off-diagonal response to `gamma`, reads four untied rows the sidecar also carries (`g_xc_aa`, `g_xa_ca`, `g_xv_aa`, `g_xa_va`) |
 | `H_kk`, K1 and K3–K6 | **no.** K1 reads exactly `Y`'s arrays at a symmetric argument; K3–K5 read only first-order dotted inputs (§5.1's table), and so does K6, which is K4's cross tables on the guarded tuples (§5.6) |
-| `H_kk`, K2 | **yes**, on a conventional case: **twelve two-general-index arrays, whose union is the whole MO-integral tensor** (below). On a density-fitted case, **no**: the golden and its `NEVPT2F1` sidecar already carry all of `B[L,p,q]` |
+| `H_kk`, K2 | **yes**, on a conventional case: **twelve two-general-index arrays, whose union is the whole MO-integral tensor** (below), which the opt-in `.erigold` sidecar (`NEVPT2E1`, #180) now carries. On a density-fitted case, **no**: the golden and its `NEVPT2F1` sidecar already carry all of `B[L,p,q]` |
 
 So the expectation recorded here before the enumeration — that §5.1's first
 term "plausibly needs nothing new" because `I''` is "built from those same
@@ -808,20 +808,24 @@ literally true.
 
 **What follows, per case kind:**
 
-- **Conventional (`NEVPT2D1`) — the sidecar does not suffice, and the missing
-  data is the full `n_mo^4` MO-integral tensor** that
-  [`gradient-theory.md`](gradient-theory.md), §3 opens by declining. Nothing
-  writes it today. Its natural writer is `generate_golden.py`'s
-  `_gradient_arrays`, the `--gradgold` path, as one more named array (a full
-  `ao2mo` transform; `ppaa` is already one of its groups) — **opt-in**, so the
-  committed `.gradgold` files do not grow, and whether it is an array in a `D1`
-  file or a sidecar of its own is the implementing issue's decision; either
-  must pass `reference_data/golden_layout_check.py`. The alternative that stores
-  nothing is AO-direct — each cross-slot integral is a four-index transformation
-  with `C u` and `C v` in place of two coefficient columns — and needs AO
-  integrals, which no file in `golden/` carries and the runtime does not
-  compute. Which committed cases a full dump is affordable for is a size
-  question for [`reference-data.md`](reference-data.md), not this document.
+- **Conventional (`NEVPT2D1`) — the gradient sidecar does not suffice, and
+  the missing data is the full `n_mo^4` MO-integral tensor** that
+  [`gradient-theory.md`](gradient-theory.md), §3 opens by declining. #180
+  decided where it lives: a **sidecar of its own**, `<case>.erigold`
+  (`NEVPT2E1`: `mo_coeff` and `eri[p,q,r,s] = (pq|rs)`), written by
+  `generate_golden.py --gradgold --erigold` from one full `ao2mo` transform and
+  held, before a byte is written, to every gradient-sidecar row and golden
+  block it overlaps. Opt-in and a separate file rather than an array in the
+  `D1` file, so no committed `.gradgold` grows or changes a byte and the
+  regeneration gate reproduces them all unchanged; it passes
+  `reference_data/golden_layout_check.py` like every other format. The
+  alternative that stores nothing, AO-direct (each cross-slot integral a
+  four-index transformation with `C u` and `C v` in place of two coefficient
+  columns), still needs AO integrals no file carries and the runtime does not
+  compute, and was not taken. Which committed cases a full dump is affordable
+  for is a size question for [`reference-data.md`](reference-data.md) ("The
+  full MO-integral tensor sidecar"), not this document; N2 CAS(4,4)'s is the
+  one committed.
 - **Conventional, restricted directions — the sidecar suffices when one of `u`,
   `v` is active–active.** Then one general index is active, and every row above
   collapses to a §3.3 array with its ties intact (`(xy|vv)` tied to `g_xa_vv`,
@@ -880,16 +884,29 @@ generators are the `:curvature` partition's:
   `F_st G + F G_st + F_s G_t + F_t G_s`, from `B_s = u^T B + B u` and
   `B_st = u^T B v + v^T B u` — three-index throughout. The same evaluator at
   first order (`dfDottedFirst`) is an independent K1 on that case.
-- A conventional pair with neither member active–active is refused as
-  Unsupported before any device work; lifting that is #180.
+- **K2 from the full tensor** (`fullDottedCross`, #180), on a conventional
+  case whose `.erigold` was uploaded (`GeneralIntegralsDevice::eri`), for any
+  pair. The three-index evaluator never needed its two factors to be one
+  tensor, only an exact `(pq|rs) = sum_L F_L[p,q] G_L[r,s]` with each factor
+  rotating as `U^T X_L U`; the four-index tensor has one with `L = (p', q')`,
+  `F` the identity and `G_L[r,s] = (p'q'|rs)`. So it is the same jets at
+  `L = n_mo^2` — the `n_mo^4` input this section says nothing smaller avoids,
+  and nothing new past it. `fullDottedFirst` is its independent K1. The
+  `Auto` route keeps the composition for a pair with an active–active member
+  and takes the full tensor only where nothing else serves.
+- A conventional pair with neither member active–active and no full tensor is
+  refused as Unsupported before any device work.
 
 The gate is `nevpt2_sc_pseudodensity --sc-hessian-kk-int`
-([`testing.md`](testing.md), "The orbital block's integral curvature"): each
+([`testing.md`](testing.md), "The orbital block's integral curvature", and,
+with `--erigold`, "K2 from the full MO-integral tensor"): each
 term's duality, the traced pairs' and the intra-space zeros, and the ladder
 this section asks for — of the pairing itself, the pseudodensities frozen, so
 that it sees I'' and nothing of K3–K5: `L(U) = <Ehat'_0, I(U)>` has exactly
 this term as its mixed second derivative along `exp(s u + t v)`, displaced
-from stored blocks along every block-diagonal pair.
+from stored blocks along every block-diagonal pair — and, with the full
+tensor, along every pair, the mixed ones displaced from `(pq|rs)` itself
+rotated on all four slots, `h^eff` and the orbital energies rebuilt from it.
 
 ### 5.5 The mixed block `H_kc`: three orientations, two of them built
 
@@ -2079,16 +2096,16 @@ specific to PC:
 - **`K` at a symmetric `W`.** `pcClassMatrices` is linear in its integrals
   and accepts any dotted pair. `mK = U^T sym(K'') U` as at first order.
 
-**K2 hits the same conventional-case refusal (#180).** PC reads the same
+**K2 takes the same data, and the same refusal, as SC's.** PC reads the same
 inputs SC does: the twelve stored blocks, `h1e`, `h2e` and the orbital
 energies. §5.4's union is over arrays, not classes. So K2's two-general-index
 data is the same, and so is the rule:
 
 - **a pair with an active–active member:** `composedCross`;
 - **a density-fitted case:** `dfDottedCross`, any pair;
+- **a conventional case with its `.erigold` uploaded:** `fullDottedCross`, any
+  other pair (#180, both variants at once);
 - **any other conventional pair:** `err_unsupported` before any device work.
-
-#180 lifts the refusal for both variants at once.
 
 **One precondition on the density-fitted case.** Before #200, PC's
 first-order orbital source term on a fitted golden had no gate in the tree.
@@ -2498,7 +2515,7 @@ code because two of its entries are not obvious.
 | a PC `H_kc` (class, CI direction `u`) along which `S`'s dropped modes lift: `P S_u P` or `L_uu` above `PC_LIFT_TOL` | **refuse** that (class, pair), `err_numerical`, through the class's status | `L_ww = L_wu = 0` identically, so the CI leg's test is the whole test (§6.5). A (class, `u`) with no second derivative in `u` has none in `(w, u)` either. The vector `H_kc^T w` has no `u` to test, so its consumer applies `u`'s test |
 | a PC `H_kk` (class, orbital pair), active–active included | **not** a refusal, and no lift test runs | `S` does not move along `kappa` (§6.5), so the rank cannot change. Such a test would measure nothing |
 | a PC tuple that is empty, by the integrals or by the state | **not** a refusal, and no sixth term | PC's energy is a quadratic form in `b_t`, and the general formula already holds the empty tuple's term (§6.6). SC's four guarded-tuple rows below do not apply to PC's seven solved classes. PC's Sijrs is SC's and takes SC's rows |
-| a conventional case whose sidecar lacks the full MO-integral tensor K2 reads (§5.4), for a direction pair with neither member active–active | **refuse** `H_kk`, SC's and PC's alike (§6.7) | a partial `H_kk` is not a Hessian, and the omission would be invisible in every identity that pairs the two modes (both would omit it) — exactly how the §6 digest gap survived until #89 |
+| a conventional case run without the full MO-integral tensor K2 reads (§5.4; the `.erigold` sidecar, #180), for a direction pair with neither member active–active | **refuse** `H_kk`, SC's and PC's alike (§6.7) | a partial `H_kk` is not a Hessian, and the omission would be invisible in every identity that pairs the two modes (both would omit it) — exactly how the §6 digest gap survived until #89 |
 | a sidecar missing any array of the inventory it is read for | **refuse** the whole sidecar | the same argument: a partial inventory is a partial `H_kk` (or `H_kc`) that no pairing of the two modes would notice |
 | a guarded tuple (`\|N_t\| <= NUMERICAL_ZERO`) that is **small**, a real perturber under the guard | **not** a refusal: contribute zero | the guard holds its energy at zero on a neighbourhood of the state, so zero is the derivative of the energy the code computes (§5.6) |
 | a guarded tuple **empty by the integrals**, populated by at most one direction of the pair, or by both with proportional tables (`rho_t` at round-off) | **not** a refusal: contribute §5.6's K6, which is K4 at the ray-limit multipliers | `E_t` is a quadratic form along the pair. A zero here was the earlier version of this row, and #158's ladders measured it as wrong. Sijrs always falls in this row and simply takes `P = -1/Delta` (§5.6) |
@@ -2547,7 +2564,7 @@ has it:
 | a PC class the gap or denominator check refuses | the class comes back `PcStatus::Refused` with its reason, through the status the energy, tangent and adjoint use; the run FAILs | the PC Hessian entries' own tables |
 | the PC Schur lift above round-off | `pcHessianDevice` (`P S_u P`, `P S_v P`, `L_uv`, `L_uu`, `L_vv`) and `pcCiHessianVectorDevice` (`P S_u P` and `L_uu`), relative to `s_max` against `PC_LIFT_TOL`, `err_numerical` through the class's status (#152, #155); and `pcMixedHessianDevice` (the CI leg's `P S_u P` and `L_uu`, the same test, #201), which returns the refusal as an `err_numerical` naming each refused class. Each check's negative control — a symmetry-breaking direction — must be refused for its lift, or the run FAILs. The separation the threshold sits in is [`pc-nevpt2.md`](pc-nevpt2.md), "What the cut drops, and how it moves" | `nevpt2_pc_hessian_cas44`, `nevpt2_pc_hessian_vector_cas44` and their `_casscf` twins; `nevpt2_sc_pseudodensity_cas44_pc_hessian_kc` and its fitted twin |
 | PC conditioning | printed, never refused: each PC Hessian table has a `kept s` and a `gap` column, and each PASS line names the smallest kept `s / s_max`, its class, and the smallest gap against `PC_MIN_GAP`. What that conditioning costs is #194's | the PC Hessian entries' regexes ([`testing.md`](testing.md), "The Hessian on CASSCF orbitals") |
-| K2 with neither direction active–active, conventional | `scOrbitalCurvatureDevice` refuses the pair as `err_unsupported`, never K1 alone (#154; a fitted case takes the three-index route instead; widening it is #180). `Eddot_kk` keeps the refusal, SC's and PC's (`pcOrbitalHessianDevice`, #202) alike | `--sc-hessian-kk-int`'s refusal checks; `--pc --sc-hessian-kk`'s check 7 |
+| K2 with neither direction active–active, conventional | `scOrbitalCurvatureDevice` refuses the pair as `err_unsupported`, never K1 alone, unless the full tensor was uploaded (#154; a fitted case takes the three-index route instead). With `--erigold` (#180) such a pair takes the four-index jets of the `.erigold` tensor, and the `FullTensor` route asked for without one is refused the same way. `Eddot_kk` keeps the refusal, SC's and PC's (`pcOrbitalHessianDevice`, #202) alike: `--sc-hessian-kk` takes no `--erigold` | `--sc-hessian-kk-int`'s refusal checks, with and without `--erigold`; `--pc --sc-hessian-kk`'s check 7 |
 | a sidecar missing an array | `GradGoldFile::requireGeneralInventory` (`nevpt2.golden`), which every reader of the general-range inventory — `--kappa-full`, `--source-oracle`, all three orbital Hessian flags — calls before uploading any of it: `err_io` naming the array, the whole sidecar refused | `test/golden`'s `GradGoldCas44Tests` / `GradGoldDfCas44Tests`: the committed sidecars with each array erased in turn |
 | the four guarded-tuple rows | `scOrbitalSandwichDevice` (`nevpt2.gradient_plan`'s `emptyTermPacked`, #190). A small tuple contributes zero and is never scored. An integral-empty tuple both directions populate adds K6 at the ray-limit multipliers. Sijrs takes its own `P = -1/Delta` on every guarded tuple, through an unguarded finish at every order (`sijrsMultipliers`), so its first-order terms are exact too. A (class, pair) whose worst `rho_t` exceeds `kRhoTol` is refused as `err_numerical`, naming the class, the tuple count and the worst `rho_t`, and so is any tuple empty by the state | `--sc-hessian-kk`'s entries, whose PASS line counts the refused pairs; the thresholds and separations are [`testing.md`](testing.md), "The orbital block's sandwich" |
 | Euler with the orbital-energy response on | two blocks have a responding mode. `H_kc`: `--sc-hessian-kc` runs its FULL mode (the orbital energies responding to `kappa` and to `c`), prints that Euler is **skipped** there and why, and gates Euler in its EULER mode (held fixed in `c`); its PASS line names both. `H_cc` (#214): the four CI flags (`--sc-hessian`, `--sc-hessian-vector`, `--pc-hessian`, `--pc-hessian-vector`) run at fixed orbital energies, Euler gated, or — with `--gradgold` beside them — in FULL mode, the orbital energies responding to `c`, Euler **skipped** and said to be; each PASS line names its mode. With `--pc`, `--sc-hessian-kc`'s scalar and vector run with the orbital energies responding to `kappa` (EULER) or frozen (FROZEN), and the responding-in-`c` mode is refused, `err_unsupported` (along an orbital `w` it has no gate; the walk's FULL mode runs, gated, only under `--pc --sc-source-tangent`, #234, where Euler has no role); `--sc-hessian-kk-int` runs EULER, `--sc-hessian-kk` both | `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kc`'s regex, the three `_cas44_casscf_pc_*` entries', and the eight `H_cc` FULL entries' (`*_full`, CASCI and CASSCF) |
@@ -2710,19 +2727,26 @@ block ([`gradients.md`](gradients.md), §1.1).
   integral-empty tuples whose tables are proportional on the pair, and an
   `err_numerical` refusal of every (class, pair) whose worst `rho_t` exceeds
   the device's threshold, and of any tuple empty by the state.
-- **K2's data on a conventional case (§5.4), decided as a refusal.** #154
-  builds K2 where the data already covers it — a direction pair with an
-  active–active member, or a density-fitted case by the three-index jets —
-  and refuses every other conventional pair as `err_unsupported`, never K1
-  alone. Which data source lifts that refusal is #180's question.
+- **K2's data on a conventional case (§5.4).** #154 builds K2 where the
+  data already covers it — a direction pair with an active–active member, or
+  a density-fitted case by the three-index jets — and refuses every other
+  conventional pair as `err_unsupported`, never K1 alone. #180 decides the
+  data source that lifts the refusal: the opt-in `.erigold` sidecar, the
+  whole `(pq|rs)`, whose four-index jets are the three-index evaluator's
+  over the identity factorisation; with it K2 runs on every pair, each one
+  laddered, SC's and PC's. Without it the refusal stands, and so does
+  `Eddot_kk`'s.
 
 **Not settled, and these are the questions worth answering before more code.**
 
-- Where a conventional case's K2 gets its data (#180): an opt-in full
-  MO-integral array written by `generate_golden.py`'s `--gradgold` path —
-  affordable only where a full dump is, which is a size question for
-  [`reference-data.md`](reference-data.md) — or an AO-direct second-order
-  transformation, which needs AO integrals nothing in the tree carries.
+- `Eddot_kk` on a conventional pair with no active–active member.
+  `--sc-hessian-kk`'s ladders of the whole energy displace stored blocks only,
+  so it takes no `--erigold` and keeps the refusal; reading the full tensor
+  there means rebuilding the energy stage's inputs from it, as
+  `--sc-hessian-kk-int`'s ladders now do. And the full tensor is affordable
+  only where a full dump is ([`reference-data.md`](reference-data.md), "The
+  full MO-integral tensor sidecar"); a large case would need the AO-direct
+  route instead, which needs AO integrals nothing in the tree carries.
 - PC's second derivative on a poorly conditioned metric (#194). §6.2's
   second-order formula assumes `P A = 0`, which holds only to the golden's CI
   residual, and `S^+` amplifies that residual by the inverse of the smallest

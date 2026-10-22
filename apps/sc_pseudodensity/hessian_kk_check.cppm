@@ -32,16 +32,19 @@
 //      x core / active x virtual ones -- exact arithmetic, the tree's 1e-7.
 //      The swap is held to its original (Eddot is symmetric; the swap runs
 //      the composition the other way round, so it is not a tautology here).
-//      A fitted case adds full x full and inactive pairs (three-index K2).
+//      A fitted case adds full x full and inactive pairs (three-index K2), and
+//      so does a conventional one run with --erigold (#180: K2 from the full
+//      MO-integral tensor's four-index jets).
 //   4  THE TRACED PAIRS' ZERO (Sec. 5.1): along the active x active pair,
 //      K1's and K2's traced shares -- each nonzero -- sum to zero.
 //   5  THE INTRA-SPACE ZEROS: along a core x core and a virtual x virtual
 //      pair no active integral moves at second order, so h2e'' is an
 //      exactly-zero tensor and the digests' term vanishes IDENTICALLY. On a
-//      conventional case K2 is refused there (neither direction is
-//      active-active) and K1 is run alone; on a fitted case both run, and
-//      their active-block pairings cancel (the core dressing's tied pair is
-//      invariant under a core rotation) to round-off.
+//      conventional case without the full tensor K2 is refused there (neither
+//      direction is active-active) and K1 is run alone; on a fitted case, or
+//      with --erigold, both run, and their active-block pairings cancel (the
+//      core dressing's tied pair is invariant under a core rotation) to
+//      round-off.
 //   6  THE LADDERS: L(U) differenced along exp(s u + t v), the four corners
 //      (+-h, +-h) combined BEFORE the pairing -- displaced blocks rotated on
 //      the host, orbital energies from the rotated generalized Fock with
@@ -50,6 +53,12 @@
 //      leaves its space cannot be displaced from stored blocks; each
 //      promotion is one contraction over the whole general index, so the
 //      rows the block-diagonal pairs exercise are the code the mixed rows run).
+//      With --erigold, along EVERY pair, the mixed ones displaced from the
+//      full tensor: every integral rotated on all four slots by
+//      U = exp(s u + t v), h^eff's core dressing and the orbital energies'
+//      density lines rebuilt from them (kkRotatedIntsFull) -- so the
+//      composition's K2 on an active x full pair and the full tensor's on a
+//      full x full one each meet a ladder.
 //      The term each ladder converges to is paired in the ladder's own walk
 //      (orbitalSecondInputsDevice) and held to the curvature call's value at
 //      1e-7: a PC walk does not reproduce itself to reassociation (check 2's
@@ -59,10 +68,21 @@
 //   8  ON A FITTED CASE, THE TWO ROUTES: K1 through the sidecar's promotion
 //      table against its three-index jet, and K2 through the composition
 //      against its three-index jet wherever one direction is active-active --
-//      constructions that share nothing past B.
+//      constructions that share nothing past B. With --erigold the same, the
+//      jets those of the full tensor (#180), which share nothing with the
+//      sidecar past the transformation that wrote both.
 //   9  THE REFUSALS: on a conventional case, a pair with neither direction
 //      active-active and a three-index route are Unsupported, never answered
-//      with K1 alone (Sec. 9.1).
+//      with K1 alone (Sec. 9.1) -- the first only without the full tensor;
+//      with it, the composition named explicitly for such a pair is still
+//      refused. The full-tensor route without a --erigold is Unsupported too.
+//
+// --erigold PATH (#180) adds one check before the pairs:
+//
+//   1b THE FULL TENSOR AGAINST THE GOLDEN: kkRotatedIntsFull at U = 1 -- every
+//      stored block sliced out of (pq|rs), h^eff and the orbital energies
+//      rebuilt from it and the sidecar's h -- against the golden's own arrays:
+//      the ladders' displaced inputs start from the state the energy runs.
 //
 // WITH --pc, THE SAME CHECKS ARE PC-NEVPT2's (#200; docs/hessian-theory.md,
 // Sec. 6.7): the adjoint held fixed is PC's Ehat'_pc (#74's dE/dslab, dE/dK,
@@ -126,6 +146,11 @@ constexpr double kKkCancelTol = 1e-12;
 // carry the core dressing's tied pair, each nonzero, summing to round-off in
 // the einsums' accumulation order.
 constexpr double kKkActZeroTol = 1e-12;
+// Check 1b: the full tensor's slices, and h^eff / the orbital energies rebuilt
+// from it, against the golden's arrays -- the same integrals from two
+// transformations of the AO tensor, relative per array (docs/testing.md, "K2
+// from the full MO-integral tensor", records what is measured).
+constexpr double kKkFullTol = 1e-10;
 // Seeds, fixed so a run is reproducible, distinct from every other check's.
 constexpr std::uint64_t kKkSeedBase = 0x5eed'0154u;
 // The ladder: h = 2^-k for k in [4, 16]. A SECOND difference's round-off
@@ -302,6 +327,101 @@ KkHostInts kkRotatedInts(const nevpt2::GoldenFile& g, const KkFockParts& fock, c
   return out;
 }
 
+// What the whole input set at ANY orthogonal U is built from, with the full
+// tensor (#180): (pq|rs) and the bare h over the whole MO range, and the
+// golden's active 1-RDM, which the orbital energies' density lines contract
+// and which is held fixed (the CI vector does not move).
+struct KkFullParts {
+  nevpt2::Tensor eri, h, gamma;
+  std::int64_t nc = 0, na = 0, nv = 0;
+};
+
+// U = exp(s u + t v) (or, `product`, exp(s u) exp(t v)) on the whole MO range.
+nevpt2::Tensor kkFullRotation(const nevpt2::Tensor& u, const nevpt2::Tensor& v, double s,
+                              double t, bool product) {
+  if (product) return kkMatmul(nevpt2::expKappa(scaled(u, s)), nevpt2::expKappa(scaled(v, t)));
+  nevpt2::Tensor sum(u.dims());
+  for (std::int64_t i = 0; i < sum.size(); ++i) sum.flatRef(i) = s * u.flat(i) + t * v.flat(i);
+  return nevpt2::expKappa(sum);
+}
+
+// The whole input set at the orthogonal `u`, from the full tensor: every
+// integral rotated on its four slots and h on its two (rotateAxes: X' =
+// U^T X U), then the definitions generate_golden.py slices the golden by --
+// each stored block a slice of (pq|rs) in its own axis order (that script's
+// _integral_blocks), h^eff = h + sum_j [2 (pq|jj) - (pj|jq)] over the core,
+// h1e_v_Sr less its traced active pair, and e_p = f_pp, f = h^eff + sum_tu
+// gamma_tu [(pq|tu) - (1/2)(pt|qu)] -- all of them at the rotated integrals.
+// The fields in kkRotatedInts' order.
+KkHostInts kkRotatedIntsFull(const KkFullParts& p, const nevpt2::Tensor& u) {
+  const std::int64_t nc = p.nc, na = p.na, nv = p.nv, n = nc + na + nv;
+  const nevpt2::Tensor e = nevpt2::rotateAxes(p.eri, {0, 1, 2, 3}, u);
+  nevpt2::Tensor heff = nevpt2::rotateAxes(p.h, {0, 1}, u);
+  for (std::int64_t a = 0; a < n; ++a)
+    for (std::int64_t b = 0; b < n; ++b)
+      for (std::int64_t j = 0; j < nc; ++j) heff(a, b) += 2.0 * e(a, b, j, j) - e(a, j, j, b);
+  const auto lo = [&](char sp) { return sp == 'c' ? 0 : (sp == 'a' ? nc : nc + na); };
+  const auto ext = [&](char sp) { return sp == 'c' ? nc : (sp == 'a' ? na : nv); };
+  // X = E.transpose(perm), E = (pq|rs) over the spaces `sp` spells: X[i] = E[j]
+  // with j[perm[k]] = i[k], numpy's rule.
+  const auto block = [&](const char* sp, std::array<int, 4> perm) {
+    std::vector<std::int64_t> dims(4);
+    for (int k = 0; k < 4; ++k) dims[static_cast<std::size_t>(k)] = ext(sp[perm[static_cast<std::size_t>(k)]]);
+    nevpt2::Tensor x(dims);
+    std::array<std::int64_t, 4> i{}, j{};
+    for (i[0] = 0; i[0] < dims[0]; ++i[0])
+      for (i[1] = 0; i[1] < dims[1]; ++i[1])
+        for (i[2] = 0; i[2] < dims[2]; ++i[2])
+          for (i[3] = 0; i[3] < dims[3]; ++i[3]) {
+            for (std::size_t k = 0; k < 4; ++k) j[static_cast<std::size_t>(perm[k])] = i[k];
+            x(i[0], i[1], i[2], i[3]) =
+                e(lo(sp[0]) + j[0], lo(sp[1]) + j[1], lo(sp[2]) + j[2], lo(sp[3]) + j[3]);
+          }
+    return x;
+  };
+  const auto mat = [&](char a, char b) {
+    nevpt2::Tensor x({ext(a), ext(b)});
+    for (std::int64_t q = 0; q < ext(a); ++q)
+      for (std::int64_t r = 0; r < ext(b); ++r) x(q, r) = heff(lo(a) + q, lo(b) + r);
+    return x;
+  };
+  KkHostInts out;
+  out.fields.emplace_back("h1e", mat('a', 'a'));
+  out.fields.emplace_back("h2e", block("aaaa", {0, 2, 1, 3}));
+  nevpt2::Tensor sr = block("vaaa", {0, 2, 1, 3});
+  nevpt2::Tensor h1Sr = mat('v', 'a');
+  for (std::int64_t r = 0; r < nv; ++r)
+    for (std::int64_t t = 0; t < na; ++t)
+      for (std::int64_t b = 0; b < na; ++b) h1Sr(r, t) -= sr(r, b, b, t);
+  out.fields.emplace_back("h2e_v_Sr", std::move(sr));
+  out.fields.emplace_back("h1e_v_Sr", std::move(h1Sr));
+  out.fields.emplace_back("h2e_v_Si", block("acaa", {0, 2, 1, 3}));
+  out.fields.emplace_back("h1e_v_Si", mat('a', 'c'));
+  out.fields.emplace_back("cvcv", block("cvcv", {0, 1, 2, 3}));
+  out.fields.emplace_back("h2e_v_Sijr", block("cacv", {3, 1, 2, 0}));
+  out.fields.emplace_back("h2e_v_Srsi", block("vacv", {3, 0, 2, 1}));
+  out.fields.emplace_back("h2e_v_Srs", block("vava", {0, 2, 1, 3}));
+  out.fields.emplace_back("h2e_v_Sij", block("caca", {1, 3, 0, 2}));
+  out.fields.emplace_back("h2e_v1_Sir", block("vcaa", {0, 2, 1, 3}));
+  out.fields.emplace_back("h2e_v2_Sir", block("vaca", {0, 3, 1, 2}));
+  out.fields.emplace_back("h1e_v_Sir", mat('v', 'c'));
+  const auto eps = [&](char sp) {
+    nevpt2::Tensor x({ext(sp)});
+    for (std::int64_t q = 0; q < ext(sp); ++q) {
+      const std::int64_t pp = lo(sp) + q;
+      double f = heff(pp, pp);
+      for (std::int64_t t = 0; t < na; ++t)
+        for (std::int64_t w = 0; w < na; ++w)
+          f += p.gamma(t, w) * (e(pp, pp, nc + t, nc + w) - 0.5 * e(pp, nc + t, pp, nc + w));
+      x(q) = f;
+    }
+    return x;
+  };
+  out.fields.emplace_back("e_core", eps('c'));
+  out.fields.emplace_back("e_virt", eps('v'));
+  return out;
+}
+
 // sum_k coef_k x_k, field by field, uploaded as a NevptIntegralsDevice.
 nevpt2::NevptIntegralsDevice kkUploadCombination(const std::vector<KkHostInts>& sets,
                                                  const std::vector<double>& coef,
@@ -361,10 +481,11 @@ nevpt2::Result<std::vector<nevpt2::ScFullRotationPairing>> kkPairIncrements(
 // walk's walk-to-walk spread cannot enter the ladder's error. The term's
 // pairing is held to `curvature` -- the term as the curvature call's own walk
 // returned it -- at the tree's 1e-7. `firstOrder` (max |<u, Y>|, |<v, Y>|)
-// joins the relative gate's denominator. Returns whether every criterion
-// holds.
+// joins the relative gate's denominator. A pair that is not block-diagonal is
+// displaced from the full tensor (`full`, which it then needs). Returns
+// whether every criterion holds.
 nevpt2::Result<bool> kkLadder(bool pc, const nevpt2::GoldenFile& g, const KkFockParts& fock,
-                              const KkPair& pair, bool product,
+                              const KkFullParts* full, const KkPair& pair, bool product,
                               const nevpt2::NevptIntegralsDevice& term,
                               const nevpt2::NevptIntegralsDevice* commutator, double curvature,
                               double firstOrder,
@@ -379,9 +500,16 @@ nevpt2::Result<bool> kkLadder(bool pc, const nevpt2::GoldenFile& g, const KkFock
     step[i] = h;
     std::vector<KkHostInts> corners;
     for (const auto& [ss, tt] : std::array<std::pair<double, double>, 4>{
-             {{h, h}, {h, -h}, {-h, h}, {-h, -h}}})
-      corners.push_back(
-          kkRotatedInts(g, fock, kkRotation(pair.u, pair.v, ss, tt, product, nc, na, nv), nc, na));
+             {{h, h}, {h, -h}, {-h, h}, {-h, -h}}}) {
+      if (pair.blockDiagonal) {
+        corners.push_back(kkRotatedInts(
+            g, fock, kkRotation(pair.u, pair.v, ss, tt, product, nc, na, nv), nc, na));
+      } else {
+        nevpt2::check(full != nullptr, "kkLadder: a mixed pair is displaced from the full tensor");
+        corners.push_back(
+            kkRotatedIntsFull(*full, kkFullRotation(pair.u, pair.v, ss, tt, product)));
+      }
+    }
     combos.push_back(kkUploadCombination(corners, {1.0, -1.0, -1.0, 1.0}, res));
   }
   std::vector<const nevpt2::NevptIntegralsDevice*> ptr{&term};
@@ -495,11 +623,16 @@ nevpt2::Result<bool> checkScHessianKkIntegral(const nevpt2::GoldenFile& g,
                                               const nevpt2::DeviceTensor& dm2,
                                               const nevpt2::RdmBuildResult& built,
                                               const nevpt2::RdmBuildOptions& opt, const bool pc,
+                                              const nevpt2::EriGoldFile* eri,
                                               const nevpt2::DeviceResources& res) {
   const nevpt2::RdmTensors rdm{dm1, dm2, built.dm3, built.f3ac, built.f3ca};
   const nevpt2::Tensor& ci = g.get("ci");
   const bool fitted = gg.densityFitted();
-  const nevpt2::GeneralIntegralsDevice gen = NEVPT2_TRY(generalIntegrals(g, gg, res));
+  nevpt2::GeneralIntegralsDevice gen = NEVPT2_TRY(generalIntegrals(g, gg, res));
+  // --erigold (#180): the full tensor, whose frame main has held to the
+  // sidecar's; what K2 reads for a pair with no active-active member.
+  if (eri != nullptr) gen.eri = nevpt2::uploadTensor(eri->get("eri"), res);
+  const bool full = gen.hasFullTensor();
   const std::int64_t nc = gg.ncore, na = gg.nact, nv = gg.nvirt, nmo = gg.nmo;
   const char* const variant = pc ? "PC" : "SC";
   std::printf("\n--sc-hessian-kk-int%s: the %s orbital Hessian's integral curvature "
@@ -507,6 +640,10 @@ nevpt2::Result<bool> checkScHessianKkIntegral(const nevpt2::GoldenFile& g,
               pc ? " --pc" : "", variant, pc ? "6.7" : "5.1", fitted ? " -- density-fitted" : "");
   std::printf("  K1 = <Ehat', I'[W]>, W = (uv + vu)/2; K2 = <Ehat', I^x[u, v]>; both modes, "
               "the digests' term in each\n");
+  if (full)
+    std::printf("  the full MO-integral tensor (%lld^4) is uploaded: K2 for a pair with no "
+                "active-active member from its four-index jets (#180)\n",
+                static_cast<long long>(gg.nmo));
   bool ok = true;
 
   // --- 1. the sidecar against itself ---------------------------------------------
@@ -518,6 +655,37 @@ nevpt2::Result<bool> checkScHessianKkIntegral(const nevpt2::GoldenFile& g,
               "f's diagonal %.2e,\n      (O2) %.2e, f over the whole range %.2e  (< %.0e: %s)\n",
               self.blocks, self.worstBlock.c_str(), self.heff, self.fock, self.eps, self.fockFull,
               kKkSelfTol, worstSelf < kKkSelfTol ? "ok" : "FAILED");
+
+  // --- 1b. the full tensor against the golden ----------------------------------------
+  std::optional<KkFullParts> fullParts;
+  if (full) {
+    fullParts.emplace(KkFullParts{eri->get("eri"), gg.get("h"), g.get("dm1"), gg.ncore, gg.nact,
+                                  gg.nvirt});
+    nevpt2::Tensor one({gg.nmo, gg.nmo});
+    for (std::int64_t q = 0; q < gg.nmo; ++q) one(q, q) = 1.0;
+    const KkHostInts at = kkRotatedIntsFull(*fullParts, one);
+    double worst = 0.0;
+    std::string worstName;
+    for (const auto& [name, mine] : at.fields) {
+      const nevpt2::Tensor& ref = g.get(name);
+      double scale = 0.0, gap = 0.0;
+      for (std::int64_t i = 0; i < ref.size(); ++i) {
+        scale = std::max(scale, std::fabs(ref.flat(i)));
+        gap = std::max(gap, std::fabs(ref.flat(i) - mine.flat(i)));
+      }
+      const double rel = mine.dims() == ref.dims() ? gap / std::max(1e-300, scale) : 1.0;
+      if (rel >= worst) {
+        worst = rel;
+        worstName = name;
+      }
+    }
+    const bool good = worst < kKkFullTol;
+    ok = ok && good;
+    std::printf("\n  [1b] the full tensor at U = 1 against the golden (relative, per array; "
+                "h^eff and the orbital energies rebuilt from it):\n      worst %.2e (%s) "
+                "(< %.0e: %s)\n",
+                worst, worstName.c_str(), kKkFullTol, good ? "ok" : "FAILED");
+  }
 
   // The digests' transpose: what the adjoint pairings' digest term reads --
   // SC's, or PC's (a refused PC class is a Numerical Error, reported at main).
@@ -633,7 +801,7 @@ nevpt2::Result<bool> checkScHessianKkIntegral(const nevpt2::GoldenFile& g,
   };
   if (core1) pairs.push_back(KkPair{"active x core", uAct, *core1, true, true});
   if (virt1) pairs.push_back(KkPair{"active x virtual", uAct, *virt1, true, true});
-  if (fitted) {
+  if (fitted || full) {
     pairs.push_back(KkPair{"full x full", full1, full2, false, false});
     if (core1 && virt1) pairs.push_back(KkPair{"core x virtual", *core1, *virt1, true, false});
     if (core1) pairs.push_back(KkPair{"core x core", *core1, *core2, true, false});
@@ -690,7 +858,7 @@ nevpt2::Result<bool> checkScHessianKkIntegral(const nevpt2::GoldenFile& g,
       }
       const nevpt2::Tensor& a = **in.a;
       const nevpt2::Tensor& b = **in.b;
-      if (!fitted) {
+      if (!fitted && !full) {
         // K2 refused; K1 alone through its own machinery.
         const nevpt2::Result<std::vector<nevpt2::ScOrbitalCurvatureResult>> refused =
             curvature({nevpt2::ScOrbitalCurvatureRequest{a, b}});
@@ -710,7 +878,7 @@ nevpt2::Result<bool> checkScHessianKkIntegral(const nevpt2::GoldenFile& g,
                     good ? "ok" : "FAILED");
         continue;
       }
-      // Fitted: the pair is among check 3's; find it.
+      // Fitted, or the full tensor: the pair is among check 3's; find it.
       for (std::size_t k = 0; k < pairs.size(); ++k) {
         if (pairs[k].name != in.name) continue;
         const nevpt2::ScOrbitalCurvatureResult& r = res3[k];
@@ -741,14 +909,17 @@ nevpt2::Result<bool> checkScHessianKkIntegral(const nevpt2::GoldenFile& g,
   // --- 6 and 7. the ladders -------------------------------------------------------
   const KkFockParts fock = kkFockParts(gen, g.get("dm1"), res);
   for (std::size_t k = 0; k < pairs.size(); ++k) {
-    if (!pairs[k].blockDiagonal) continue;
+    // A mixed pair is displaced from the full tensor, so needs it.
+    if (!pairs[k].blockDiagonal && !full) continue;
     const double yu = NEVPT2_TRY(kkFirstOrder(pc, ints, gen, rdm, hbar, pairs[k].u, res));
     const double yv = NEVPT2_TRY(kkFirstOrder(pc, ints, gen, rdm, hbar, pairs[k].v, res));
     const nevpt2::NevptIntegralsDevice term = NEVPT2_TRY(nevpt2::orbitalSecondInputsDevice(
         setup, nevpt2::ScOrbitalCurvatureRequest{pairs[k].u, pairs[k].v}, res));
-    std::printf("\n  [6] the ladder along exp(s u + t v), %s (<u, Y> = %.6e, <v, Y> = %.6e):\n",
-                pairs[k].name.c_str(), yu, yv);
-    const bool fd = NEVPT2_TRY(kkLadder(pc, g, fock, pairs[k], false, term, nullptr, res3[k].value(),
+    std::printf("\n  [6] the ladder along exp(s u + t v), %s%s (<u, Y> = %.6e, <v, Y> = %.6e):\n",
+                pairs[k].name.c_str(),
+                pairs[k].blockDiagonal ? "" : ", displaced from the full tensor", yu, yv);
+    const bool fd = NEVPT2_TRY(kkLadder(pc, g, fock, fullParts ? &*fullParts : nullptr, pairs[k],
+                                        false, term, nullptr, res3[k].value(),
                                         std::max(std::fabs(yu), std::fabs(yv)), ints, rdm, hbar,
                                         nc, na, nv, res));
     ok = ok && fd;
@@ -791,34 +962,40 @@ nevpt2::Result<bool> checkScHessianKkIntegral(const nevpt2::GoldenFile& g,
                 pp.name.c_str(), res3[best].value(), want, 0.5 * std::fabs(bestComm),
                 std::fabs(bestComm) < 1e-12 ? " -- <[u, v], Y> vanishes by symmetry on this case"
                                             : "");
-    const bool fd = NEVPT2_TRY(kkLadder(pc, g, fock, pp, true, term, &commInputs,
+    const bool fd = NEVPT2_TRY(kkLadder(pc, g, fock, fullParts ? &*fullParts : nullptr, pp, true,
+                                        term, &commInputs,
                                         res3[best].value(), std::max(std::fabs(yu), std::fabs(yv)),
                                         ints, rdm, hbar, nc, na, nv, res));
     ok = ok && fd;
   }
 
-  // --- 8. the two routes on a fitted case -----------------------------------------
-  if (fitted) {
+  // --- 8. the two routes on a fitted case, or with the full tensor ----------------
+  if (fitted || full) {
+    const nevpt2::ScCurvatureRoute jet =
+        fitted ? nevpt2::ScCurvatureRoute::ThreeIndex : nevpt2::ScCurvatureRoute::FullTensor;
     std::printf("\n  [8] the two routes: the sidecar's (promotion table; composition) against "
-                "the three-index jets of B\n");
+                "%s\n",
+                fitted ? "the three-index jets of B" : "the four-index jets of the full tensor");
     std::vector<nevpt2::ScOrbitalCurvatureRequest> side, three;
     std::vector<std::size_t> which;
     for (std::size_t k = 0; k < pairs.size(); ++k) {
       const bool oneActive = pairs[k].oneActive;
       nevpt2::ScOrbitalCurvatureRequest a{pairs[k].u, pairs[k].v, false};
       a.k1 = nevpt2::ScCurvatureRoute::Sidecar;
-      a.k2 = oneActive ? nevpt2::ScCurvatureRoute::Sidecar : nevpt2::ScCurvatureRoute::ThreeIndex;
+      a.k2 = oneActive ? nevpt2::ScCurvatureRoute::Sidecar : jet;
       nevpt2::ScOrbitalCurvatureRequest b{pairs[k].u, pairs[k].v, false};
-      b.k1 = nevpt2::ScCurvatureRoute::ThreeIndex;
-      b.k2 = nevpt2::ScCurvatureRoute::ThreeIndex;
+      b.k1 = jet;
+      b.k2 = jet;
       side.push_back(a);
       three.push_back(b);
       which.push_back(k);
     }
     const std::vector<nevpt2::ScOrbitalCurvatureResult> rs = NEVPT2_TRY(curvature(side));
     const std::vector<nevpt2::ScOrbitalCurvatureResult> rt = NEVPT2_TRY(curvature(three));
+    const char* jetName = fitted ? "three-index" : "full tensor";
     std::printf("    %-26s %22s %22s %10s %22s %22s %10s\n", "pair", "K1 sidecar",
-                "K1 three-index", "|delta|", "K2 sidecar", "K2 three-index", "|delta|");
+                std::format("K1 {}", jetName).c_str(), "|delta|", "K2 sidecar",
+                std::format("K2 {}", jetName).c_str(), "|delta|");
     double worst = 0.0;
     for (std::size_t i = 0; i < which.size(); ++i) {
       const double d1 = std::fabs(rs[i].k1.adjoint - rt[i].k1.adjoint);
@@ -840,7 +1017,7 @@ nevpt2::Result<bool> checkScHessianKkIntegral(const nevpt2::GoldenFile& g,
     std::printf("\n  [9] the refusals:\n");
     // A pair with neither direction active-active, by the composition.
     nevpt2::ScOrbitalCurvatureRequest neither{full1, full2, false};
-    if (fitted) neither.k2 = nevpt2::ScCurvatureRoute::Sidecar;
+    if (fitted || full) neither.k2 = nevpt2::ScCurvatureRoute::Sidecar;
     const nevpt2::Result<std::vector<nevpt2::ScOrbitalCurvatureResult>> r1 =
         curvature({neither});
     const bool refused1 = !r1 && r1.error().kind == nevpt2::ErrorKind::Unsupported;
@@ -859,6 +1036,17 @@ nevpt2::Result<bool> checkScHessianKkIntegral(const nevpt2::GoldenFile& g,
       std::printf("  the three-index route on a conventional case: %s\n",
                   refused2 ? "refused, Unsupported" : "NOT REFUSED");
     }
+    if (!full) {
+      // The full-tensor route with no tensor uploaded (#180).
+      nevpt2::ScOrbitalCurvatureRequest four{uAct, vAct, false};
+      four.k2 = nevpt2::ScCurvatureRoute::FullTensor;
+      const nevpt2::Result<std::vector<nevpt2::ScOrbitalCurvatureResult>> r3 =
+          curvature({four});
+      const bool refused3 = !r3 && r3.error().kind == nevpt2::ErrorKind::Unsupported;
+      ok = ok && refused3;
+      std::printf("  the full-tensor route with no .erigold: %s\n",
+                  refused3 ? "refused, Unsupported" : "NOT REFUSED");
+    }
   }
 
   std::printf("\n%s: the %s orbital Hessian's integral curvature <Ehat', I''> = K1 + K2 agrees "
@@ -868,6 +1056,9 @@ nevpt2::Result<bool> checkScHessianKkIntegral(const nevpt2::GoldenFile& g,
               "responding to kappa)%s\n",
               ok ? "PASS" : "FAIL", variant, kKkTol,
               pc ? " (PC's first-order source term gated first, both dualities)" : "",
-              fitted ? " (density-fitted: K2 by the three-index jets, both routes agree)" : "");
+              fitted ? " (density-fitted: K2 by the three-index jets, both routes agree)"
+              : full ? " (full MO-integral tensor: K2 on every pair, by the four-index jets where "
+                       "no member is active-active, both routes agree, every pair laddered)"
+                     : "");
   return ok;
 }

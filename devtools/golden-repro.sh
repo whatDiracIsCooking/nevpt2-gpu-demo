@@ -14,8 +14,11 @@
 # place that re-runs the promise, and the one place a byte comparison is right:
 # everywhere else compares against a tolerance.
 #
-# What it regenerates (twenty-eight files, twenty-two generator runs):
+# What it regenerates (twenty-nine files, twenty-two generator runs):
 #   generate_golden.py     n2_ccpvdz_cas44 / cas88 .nevpt2gold + .gradgold,
+#                          and cas44's full MO-integral tensor sidecar
+#                          n2_ccpvdz_cas44.erigold (#180, --erigold, in the
+#                          same run: it changes no byte of the other two),
 #                          their _df twins (each with its density-fitted
 #                          NEVPT2F1 .gradgold, #164), the two .mogold sidecars (a fresh
 #                          --casscf each) and the two *_casscf[_df] goldens
@@ -155,8 +158,8 @@ S=$scratch
 # the first one wrote.
 declare -a run_names=() run_files=() run_cmds=() run_posts=()
 add_run() { run_names+=("$1"); run_files+=("$2"); run_cmds+=("$3"); run_posts+=("${4:-}"); }
-add_run cas44 "n2_ccpvdz_cas44.nevpt2gold n2_ccpvdz_cas44.gradgold" \
-  "python $gen --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44 --gradgold --out $S/n2_ccpvdz_cas44.nevpt2gold"
+add_run cas44 "n2_ccpvdz_cas44.nevpt2gold n2_ccpvdz_cas44.gradgold n2_ccpvdz_cas44.erigold" \
+  "python $gen --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44 --gradgold --erigold --out $S/n2_ccpvdz_cas44.nevpt2gold"
 add_run cas44_df "n2_ccpvdz_cas44_df.nevpt2gold n2_ccpvdz_cas44_df.gradgold" \
   "python $gen --df --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_df --gradgold --out $S/n2_ccpvdz_cas44_df.nevpt2gold" \
   "python $num --df --case n2_ccpvdz_cas44 --sidecar $S/n2_ccpvdz_cas44_df.gradgold"

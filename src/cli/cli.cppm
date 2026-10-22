@@ -207,6 +207,11 @@ struct Options {
   // gradient sidecar (required).
   std::string scSourceTangentPath;
   std::string gradgoldPath;
+  // nevpt2_sc_pseudodensity: --erigold PATH, only with --sc-hessian-kk-int
+  // (#180): the `.erigold` full MO-integral tensor sidecar, from which K2 is
+  // computed for a direction pair with no active-active member on a
+  // conventional case -- refused without it.
+  std::string erigoldPath;
   std::string dumpSourceTermsPath;
   // nevpt2_sc_pseudodensity: --probed-y, only with --dump-source-terms (#240):
   // also probe Y basis direction by basis direction and hold the one-pass Y

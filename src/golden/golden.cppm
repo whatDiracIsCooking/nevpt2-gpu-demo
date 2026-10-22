@@ -20,6 +20,9 @@
 //                  every nuclear coordinate's derivative of the gradient
 //                  sidecar's inventory, written by
 //                  reference_data/integral_perturbation.py.
+//   loadEriGold    `*.erigold`: the full MO-integral tensor sidecar (#180),
+//                  every (pq|rs) of a conventional state, written by
+//                  generate_golden.py --erigold.
 //
 // They are two files and not one on purpose: the golden format is extensible
 // (magic + array count), but adding arrays would change every committed
@@ -292,6 +295,50 @@ struct PertGoldFile {
 // a derivative with one input held fixed would pass every identity its two
 // modes share -- or one shaped otherwise than its header says.
 [[nodiscard]] Result<PertGoldFile> loadPertGold(const std::string& path);
+
+// ---------------------------------------------------------------------------
+// The full MO-integral tensor sidecar (`*.erigold`, #180).
+// ---------------------------------------------------------------------------
+
+// Every MO integral of a CONVENTIONAL golden's state over the whole MO range,
+// in its gradient sidecar's orbitals (generate_golden.py --gradgold --erigold):
+//
+//   mo_coeff   [nao, nmo]                the frame: the gradient sidecar's
+//                                        own, bit for bit
+//   eri        [nmo, nmo, nmo, nmo]      (pq|rs), chemists' order, every
+//                                        permutational copy stored
+//
+// What the orbital Hessian's cross-slot curvature K2 reads for a direction
+// pair with no active-active member: two general indices reach every MO
+// integral (docs/hessian-theory.md, Sec. 5.4). Opt-in, a file of its own, so
+// no committed golden or gradient sidecar changes a byte. A density-fitted
+// case has no such file: its B[L, p, q] is already the whole tensor.
+struct EriGoldFile {
+  // Stored as int32 in the file; held as int64_t like every host size.
+  int64_t nao = 0;
+  int64_t nmo = 0;  // = ncore + nact + nvirt, checked on load
+  int64_t ncore = 0;
+  int64_t nact = 0;
+  int64_t nvirt = 0;
+  std::unordered_map<std::string, Tensor> arrays;
+
+  // An IO Error unless this tensor was written for `golden`'s state and
+  // `sidecar`'s frame: the same partition, a conventional golden and
+  // sidecar, and `mo_coeff` the sidecar's, bit for bit -- integrals in
+  // another orbital basis would be rotated against the wrong pseudodensities
+  // with nothing downstream to notice.
+  [[nodiscard]] Status checkAgainst(const GoldenFile& golden, const GradGoldFile& sidecar) const;
+
+  // The array `name` (mo_coeff or eri); our bug if absent.
+  const Tensor& get(const std::string& name) const;
+};
+
+// The parsed sidecar, or an IO Error if it cannot be opened, ends early, has
+// another magic than "NEVPT2E1", carries a partition that does not add up, a
+// malformed array header or bytes after its last array, an array that is not
+// one of its two -- or lacks either -- or one shaped otherwise than its header
+// says.
+[[nodiscard]] Result<EriGoldFile> loadEriGold(const std::string& path);
 
 // ---------------------------------------------------------------------------
 // The source-term oracle (`*.srcgold`), SC and PC.

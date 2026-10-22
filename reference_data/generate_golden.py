@@ -117,6 +117,18 @@ pi space picked by irrep, the DF one fitted with 6-31G**-RIFIT)::
         --name salicylaldimine_631gss_cas88       # add --df --auxbasis
         # reference_data/basis/6-31gss-rifit.nw and a _df name for the twin
 
+``--erigold`` (with ``--gradgold``, conventional only) additionally writes the
+**full MO-integral tensor sidecar** ``<out>.erigold`` (``NEVPT2E1``, #180):
+every ``(pq|rs)`` over the whole MO range in the gradient sidecar's orbitals,
+``n_mo^4`` doubles -- what the orbital Hessian's cross-slot curvature K2 reads
+for a direction pair with no active-active member (docs/hessian-theory.md,
+§5.4). Opt-in and a file of its own, so the golden and ``.gradgold`` beside it
+are byte-identical with or without it (:func:`_full_eri`). The committed one
+is N2 CAS(4,4)'s::
+
+    uv run python reference_data/generate_golden.py --ncas 4 --nelecas 4 \\
+        --name n2_ccpvdz_cas44 --gradgold --erigold
+
 ``--casscf --mo-out FILE`` / ``--mo-from FILE`` build a golden on **converged
 CASSCF orbitals** in two steps, so that no golden's state depends on an
 orbital optimiser. The first step optimises once and commits the orbitals
@@ -1666,6 +1678,80 @@ def _gradient_arrays(mc, pt, eris, dm1: np.ndarray) -> dict:
     )
 
 
+#: How closely the full tensor must reproduce, element by element and
+#: relative to its largest element, every array it overlaps: the gradient
+#: sidecar's eighteen rows and the golden's two-electron blocks, each from its
+#: own transform (:func:`_full_eri`). Separate transforms agree to round-off;
+#: a wrong frame or index order is off at O(1).
+ERI_OVERLAP_TOL = 1e-12
+
+
+def _full_eri(pt, grad_arrays: dict, blocks: dict) -> tuple[dict, dict]:
+    """The full MO-integral tensor sidecar (``--erigold``, #180): ``eri[p, q,
+    r, s] = (pq|rs)`` over the whole MO range in ``pt.mo_coeff`` -- one
+    ``ao2mo.full`` -- with the frame ``mo_coeff``. Held, before it is handed
+    back, to every array it overlaps (:data:`ERI_OVERLAP_TOL`): the gradient
+    sidecar's eighteen one-general-index rows, sliced and tied as
+    :func:`_gradient_arrays` stores them, and the golden's ten two-electron
+    blocks, as :func:`_integral_blocks` slices them. Returns ``(header,
+    arrays)`` for ``golden_format.write_erigold``."""
+    from pyscf import ao2mo
+
+    mo = pt.mo_coeff
+    nao, nmo = mo.shape
+    ncore, nact = pt.ncore, pt.ncas
+    nocc = ncore + nact
+    eri = ao2mo.full(pt.mol, mo, compact=False).reshape(nmo, nmo, nmo, nmo)
+    sp = dict(c=slice(0, ncore), a=slice(ncore, nocc), v=slice(nocc, nmo))
+    want: dict[str, np.ndarray] = {}
+    for name in grad_arrays:
+        if not name.startswith("g_x"):
+            continue
+        if name in ("g_xc_cc_j", "g_xa_vv", "g_xc_vv"):  # (x q | P P), P tied
+            tied = sp["c" if name == "g_xc_cc_j" else "v"]
+            want[name] = np.einsum("xqrr->xqr", eri[:, sp[name[3]], tied, tied])
+        elif name == "g_xc_cc_k":  # (x j | j i)
+            want[name] = np.einsum("xjji->xji", eri[:, sp["c"], sp["c"], sp["c"]])
+        else:
+            want[name] = eri[:, sp[name[3]], sp[name[5]], sp[name[6]]]
+    c, a, v = sp["c"], sp["a"], sp["v"]
+    want_blocks = dict(
+        h2e=eri[a, a, a, a].transpose(0, 2, 1, 3),
+        h2e_v_Sr=eri[v, a, a, a].transpose(0, 2, 1, 3),
+        h2e_v_Si=eri[a, c, a, a].transpose(0, 2, 1, 3),
+        cvcv=eri[c, v, c, v],
+        h2e_v_Sijr=eri[c, a, c, v].transpose(3, 1, 2, 0),
+        h2e_v_Srsi=eri[v, a, c, v].transpose(3, 0, 2, 1),
+        h2e_v_Srs=eri[v, a, v, a].transpose(0, 2, 1, 3),
+        h2e_v_Sij=eri[c, a, c, a].transpose(1, 3, 0, 2),
+        h2e_v1_Sir=eri[v, c, a, a].transpose(0, 2, 1, 3),
+        h2e_v2_Sir=eri[v, a, c, a].transpose(0, 3, 1, 2),
+    )
+    scale = float(np.abs(eri).max())
+    worst, where = 0.0, ""
+    for name, ref in [(n, grad_arrays[n]) for n in want] + [
+            (n, blocks[n]) for n in want_blocks]:
+        mine = want[name] if name in want else want_blocks[name]
+        if mine.shape != ref.shape:
+            raise SystemExit(f"--erigold: the full tensor's {name} is {mine.shape}, "
+                             f"the stored one {ref.shape}")
+        gap = float(np.abs(mine - ref).max(initial=0.0)) / scale
+        if gap > worst:
+            worst, where = gap, name
+    sym = max(float(np.abs(eri - eri.transpose(1, 0, 2, 3)).max()),
+              float(np.abs(eri - eri.transpose(2, 3, 0, 1)).max())) / scale
+    if worst > ERI_OVERLAP_TOL or sym > ERI_OVERLAP_TOL:
+        raise SystemExit(
+            f"--erigold: the full tensor reproduces the arrays it overlaps only to "
+            f"{worst:.1e} relative (worst {where}), its permutational symmetry to "
+            f"{sym:.1e} (both must be <= {ERI_OVERLAP_TOL:g}); refusing to write it")
+    print(f"  full tensor: {nmo}^4 = {eri.size} doubles, {eri.nbytes / 1e6:.2f} MB; "
+          f"against the {len(want)} sidecar rows and {len(want_blocks)} golden blocks it "
+          f"overlaps {worst:.1e} relative (worst {where}), permutational symmetry {sym:.1e}")
+    header = dict(nao=nao, nmo=nmo, ncore=ncore, nact=nact, nvirt=nmo - nocc)
+    return header, dict(mo_coeff=mo, eri=np.ascontiguousarray(eri))
+
+
 def _gradient_matrices(mc, pt, eris, dm1: np.ndarray) -> dict:
     """§3.5's full-MO-range matrices and ``mo_coeff``, the first six arrays of
     a gradient sidecar of either flavour: ``h``, ``h^eff``, the generalized
@@ -1877,7 +1963,8 @@ def generate(
     core_irreps: dict[str, int] | None = None,
     gradgold: bool = False,
     mo_from: str | Path | None = None,
-) -> tuple[dict, dict, tuple[dict, dict] | None]:
+    erigold: bool = False,
+) -> tuple[dict, dict, tuple[dict, dict] | None, tuple[dict, dict] | None]:
     t0 = time.perf_counter()
     mc, pt = _build_state(
         atom, basis, ncas, nelecas, auxbasis, cas_irreps, core_irreps, mo_from
@@ -1983,7 +2070,11 @@ def generate(
             + " ".join(f"{k} {x:.2e}" for k, x in res["o1_each"].items())
             + f" (O2) {res['o2']:.2e} {o3}"
         )
-    return meta, arrays, grad
+    full = None
+    if erigold:
+        # _parse_args has refused it without --gradgold and with --df.
+        full = _full_eri(pt, grad[1], blocks)
+    return meta, arrays, grad, full
 
 
 def _irrep_counts(text: str) -> dict[str, int]:
@@ -2054,6 +2145,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "and the four tied orbital-energy arrays (section 3.8)",
     )
     ap.add_argument(
+        "--erigold",
+        action="store_true",
+        help="with --gradgold, also write the full MO-integral tensor sidecar "
+        "<out>.erigold: every (pq|rs) over the whole MO range, n_mo^4 doubles, what "
+        "the orbital Hessian's cross-slot curvature K2 reads on a conventional case "
+        "(docs/hessian-theory.md, section 5.4). Not with --df, whose B is already "
+        "the whole tensor",
+    )
+    ap.add_argument(
         "--core-irreps",
         type=_irrep_counts,
         default=None,
@@ -2102,6 +2202,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.gradgold and args.casscf:
         ap.error("--gradgold writes beside a golden and --casscf writes none: "
                  "pass --gradgold to the --mo-from step instead")
+    # --erigold (#180) rides on --gradgold: the tensor is written in the
+    # gradient sidecar's frame and held to its rows before a byte is written.
+    # A density-fitted case's B is already the whole tensor in three-index
+    # form, so a fitted four-index dump would be a second copy of the same
+    # integrals, not data K2 lacks.
+    if args.erigold and not args.gradgold:
+        ap.error("--erigold needs --gradgold: the tensor is written in, and checked "
+                 "against, the gradient sidecar beside it")
+    if args.erigold and args.df:
+        ap.error("--erigold is the conventional case's: a --df golden and its sidecar "
+                 "already carry the whole B[L, p, q]")
     # --df --gradgold is permitted (#164): docs/gradient-theory.md, section 3.8
     # carries the derivation over to three-index integrals unchanged (the
     # fitting metric is inert under an orbital rotation), and names the
@@ -2133,11 +2244,11 @@ def main() -> None:
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    meta, arrays, grad = generate(
+    meta, arrays, grad, full = generate(
         args.atom, args.basis, args.ncas, args.nelecas, args.name, auxbasis,
         pc=not args.no_pc, rdm4_threads=args.rdm4_threads,
         cas_irreps=args.cas_irreps, core_irreps=args.core_irreps,
-        gradgold=args.gradgold, mo_from=args.mo_from,
+        gradgold=args.gradgold, mo_from=args.mo_from, erigold=args.erigold,
     )
     write_golden(out_path, **meta, arrays=arrays)
     print(f"wrote {out_path}")
@@ -2145,6 +2256,10 @@ def main() -> None:
         grad_path = out_path.with_suffix(".gradgold")
         write_gradgold(grad_path, **grad[0], arrays=grad[1])
         print(f"wrote {grad_path}")
+    if full is not None:
+        eri_path = out_path.with_suffix(".erigold")
+        gf.write_erigold(eri_path, header=full[0], arrays=full[1])
+        print(f"wrote {eri_path}")
 
 
 if __name__ == "__main__":

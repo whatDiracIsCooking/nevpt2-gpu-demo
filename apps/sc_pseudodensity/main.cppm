@@ -48,8 +48,10 @@
 // pairing against its forward tangent, the traced pairs' and the intra-space
 // exact zeros, and Richardson-verified ladders of the fixed-pseudodensity
 // pairing along exp(s u + t v), out of the sidecar (required). K2 for a pair
-// with neither direction active-active is refused on a conventional case and
-// computed in three-index form on a density-fitted one; the partition
+// with neither direction active-active is computed in three-index form on a
+// density-fitted case, from the full MO-integral tensor on a conventional one
+// run with --erigold PATH (#180), and refused on a conventional case without
+// it; the partition
 // :hessian_kk_check is where that lives, with its own PASS line. With --pc
 // the same checks run on PC-NEVPT2's curvature <Ehat'_pc, I''> (#200),
 // after gating PC's first-order orbital source term on seeded directions --
@@ -465,8 +467,25 @@ int main(int argc, char** argv) {
       return 1;
     }
     const nevpt2::GradGoldFile gg = *std::move(sidecar);
-    const nevpt2::Result<bool> ok =
-        checkScHessianKkIntegral(g, gg, dInts, dDm1, dDm2, rdm, opt.rdm, opt.pc, *res);
+    // --erigold PATH (#180): the full MO-integral tensor K2 reads for a pair
+    // with no active-active member, held to this golden's state and this
+    // sidecar's frame (mo_coeff bit for bit) before anything reads it.
+    std::optional<nevpt2::EriGoldFile> eri;
+    if (!parsedOpts.erigoldPath.empty()) {
+      std::printf("full MO-integral tensor: %s\n", parsedOpts.erigoldPath.c_str());
+      nevpt2::Result<nevpt2::EriGoldFile> loadedEri = nevpt2::loadEriGold(parsedOpts.erigoldPath);
+      if (!loadedEri) {
+        nevpt2::report(loadedEri.error());
+        return 1;
+      }
+      if (const nevpt2::Status st = loadedEri->checkAgainst(g, gg); !st) {
+        nevpt2::report(st.error());
+        return 1;
+      }
+      eri = *std::move(loadedEri);
+    }
+    const nevpt2::Result<bool> ok = checkScHessianKkIntegral(
+        g, gg, dInts, dDm1, dDm2, rdm, opt.rdm, opt.pc, eri ? &*eri : nullptr, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

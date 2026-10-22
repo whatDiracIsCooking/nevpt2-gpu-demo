@@ -403,6 +403,17 @@ Status checkGeneralShapes(const NevptIntegralsDevice& ints,
         "partition wants [{}]",
         expect[k].first, shape, nc, na, nv, want));
   }
+  // The full tensor, when one was uploaded: a conventional case's alone, and
+  // over the sidecar's MO range. (An unset tensor has rank 0 -- and size 1.)
+  if (gen.eri.rank() > 0) {
+    if (gen.densityFitted())
+      return err_config("the full MO-integral tensor is the conventional case's; a fitted "
+                        "case's B[L, p, q] is already its whole tensor");
+    if (gen.eri.dims != std::vector<int64_t>{nmo, nmo, nmo, nmo})
+      return err_config(std::format(
+          "the full MO-integral tensor is not {} x {} x {} x {}, the sidecar's MO range", nmo,
+          nmo, nmo, nmo));
+  }
   return {};
 }
 
@@ -1134,6 +1145,7 @@ const char* scCurvatureRouteName(const ScCurvatureRoute r) {
     case ScCurvatureRoute::Auto: return "auto";
     case ScCurvatureRoute::Sidecar: return "sidecar";
     case ScCurvatureRoute::ThreeIndex: return "three-index";
+    case ScCurvatureRoute::FullTensor: return "full tensor";
   }
   return "?";
 }
@@ -1307,12 +1319,14 @@ struct CurvaturePlan {
 
 // Shape, antisymmetry and the routes of pair `q`, or the caller's Error --
 // Unsupported for a route the data cannot serve or a conventional pair with
-// neither member active-active (the header's refusals), before any device work.
+// neither member active-active and no full tensor (the header's refusals),
+// before any device work.
 Result<CurvaturePlan> planCurvaturePair(const ScOrbitalCurvatureSetup& s,
                                         const ScOrbitalCurvatureRequest& r, const std::size_t q) {
   const int64_t nmo = s.gen.nmo();
   const int64_t actLo = s.gen.ncore, actHi = s.gen.ncore + s.gen.nact;
   const bool fitted = s.gen.densityFitted();
+  const bool full = s.gen.hasFullTensor();
   NEVPT2_TRY(checkCurvatureDirection(r.u, nmo, q, "u"));
   NEVPT2_TRY(checkCurvatureDirection(r.v, nmo, q, "v"));
   CurvaturePlan p{ScCurvatureRoute::Sidecar, ScCurvatureRoute::Sidecar,
@@ -1325,15 +1339,29 @@ Result<CurvaturePlan> planCurvaturePair(const ScOrbitalCurvatureSetup& s,
           q));
     p.k1 = ScCurvatureRoute::ThreeIndex;
   }
+  if (r.k1 == ScCurvatureRoute::FullTensor) {
+    if (!full)
+      return err_unsupported(std::format(
+          "pair {}: K1's full-tensor route reads the whole MO-integral tensor, which only a "
+          "conventional case with its .erigold sidecar uploaded carries",
+          q));
+    p.k1 = ScCurvatureRoute::FullTensor;
+  }
   const bool oneActive = p.uAct || p.vAct;
   const ScCurvatureRoute want =
-      r.k2 != ScCurvatureRoute::Auto
-          ? r.k2
-          : (fitted ? ScCurvatureRoute::ThreeIndex : ScCurvatureRoute::Sidecar);
+      r.k2 != ScCurvatureRoute::Auto ? r.k2
+      : fitted                       ? ScCurvatureRoute::ThreeIndex
+      : (oneActive || !full)         ? ScCurvatureRoute::Sidecar
+                                     : ScCurvatureRoute::FullTensor;
   if (want == ScCurvatureRoute::ThreeIndex && !fitted)
     return err_unsupported(std::format(
         "pair {}: K2's three-index route reads the whole B[L, p, q], which only a "
         "density-fitted case carries",
+        q));
+  if (want == ScCurvatureRoute::FullTensor && !full)
+    return err_unsupported(std::format(
+        "pair {}: K2's full-tensor route reads the whole MO-integral tensor, which only a "
+        "conventional case with its .erigold sidecar uploaded carries",
         q));
   if (want == ScCurvatureRoute::Sidecar && !oneActive)
     return err_unsupported(std::format(
@@ -1341,7 +1369,7 @@ Result<CurvaturePlan> planCurvaturePair(const ScOrbitalCurvatureSetup& s,
         "integrals -- for a pair with neither direction active-active, the whole MO-integral "
         "tensor, which the conventional gradient sidecar does not carry "
         "(docs/hessian-theory.md, Sec. 5.4). Refused rather than answered without K2 "
-        "(Sec. 9.1); the full-tensor K2 is #180",
+        "(Sec. 9.1); a .erigold full-tensor sidecar beside it (#180) serves such a pair",
         q));
   p.k2 = want;
   return p;
@@ -1363,11 +1391,15 @@ Result<std::pair<ScDotted, ScDotted>> curvatureSets(const ScOrbitalCurvatureSetu
                                                     const DeviceResources& res) {
   ScDotted k1Set = p.k1 == ScCurvatureRoute::ThreeIndex
                        ? dfDottedFirst(s.ints, s.gen, s.rdm.dm1, w, res)
+                   : p.k1 == ScCurvatureRoute::FullTensor
+                       ? fullDottedFirst(s.ints, s.gen, s.rdm.dm1, w, res)
                        : NEVPT2_TRY(dottedAtMatrix(s.ints, s.gen, s.rdm.dm1, w, res));
   // The composition's outer direction is the active-active one; z^x is
   // symmetric in (u, v), so either way round is the same term.
   ScDotted k2Set = p.k2 == ScCurvatureRoute::ThreeIndex
                        ? dfDottedCross(s.ints, s.gen, s.rdm.dm1, r.u, r.v, res)
+                   : p.k2 == ScCurvatureRoute::FullTensor
+                       ? fullDottedCross(s.ints, s.gen, s.rdm.dm1, r.u, r.v, res)
                        : NEVPT2_TRY(composedCross(s.ints, s.gen, s.rdm.dm1, p.uAct ? r.u : r.v,
                                                   p.uAct ? r.v : r.u, res));
   return std::pair<ScDotted, ScDotted>{std::move(k1Set), std::move(k2Set)};

@@ -431,6 +431,15 @@ struct GeneralIntegralsDevice {
   // `ThreeIndex` route below), and what says a case is fitted on the device.
   DeviceTensor b;
   bool densityFitted() const { return b.rank() == 3; }
+
+  // A CONVENTIONAL case's whole MO-integral tensor (pq|rs) (n_mo, n_mo, n_mo,
+  // n_mo), uploaded by the caller from a `.erigold` sidecar (#180); EMPTY
+  // otherwise, and never on a fitted case. What the orbital block's
+  // cross-slot curvature reads for a pair with neither member active-active
+  // (the `FullTensor` route below): two general indices reach every MO
+  // integral (docs/hessian-theory.md, Sec. 5.4). Nothing else reads it.
+  DeviceTensor eri;
+  bool hasFullTensor() const { return eri.rank() == 4; }
 };
 
 // --- the density-fitted inventory (#165) -------------------------------------
@@ -1069,10 +1078,14 @@ Result<ScMixedHessianVectorResult> scMixedHessianVectorDevice(const ScMixedHessi
 // has the derivation). On a density-fitted case the golden and its NEVPT2F1
 // sidecar carry the whole B[L, p, q], and K2 for ANY pair is a three-index
 // product jet (the `ThreeIndex` route; GeneralIntegralsDevice::b). A
-// conventional pair with neither member active-active is REFUSED, as
-// Unsupported, before any device work -- never answered with K1 alone
-// (Sec. 9.1: an omitted K2 is invisible to the duality, which would omit it in
-// both modes). Lifting that refusal is #180's full-tensor K2.
+// conventional pair with neither member active-active needs the whole
+// MO-integral tensor: with it uploaded (GeneralIntegralsDevice::eri, a
+// `.erigold` sidecar, #180) K2 for ANY pair is the same product jet with the
+// exact four-index factorisation (pq|rs) = sum_L E_L[p, q] G_L[r, s], E the
+// identity over L = (p', q') and G the tensor itself (the `FullTensor`
+// route); WITHOUT it such a pair is REFUSED, as Unsupported, before any
+// device work -- never answered with K1 alone (Sec. 9.1: an omitted K2 is
+// invisible to the duality, which would omit it in both modes).
 //
 // THE TRACED PAIRS' ZERO (Sec. 5.1). h1e_v_Sr's subtracted trace and v2tr
 // depend on the orbitals through the rotated active projector U P U^T, whose
@@ -1088,9 +1101,12 @@ Result<ScMixedHessianVectorResult> scMixedHessianVectorDevice(const ScMixedHessi
 // ScOrbitalCurvatureResult::value() + those terms. This call owns the I''
 // half and nothing else.
 enum class ScCurvatureRoute {
-  Auto,        // K1: Sidecar. K2: ThreeIndex on a fitted case, else Sidecar, else refused
+  Auto,        // K1: Sidecar. K2: ThreeIndex on a fitted case, else Sidecar (one of u, v
+               // active-active), else FullTensor (the tensor uploaded), else refused
   Sidecar,     // K1: the promotion rule at W. K2: the composition (one of u, v active-active)
   ThreeIndex,  // the product jets of B -- density-fitted only (K1's an independent check)
+  FullTensor,  // the same jets over the full tensor -- a conventional case with
+               // GeneralIntegralsDevice::eri (#180; K1's an independent check)
 };
 
 const char* scCurvatureRouteName(ScCurvatureRoute r);
@@ -1148,9 +1164,10 @@ struct ScOrbitalCurvatureSetup {
 
 // Both terms along each pair. A malformed direction (shape, antisymmetry), a
 // sidecar that does not fit the integrals, a route the data cannot serve
-// (`ThreeIndex` on a conventional case), or a conventional pair with neither
-// member active-active is the caller's input: an Error, Unsupported for the
-// last two, before any walk. Integral-direct, one slab per block; one walk per
+// (`ThreeIndex` on a conventional case, `FullTensor` without the tensor or on
+// a fitted one), or a conventional pair with neither member active-active and
+// no full tensor is the caller's input: an Error, Unsupported for the last
+// two, before any walk. Integral-direct, one slab per block; one walk per
 // pair (K1, K2 and the traced shares as four dotted directions), plus one
 // plain RDM build per term per tangent pair, at `opt.nTiles` -- the plain
 // build's floors (docs/performance.md, "Tile floors").
@@ -1347,7 +1364,9 @@ Result<std::vector<ScOrbitalSandwichResult>> scOrbitalSandwichDevice(
 // Eddot_kk(u, v) assembled: the curvature's two terms (with `setup.ci` the
 // digests' forward term too) and the sandwich, per pair. The curvature's
 // refusal stands -- a conventional pair with neither member active-active has
-// no K2, and is refused as Unsupported before any device work, never answered
+// no K2 without the full tensor (GeneralIntegralsDevice::eri, which no caller
+// of this one uploads: --sc-hessian-kk's ladders displace stored blocks only),
+// and is refused as Unsupported before any device work, never answered
 // without it (Sec. 9.1). `setup.ci` is required (the sandwich's digests); a
 // request's `tangent` asks for both terms' second mode.
 struct ScOrbitalHessianResult {
@@ -1875,9 +1894,10 @@ Result<std::vector<ScDigestTangent>> pcDigestRotationTangentDevice(
 //        active-active directions is h1e_v_Sr's share alone);
 //   K2 = <Ehat'_pc, I^x[u, v]>, from the sidecar's composition when one
 //        member is active-active, from the three-index jets of B on a
-//        density-fitted case; a conventional pair with neither member
-//        active-active is refused as Unsupported before any device work (the
-//        same rule as SC's; #180 lifts it for both).
+//        density-fitted case, from the four-index jets of the full tensor on
+//        a conventional case that has one uploaded (#180); a conventional
+//        pair with neither member active-active and no full tensor is refused
+//        as Unsupported before any device work (the same rules as SC's).
 //
 // Both modes per term: the adjoint pairing (integral + eps + <hbar_pc, h2e''>)
 // and the forward tangent (pcRotationTangent* at the same inputs + eps + the
@@ -2123,8 +2143,8 @@ Result<std::vector<PcOrbitalSandwichResult>> pcOrbitalSandwichDevice(
 // (pcOrbitalCurvatureDevice, with `setup.ci` the digests' forward term too)
 // plus the sandwich, per pair, in one orbital-energy mode. The curvature's
 // refusal stands -- a conventional pair with neither member active-active
-// has no K2 and is refused as Unsupported before any device work, never
-// answered without it (Sec. 6.7, 9.1). `setup.ci` is required (the
+// has no K2 without the full tensor (as SC's) and is refused as Unsupported
+// before any device work, never answered without it (Sec. 6.7, 9.1). `setup.ci` is required (the
 // sandwich's digests); `setup.digestAdjoint` must be PC's hbar
 // (pcDigestAdjointDevice); a request's `tangent` asks for both terms' second
 // mode. FROZEN (`epsKappa` false) drops the curvature's `eps` terms (the

@@ -43,7 +43,12 @@ different times, the last by luck (issue #71). Since then there is one parser,
    through ``golden_format.read_pertgold`` / ``write_pertgold``, held to the
    golden and gradient sidecar beside it (partition, calculation -- ``naux``
    -- and ``mo_coeff`` bit for bit); both flavours, conventional and
-   density-fitted, must be present.
+   density-fitted, must be present. Each ``golden/*.erigold`` full
+   MO-integral tensor sidecar (#180, ``NEVPT2E1``) through
+   ``golden_format.read_erigold`` / ``write_erigold``, held to the
+   conventional golden and gradient sidecar beside it (partition and
+   ``mo_coeff`` bit for bit), and its tensor to the gradient sidecar's
+   ``g_xa_aa`` row it overlaps; at least one must be present.
 3. **The writer as it is now.** A golden written by the current
    ``generate_golden.write_golden`` (both reference kinds) is read back by
    every reader, so a field added to the writer and not to the readers fails
@@ -440,6 +445,49 @@ def committed_sidecars(fail: Failures, tmp: Path) -> None:
                    f"no committed {'density-fitted' if fitted else 'conventional'} *.pertgold "
                    "was read, so that flavour is untested")
 
+    eris = sorted(GOLDEN.glob("*.erigold"))
+    fail.check(bool(eris), "no committed *.erigold was read, so that layout is untested")
+    for path in eris:
+        r = fail.run(f"{path.name}: golden_format.read_erigold", gf.read_erigold, path)
+        if r is None:
+            continue
+        header, arrays = r
+        bad = non_finite(arrays)
+        fail.check(not bad, f"{path.name}: non-finite values in {', '.join(bad)}")
+        out = tmp / path.name
+        fail.run(f"{path.name}: golden_format.write_erigold",
+                 lambda o=out, h=header, a=arrays: gf.write_erigold(o, header=h, arrays=a))
+        fail.check(out.exists() and out.read_bytes() == path.read_bytes(),
+                   f"{path.name}: golden_format.write_erigold does not reproduce it")
+        out.unlink(missing_ok=True)
+        # <stem>.erigold sits beside a CONVENTIONAL <stem>.nevpt2gold /
+        # .gradgold and is written in their frame.
+        twin = path.with_suffix(".nevpt2gold")
+        fail.check(twin.exists(), f"{path.name}: no golden beside it")
+        if twin.exists():
+            g, ga = gf.read_golden(twin, want={"B_aa"})
+            fail.check((header["nact"], header["ncore"]) == (g["ncas"], g["ncore"]),
+                       f"{path.name}: its partition is not its golden's")
+            fail.check("B_aa" not in ga, f"{path.name}: its golden is density-fitted")
+        side = path.with_suffix(".gradgold")
+        fail.check(side.exists(), f"{path.name}: no gradient sidecar beside it")
+        if side.exists():
+            s, sa = gf.read_gradgold(side)
+            fail.check("naux" not in s, f"{path.name}: its gradient sidecar is density-fitted")
+            fail.check((header["nao"], header["nmo"], header["ncore"], header["nact"],
+                        header["nvirt"])
+                       == (s["nao"], s["nmo"], s["ncore"], s["nact"], s["nvirt"]),
+                       f"{path.name}: its orbital space is not its gradient sidecar's")
+            fail.check(np.array_equal(arrays["mo_coeff"], sa["mo_coeff"]),
+                       f"{path.name}: its mo_coeff is not its gradient sidecar's, bit for bit")
+            a = slice(header["ncore"], header["ncore"] + header["nact"])
+            if "g_xa_aa" in sa:
+                gap = float(np.abs(arrays["eri"][:, a, a, a] - sa["g_xa_aa"]).max())
+                fail.check(gap < 1e-10, f"{path.name}: its (x a | a a) is {gap:.1e} off the "
+                           "gradient sidecar's g_xa_aa -- not the same integrals")
+        print(f"  {path.name}: {gf.ERIGOLD_MAGIC.decode()}, nmo {header['nmo']}, "
+              f"{arrays['eri'].nbytes / 1e6:.2f} MB", flush=True)
+
 
 def fresh_writer(fail: Failures, tmp: Path) -> None:
     """A small golden from the writer as it is now, both kinds, through every
@@ -559,7 +607,8 @@ def main() -> int:
             print(f"  {item}")
         return 1
     print("PASS: every golden, gradient sidecar, MO sidecar, source-term oracle, "
-          "response sidecar and integral perturbation sidecar round-trips through "
+          "response sidecar, integral perturbation sidecar and full MO-integral tensor "
+          "sidecar round-trips through "
           f"every reader, layouts {sorted(m.decode() for m in layouts)}")
     return 0
 

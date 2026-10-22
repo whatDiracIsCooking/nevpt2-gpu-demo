@@ -119,9 +119,11 @@ DeviceTensor reshapeView(const DeviceTensor& t, std::vector<int64_t> dims,
 Tensor downloadTensor(const DeviceTensor& t, wwrStream_t stream);
 
 // n x n identity, uploaded -- the device twin of Tensor::eye. Built host-side
-// and uploaded rather than a dedicated kernel: it's at most norb x norb
-// (<=256 elements here), negligible next to the norb^6-scale contractions
-// this whole file exists for.
+// and uploaded rather than a dedicated kernel: mostly it is norb x norb
+// (<=256 elements), negligible next to the norb^6-scale contractions this
+// whole file exists for. Its largest caller is the orbital curvature's
+// full-tensor factorisation (#180), n_mo^2 x n_mo^2 -- the size of the full
+// MO-integral tensor it sits beside, uploaded once per pair.
 DeviceTensor deviceEye(int64_t n, const DeviceResources& res,
                        std::source_location loc = std::source_location::current());
 
