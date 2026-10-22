@@ -388,10 +388,10 @@ OPENMOLCAS_PIN_FILES=${OPENMOLCAS_PIN_FILES:-"docker/Dockerfile.cuda
 docker/Dockerfile.hip
 docker/Dockerfile.combined"}
 
-# Whether docker/build.sh installs OpenMolcas into the GPU images. ON here so
-# this checkout's images can run the cross-check; the Dockerfile's own ARG
-# default stays 0, as INSTALL_CLAUDE_CODE's and INSTALL_AGY's do, so a by-hand
-# `docker build` gets none. It is a from-source Fortran build (and gfortran
-# with it) in a leaf layer that is cached until the pin moves; turn it off
-# for one build with INSTALL_OPENMOLCAS=0 before docker/build.sh.
-INSTALL_OPENMOLCAS=${INSTALL_OPENMOLCAS:-1}
+# Whether docker/build.sh installs OpenMolcas into the GPU images. OFF by
+# default: it is a from-source Fortran build (and gfortran with it) that only
+# the offline reference_data/molcas_casscf_hessian.py needs. The Dockerfile's
+# own ARG default is 0 too. Turn it on for one build with
+# INSTALL_OPENMOLCAS=1 before docker/build.sh; its leaf layer is then cached
+# until the pin moves.
+INSTALL_OPENMOLCAS=${INSTALL_OPENMOLCAS:-0}

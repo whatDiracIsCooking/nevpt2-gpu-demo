@@ -2688,8 +2688,9 @@ the `Z`-weighted third-derivative term (#216) or any NEVPT2 piece: CASSCF's
 own multipliers vanish.
 
 **The tool.** OpenMolcas `v26.06` (commit `8355057f`), built from source by
-`docker/install-openmolcas.sh` and pinned in the three GPU Dockerfiles
-(`docker/README.md`, "OpenMolcas, for one offline cross-check"). It runs
+`docker/install-openmolcas.sh` and pinned in the three GPU Dockerfiles,
+installed only in an image built with `INSTALL_OPENMOLCAS=1` (off by default;
+`docker/README.md`, "OpenMolcas, for one offline cross-check"). It runs
 through `pymolcas`: `$PYMOLCAS`, else `pymolcas` on `PATH`, else
 `--pymolcas`.
 

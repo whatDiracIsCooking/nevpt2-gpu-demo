@@ -102,7 +102,7 @@ Usage::
 
 ``--pymolcas`` defaults to ``$PYMOLCAS``, then ``pymolcas`` on ``PATH``
 (``docker/install-openmolcas.sh``'s wrapper, ``/usr/local/bin/pymolcas`` in
-the images). The measured agreement is in
+an image built with ``INSTALL_OPENMOLCAS=1``; off by default). The measured agreement is in
 docs/reference-data.md, "The CASSCF Hessian against OpenMolcas".
 """
 
@@ -339,7 +339,7 @@ def find_pymolcas(arg: str | None) -> str:
         if cand:
             return cand
     sys.exit("molcas_casscf_hessian: no pymolcas (--pymolcas, $PYMOLCAS, or PATH); "
-             "docker/install-openmolcas.sh installs it")
+             "INSTALL_OPENMOLCAS=1 docker/build.sh <target> installs it")
 
 
 def run_molcas(pymolcas: str, text: str, work: Path, project: str = "hess") -> tuple[str, Path]:

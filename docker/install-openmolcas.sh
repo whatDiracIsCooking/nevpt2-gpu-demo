@@ -50,10 +50,9 @@
 #   OPENMOLCAS_FC=... OPENMOLCAS_JOBS=6 bash docker/install-openmolcas.sh
 set -euo pipefail
 
-# OPT-IN AT THIS LAYER, exactly as the two agents are: the ARG's default is 0,
-# so a plain `docker build` of a GPU Dockerfile gets no OpenMolcas; THIS
-# project's builds get it because devtools/config.sh defaults
-# INSTALL_OPENMOLCAS to 1 and docker/build.sh forwards it.
+# OPT-IN: the ARG's default is 0, and so is devtools/config.sh's, which
+# docker/build.sh forwards; a build gets OpenMolcas only with
+# INSTALL_OPENMOLCAS=1 set for it.
 if [ "${INSTALL_OPENMOLCAS:-0}" != 1 ]; then
   echo "=== OpenMolcas not installed (INSTALL_OPENMOLCAS=${INSTALL_OPENMOLCAS:-0}; set 1 to opt in) ==="
   if [ -f "${OPENMOLCAS_PREFIX:-/opt/openmolcas}/VERSION" ]; then

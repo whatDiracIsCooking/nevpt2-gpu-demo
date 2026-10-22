@@ -80,10 +80,9 @@ ARG OPENMOLCAS_COMMIT=8355057f32d65706a35996b5ab07cac2962bb728
 ENV OPENMOLCAS_VERSION=${OPENMOLCAS_VERSION} \
     OPENMOLCAS_COMMIT=${OPENMOLCAS_COMMIT}
 # OPT-IN AT THIS LAYER, as the two agents below are: INSTALL_OPENMOLCAS=0, this
-# ARG's default, skips it (and the gfortran it brings), so a plain `docker
-# build` of this file does not get it. docker/build.sh ALWAYS forwards the value
-# from devtools/config.sh, where this project sets it to 1; turn it off for one
-# build with `INSTALL_OPENMOLCAS=0 docker/build.sh <target>`.
+# ARG's default, skips it (and the gfortran it brings). Unlike theirs, the
+# value docker/build.sh forwards from devtools/config.sh is 0 as well; turn
+# it on for one build with `INSTALL_OPENMOLCAS=1 docker/build.sh <target>`.
 ARG INSTALL_OPENMOLCAS=0
 ENV INSTALL_OPENMOLCAS=${INSTALL_OPENMOLCAS}
 RUN --mount=type=bind,source=docker/install-openmolcas.sh,target=/tmp/install-openmolcas.sh \

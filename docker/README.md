@@ -247,13 +247,12 @@ therefore runs `docker/install-openmolcas.sh`, which builds it from source:
   `doctor.sh` reads.
 
 It is opt-in at the layer like the two agents, and placed before them
-because it is the slow layer and the rarely bumped one. `devtools/config.sh`
-turns it on (`INSTALL_OPENMOLCAS=1`), so `docker/build.sh` installs it; the
-`ARG` defaults to `0`, so a by-hand build does not. To drop it from one
-build:
+because it is the slow layer and the rarely bumped one. Unlike the agents it
+is **off** in `devtools/config.sh` too (`INSTALL_OPENMOLCAS=0`), so neither
+`docker/build.sh` nor a by-hand build installs it. To add it to one build:
 
 ```bash
-INSTALL_OPENMOLCAS=0 docker/build.sh cuda
+INSTALL_OPENMOLCAS=1 docker/build.sh cuda
 ```
 
 `Dockerfile.combined` inherits the `cuda` image's copy when it is already at
