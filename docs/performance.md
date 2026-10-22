@@ -886,6 +886,41 @@ energy stage, plus the perturbation's host build. HSOH SC's 55 s on the
 RX 9060 XT is out of line with every other row (and with HSOH PC's 3.9 s);
 where it goes has not been separated.
 
+### The analytic nuclear term (#247)
+
+`nevpt2_grad.py`'s nuclear term used to difference `Phi` along the frozen
+path, four displaced evaluations per Cartesian component for each of its two
+halves, with `E_corr` among them. Since #247 it is analytic: density pairs
+and the dump's integral adjoint against the path's derivative integrals, and
+no displaced geometry ([`testing.md`](testing.md), "The analytic nuclear
+term"). It is offline Python, but `gradient_at` (#212) pays for it once per
+gradient, and the seminumerical Hessian (#217) and the optimiser (#218) call
+`gradient_at` many times.
+
+One `gradient_at` call per row, at the case's reference geometry from the
+committed `.mogold`. "Before" is the code before #247 (the same tree's
+`reference_data/` at the merge base); "after" is this change. 2026-10-22, the
+RTX 3080 box with nothing else of ours running, dump at `--tiles 3` under the
+card lock, `--workers 12`, one run per row:
+
+| case | wall, before | wall, after | solve stage, before → after | nuclear term, after |
+|---|---:|---:|---:|---:|
+| N2 CAS(4,4) SC | — | 2.4 s | — → 1.4 s | 0.4 s |
+| N2 CAS(4,4) PC | 36.0 s | 29.2 s | 10.6 → 3.2 s | 0.4 s |
+| HSOH CAS(6,6) SC | 34.8 s | 25.9 s | 19.6 → 10.9 s | 1.4 s |
+| HSOH CAS(6,6) PC | 177.9 s | 80.4 s | 135.8 → 38.7 s | 1.4 s |
+| acrolein CAS(6,5) SC | 223.5 s | 169.6 s | 170.7 → 117.1 s | 12.9 s |
+| acrolein CAS(6,5) PC | 954.8 s | 267.9 s | 872.0 → 186.0 s | 13.0 s |
+
+The other stages (CASSCF, transient golden, dump) do not change; N2 SC's
+"before" row was not run. The quotient's own time, taken beside the
+analytic one in `nevpt2_grad.py --nuclear-quotient --source dump`, was 70 s
+(SC) and 709 s (PC) on acrolein, 10 s and 96 s on HSOH. So PC gains most:
+every displaced `Phi` there was a block2 PC solve. What is left in the solve
+stage is the `kappa` sweep and the coupled CP-CASSCF solve. Where acrolein's
+13 s analytic term goes (#232's `Constraint` setup, the full MO tensor, the
+two adjoint contractions) has not been profiled.
+
 ### The density-fitted orbital source term
 
 `nevpt2_sc_pseudodensity --kappa-full` on a `*_df` golden (#165;
