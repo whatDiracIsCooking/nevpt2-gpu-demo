@@ -13,7 +13,8 @@ and it carries **no measured numbers**. Level 1 (§2–§6) has since been built
 what is in the tree, what is refused and what is deliberately not built is
 [`gradients.md`](gradients.md), §1.1, and the "as built" notes below
 (§9.1's second table among them) say where the code sits. Levels 2 and 3
-(§7–§8) are not in the tree. Size formulas in `n_mo`, `n_core`, `n_act`,
+(§7–§8) are not in the tree, but for §8's one "as built" piece, the NEVPT2
+half of `L_{R Θ}` (#220). Size formulas in `n_mo`, `n_core`, `n_act`,
 `n_virt` and `ndet` are algebra and stay here; what any of them works out to in bytes or seconds belongs in
 [`performance.md`](performance.md) or [`reference-data.md`](reference-data.md).
 
@@ -2270,6 +2271,26 @@ gives the form worth implementing:
   Hessian-vector products against the responses. That is exactly the
   action-on-a-direction deliverable §5.3 argues for, which is the one piece of
   good news in this section.
+
+**As built (#220): the NEVPT2 half of `L_{R Θ}`.** At fixed parameters a
+nuclear coordinate enters the energy only through its perturbed Hamiltonian
+`Idot_A`. So `L_{R_A Θ}`'s NEVPT2 part is the source terms' tangent along an
+integral perturbation, `(Ydot_A, ydot_A)`, and the tree computes it
+(`nevpt2_sc_pseudodensity --sc-source-tangent`, SC). Nothing new is needed
+to compute it, because `Idot` is a first-order dotted input set (§5.4). Its
+cross term with a rotation is
+`d^2/dh ds [U^T (I + h Idot) U] = A_kappa(Idot)`, the first-order promotion
+rule applied to `Idot`. That has no `W` term and reads one general index of
+`Idot`, so the gradient sidecar's inventory of `Idot` suffices. A
+conventional case needs the full tensor only offline, where the connection
+term's derivative is formed. `Ydot` is then §5.1's two terms with one leg
+`Idot`: the first-order pairing at `A_kappa(Idot)`, and the sandwich's
+reverse with `v = Idot`. `ydot` is §5.5's R1 with `w -> Idot`, the orbital
+energies' mixed response read as `W` at `Idot`'s own rows. The tangents meet
+`d^2E/dh dtheta` forward over forward by duality. §5.6's empty perturbers
+need care, because K6 needs both legs to populate a tuple. A perturbation
+that keeps the point group populates none, and one that does not is refused
+([`gradients.md`](gradients.md), §1.1).
 
 Three things are needed that the gradient did not need:
 

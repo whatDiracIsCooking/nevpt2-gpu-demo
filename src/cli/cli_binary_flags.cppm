@@ -73,6 +73,14 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //   --sc-hessian-kk nevpt2_sc_pseudodensity alone (#158): the orbital block's
 //                   sandwich and the whole Eddot_kk, for --sc-hessian-kk-int's
 //                   reasons, its ladders displacing as that flag's do.
+//   --sc-source-tangent PATH
+//                   nevpt2_sc_pseudodensity alone (#220): the SC source terms'
+//                   tangent along a `.pertgold`'s integral perturbations --
+//                   the orbital source term Y and the sidecar it is read out
+//                   of are this binary's, and its ladders displace the stored
+//                   blocks and the sidecar's inventory as --kappa-full's do.
+//                   SC only, and refused the approximate digests with the
+//                   Hessian flags (a mixed second derivative).
 //   each binary's own flags: that binary alone. --dump-source-terms is
 //                   nevpt2_sc_pseudodensity's because Y_xy needs the gradient
 //                   sidecar's full-MO-range arrays; nevpt2_demo computes y_I
@@ -88,7 +96,8 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   gated against --pc-hessian's Eddot by duality, with the
 //                   same ladder flags; the two are one check at a time.
 //   --gradgold      nevpt2_sc_pseudodensity (--kappa-full, --sc-hessian-kc,
-//                   --sc-hessian-kk-int, --sc-hessian-kk, --dump-source-terms,
+//                   --sc-hessian-kk-int, --sc-hessian-kk, --sc-source-tangent,
+//                   --dump-source-terms,
 //                   --source-oracle; each with or without --pc where it takes
 //                   it), nevpt2_demo (--gradient-source, whose y_I and forward
 //                   tangent then carry the orbital energies' CI response,
@@ -125,6 +134,7 @@ constexpr std::array kFlagTable{
     FlagSpec{"--sc-hessian-kc", "", kScPd},
     FlagSpec{"--sc-hessian-kk-int", "", kScPd},
     FlagSpec{"--sc-hessian-kk", "", kScPd},
+    FlagSpec{"--sc-source-tangent", "path", kScPd},
     FlagSpec{"--gradgold", "path", kDemo | kScPd | kPcTangent},
     FlagSpec{"--dump-source-terms", "path", kScPd},
     FlagSpec{"--source-oracle", "path", kScPd},
@@ -186,6 +196,8 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
     opt.scHessianKkInt = true;
   } else if (a == "--sc-hessian-kk") {
     opt.scHessianKk = true;
+  } else if (a == "--sc-source-tangent") {
+    opt.scSourceTangentPath = std::string(args[++i]);
   } else if (a == "--gradgold") {
     opt.gradgoldPath = std::string(args[++i]);
   } else if (a == "--dump-source-terms") {
@@ -215,16 +227,18 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
   return {};
 }
 
-// Every Hessian flag, of every binary (docs/hessian-theory.md, Sec. 9.1).
-constexpr std::array<std::string_view, 7> kHessianFlags{
-    "--sc-hessian",    "--sc-hessian-vector", "--sc-hessian-kc", "--sc-hessian-kk-int",
-    "--sc-hessian-kk", "--pc-hessian",        "--pc-hessian-vector"};
+// Every Hessian flag, of every binary (docs/hessian-theory.md, Sec. 9.1) --
+// and --sc-source-tangent (#220), a mixed second derivative of the energy in
+// the integrals and the parameters, refused the approximate digests alike.
+constexpr std::array<std::string_view, 8> kHessianFlags{
+    "--sc-hessian",    "--sc-hessian-vector", "--sc-hessian-kc",     "--sc-hessian-kk-int",
+    "--sc-hessian-kk", "--pc-hessian",        "--pc-hessian-vector", "--sc-source-tangent"};
 
 // The first Hessian flag `opt` sets, in kHessianFlags' order; empty for none.
 std::string_view hessianFlagOf(const Options& opt) {
   const std::array<bool, kHessianFlags.size()> set{
-      opt.scHessian,   opt.scHessianVector, opt.scHessianKc,    opt.scHessianKkInt,
-      opt.scHessianKk, opt.pcHessian,       opt.pcHessianVector};
+      opt.scHessian,   opt.scHessianVector, opt.scHessianKc,     opt.scHessianKkInt,
+      opt.scHessianKk, opt.pcHessian,       opt.pcHessianVector, !opt.scSourceTangentPath.empty()};
   for (std::size_t k = 0; k < set.size(); ++k)
     if (set[k]) return kHessianFlags[k];
   return {};
@@ -390,6 +404,21 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
             "--sc-hessian-kk checks the orbital Hessian block; --kappa-act, --kappa-full, "
             "--sc-hessian-kc, --sc-hessian-kk-int, --dump-source-terms and --source-oracle are "
             "jobs of their own -- run one at a time");
+      // --sc-source-tangent (#220) likewise: one job per run, and SC's alone
+      // (it differentiates the SC source terms; PC's tangent is not built).
+      if (!opt.scSourceTangentPath.empty() &&
+          (opt.kappaAct || opt.kappaFull || opt.scHessianKc || opt.scHessianKkInt ||
+           opt.scHessianKk || !opt.dumpSourceTermsPath.empty() ||
+           !opt.sourceOraclePath.empty()))
+        return err_config(
+            "--sc-source-tangent checks the source terms' tangent along an integral "
+            "perturbation; --kappa-act, --kappa-full, --sc-hessian-kc, --sc-hessian-kk-int, "
+            "--sc-hessian-kk, --dump-source-terms and --source-oracle are jobs of their own -- "
+            "run one at a time");
+      if (c.pc && !opt.scSourceTangentPath.empty())
+        return err_config(
+            "--sc-source-tangent differentiates the SC source terms along an integral "
+            "perturbation; it has no --pc path");
       // --pc picks PC-NEVPT2's source terms (#74), PC's orbital curvature
       // (#200), PC's mixed block (#201) and PC's sandwich and Eddot_kk
       // (#202): only the five jobs that assemble them take it.
@@ -401,11 +430,11 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
             "and --kappa-full are the SC energy's and have no --pc path");
       if (!opt.gradgoldPath.empty() && !opt.kappaFull && !opt.scHessianKc &&
           !opt.scHessianKkInt && !opt.scHessianKk && opt.dumpSourceTermsPath.empty() &&
-          opt.sourceOraclePath.empty())
+          opt.sourceOraclePath.empty() && opt.scSourceTangentPath.empty())
         return err_config(
             "--gradgold is the sidecar --kappa-full, --sc-hessian-kc, --sc-hessian-kk-int, "
-            "--sc-hessian-kk, --dump-source-terms and --source-oracle read; it does nothing on "
-            "its own");
+            "--sc-hessian-kk, --sc-source-tangent, --dump-source-terms and --source-oracle "
+            "read; it does nothing on its own");
       // --sc-hessian-kc / -kk-int / -kk with an approximate digest never get
       // here: checkHessianDigests refused them before finalize(), as
       // Unsupported (docs/hessian-theory.md, Sec. 9.1).

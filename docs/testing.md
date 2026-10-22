@@ -113,7 +113,13 @@ checked in two halves:
   sidecar goes through `read_respgold` / `write_respgold` byte for byte and
   is held to the `_casscf` golden and gradient sidecar beside it: partition,
   `ci` and `mo_coeff` bit for bit, the frame its directions are written in;
-  at least one must be committed. Ends `PASS:` or `FAIL:` with an exit status.
+  at least one must be committed. Since #220 every committed `.pertgold`
+  integral perturbation sidecar goes through `read_pertgold` /
+  `write_pertgold` byte for byte and is held to the golden and gradient
+  sidecar beside it (partition, calculation, `mo_coeff` bit for bit); a
+  conventional and a density-fitted one must both be committed. The C++
+  scan's magic pattern spells `NEVPT2I` too. Ends `PASS:` or `FAIL:` with an
+  exit status.
 
 The Python half registers **no ctest entry**, for the same reasons the
 gradient comparison does not ("Why there is no ctest entry for it", below):
@@ -129,7 +135,9 @@ file but still fails the scan on a seek or a golden magic.
 
 Measured (no card, 2026-10-21; the 17 committed goldens — 12 `G1`, 5 `G2` —
 7 gradient sidecars — 5 `D1`, 2 `F1` — 5 MO sidecars and 14 source-term
-oracles — 3 `S1`, 2 `P1`, 5 `SD`, 4 `PD`): 1.2 s wall, `PASS:`. The negative
+oracles — 3 `S1`, 2 `P1`, 5 `SD`, 4 `PD`): 1.2 s wall, `PASS:`. With #220's
+fitted CASSCF gradient sidecar (9 gradient sidecars now, 6 `D1` and 3 `F1`), the two `.respgold` and
+the two `.pertgold` (one of each calculation): 1.3 s, `PASS:` (2026-10-22). The negative
 controls below were run when only the three N2 `G2` goldens were committed: a
 scratch field added to the `G2` header table fails it on all three `G2`
 goldens (their array tables
@@ -310,6 +318,18 @@ What they are, all on synthetic inputs, no PySCF solve, no card, no network:
   fresh solve (1e-10), with a misshapen array refused. About 25 s of CPU
   ([`reference-data.md`](reference-data.md), "The analytic CASSCF nuclear
   Hessian").
+- **`test_integral_perturbation.py`** (#220) — `integral_perturbation.py`
+  and the `.pertgold` format. The writer → reader round trip and byte-exact
+  rewrite. Each of the 22 arrays left out in turn is refused, by the writer
+  and by the reader of a file written past it. A misshapen array and a bad
+  partition are refused. The inventory is linear in `(h, (pq|rs))`, and the
+  eight-fold symmetrization is idempotent. The analytic perturbed `h` and
+  `(pq|rs)`, conventional and **fitted** (`DfSkeleton`'s three-centre and
+  metric derivatives), are held on every coordinate of a C1 water (6-31G,
+  auxiliary basis `weigend`) to a Richardson-extrapolated central difference
+  of the integrals rebuilt along the frozen path (1e-8). About 4 s of CPU
+  ([`reference-data.md`](reference-data.md), "The integral perturbation
+  sidecar").
 
 **The thresholds are written into the tests as numbers**, not read from the
 module: a test comparing against `DEGENERACY_TOL` would move with it.
@@ -325,7 +345,9 @@ above), after `ruff`. Measured: 343 tests, 32 s, no card (RTX 3080 box's
 CPU, 2026-10-20, with two other CPU jobs running; the ten empty-perturber
 cases take 1 s of it, and the eleven PC orbital-Hessian cases (#199) another
 1 s). With #219's eleven CASSCF-Hessian cases: 369 tests, 46 s (2026-10-22,
-a sibling build sharing the CPU). Negative controls, run once in scratch and reverted: setting
+a sibling build sharing the CPU). With #220's 27 integral-perturbation cases
+(and whatever landed between): 396 tests, 74 s (2026-10-22, the golden
+regeneration gate running beside it on the same CPU). Negative controls, run once in scratch and reverted: setting
 `DEGENERACY_TOL` to 1e-5 fails 4 tests (the pinned value and the three
 0.99e-4 refusals); leaving the constant alone and loosening the comparison
 inside `_check_degeneracy` to `DEGENERACY_TOL / 10` fails the same three
@@ -342,8 +364,9 @@ nothing skips.
 `devtools/golden-repro.sh` re-runs the promise CLAUDE.md makes — the
 generators are bit-reproducible, so a regenerated file that differs from the
 committed one means something changed — for every committed N2 CAS(4,4) /
-CAS(8,8) reference, the C1 case's three HSOH files (#213) and the two CASSCF
-response sidecars (#219). Twenty-five files from twenty generator runs, each with the
+CAS(8,8) reference, the C1 case's three HSOH files (#213), the two CASSCF
+response sidecars (#219) and the two integral perturbation sidecars (#220).
+Twenty-eight files from twenty-two generator runs, each with the
 generator's own settings (`--out` into a scratch directory is the only flag
 added):
 
@@ -352,13 +375,14 @@ added):
 | `n2_ccpvdz_cas44.nevpt2gold`, `.gradgold`; `n2_ccpvdz_cas88.nevpt2gold`, `.gradgold` | `generate_golden.py --gradgold` |
 | `n2_ccpvdz_cas44_df.nevpt2gold`, `.gradgold`; `n2_ccpvdz_cas88_df.nevpt2gold`, `.gradgold` | `generate_golden.py --df --gradgold` (the density-fitted `NEVPT2F1` sidecar, #164); for CAS(4,4), then `nevpt2_numgrad.py --df` on the sidecar it just wrote, in the same run, so its `grad_num*` arrays are regenerated too (#167) |
 | `n2_ccpvdz_cas44_casscf[_df].mogold` | `generate_golden.py --casscf --mo-out` (a fresh optimisation) |
-| `n2_ccpvdz_cas44_casscf[_df].nevpt2gold` | `generate_golden.py --mo-from` the **committed** sidecar, so a drifted sidecar fails as itself and not as its golden too |
+| `n2_ccpvdz_cas44_casscf[_df].nevpt2gold`, `n2_ccpvdz_cas44_casscf_df.gradgold` | `generate_golden.py --mo-from` the **committed** sidecar, so a drifted sidecar fails as itself and not as its golden too; the fitted run with `--gradgold`, writing the `NEVPT2F1` sidecar committed for #220 |
 | `n2_ccpvdz_cas44.srcgold`, `n2_ccpvdz_cas44_pc.srcgold` | `sc_source_oracle.py [--pc]`, reading the committed golden |
 | `n2_ccpvdz_cas44_dir.srcgold`, `n2_ccpvdz_cas44_pc_dir.srcgold` | `sc_source_oracle.py --directional [--pc]` (#105) |
 | `n2_ccpvdz_cas44_casscf[_pc][_dir].srcgold` | `sc_source_oracle.py --case n2_ccpvdz_cas44_casscf --mo-from` the **committed** sidecar `[--pc] [--directional]` (#117) |
 | `hsoh_def2svp_cas66_casscf.mogold` | `generate_golden.py --casscf --mo-out` (a fresh optimisation) |
 | `hsoh_def2svp_cas66_casscf.nevpt2gold`, `.gradgold` | `generate_golden.py --mo-from` the **committed** `.mogold` `--gradgold`, then `nevpt2_numgrad.py --reference casscf --workers 12` on the sidecar it just wrote, in the same run, so the sidecar's `grad_num*` arrays are regenerated too (#213) |
 | `n2_ccpvdz_cas44_casscf.respgold`, `hsoh_def2svp_cas66_casscf.respgold` | `casscf_nuclear_hessian.py --no-ladders --write`, on the state `--mo-from` the **committed** `.mogold` builds, refused unless it is the committed golden's frame bit for bit (#219) |
+| `n2_ccpvdz_cas44_casscf[_df].pertgold` | `integral_perturbation.py [--df] --no-ladders --write`, on the state `--mo-from` the **committed** `.mogold` builds, refused unless it is the committed golden's `ci` and gradient sidecar's `mo_coeff` bit for bit (#220) |
 
 The comparison is `cmp` on the whole file — the one place in this tree a
 byte comparison is right. One exception, the documented one
@@ -368,7 +392,7 @@ four the state fields must be byte-identical, the new `reference_kind` must
 be `casci`, and everything from the array count on byte-identical, each
 file's header length read with `golden_format.py arrays-at`. It prints one
 `PASS:`/`FAIL:` line per file (naming it) and exits 0 only if all
-twenty-five reproduce. `--committed DIR` compares against a copy instead of `golden/`
+twenty-eight reproduce. `--committed DIR` compares against a copy instead of `golden/`
 (the generator inputs stay `golden/`'s), `--only REGEX` narrows the set,
 `--out DIR` keeps the regenerated files and each run's log.
 
@@ -395,6 +419,7 @@ before #105 added the two directional files:
 | `-j 6`, twenty files, `n2_ccpvdz_cas44_df.gradgold` with its `grad_num`, #167 (same box, a sibling agent sharing it) | 178 s, all twenty `PASS:`; the `cas44_df` run, generator plus `nevpt2_numgrad.py --df`, 33 s |
 | `-j 6`, twenty-three files, the HSOH three added, #213 (the two-card box's CPU) | 227 s, all twenty-three `PASS:`; the `hsoh_casscf` run, generator plus the 72-state `--reference casscf` sweep at `--workers 12`, 198 s, the `hsoh_casscf_mo` run 16 s |
 | `-j 6`, twenty-five files, the two `.respgold` added, #219 (the 12-core reference box, a sibling build sharing it) | 236 s, all twenty-five `PASS:`; `cas44_casscf_resp` 4 s, `hsoh_casscf_resp` 11 s |
+| `-j 6`, twenty-eight files, the fitted CASSCF `.gradgold` and the two `.pertgold` added, #220 (the 12-core reference box, a sibling agent's offline job sharing it) | 236 s, all twenty-eight `PASS:`; `cas44_casscf_pert` and `cas44_casscf_df_pert` 2 s each, `cas44_casscf_df` (now with `--gradgold`) 27 s |
 
 Per generator run (the `-j 1` run): `--casscf` sidecars 2–3 s,
 `n2_ccpvdz_cas44.srcgold` 9 s, the CAS(4,4) goldens 26–27 s, the CAS(8,8)
@@ -1037,6 +1062,105 @@ tangent — is `test/gradient_plan/`'s `MixedTermsTests` and
 `SlabMultiplierTests` (card-free), each against a central difference of the
 class energy or of the multipliers themselves; the flag's refusals are
 `test/cli/`'s `CliScPseudodensityFlagTests`.
+
+## The source terms' tangent along an integral perturbation
+
+`nevpt2_sc_pseudodensity_cas44_casscf_sc_source_tangent` and
+`nevpt2_sc_pseudodensity_cas44_casscf_df_sc_source_tangent` (`gpu`) run
+`nevpt2_sc_pseudodensity --golden <case> --tiles 3 --sc-source-tangent
+golden/<case>.pertgold` on N2 CAS(4,4)'s CASSCF state and its density-fitted
+twin. They match `PASS: the SC source terms' tangent along the integral
+perturbation agrees with itself by duality to 1e-07 … on 2 of 6 coordinates;
+4 refused, populating empty perturbers (Sec. 5.6)`, and the fitted one ends
+`(density-fitted)` (#220). They check `nevpt2.gradient`'s
+`scSourceTangentDevice` (`Ydot` probed, `ydot` by reverse over forward) and
+`scSourceTangentForwardDevice` (`d²E/dh dθ` forward over forward), the gated
+`Y` and `y` differentiated along each coordinate's perturbed Hamiltonian
+([`hessian-theory.md`](hessian-theory.md), §8;
+`apps/sc_pseudodensity/source_tangent_check.cppm` has the checks, and
+[`reference-data.md`](reference-data.md), "The integral perturbation
+sidecar" the input). RTX 3080 (CUDA, `default` preset), 2026-10-22, the two
+entries' ctest run:
+
+| check, per computed coordinate (worst of the two) | CASSCF | CASSCF DF | gate |
+|---|---|---|---|
+| the gradient sidecar against its golden (once): restrictions, `h^eff`, `f`'s diagonal, (O2), `f` over the whole range | 4.6e-14 | 4.7e-14 | 1e-10 |
+| the dotted `h^eff` and `f` rebuilt from the dotted `h` and rows (every coordinate) | 3.7e-16 | 3.9e-16 | 1e-10 |
+| every probe's integrals term, adjoint against forward tangent (integral half), 378 probes | 3.5e-16 | 5.1e-16 | 1e-7 |
+| every probe's sandwich, reverse against forward, 378 probes | 7.1e-15 | 7.1e-15 | 1e-7 |
+| the duality `<Ydot, κ> + <ydot, u>` against `d²E/dh dθ`, four `θ`: `(κ, u)`, `(κ, 0)`, `(0, u)`, `(0, c)` | 4.9e-13 | 1.7e-12 | 1e-7 |
+| the translational sum rule along z, `max \|Σ_A Ydot_A\|` / `max \|Σ_A ydot_A\|` (printed, not gated) | 3.1e-13 / 6.8e-13 | 4.2e-12 / 3.6e-12 | — |
+
+`max |Ydot|` is 8.03 (the integrals term 3.6e-2, the sandwich 8.03) and
+`max |ydot|` 0.95 on both. At the first computed coordinate the `(κ, u)`
+forward total splits into the integrals term, its digests' forward term, the
+sandwich and the mixed block as -3.7e-3, -5.5e-4, -0.415 and -0.140. The
+`(0, c)` direction has the largest gap, about 1e-12.
+
+**The ladders: `Y` and `y` recomputed in full.** Every stored block, the
+inventory and the orbital energies are displaced to `I ± h Idot`, the
+digests are rebuilt at the displaced `h2e` with their transpose, and `W` is
+taken at the displaced rows. The result is central-differenced against `Ydot`
+and `ydot`, and each rung's error is the worst element relative to the
+tangent's largest. `h = 2^-k`, `k = 10…20`, z of the first atom, CASSCF; each
+ratio is over the halving into its rung. The second atom's and the fitted
+twin's agree to the digits shown down to `y`'s round-off floor, below which
+`y`'s rungs scatter:
+
+| k | `Y` | ratio | `y` | ratio |
+|---|---:|---:|---:|---:|
+| 10 | 4.0e-3 | — | 4.3e-3 | — |
+| 12 | 6.8e-4 | 3.03 | 2.8e-4 | 3.91 |
+| 14 | 4.7e-5 | 3.92 | 1.8e-5 | 3.99 |
+| 16 | 3.0e-6 | 3.99 | 1.1e-6 | 4.07 |
+| 18 | 1.9e-7 | 4.00 | 2.5e-7 | 1.29 |
+| 20 | 1.2e-8 | 4.00 | 6.0e-8 | 3.53 |
+
+`Y` runs eight fourfold halvings to 1.2e-8 on every computed coordinate of
+both cases. `y` runs six or seven, to a round-off floor of 1e-7 relative
+(best 4.5e-9 … 1.7e-7). The gate needs three fourfold halvings and a best
+under 1e-6.
+
+**Why the ladders start at `2^-10`.** Along a nuclear perturbation the gated
+`Y` has structure on a scale of `h ~ 1e-3`. On the first run, `k = 3…22`, the
+error was not `O(h²)` above it: 1.5e-2, 7.6e-2, 1.5e-2, 1.3e-2, 1.2e-2,
+1.1e-2, 6.8e-3 for `k = 3…9`, the ratios between 0.20 and 5.21 and never two
+fourfold in a row. The element that dominates is `Y[1, 27]`, a core–virtual
+pair with `Ydot` = 8.0342893. Its difference quotient sits at 8.073–8.075
+from `2^-5` down to `2^-9`, then falls onto the tangent below `h ~ 5e-4`, to
+8.0342894 at `2^-20`. The
+tangent is the limit, and the ladder converges to it fourfold from `2^-13`
+on. The coarse rungs added only wall time, so the entries start at `2^-10`.
+
+**The x and y coordinates are refused, and the PASS line counts them.** On
+N2 a displacement along x or y leaves the point group. Its perturbation
+populates every H class's integral-empty tuples (Sr 11, Si 5, Sijr 165, Srsi
+510, Srs 176, Sir 40), along which the energy need not be twice
+differentiable with every orbital direction ([`hessian-theory.md`](hessian-theory.md),
+§5.6). Each is refused whole, as a Numerical Error naming the classes,
+before any probe. The z coordinates populate none of the 8819 integral-empty
+tuples, so K6 is zero for every probe and nothing is refused there.
+
+**What a run costs.** Each entry takes about a minute: 67 s CASSCF and 63 s
+fitted in the ctest run. Per computed coordinate, the 378 probes take
+11–13 s, one sandwich pair walk each plus 24 walks of the integrals term,
+and the eleven-rung ladder takes 19–22 s, two full `Y` and `y` per rung. The
+four refused coordinates cost one census walk each. Not `small`, so the
+sanitizer tier leaves them out.
+
+**The negative control: what only the ladder sees.** The run was repeated
+once in scratch with `W'[Idot]` zeroed, then reverted. `W'[Idot]` is the
+orbital energies' mixed response, which `ydot` folds and the mixed block's
+forward C5 reads, so both modes share it. Every duality still held: each
+probe's two modes to 7.1e-15, and the four `θ` to 8.8e-13. The `y` ladder
+went flat at 7.7e-4 relative, ratios 1.00 from `2^-15` on, with no fourfold
+halving, and it failed. That was the first computed coordinate; the second's
+ladder read the same as far as its log was read. `Y`'s ladder was
+unchanged, since `Y` reads no `W`.
+
+The flag's refusals are `test/cli/`'s `CliScPseudodensityFlagTests`
+(`ScSourceTangent*`), and the reader's — the whole sidecar refused if any of
+its 22 arrays is missing — `test/golden/`'s `pertgold_tests`.
 
 ## The orbital block's integral curvature
 
@@ -2214,7 +2338,7 @@ difference can be formed there.
 
 ## The Hessian tier's entries
 
-Every ctest entry the Hessian milestones added (#150–#158, #184, #190, #200–#203, #214), in
+Every ctest entry the Hessian milestones added (#150–#158, #184, #190, #200–#203, #214, #220), in
 one place: its binary and flag, its gate (the `PASS_REGULAR_EXPRESSION` the
 entry matches) and its labels. What each one checks, and every number it
 comes out at, is in the section the last column names, not here.
@@ -2241,6 +2365,7 @@ exact digests:
 | `nevpt2_cas44_sc_hessian_vector_full`, `nevpt2_cas44_casscf_sc_hessian_vector_full` | `nevpt2_demo --sc-hessian-vector --gradgold <sidecar>` | `PASS: the SC Hessian-vector product matches … (orbital-energy mode: FULL, the orbital energies responding to c on both legs)` | `gpu;small` | "The CI block in FULL mode" |
 | `nevpt2_pc_hessian_cas44_full`, `nevpt2_pc_hessian_cas44_casscf_full` | `nevpt2_pc_tangent --pc-hessian --gradgold <sidecar>` | `PASS: the PC-NEVPT2 Hessian Eddot(u, v) matches the central difference of Edot (orbital-energy mode: FULL, …`, with the smallest kept `s / s_max` and gap | `gpu;small` | "The CI block in FULL mode" |
 | `nevpt2_pc_hessian_vector_cas44_full`, `nevpt2_pc_hessian_vector_cas44_casscf_full` | `nevpt2_pc_tangent --pc-hessian-vector --gradgold <sidecar>` | `PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches … (orbital-energy mode: FULL, …`, likewise | `gpu;small` | "The CI block in FULL mode" |
+| `nevpt2_sc_pseudodensity_cas44_casscf_sc_source_tangent`, `nevpt2_sc_pseudodensity_cas44_casscf_df_sc_source_tangent` | `nevpt2_sc_pseudodensity --sc-source-tangent <pertgold>` (#220) | `PASS: the SC source terms' tangent along the integral perturbation agrees with itself by duality to 1e-07 … on 2 of 6 coordinates; 4 refused, populating empty perturbers (Sec. 5.6)`, the fitted entry's line ending `(density-fitted)` | `gpu` | "The source terms' tangent along an integral perturbation" |
 
 There is no CAS(8,8) entry for PC's CI block: there both second-order checks
 converge to a value standing off the analytic one, for a conditioning reason
@@ -2266,6 +2391,8 @@ build sets each flag's tile floor is [`performance.md`](performance.md),
 | `RdmSecondDerivativeTests`, `RdmHessianTangentsTests` (`gpu`) | `rdm_tangent_tests` | the builder at `(u, v)` against a central difference of the tangent, the third derivative exactly zero; each three-argument set against the tangent build at its pair |
 | `PcHessianReportTests`, `PcHessianVectorReportTests` | `pc_tangent_tests` | the PC Hessian checks' gates: a refused class, a control that answers instead of refusing, a two-term tangent off the three-term one and a plateau in any class each fail |
 | `CliHessianRefusalTests` | `cli_tests` | every Hessian flag against every approximate digest, in both orders, refused as `err_unsupported`; each flag one binary's; the exact digests accepted |
+| `CliScPseudodensityFlagTests` (`ScSourceTangent*`, #220) | `cli_tests` | `--sc-source-tangent PATH` sets its path, needs one, takes `--gradgold` and the exact digests, refuses the other jobs and `--pc` (`err_config`) and the approximate digests (`err_unsupported`, the Hessian flags' message), and is `nevpt2_sc_pseudodensity`'s alone |
+| `PertGoldRoundTripTests`, `PertGoldLoadErrorTests`, `PertGoldCommittedTests` | `pertgold_tests` | the `.pertgold` reader (#220): a written sidecar's header, arrays and per-coordinate slices read back; every malformed file an IO Error, and the sidecar with **any one** of its 22 arrays missing refused whole; the two committed sidecars paired with their own golden and gradient sidecar and refused beside the CASCI state's (another frame) and the other calculation's |
 
 ## The density-fitted orbital source term
 

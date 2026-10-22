@@ -816,6 +816,47 @@ if(NEVPT2_BUILD_TESTING)
       PASS_REGULAR_EXPRESSION "${_nevpt2_sc_hessian_kc_pass}")
   endif()
 
+  # --- the source terms' tangent along an integral perturbation (#220) ----------
+  #
+  # nevpt2_sc_pseudodensity --sc-source-tangent PATH (apps/sc_pseudodensity/
+  # source_tangent_check.cppm; docs/hessian-theory.md, Sec. 8): the gated SC
+  # source terms Y and y differentiated along each nuclear coordinate's
+  # perturbed Hamiltonian, the committed `.pertgold` beside the golden
+  # (reference_data/integral_perturbation.py). Per coordinate: the dotted
+  # inventory against itself, every probe of Ydot in both modes, the DUALITY
+  # <Ydot, kappa> + <ydot, u> against d^2E/dh dtheta forward over forward
+  # (1e-7), and Richardson-verified ladders of the whole Y and y recomputed at
+  # I +- h Idot. On N2 the x and y coordinates leave the point group and
+  # populate empty perturbers, so they are refused (Numerical) and the PASS
+  # line counts them: 2 of 6 computed, 4 refused. N2 CAS(4,4) on CASSCF
+  # orbitals and its density-fitted twin (its NEVPT2F1 sidecar committed for
+  # this). Not `small`: each is about a minute of probes and ladders
+  # (docs/testing.md, "The source terms' tangent along an integral
+  # perturbation").
+  set(_nevpt2_sc_source_tangent_pass
+      "PASS: the SC source terms' tangent along the integral perturbation agrees with itself by duality to 1e-07 .* on 2 of 6 coordinates; 4 refused, populating empty perturbers \\(Sec. 5.6\\)")
+  foreach(_case cas44_casscf cas44_casscf_df)
+    set(_st_stem "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_${_case}")
+    foreach(_st_ext gradgold pertgold)
+      if(NOT EXISTS "${_st_stem}.${_st_ext}")
+        message(FATAL_ERROR "nevpt2: committed sidecar missing: ${_st_stem}.${_st_ext}")
+      endif()
+    endforeach()
+    _add_golden_test_with(nevpt2_sc_pseudodensity
+                          nevpt2_sc_pseudodensity_${_case}_sc_source_tangent
+                          "${_st_stem}.nevpt2gold" --tiles 3
+                          --sc-source-tangent "${_st_stem}.pertgold")
+    if(TEST nevpt2_sc_pseudodensity_${_case}_sc_source_tangent)
+      set_tests_properties(nevpt2_sc_pseudodensity_${_case}_sc_source_tangent PROPERTIES
+        PASS_REGULAR_EXPRESSION "${_nevpt2_sc_source_tangent_pass}")
+    endif()
+    unset(_st_stem)
+  endforeach()
+  if(TEST nevpt2_sc_pseudodensity_cas44_casscf_df_sc_source_tangent)
+    set_tests_properties(nevpt2_sc_pseudodensity_cas44_casscf_df_sc_source_tangent PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_sc_source_tangent_pass} \\(density-fitted\\)")
+  endif()
+
   # --- PC's mixed orbital-CI block H_kc, --pc --sc-hessian-kc (#201) --------------
   #
   # The same binary and flag with --pc (apps/sc_pseudodensity/
