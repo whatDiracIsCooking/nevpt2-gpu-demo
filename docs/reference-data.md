@@ -756,7 +756,10 @@ never from a length it knows:
 | `.mogold` | Python: `golden_format.read_mo_sidecar` | `generate_golden.read_mo_sidecar` (`--mo-from`, which adds its own checks); no C++ reader — it is generator input |
 | `.srcgold` (`NEVPT2S1` SC, `NEVPT2P1` PC; directional `NEVPT2SD` / `NEVPT2PD`, #105) | C++: `loadSrcGold` (`src/golden/srcgold.cpp`); `SrcGoldFile::scheme` and `::flavour` are the kind, `srcGoldCase` the golden a `<case>[_pc][_dir].srcgold` belongs to | `apps/sc_pseudodensity` (`--source-oracle`; a PC one with `--pc`, #74; a directional one through `compareSourceDirections`, #105); `test/source_compare/` (all four kinds, through `nevpt2.source_compare`) |
 | `.srcgold` (all four) | Python: `golden_format.read_srcgold` (`header["scheme"]`, `header["flavour"]`), `srcgold_name`, `srcgold_case` | `sc_source_oracle.py` (reads back what it wrote, `--pc` and `--directional` too); `golden_layout_check.py` |
-| `.respgold` (`NEVPT2R1`, #219) | Python: `golden_format.read_respgold` (every array held to `RESPGOLD_ARRAYS`' order and shapes); no C++ reader yet — #222's bilinear form adds it | `golden_layout_check.py`; `tests/test_casscf_nuclear_hessian.py` |
+| `.respgold` (`NEVPT2R1`, #219) | C++: `loadRespGold` (`src/golden/respgold.cpp`, #222); every array required, `RespGoldFile::checkAgainst` the state, its `ci` and its frame bit for bit | `apps/sc_pseudodensity` (`--sc-parameter-hessian`); `test/golden/`'s `respgold_tests` |
+| `.respgold` | Python: `golden_format.read_respgold` (every array held to `RESPGOLD_ARRAYS`' order and shapes) | `golden_layout_check.py`; `tests/test_casscf_nuclear_hessian.py` |
+| `.parhess` (`NEVPT2H1`, #222; an output, never committed) | C++: `writeParHess` / `loadParHess` (`src/golden/parhess.cpp`) — the one format of this family the C++ side writes; `coords` and the four matrices required | `apps/sc_pseudodensity` (`--sc-parameter-hessian --parameter-hessian-out`, which reads back what it wrote); `test/golden/`'s `respgold_tests` (the writer's bytes against the format's) |
+| `.parhess` | Python: `golden_format.read_parhess` / `write_parhess` (`coords` strictly increasing within `[0, 3 natm)`, every matrix `(nsel, nsel)`) | the nuclear Hessian's assembly (#233); `golden_layout_check.py --parhess FILE...` (a C++-written file must be `write_parhess`'s bytes); `tests/test_parhess.py` |
 | `.pertgold` (`NEVPT2I1`, #220) | C++: `loadPertGold` (`src/golden/pertgold.cpp`); every array required, a sidecar missing any one refused whole, `PertGoldFile::checkAgainst` the frame | `apps/sc_pseudodensity` (`--sc-source-tangent`); `test/golden/`'s `pertgold_tests` |
 | `.pertgold` | Python: `golden_format.read_pertgold` (every array held to `PERTGOLD_ARRAYS`' order and shapes) | `integral_perturbation.py` (writes it); `golden_layout_check.py`; `tests/test_integral_perturbation.py` |
 | `.erigold` (`NEVPT2E1`, #180) | C++: `loadEriGold` (`src/golden/erigold.cpp`); both arrays required, `EriGoldFile::checkAgainst` the state, the calculation and the frame | `apps/sc_pseudodensity` (`--sc-hessian-kk-int --erigold`); `test/golden/`'s `erigold_tests` |
@@ -766,10 +769,12 @@ never from a length it knows:
 format, and is read by `np.load` (`nevpt2_grad.load_source_terms`, and
 `load_edot_directions` for its optional `edot_kappa` / `edot_frozen` /
 `edot_digest` set, #88 — `--edot-check`). It is
-the one file here the C++ side **writes**: `nevpt2_sc_pseudodensity
+one of the two files here the C++ side **writes**: `nevpt2_sc_pseudodensity
 --dump-source-terms` through `nevpt2.gradsrc` (`apps/sc_pseudodensity/`),
 whose `readGradSrc` exists only for that binary's round trip and
-`test/gradsrc/`. It is never committed. Since #246 its members are a table in
+`test/gradsrc/`. It is never committed. (The `.parhess`, #222, is the other
+file the C++ side writes, but in this family's own layout, so it sits in the
+table above.) Since #246 its members are a table in
 `golden_format.py` too (`GRADSRC_MEMBERS`: the core seven, `pc`, the `edot_*`
 set and the 21 `ibar_*` members of the integral adjoint, each set whole or
 absent), with `read_gradsrc` (over `np.load`, every rule checked) and
@@ -781,10 +786,11 @@ C++ `kIntegralAdjointNames` table to `GRADSRC_IBAR`. The `ibar_*` arrays are
 coordinate's skeleton derivative of `E_corr` is their contraction (#247;
 docs/gradients.md, §6.3). The other writers are in `generate_golden.py`
 (`write_golden`, `write_gradgold`, `write_mo_sidecar`) and `golden_format.py`
-(`write_srcgold`, `write_respgold`, `write_pertgold`, `write_erigold`), and pack their scalar headers from the same tables
+(`write_srcgold`, `write_respgold`, `write_pertgold`, `write_erigold`,
+`write_parhess`), and pack their scalar headers from the same tables
 `golden_format.py` reads them by (`GOLDEN_HEADERS`, `GRADGOLD_HEADERS`,
 `MO_SIDECAR_HEADERS`, `SRCGOLD_HEADERS`, `RESPGOLD_HEADERS`, `PERTGOLD_HEADERS`,
-`ERIGOLD_HEADERS`, keyed by magic).
+`ERIGOLD_HEADERS`, `PARHESS_HEADERS`, keyed by magic).
 
 **Changing a header**, then, is: a new magic and a new entry in
 `golden_format.GOLDEN_HEADERS` (never an edit to an existing entry — that
@@ -801,7 +807,8 @@ must be present, and are: `G1` for the CASCI goldens, `G2` for the
 `*_casscf*` ones — and every `.gradgold`, `.mogold`, `.srcgold`, `.respgold`, `.pertgold` and `.erigold`, re-packs each from its
 own magic's header table and requires the original bytes back, runs each
 through every reader entry point in the table above and requires one answer,
-reads back a golden from the writer as it is now, and refuses any parser
+reads back a golden from the writer as it is now, round-trips a synthetic
+`.parhess` (none is committed), and refuses any parser
 outside `golden_format.py` (any byte unpacking, seeking or format magic in
 `reference_data/`; any file reading or magic in `src/` or `apps/` outside
 `src/golden/`). `test/golden`'s `GoldenLayoutContractTests` loads every
@@ -3015,8 +3022,9 @@ the card and in the host-side ladders' rotations (each an `n_mo^5`
 transform per displaced corner): 4.9 MB at `n_mo = 28`, which covers every
 N2 cc-pVDZ golden (CAS(8,8) too, whose `n_mo` is the same 28), but 150 MB at
 `n_mo = 66`, past the repository's 10 MB file limit long before it is past a
-card. Only CAS(4,4)'s is committed: one conventional case is what the gate
-needs, and any other N2 cc-pVDZ case's is one generator flag away (a larger
+card. Only CAS(4,4)'s are committed, on RHF and on CASSCF orbitals (the
+second for #222, below): one conventional case is what #180's gate needs,
+and any other N2 cc-pVDZ case's is one generator flag away (a larger
 basis's would be gitignored and regenerated, as CAS(14,14)'s golden is). A
 case whose tensor is too large to dump at all is the AO-direct route's
 ([`hessian-theory.md`](hessian-theory.md), §10).
@@ -3024,6 +3032,42 @@ case whose tensor is too large to dump at all is the AO-direct route's
 ```bash
 uv run python reference_data/generate_golden.py --ncas 4 --nelecas 4 \
     --name n2_ccpvdz_cas44 --gradgold --erigold
+```
+
+**On CASSCF orbitals (#222).** The parameter Hessian over the response
+directions (`nevpt2_sc_pseudodensity --sc-parameter-hessian`; the response
+sidecar is "The analytic CASSCF nuclear Hessian" above) reads the full tensor
+for every pair. A response has no active–active member, so K2 has no other
+source. So the two `_casscf` states the responses are committed for carry one
+each, written `--mo-from` the committed `.mogold` beside the golden and the
+gradient sidecar. The golden and the `.gradgold` come out byte-identical with
+or without `--erigold`. N2 CAS(4,4)'s is committed, and the regeneration gate
+compares it. HSOH CAS(6,6)'s is `42^4` doubles, past the repository's file
+limit, so it is gitignored and regenerated by the command below, and its
+ctest entry is registered only when the file is there. Measured as above
+(2026-10-22, the 12-core reference box, single-threaded):
+
+| | N2 CAS(4,4) CASSCF | HSOH CAS(6,6) CASSCF |
+|---|---|---|
+| size | `28^4` doubles, 4.92 MB (committed) | `42^4 = 3,111,696` doubles, 24.9 MB (gitignored) |
+| against the 18 sidecar rows and 10 golden blocks it overlaps | 1.5e-14 relative (worst `g_xc_vv`) | 1.7e-15 relative (worst `g_xc_cc_j`) |
+| permutational symmetry | 1.3e-13 relative | 1.2e-15 relative |
+| generator wall time, with the golden and `.gradgold` | 26.0 s | 28.2 s |
+| the golden and `.gradgold` against the committed ones | byte-identical | the golden byte-identical (the committed `.gradgold` also carries `grad_num`) |
+
+```bash
+uv run python reference_data/generate_golden.py --ncas 4 --nelecas 4 \
+    --name n2_ccpvdz_cas44_casscf \
+    --mo-from golden/n2_ccpvdz_cas44_casscf.mogold --gradgold --erigold
+# HSOH's into a scratch directory, then only the .erigold copied into golden/:
+# --gradgold here would overwrite the committed sidecar, which also carries
+# nevpt2_numgrad.py's grad_num (see "HSOH, the C1 case")
+uv run python reference_data/generate_golden.py \
+    --atom reference_data/geometries/hsoh.xyz --basis def2-svp \
+    --ncas 6 --nelecas 6 --name hsoh_def2svp_cas66_casscf \
+    --mo-from golden/hsoh_def2svp_cas66_casscf.mogold --gradgold --erigold \
+    --out /tmp/hsoh/hsoh_def2svp_cas66_casscf.nevpt2gold
+cp /tmp/hsoh/hsoh_def2svp_cas66_casscf.erigold golden/
 ```
 
 ### Level 2's CASSCF third-derivative term
@@ -3715,10 +3759,10 @@ not used.
 | `reference_data/casscf_constraint_mixed.py` | **the CASSCF constraint's R-mixed terms** (#232): `Z . d²g/dθdR [u]` (an action, one number per coordinate) and `Z . d²g/dR²`, as `casscf_hessian.py`'s perturbed-Hamiltonian gradient and `L_RR` at Z-weighted densities built from `casscf_third_derivative.py`'s exact series. Checked against ladders of `gen_g_hop`'s `g_all` along the frozen path, and against the exact identities (symmetry, translational sum rules, #219's `dg_all/dR` formula), with the SC-NEVPT2 multipliers on N2, LiF and HSOH's committed `_casscf` states. CPU only; writes nothing (see "The CASSCF constraint's R-mixed terms" above) |
 | `reference_data/casscf_repro_probe.py` | the **CASSCF reproducibility** measurement: ≥5 back-to-back RHF → symmetry-adapted `mcscf.CASSCF` → orbital-gradient → fresh `mcscf.CASCI` → SC-NEVPT2 runs under `generate_golden`'s own settings (imported, so single-threaded with the same Davidson tolerance), reporting the spread of E_CASSCF / E_corr / ‖g_orb‖ and whether any run changed stationary point. `--perturb EPS` starts the optimiser from a random same-irrep rotation instead. `--case NAME --displace COMP --steps …` runs `nevpt2_numgrad.py --reference casscf`'s own state path along a ladder of displacements and prints the continuity guard's three signals per step (where its thresholds come from). Writes no golden; its output is what "A fresh CASSCF reproduces, measured" above quotes, and where the `--mo-from` gate thresholds come from |
 | `reference_data/sc_source_oracle.py` | **PySCF's exact SC source terms** for N2 CAS(4,4) and LiF, written as `golden/<case>.srcgold` out of `nevpt2_grad.py`'s own machinery at its converged steps; the oracle `nevpt2_sc_pseudodensity --source-oracle` gates the GPU's against (see "The SC source-term oracle" above). With `--pc`, **block2's PC ones** for N2 CAS(4,4), `golden/n2_ccpvdz_cas44_pc.srcgold` ("The PC flavour"). With `--directional`, the **directional flavour** for acrolein, N2 and LiF, `golden/<case>[_pc]_dir.srcgold` ("The directional flavour"). With `--case n2_ccpvdz_cas44_casscf --mo-from FILE`, all four kinds on **converged CASSCF orbitals** ("On CASSCF orbitals"), and with `--case acrolein_def2svp_cas65_casscf --mo-from FILE --directional`, acrolein's directional pair on them (#135), with the sidecar fingerprint-checked as `generate_golden.py --mo-from` checks it. Byte-reproducible |
-| `reference_data/golden_format.py` | the **one Python parser** of the three formats in `golden/` (and of the `.srcgold` oracle, the `.respgold` response sidecar, the `.pertgold` integral perturbation sidecar and the `.erigold` full MO-integral tensor sidecar, plus their writers `write_srcgold` / `write_respgold` / `write_pertgold` / `write_erigold`): the header tables (keyed by magic) the writers pack from and the readers read by, `read_golden` / `read_golden_header` / `read_gradgold` / `read_mo_sidecar` / `read_srcgold` / `read_respgold` / `read_pertgold` / `read_erigold`, and `arrays-at FILE` for the regeneration check's `cmp -i`. `struct` and NumPy only, and no thread settings, so the timing script can use it (see "The file format" above) |
+| `reference_data/golden_format.py` | the **one Python parser** of the three formats in `golden/` (and of the `.srcgold` oracle, the `.respgold` response sidecar, the `.pertgold` integral perturbation sidecar, the `.erigold` full MO-integral tensor sidecar and the `.parhess` parameter Hessian sidecar the GPU writes, plus their writers `write_srcgold` / `write_respgold` / `write_pertgold` / `write_erigold` / `write_parhess`): the header tables (keyed by magic) the writers pack from and the readers read by, `read_golden` / `read_golden_header` / `read_gradgold` / `read_mo_sidecar` / `read_srcgold` / `read_respgold` / `read_pertgold` / `read_erigold` / `read_parhess`, and `arrays-at FILE` for the regeneration check's `cmp -i`. `struct` and NumPy only, and no thread settings, so the timing script can use it (see "The file format" above) |
 | `reference_data/golden_layout_check.py` | the Python half of the **layout contract**: every committed file of both golden layouts, and every sidecar, through every reader and back through its writer byte for byte, plus a scan for any parser outside `golden_format.py`. Ends `PASS:`/`FAIL:`; a manual gate, no ctest entry ([`testing.md`](testing.md), "The golden layout contract") |
 | `reference_data/tests/` | the **oracle's own tests** (pytest, `uv run pytest`): every format's writer → reader round trip and every reader refusal in `golden_format.py`, and `_check_degeneracy` / `_check_pc_conditioning` / `_check_gradient_invariants` on synthetic inputs just either side of each threshold, plus `nevpt2_numgrad.py`'s own refusals (`test_numgrad_casscf.py`, and `test_numgrad_df.py`'s symmetry-changing displacement refused on the `--df` route) and `gradient_at.py`'s (`test_gradient_at.py`: the point-group-changing displacement and the work-dir guard). No solve, no card; a `cpp-tier.sh` phase ([`testing.md`](testing.md), "The oracle's own tests") |
-| `devtools/golden-repro.sh` | the **regeneration gate**: the committed N2 CAS(4,4) / CAS(8,8) references (CAS(4,4)'s `.erigold` with them), the C1 case's three HSOH files, the two `.respgold` sidecars and the two `.pertgold` sidecars regenerated into scratch and compared byte for byte (see "Regenerating the golden file" above; [`testing.md`](testing.md), "The golden regeneration gate") |
+| `devtools/golden-repro.sh` | the **regeneration gate**: the committed N2 CAS(4,4) / CAS(8,8) references (CAS(4,4)'s two `.erigold` files with them, CASCI and CASSCF), the C1 case's three HSOH files, the two `.respgold` sidecars and the two `.pertgold` sidecars regenerated into scratch and compared byte for byte (see "Regenerating the golden file" above; [`testing.md`](testing.md), "The golden regeneration gate") |
 | `reference_data/pyscf_contract_time.py` | the CPU side of the head-to-head: reads a golden file and times PySCF's `NEVPTcontract` (`make_dm123` + `_contract4pdm` ×2) on the *same frozen CI vector* the demo reads, with no CASCI re-solve (see [`performance.md`](performance.md), "Head-to-head vs PySCF") |
 | `golden/n2_ccpvdz_cas1010.nevpt2gold` | the **default case**: CAS(10,10) on N2/cc-pVDZ |
 | `golden/n2_ccpvdz_cas1212.nevpt2gold` | CAS(12,12) on the same molecule, the scaling case (see [`performance.md`](performance.md), "Scaling with active-space size"). `slow`-labelled; run with `--tiles 40`. Carries **no** PC fields: its PC metric is ungapped (see "PC fields" above) |
@@ -3730,6 +3774,7 @@ not used.
 | `golden/n2_ccpvdz_cas44_casscf_df.mogold`, `golden/n2_ccpvdz_cas44_casscf_df.nevpt2gold` | the **density-fitted** CASSCF-orbital case, `nevpt2_df_demo`'s CASSCF reference (0.47 MB, SC and PC): fitted throughout, the orbital optimisation included, so the aux basis is part of the sidecar's fingerprint |
 | `golden/n2_ccpvdz_cas44_casscf_df.gradgold` | its **density-fitted gradient sidecar** (#220, `NEVPT2F1`, 0.86 MB): the `--mo-from` step's `--gradgold` output, committed for `--sc-source-tangent`'s fitted entry. `golden-repro.sh` regenerates it byte for byte (see "The integral perturbation sidecar" above) |
 | `golden/n2_ccpvdz_cas44.erigold` | the **full MO-integral tensor sidecar** (#180, `NEVPT2E1`; 4.92 MB): every `(pq|rs)` of the N2 CAS(4,4) CASCI state in its gradient sidecar's orbitals. Written by `generate_golden.py --gradgold --erigold`; read by `loadEriGold` for `nevpt2_sc_pseudodensity --sc-hessian-kk-int --erigold`; `golden-repro.sh` regenerates it byte for byte, `golden_layout_check.py` holds it to its golden and gradient sidecar, and `test/golden`'s `erigold_tests` holds the reader to it (see "The full MO-integral tensor sidecar" above) |
+| `golden/n2_ccpvdz_cas44_casscf.erigold`; `golden/hsoh_def2svp_cas66_casscf.erigold` (gitignored) | the **full MO-integral tensors of the two CASSCF response states** (#222, `NEVPT2E1`; 4.92 / 24.9 MB): what `nevpt2_sc_pseudodensity --sc-parameter-hessian --erigold` reads K2 and its ladders' displaced orbitals from. Written by `generate_golden.py --mo-from <the committed .mogold> --gradgold --erigold`; `golden-repro.sh` regenerates N2's byte for byte, HSOH's is past the repository's file limit and regenerated on demand (see "The full MO-integral tensor sidecar" above) |
 | `golden/n2_ccpvdz_cas44_casscf.pertgold`, `golden/n2_ccpvdz_cas44_casscf_df.pertgold` | the **integral perturbation sidecars** (#220, `NEVPT2I1`; 8.98 MB each): every Cartesian coordinate's perturbed Hamiltonian of the two N2 CAS(4,4) CASSCF states in the gradient sidecar's inventory, the second of the fitted integrals. Written by `integral_perturbation.py --write`; read by `loadPertGold` for `nevpt2_sc_pseudodensity --sc-source-tangent`; `golden-repro.sh` regenerates both byte for byte, `golden_layout_check.py` holds each to its golden and gradient sidecar, and `test/golden`'s `pertgold_tests` holds the reader to both (see "The integral perturbation sidecar" above) |
 | `golden/n2_ccpvdz_cas44.gradgold`, `golden/n2_ccpvdz_cas88.gradgold` | the **gradient sidecars** for those two cases: the general-range MO-integral blocks an analytic gradient reads, plus the full-range Fock matrices and `mo_coeff` (see "The gradient sidecar" above). Separate files, so the goldens beside them are untouched. `test/golden/gradgold_tests.cpp` round-trips the reader and checks the CAS(4,4) one against the golden beside it. Neither holds a `grad_num`: they stay the 24 arrays `--gradgold` writes, and CAS(4,4)'s numerical gradient goes to an `--npz` instead — `nevpt2_numgrad.py` refuses the in-place write for that case rather than move these bytes ([`testing.md`](testing.md), "The analytic gradient against the numerical one") |
 | `golden/n2_ccpvdz_cas44_df.gradgold`, `golden/n2_ccpvdz_cas88_df.gradgold` | the **density-fitted gradient sidecars** (#164, `NEVPT2F1`; 0.86 / 0.95 MB) beside the two small `_df` goldens: `B_cc` and `B_vv` (the blocks of `(L\|pq)` the golden lacks), the fitted calculation's six full-range matrices, and the four tied orbital-energy arrays (see "The density-fitted gradient sidecar" above). The CAS(4,4) one also carries the density-fitted **numerical gradient**, `nevpt2_numgrad.py --df`'s four `grad_num*` arrays (#167, "The density-fitted numerical gradient" above), so it takes two commands to regenerate. `devtools/golden-repro.sh` regenerates both byte for byte, that one with its `grad_num`; `test/golden/gradgold_tests.cpp`'s `GradGoldDfCas44Tests` holds the CAS(4,4) one to its golden, and `nevpt2_gradient_source_cas44_df` reads it on a card; `nevpt2_sc_pseudodensity --kappa-full` reads both (#165); `nevpt2_grad.py --df` gates against the CAS(4,4) one's `grad_num` (#166); `nevpt2_df_demo` reads neither |

@@ -16,6 +16,7 @@ add_cxx_module_library(
   NAME nevpt2.golden
   PRIMARY_INTERFACE golden.cppm
   PARTITIONS golden_reader.cppm
-  IMPLEMENTATION golden.cpp gradgold.cpp srcgold.cpp pertgold.cpp erigold.cpp
+  IMPLEMENTATION golden.cpp gradgold.cpp srcgold.cpp pertgold.cpp erigold.cpp respgold.cpp
+                 parhess.cpp
   LINK_PUBLIC nevpt2::tensor nevpt2::error_handling
 )

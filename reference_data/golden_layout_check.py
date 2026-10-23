@@ -68,6 +68,13 @@ different times, the last by luck (issue #71). Since then there is one parser,
    ``kIntegralAdjointNames`` table (``apps/sc_pseudodensity/gradsrc.cppm``)
    must be ``GRADSRC_IBAR``. ``--gradsrc DUMP...`` adds dumps the C++ writer
    wrote: each must be ``write_gradsrc``'s bytes exactly.
+6. **The ``.parhess`` sidecar** (#222), the GPU's parameter Hessian over a
+   response sidecar's directions. An output, so none is committed: a
+   synthetic one is written by ``golden_format.write_parhess``, read back by
+   ``read_parhess`` and rewritten byte for byte, and a missing array, a
+   mis-shaped one and a partition that does not add up are refused.
+   ``--parhess FILE...`` adds files the C++ writer (``writeParHess``) wrote:
+   each must be ``write_parhess``'s bytes exactly.
 
 The C++ half is ``test/golden``'s ``GoldenLayoutContractTests``, which loads
 every committed golden and sidecar with ``loadGolden`` / ``loadGradGold`` /
@@ -675,12 +682,75 @@ def gradsrc_dumps(fail: Failures, tmp: Path, paths: list[Path]) -> None:
               "byte for byte", flush=True)
 
 
+def parhess_files(fail: Failures, tmp: Path, paths: list[Path]) -> None:
+    """The ``.parhess`` parameter Hessian sidecar (#222): an OUTPUT, so none is
+    committed. The contract is held on a synthetic one -- written by
+    ``golden_format.write_parhess``, read back by ``read_parhess`` and written
+    again byte for byte -- plus any file the C++ writer (``writeParHess``)
+    produced that is named on the command line, which must be
+    ``write_parhess``'s bytes exactly. The refusals: a missing array, a
+    mis-shaped one, a partition that does not add up."""
+    rng = np.random.default_rng(222)
+    header = dict(natm=2, nmo=9, ncore=2, nact=3, nvirt=4, ndet=9)
+    arrays = {"coords": np.array([0.0, 2.0, 3.0, 5.0])}
+    arrays |= {n: rng.standard_normal((4, 4)) for n, _s in gf.PARHESS_ARRAYS if n != "coords"}
+    p = tmp / "synthetic.parhess"
+    def write(path, h, a):
+        gf.write_parhess(path, header=h, arrays=a)
+        return True
+
+    if fail.run("synthetic: write_parhess", write, p, header, arrays) is not None:
+        back = fail.run("synthetic: read_parhess", gf.read_parhess, p)
+        if back is not None:
+            h, a = back
+            fail.check(h == header and list(a) == [n for n, _s in gf.PARHESS_ARRAYS]
+                       and all(np.array_equal(a[n], arrays[n]) for n in arrays),
+                       "synthetic: read_parhess does not return what was written")
+            q = tmp / "synthetic_again.parhess"
+            gf.write_parhess(q, header=h, arrays=a)
+            fail.check(q.read_bytes() == p.read_bytes(), "synthetic: not byte-identical rewritten")
+            print(f"  synthetic: {len(a)} arrays round-trip, byte for byte", flush=True)
+    for what, hdr, bad in (
+            ("a missing h_cc", header, {n: v for n, v in arrays.items() if n != "h_cc"}),
+            ("a mis-shaped h_kk", header, {**arrays, "h_kk": np.zeros((5, 4))}),
+            ("coordinates out of order", header, {**arrays, "coords": np.array([0., 3, 2, 5])}),
+            ("a coordinate past 3 natm", header, {**arrays, "coords": np.array([0., 2, 3, 6])}),
+            ("a partition that does not add up", dict(header, nvirt=5), arrays)):
+        try:
+            gf.write_parhess(tmp / "refused.parhess", header=hdr, arrays=bad)
+            fail.add(f"write_parhess accepted {what}")
+        except gf.FormatError:
+            print(f"  refused: {what}", flush=True)
+    for path in paths:
+        got = fail.run(f"{path.name}: read_parhess", gf.read_parhess, path)
+        if got is None:
+            continue
+        q = tmp / "cpp_again.parhess"
+        gf.write_parhess(q, header=got[0], arrays=got[1])
+        fail.check(q.read_bytes() == path.read_bytes(),
+                   f"{path.name}: the C++ writer's bytes are not golden_format's")
+        print(f"  {path}: natm {got[0]['natm']}, C++ writer == golden_format.write_parhess, "
+              "byte for byte", flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    gradsrc_paths = [Path(a) for a in argv[1:]] if argv[:1] == ["--gradsrc"] else []
-    if argv and not gradsrc_paths:
-        print("usage: golden_layout_check.py [--gradsrc DUMP...]")
+    # [--gradsrc DUMP...] [--parhess FILE...], in either order.
+    lists: dict[str, list[Path]] = {"--gradsrc": [], "--parhess": []}
+    current = None
+    for a in argv:
+        if a in lists:
+            current = a
+        elif current is None:
+            print("usage: golden_layout_check.py [--gradsrc DUMP...] [--parhess FILE...]")
+            return 2
+        else:
+            lists[current].append(Path(a))
+    if any(a in lists and not lists[a] for a in argv):
+        print("usage: golden_layout_check.py [--gradsrc DUMP...] [--parhess FILE...]")
         return 2
+    gradsrc_paths = lists["--gradsrc"]
+    parhess_paths = lists["--parhess"]
     fail = Failures()
     print("stray parsers (reference_data/, src/, apps/):", flush=True)
     stray_parsers(fail)
@@ -700,6 +770,8 @@ def main(argv: list[str] | None = None) -> int:
         states_hand_off(fail, tmp)
         print("the .gradsrc dump:", flush=True)
         gradsrc_dumps(fail, tmp, gradsrc_paths)
+        print("the .parhess sidecar:", flush=True)
+        parhess_files(fail, tmp, parhess_paths)
     if fail.items:
         print(f"FAIL: {len(fail.items)} layout-contract failure(s)")
         for item in fail.items:
@@ -707,8 +779,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print("PASS: every golden, gradient sidecar, MO sidecar, source-term oracle, "
           "response sidecar, integral perturbation sidecar and full MO-integral tensor "
-          "sidecar, and the .gradsrc dump's every flavour, round-trips through "
-          f"every reader, layouts {sorted(m.decode() for m in layouts)}")
+          "sidecar, the .gradsrc dump's every flavour and the .parhess sidecar, round-trips "
+          f"through every reader, layouts {sorted(m.decode() for m in layouts)}")
     return 0
 
 

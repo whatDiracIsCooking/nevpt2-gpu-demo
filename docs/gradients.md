@@ -73,8 +73,9 @@ and of what lies above it only one piece is: the source terms' tangent along
 a supplied integral perturbation, SC's (#220) and PC's (#234), the NEVPT2
 half of level 3's mixed term.** Level 1 is the energy functional's parameter Hessian,
 at one fixed geometry, as directional second derivatives and Hessian-vector
-products. `H_cc` and `H_kc` are assembled only column by column, as a
-check, where `ndet` allows. Every flag runs on exact digests only
+products, and — the form level 3 consumes it in — as the bilinear form over
+the reference's `3N` responses (#222). `H_cc` and `H_kc` are assembled only
+column by column, as a check, where `ndet` allows. Every flag runs on exact digests only
 and on either reference kind, behind the source-term gate. Each entry below is
 one binary's flag (README.md, "Which binary takes which flag"). What each
 refusal guards is [`hessian-theory.md`](hessian-theory.md), §9.1.
@@ -102,11 +103,28 @@ refusal guards is [`hessian-theory.md`](hessian-theory.md), §9.1.
 | a Hessian on `nevpt2_df_demo` | **not in tree**: refused as a flag that binary does not implement. The density-fitted orbital block runs through `nevpt2_sc_pseudodensity` on a `*_df` golden |
 | the source terms' tangent along a **supplied integral perturbation**, `Ydot` and `ydot` (#220) | **in tree**, SC only, `nevpt2_sc_pseudodensity --sc-source-tangent PATH`: `scSourceTangentDevice` and `scSourceTangentForwardDevice`, the NEVPT2 half of level 3's mixed term `L_{RΘ}` ([`hessian-theory.md`](hessian-theory.md), §8). The input is a `.pertgold`, every coordinate's perturbed Hamiltonian in the gradient sidecar's inventory. The perturbation is a first-order dotted input set, so its cross term with a rotation reads one general index of it, and no full tensor reaches the card. `Ydot` is the integrals' pairing at `A_kappa(Idot)` plus the sandwich's reverse with `v = Idot`, probed per basis direction; `ydot` is R1 of the mixed block with `w -> Idot`. Gated by the duality `<Ydot, kappa> + <ydot, u> = d^2E/dh dtheta` and by ladders of the gated `Y` and `y` at `I +- h Idot`, on N2 CAS(4,4)'s CASSCF state and its fitted twin. **Refused:** a perturbation that populates an H class's empty perturbers (a displacement that leaves the point group, §5.6 there), whole and before any probe, as `err_numerical` |
 | PC's source terms' tangent along a supplied integral perturbation (#234) | **in tree**, `nevpt2_sc_pseudodensity --pc --sc-source-tangent PATH`: `pcSourceTangentDevice` and `pcSourceTangentForwardDevice`, the same construction with PC's pieces ([`hessian-theory.md`](hessian-theory.md), §6.4, §6.7 and §8). `Ydot` is `Ehat'_pc`'s pairing at `A_kappa(Idot)` (`hbar_pc` in) plus PC's sandwich reverse with `v = Idot`, probed per basis direction (below, why not #240's transpose); `ydot` is PC's `H_kc^T w` at `w -> Idot` in the FULL mode, the derivative of the gated three-term `y` with the orbital energies responding to `c` through `W`, its rotation term's adjoint included. `S` does not move along `Idot`, so no lift test runs on that leg; PC has no empty-perturber term (§6.6 there), so no coordinate is refused, symmetry-breaking ones included. Gated by `Edot(Idot)` three ways, every probe's two modes, the duality and ladders of `Y_pc` and the three-term `y_pc` at `I +- h Idot` from `h = 2^-4`, on N2 CAS(4,4)'s CASSCF state only (PC's second-order gate size, #194). **Refused:** a forward CI direction along which `S`'s dropped modes lift (`err_numerical`), and any class the solve refuses |
-| level 2, the Lagrangian's parameter Hessian, and level 3, the nuclear Hessian | **not in tree**, and not offline either, apart from the two rows above and the offline CASSCF pieces of [`hessian-theory.md`](hessian-theory.md), §8 (#215, #219) ([`hessian-theory.md`](hessian-theory.md), §7–§8) |
+| level 1 as a **bilinear form over the reference's responses**, `E_θθ[Θ⁽¹⁾_A, Θ⁽¹⁾_B]` (#222) | **in tree**, SC only, `nevpt2_sc_pseudodensity --sc-parameter-hessian PATH`: `scParameterHessianDevice`, over the `3N` full-range `(κ, c)` directions of a `.respgold` (#219), the orbital energies responding throughout — `H_cc` in #214's FULL mode, `H_kc` in #184's FULL mode, `H_kk` with its own `κ` response and K2 from the `.erigold` full tensor (#180), every block the per-block flags' own. Written, with its three blocks, as a `.parhess` (`--parameter-hessian-out`). Gated per entry against those flags' scalars on the same pair, by its symmetry, and by ladders of the gated `Y` and `y` recomputed at `(C exp(h κ_B), c + h c_B)` out of the full tensor, on N2 CAS(4,4)'s CASSCF `z` block and on HSOH CAS(6,6)'s whole `3N` set. **Refused whole**, never with a zero entry: any pair §9.1 refuses (K2 with no full tensor, Unsupported; a non-proportional empty perturber or one empty by the state, Numerical), so N2's whole `3N` set is refused (its `x`–`y` pairs, [`hessian-theory.md`](hessian-theory.md), §5.6) and `--parameter-hessian-coords` restricts the set to a block that keeps the point group; a density-fitted case and `--pc` (Unsupported). How it is formed is below |
+| level 2, the Lagrangian's parameter Hessian, and level 3, the nuclear Hessian | **not in tree**, and not offline either, apart from the three rows above and the offline CASSCF pieces of [`hessian-theory.md`](hessian-theory.md), §8 (#215, #219) ([`hessian-theory.md`](hessian-theory.md), §7–§8) |
 
 The entries, their gates and the measured residuals are
 [`testing.md`](testing.md), "The Hessian tier's entries"; the tile floors are
 [`performance.md`](performance.md), "Which build sets a Hessian flag's floor".
+
+**How the bilinear form is formed: vectors where the tree has them, pairs
+where it does not (#222).** [`hessian-theory.md`](hessian-theory.md), §4.4
+and §5.3 set the choice. Two of the three blocks have a vector orientation in
+tree: `H_cc u` by reverse over forward (#156) and `H_kc^T w`, R1 (#184). Each
+costs about one walk, as a scalar does, and a vector serves every partner by a
+determinant-space dot. So the CI and mixed blocks are formed as `3N` vector
+products, `2 × 3N` walks for all `(3N)²` entries of both. Per-pair scalars
+would cost `(3N)²` F walks for `H_kc` and `3N(3N+1)/2` three-vector walks for
+`H_cc`. The orbital block has no vector orientation: §5.3 makes it an action
+only, and the action in tree is the scalar `Eddot_kk(u, v)`. So `H_kk` is
+formed per pair, one curvature and one sandwich walk per pair `A ≤ B`, the
+`(B, A)` entry the symmetric form's mirror. That block is the whole cost
+([`performance.md`](performance.md), "The parameter Hessian over the
+responses"). The per-pair scalars of the other two blocks are run as the
+check on every entry, not as the construction.
 
 **Why `Ydot` is probed, not assembled through #240's transpose (#234).**
 #240 transposes the *first*-order walk: its bars (`dE/dslab`, `dE/dK` and

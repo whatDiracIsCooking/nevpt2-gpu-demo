@@ -92,7 +92,7 @@ add_cxx_module_library(
   PARTITIONS gradient_general.cppm gradient_rotation.cppm gradient_terms.cppm
              gradient_curvature.cppm gradient_sc_classes.cppm gradient_rdm_adjoint.cppm
              gradient_block_transpose.cppm gradient_ci_source.cppm gradient_pc_classes.cppm
-  IMPLEMENTATION gradient.cpp gradient_df.cpp
+  IMPLEMENTATION gradient.cpp gradient_df.cpp parameter_hessian.cpp
   LINK_PUBLIC nevpt2::energy nevpt2::sc_amplitudes nevpt2::gradient_plan
               nevpt2::sigma_vector nevpt2::rdm_build
   # The mixed block's forward orientation (#184) builds its CI direction's

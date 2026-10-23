@@ -353,13 +353,34 @@ nevpt2::Tensor kkFullRotation(const nevpt2::Tensor& u, const nevpt2::Tensor& v, 
 // h1e_v_Sr less its traced active pair, and e_p = f_pp, f = h^eff + sum_tu
 // gamma_tu [(pq|tu) - (1/2)(pt|qu)] -- all of them at the rotated integrals.
 // The fields in kkRotatedInts' order.
-KkHostInts kkRotatedIntsFull(const KkFullParts& p, const nevpt2::Tensor& u) {
-  const std::int64_t nc = p.nc, na = p.na, nv = p.nv, n = nc + na + nv;
-  const nevpt2::Tensor e = nevpt2::rotateAxes(p.eri, {0, 1, 2, 3}, u);
-  nevpt2::Tensor heff = nevpt2::rotateAxes(p.h, {0, 1}, u);
+// h^eff = h + sum_j [2 (pq|jj) - (pj|jq)] over the core, from the ROTATED
+// tensor `e` and the rotated bare `h`.
+nevpt2::Tensor kkHeffFromRotated(const KkFullParts& p, const nevpt2::Tensor& e,
+                                 const nevpt2::Tensor& h) {
+  const std::int64_t n = p.nc + p.na + p.nv;
+  nevpt2::Tensor heff = h;
   for (std::int64_t a = 0; a < n; ++a)
     for (std::int64_t b = 0; b < n; ++b)
-      for (std::int64_t j = 0; j < nc; ++j) heff(a, b) += 2.0 * e(a, b, j, j) - e(a, j, j, b);
+      for (std::int64_t j = 0; j < p.nc; ++j) heff(a, b) += 2.0 * e(a, b, j, j) - e(a, j, j, b);
+  return heff;
+}
+
+KkHostInts kkIntsFromRotatedFull(const KkFullParts& p, const nevpt2::Tensor& e,
+                                 const nevpt2::Tensor& heff);
+
+KkHostInts kkRotatedIntsFull(const KkFullParts& p, const nevpt2::Tensor& u) {
+  const nevpt2::Tensor e = nevpt2::rotateAxes(p.eri, {0, 1, 2, 3}, u);
+  return kkIntsFromRotatedFull(p, e, kkHeffFromRotated(p, e, nevpt2::rotateAxes(p.h, {0, 1}, u)));
+}
+
+// The same input set from an already-rotated tensor `e` and its h^eff: what
+// a caller that needs the rotated tensor for more than the stored blocks
+// (#222's ladders, which also rebuild the gradient sidecar's rows) rotates
+// once and hands in. p.gamma is the active density the orbital energies'
+// density lines contract.
+KkHostInts kkIntsFromRotatedFull(const KkFullParts& p, const nevpt2::Tensor& e,
+                                 const nevpt2::Tensor& heff) {
+  const std::int64_t nc = p.nc, na = p.na, nv = p.nv;
   const auto lo = [&](char sp) { return sp == 'c' ? 0 : (sp == 'a' ? nc : nc + na); };
   const auto ext = [&](char sp) { return sp == 'c' ? nc : (sp == 'a' ? na : nv); };
   // X = E.transpose(perm), E = (pq|rs) over the spaces `sp` spells: X[i] = E[j]
