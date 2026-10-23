@@ -24,7 +24,10 @@
 //   CliScPseudodensityFlagTests  --kappa-act / --kappa-full / --gradgold /
 //                                --dump-source-terms / --source-oracle /
 //                                --sc-hessian-kc / --sc-hessian-kk-int /
-//                                --sc-hessian-kk
+//                                --sc-hessian-kk / --sc-source-tangent /
+//                                --sc-parameter-hessian and its
+//                                --parameter-hessian-out /
+//                                --parameter-hessian-coords (#222)
 //   CliPcTangentFlagTests        --fd-steps / --fd-start-pow / --pc-hessian /
 //                                --pc-hessian-vector
 //   CliHessianRefusalTests       every Hessian flag of every binary at once
@@ -423,6 +426,9 @@ constexpr std::array kExpectedMatrix{
     MatrixRow{"--kappa-full", "S"},         MatrixRow{"--sc-hessian-kc", "S"},
     MatrixRow{"--sc-hessian-kk-int", "S"},  MatrixRow{"--sc-hessian-kk", "S"},
     MatrixRow{"--sc-source-tangent", "S"},
+    MatrixRow{"--sc-parameter-hessian", "S"},
+    MatrixRow{"--parameter-hessian-out", "S"},
+    MatrixRow{"--parameter-hessian-coords", "S"},
     MatrixRow{"--gradgold", "DSP"},         MatrixRow{"--erigold", "S"},
     MatrixRow{"--dump-source-terms", "S"},
     MatrixRow{"--probed-y", "S"},
@@ -676,6 +682,15 @@ TEST(CliParseArgsTests, EveryRegisteredCtestCombinationIsAccepted) {
       {Binary::ScPseudodensity, {"--tiles", "3", "--sc-hessian-kk-int", "--erigold", "x.erigold"}},
       {Binary::ScPseudodensity,
        {"--tiles", "3", "--pc", "--sc-hessian-kk-int", "--erigold", "x.erigold"}},
+      {Binary::ScPseudodensity,
+       {"--tiles", "3", "--sc-parameter-hessian", "x.respgold", "--erigold", "x.erigold",
+        "--parameter-hessian-out", "x.parhess"}},
+      {Binary::ScPseudodensity,
+       {"--tiles", "3", "--sc-parameter-hessian", "x.respgold", "--erigold", "x.erigold",
+        "--parameter-hessian-coords", "2,5", "--parameter-hessian-out", "x.parhess"}},
+      {Binary::ScPseudodensity,
+       {"--tiles", "3", "--sc-parameter-hessian", "x.respgold", "--erigold", "x.erigold"}},
+      {Binary::ScPseudodensity, {"--tiles", "3", "--sc-parameter-hessian", "x.respgold"}},
       {Binary::PcTangent, {"--tiles", "3"}},
       {Binary::PcTangent, {"--tiles", "40", "--fd-steps", "3"}},
       {Binary::PcTangent, {"--tiles", "3", "--pc-hessian"}},
@@ -1030,8 +1045,8 @@ TEST(CliScPseudodensityFlagTests, GradgoldNeedsKappaFull) {
     EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
     EXPECT_EQ(r.error().message,
               "--gradgold is the sidecar --kappa-full, --sc-hessian-kc, --sc-hessian-kk-int, "
-              "--sc-hessian-kk, --sc-source-tangent, --dump-source-terms and --source-oracle "
-              "read; it does nothing on its own");
+              "--sc-hessian-kk, --sc-source-tangent, --sc-parameter-hessian, --dump-source-terms "
+              "and --source-oracle read; it does nothing on its own");
   }
 }
 
@@ -1247,7 +1262,7 @@ TEST(CliScPseudodensityFlagTests, ScHessianKkIntSetsItsFieldAndTakesGradgold) {
 
 // --erigold (#180): the full MO-integral tensor --sc-hessian-kk-int's K2
 // reads, with or without --pc, and nothing else's.
-TEST(CliScPseudodensityFlagTests, ErigoldRidesOnScHessianKkIntAlone) {
+TEST(CliScPseudodensityFlagTests, ErigoldRidesOnScHessianKkIntAndScParameterHessianAlone) {
   for (const std::vector<std::string_view>& args :
        {std::vector<std::string_view>{"--sc-hessian-kk-int", "--erigold", "x.erigold"},
         std::vector<std::string_view>{"--erigold", "x.erigold", "--pc", "--sc-hessian-kk-int",
@@ -1257,6 +1272,11 @@ TEST(CliScPseudodensityFlagTests, ErigoldRidesOnScHessianKkIntAlone) {
     EXPECT_TRUE(r->scHessianKkInt);
     EXPECT_EQ(r->erigoldPath, "x.erigold");
   }
+  // #222: the parameter Hessian's K2 reads it too.
+  const Result<Options> ph = parse(Binary::ScPseudodensity, {"--erigold", "x.erigold",
+                                                             "--sc-parameter-hessian", "r"});
+  ASSERT_TRUE(ph.has_value()) << ph.error().message;
+  EXPECT_EQ(ph->erigoldPath, "x.erigold");
   for (const std::vector<std::string_view>& args :
        {std::vector<std::string_view>{"--erigold", "x.erigold"},
         std::vector<std::string_view>{"--sc-hessian-kk", "--erigold", "x.erigold"},
@@ -1266,9 +1286,9 @@ TEST(CliScPseudodensityFlagTests, ErigoldRidesOnScHessianKkIntAlone) {
     ASSERT_FALSE(r.has_value()) << args[0];
     EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig);
     EXPECT_EQ(r.error().message,
-              "--erigold is the full MO-integral tensor --sc-hessian-kk-int's K2 reads for a "
-              "pair with no active-active member; it does nothing on its own or beside another "
-              "job");
+              "--erigold is the full MO-integral tensor --sc-hessian-kk-int's and "
+              "--sc-parameter-hessian's K2 reads for a pair with no active-active member; it "
+              "does nothing on its own or beside another job");
   }
   for (const Binary b : {Binary::Demo, Binary::DfDemo, Binary::PcTangent}) {
     const Result<Options> r = parse(b, {"--erigold", "x.erigold"});
@@ -1461,6 +1481,129 @@ TEST(CliScPseudodensityFlagTests, ScSourceTangentRefusesTheApproximateDigests) {
 TEST(CliScPseudodensityFlagTests, OtherBinariesRefuseScSourceTangent) {
   for (const Binary b : {Binary::Demo, Binary::DfDemo, Binary::PcTangent}) {
     const Result<Options> r = parse(b, {"--sc-source-tangent", "p.pertgold"});
+    ASSERT_FALSE(r.has_value()) << binaryName(b);
+    EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << binaryName(b);
+    EXPECT_NE(r.error().message.find("only nevpt2_sc_pseudodensity"), std::string::npos)
+        << r.error().message;
+  }
+}
+
+// --sc-parameter-hessian PATH (#222): the parameter Hessian over a response
+// sidecar's directions, with its sidecars beside it -- the gradient sidecar,
+// the full tensor, the output and the coordinate block -- the exact digests
+// taken.
+TEST(CliScPseudodensityFlagTests, ScParameterHessianSetsItsPathsAndTakesItsSidecars) {
+  const Result<Options> r =
+      parse(Binary::ScPseudodensity, {"--sc-parameter-hessian", "r.respgold"});
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(r->scParameterHessianPath, "r.respgold");
+  EXPECT_TRUE(r->parameterHessianOutPath.empty());
+  EXPECT_TRUE(r->parameterHessianCoords.empty());
+  const Result<Options> all = parse(
+      Binary::ScPseudodensity,
+      {"--sc-parameter-hessian", "r.respgold", "--gradgold", "s.gradgold", "--erigold",
+       "x.erigold", "--parameter-hessian-out", "o.parhess", "--parameter-hessian-coords", "2,5",
+       "--blas-digest"});
+  ASSERT_TRUE(all.has_value()) << all.error().message;
+  EXPECT_EQ(all->gradgoldPath, "s.gradgold");
+  EXPECT_EQ(all->erigoldPath, "x.erigold");
+  EXPECT_EQ(all->parameterHessianOutPath, "o.parhess");
+  EXPECT_EQ(all->parameterHessianCoords, (std::vector<std::int64_t>{2, 5}));
+  for (const std::vector<std::string_view>& digest :
+       {std::vector<std::string_view>{"--digest-emitted"},
+        std::vector<std::string_view>{"--consume-emitted"}}) {
+    std::vector<std::string_view> args{"--sc-parameter-hessian", "r.respgold"};
+    args.insert(args.end(), digest.begin(), digest.end());
+    const Result<Options> e = parse(Binary::ScPseudodensity, args);
+    EXPECT_TRUE(e.has_value()) << digest.front() << ": " << e.error().message;
+  }
+}
+
+TEST(CliScPseudodensityFlagTests, ScParameterHessianCoordsAreAnIncreasingList) {
+  const Result<Options> one = parse(Binary::ScPseudodensity, {"--sc-parameter-hessian", "r",
+                                                              "--parameter-hessian-coords", "0"});
+  ASSERT_TRUE(one.has_value()) << one.error().message;
+  EXPECT_EQ(one->parameterHessianCoords, (std::vector<std::int64_t>{0}));
+  for (const std::string_view bad : {"", "1,", ",1", "2,1", "1,1", "-1", "a", "1;2", "1, 2"}) {
+    const Result<Options> r = parse(
+        Binary::ScPseudodensity, {"--sc-parameter-hessian", "r", "--parameter-hessian-coords", bad});
+    ASSERT_FALSE(r.has_value()) << "\"" << bad << "\"";
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig) << "\"" << bad << "\"";
+    EXPECT_NE(r.error().message.find("--parameter-hessian-coords"), std::string::npos)
+        << r.error().message;
+  }
+}
+
+TEST(CliScPseudodensityFlagTests, ScParameterHessianOutAndCoordsRideOnIt) {
+  const Result<Options> out = parse(Binary::ScPseudodensity, {"--parameter-hessian-out", "o"});
+  ASSERT_FALSE(out.has_value());
+  EXPECT_EQ(out.error().kind, ErrorKind::InvalidConfig);
+  EXPECT_EQ(out.error().message,
+            "--parameter-hessian-out is where --sc-parameter-hessian writes its matrix; it does "
+            "nothing on its own");
+  const Result<Options> coords =
+      parse(Binary::ScPseudodensity, {"--sc-hessian-kk", "--parameter-hessian-coords", "1"});
+  ASSERT_FALSE(coords.has_value());
+  EXPECT_EQ(coords.error().kind, ErrorKind::InvalidConfig);
+  EXPECT_EQ(coords.error().message,
+            "--parameter-hessian-coords restricts --sc-parameter-hessian's direction set; it "
+            "does nothing on its own");
+  for (const std::string_view flag : {"--parameter-hessian-out", "--parameter-hessian-coords"})
+    for (const Binary b : {Binary::Demo, Binary::DfDemo, Binary::PcTangent}) {
+      const Result<Options> r = parse(b, {flag, "1"});
+      ASSERT_FALSE(r.has_value()) << binaryName(b) << " " << flag;
+      EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << binaryName(b) << " " << flag;
+    }
+}
+
+TEST(CliScPseudodensityFlagTests, ScParameterHessianRefusesTheOtherJobsAndPc) {
+  for (const std::vector<std::string_view>& other :
+       {std::vector<std::string_view>{"--kappa-act"}, std::vector<std::string_view>{"--kappa-full"},
+        std::vector<std::string_view>{"--sc-hessian-kc"},
+        std::vector<std::string_view>{"--sc-hessian-kk-int"},
+        std::vector<std::string_view>{"--sc-hessian-kk"},
+        std::vector<std::string_view>{"--sc-source-tangent", "p.pertgold"},
+        std::vector<std::string_view>{"--dump-source-terms", "x.gradsrc"},
+        std::vector<std::string_view>{"--source-oracle", "x.srcgold"}}) {
+    std::vector<std::string_view> args{"--sc-parameter-hessian", "r.respgold"};
+    args.insert(args.end(), other.begin(), other.end());
+    const Result<Options> r = parse(Binary::ScPseudodensity, args);
+    ASSERT_FALSE(r.has_value()) << other.front();
+    EXPECT_EQ(r.error().kind, ErrorKind::InvalidConfig) << other.front();
+    EXPECT_NE(r.error().message.find("run one at a time"), std::string::npos)
+        << r.error().message;
+  }
+  // SC only: PC's bilinear form is not built.
+  const Result<Options> pc =
+      parse(Binary::ScPseudodensity, {"--sc-parameter-hessian", "r.respgold", "--pc"});
+  ASSERT_FALSE(pc.has_value());
+  EXPECT_EQ(pc.error().kind, ErrorKind::Unsupported);
+  EXPECT_EQ(pc.error().message,
+            "--sc-parameter-hessian --pc: the parameter Hessian over the responses is SC's "
+            "here; PC's bilinear form is not built");
+}
+
+TEST(CliScPseudodensityFlagTests, ScParameterHessianRefusesTheApproximateDigests) {
+  for (const std::vector<std::string_view>& digest :
+       {std::vector<std::string_view>{"--cublas"}, std::vector<std::string_view>{"--ozaki"},
+        std::vector<std::string_view>{"--fused-digest", "--blas-digest"}}) {
+    if (digest.front() == "--cublas" && !kHaveCublasEmul) continue;
+    for (const bool flagFirst : {true, false}) {
+      std::vector<std::string_view> args;
+      if (flagFirst) args.insert(args.end(), {"--sc-parameter-hessian", "r.respgold"});
+      args.insert(args.end(), digest.begin(), digest.end());
+      if (!flagFirst) args.insert(args.end(), {"--sc-parameter-hessian", "r.respgold"});
+      const Result<Options> r = parse(Binary::ScPseudodensity, args);
+      ASSERT_FALSE(r.has_value()) << digest.front();
+      EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << digest.front();
+      EXPECT_EQ(r.error().message, hessianDigestMessage("--sc-parameter-hessian", digest.front()));
+    }
+  }
+}
+
+TEST(CliScPseudodensityFlagTests, OtherBinariesRefuseScParameterHessian) {
+  for (const Binary b : {Binary::Demo, Binary::DfDemo, Binary::PcTangent}) {
+    const Result<Options> r = parse(b, {"--sc-parameter-hessian", "r.respgold"});
     ASSERT_FALSE(r.has_value()) << binaryName(b);
     EXPECT_EQ(r.error().kind, ErrorKind::Unsupported) << binaryName(b);
     EXPECT_NE(r.error().message.find("only nevpt2_sc_pseudodensity"), std::string::npos)

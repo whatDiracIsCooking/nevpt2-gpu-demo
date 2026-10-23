@@ -14,7 +14,7 @@
 # place that re-runs the promise, and the one place a byte comparison is right:
 # everywhere else compares against a tolerance.
 #
-# What it regenerates (twenty-nine files, twenty-two generator runs):
+# What it regenerates (thirty files, twenty-two generator runs):
 #   generate_golden.py     n2_ccpvdz_cas44 / cas88 .nevpt2gold + .gradgold,
 #                          and cas44's full MO-integral tensor sidecar
 #                          n2_ccpvdz_cas44.erigold (#180, --erigold, in the
@@ -25,7 +25,9 @@
 #                          (--mo-from the COMMITTED sidecar, as
 #                          docs/reference-data.md's commands do, so a sidecar
 #                          that drifted fails as itself, not as its golden too),
-#                          the _casscf_df one with its NEVPT2F1 .gradgold (#220)
+#                          the _casscf one with its full tensor
+#                          n2_ccpvdz_cas44_casscf.erigold (#222) and the
+#                          _casscf_df one with its NEVPT2F1 .gradgold (#220)
 #   sc_source_oracle.py    n2_ccpvdz_cas44.srcgold and n2_ccpvdz_cas44_pc.srcgold,
 #                          and their directional twins (#105) *_dir.srcgold /
 #                          *_pc_dir.srcgold (all four read
@@ -70,8 +72,9 @@
 # upstream of it (the .mogold), so its contract is reproducibility to a
 # tolerance, not byte for byte, and this gate makes no claim over it
 # (docs/reference-data.md, "The CASSCF-reference gradient sidecar"). The
-# cas44_casscf run below therefore omits the --gradgold that the docs' command
-# for that sidecar adds; the golden it writes is byte-identical either way.
+# cas44_casscf run below writes one (since #222 it passes --gradgold
+# --erigold, the full tensor needing the sidecar's run) but does not compare
+# it; the golden it writes is byte-identical either way.
 # (The HSOH sidecar above is the exception by construction: it is built from
 # the committed .mogold, as every --mo-from file here is, so the byte claim
 # is the same one its golden's is -- and so is the density-fitted
@@ -169,8 +172,11 @@ add_run cas88_df "n2_ccpvdz_cas88_df.nevpt2gold n2_ccpvdz_cas88_df.gradgold" \
   "python $gen --df --ncas 8 --nelecas 8 --name n2_ccpvdz_cas88_df --gradgold --out $S/n2_ccpvdz_cas88_df.nevpt2gold"
 add_run cas44_casscf_mo "n2_ccpvdz_cas44_casscf.mogold" \
   "python $gen --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_casscf --casscf --mo-out $S/n2_ccpvdz_cas44_casscf.mogold"
-add_run cas44_casscf "n2_ccpvdz_cas44_casscf.nevpt2gold" \
-  "python $gen --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_casscf --mo-from $G/n2_ccpvdz_cas44_casscf.mogold --out $S/n2_ccpvdz_cas44_casscf.nevpt2gold"
+# With --gradgold --erigold since #222: the full tensor is compared, the
+# gradient sidecar the run also writes is not (header, "What it deliberately
+# does NOT regenerate").
+add_run cas44_casscf "n2_ccpvdz_cas44_casscf.nevpt2gold n2_ccpvdz_cas44_casscf.erigold" \
+  "python $gen --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_casscf --mo-from $G/n2_ccpvdz_cas44_casscf.mogold --gradgold --erigold --out $S/n2_ccpvdz_cas44_casscf.nevpt2gold"
 add_run cas44_casscf_df_mo "n2_ccpvdz_cas44_casscf_df.mogold" \
   "python $gen --df --ncas 4 --nelecas 4 --name n2_ccpvdz_cas44_casscf_df --casscf --mo-out $S/n2_ccpvdz_cas44_casscf_df.mogold"
 add_run cas44_casscf_df "n2_ccpvdz_cas44_casscf_df.nevpt2gold n2_ccpvdz_cas44_casscf_df.gradgold" \

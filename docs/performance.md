@@ -764,6 +764,7 @@ live there and are not repeated here:
 | `--pc --sc-hessian-kk` (#202) | the plain build, the digests' transpose, and the gauge's tangent builds (#201's) | the plain rows, the transpose's and the `--rdm-tangent` rows | **yes**, on the four cases with a sidecar and PC fields: floor 1 (the table above) |
 | `--sc-source-tangent` (#220) | the plain build, the digests' transpose, and the tangent build (the mixed block's forward orientation) | the plain rows, the transpose's and the `--rdm-tangent` rows | no; pool high-water at the ctest entries only |
 | `--pc --sc-source-tangent` (#234) | the same three, PC's mixed block's forward orientation running the tangent build three times per CI direction (#201's) | the plain rows, the transpose's and the `--rdm-tangent` rows, as a lower bound | no; pool high-water only: 8.4 MB used for the whole run at its entry's `--tiles 3` (RTX 3080, CUDA, 2026-10-22) |
+| `--sc-parameter-hessian` (#222) | the three-argument build (its `H_cc` scalar check), the tangent build (`H_cc u`, `H_kc`'s forward check), the plain build and the digests' transpose (`H_kk` per pair, the ladders) | the `--sc-hessian` rows, as a lower bound | no; pool high-water at its entries only ("The parameter Hessian over the responses", below) |
 | `--pc-hessian` (#152) | the three-argument build, beside the PC stage's own buffers | the `--sc-hessian` rows, as a lower bound | **no**. Its only entries are CAS(4,4) (`docs/testing.md`, "The Hessian tier's entries") |
 | `--pc-hessian-vector` (#155) | the three-argument build, beside the PC adjoint walk's buffers | the `--sc-hessian` rows, as a lower bound | **no**, likewise |
 
@@ -958,6 +959,37 @@ the committed `.mogold`, waits for the card's lock excluded. N2 SC took
 dump on this card is 114 s of that. The other rows were not run whole:
 the card was held for over half an hour by another job. Their solve stage
 is the table above.
+
+### The parameter Hessian over the responses
+
+`nevpt2_sc_pseudodensity --sc-parameter-hessian` (#222) forms the SC
+parameter Hessian over a `.respgold`'s `3N` response directions:
+`H_cc` and `H_kc` as `3N` vectors, `H_kk` per pair `A ≤ B`
+([`gradients.md`](gradients.md), §1.1, has the choice). RX 9060 XT (HIP,
+`hip` preset), 2026-10-22. The RTX 3080 was unavailable to the container
+that day, so these numbers are HIP's alone:
+
+| | N2 CAS(4,4) CASSCF, `z` block (2 directions) | HSOH CAS(6,6) CASSCF (12 directions) |
+|---|---|---|
+| `H_kk`, pairs `A ≤ B` | 3, 0.9 s together | 78, 3335 s (42.8 s a pair) |
+| `H_kc^T κ_A` vectors | 2, 0.1 s | 12, 145 s (12.1 s each) |
+| `H_cc c_A` vectors | 2, 0.1 s | 12, 51.7 s (4.3 s each) |
+| the matrix | 1.1 s | 3532 s |
+| the whole run, every check | 16 s; pool high-water 48.9 MB | 7256 s (2 h 1 min), the rest after the matrix being the per-entry scalar checks (144 forward `H_kc` walks, 78 three-vector `H_cc` walks), four swapped `H_kk` pairs and the ladders; pool high-water 249.4 MB |
+
+**The orbital block is the whole cost, and on HSOH the HIP cost is the
+generic einsum's.** One HSOH pair splits into the curvature at 13.6 s (K1
+and K2, the full tensor's jets at `L = n_mo² = 1764`) and the sandwich at
+28.6 s. Inside the sandwich's walk, Sr takes 15.8 s and Si 7.7 s, against
+0.95 s and 0.51 s in a plain first-order walk of the same classes. Their
+pair tables are three-operand einsums such as `ipqr,rpqbac,iabc->i`, which
+`einsum_generic` runs one thread per (output, contracted) element and folds
+with `atomicAdd` onto a handful of outputs. That is a fixed cost per pair,
+and pairs are the one thing the orbital block cannot avoid (§5.3: no vector
+orientation). A per-pair time on the RTX 3080 was not measured. #246
+measured HIP about 100× slower than CUDA on HSOH SC kernels, which suggests
+the CUDA figure would be a small fraction of this one. That is why the HSOH
+entry is `slow`.
 
 ### The density-fitted orbital source term
 

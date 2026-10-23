@@ -101,13 +101,30 @@ constexpr std::uint8_t kNotPcTangent = kDemos | kScPd;
 //                   --pc-hessian-vector is its too (#155): PC's H_cc u,
 //                   gated against --pc-hessian's Eddot by duality, with the
 //                   same ladder flags; the two are one check at a time.
+//   --sc-parameter-hessian PATH, --parameter-hessian-out PATH
+//                   nevpt2_sc_pseudodensity alone (#222): the level-1
+//                   parameter Hessian as a bilinear form over a `.respgold`'s
+//                   response directions, assembled from the orbital, mixed
+//                   and CI blocks the tree already gates; the orbital
+//                   directions, the sidecar and the full tensor are this
+//                   binary's, and its ladders recompute the gated Y and y at
+//                   orbitals displaced out of the full tensor, as
+//                   --sc-hessian-kk-int's mixed ladders displace. SC only:
+//                   --pc is Unsupported. The second flag is where the matrix
+//                   is written, and only beside the first; so is
+//                   --parameter-hessian-coords LIST, the coordinates the
+//                   direction set is restricted to (a point-group-keeping
+//                   block). Refused the approximate digests with the Hessian
+//                   flags.
 //   --erigold       nevpt2_sc_pseudodensity alone, with --sc-hessian-kk-int
-//                   only (#180): the full MO-integral tensor its K2 reads for
-//                   a pair with no active-active member on a conventional
-//                   case. --sc-hessian-kk's Eddot_kk keeps the refusal: its
+//                   (#180) or --sc-parameter-hessian (#222): the full
+//                   MO-integral tensor K2 reads for a pair with no
+//                   active-active member on a conventional case.
+//                   --sc-hessian-kk's Eddot_kk keeps the refusal: its
 //                   ladders of the whole energy displace stored blocks only.
 //   --gradgold      nevpt2_sc_pseudodensity (--kappa-full, --sc-hessian-kc,
 //                   --sc-hessian-kk-int, --sc-hessian-kk, --sc-source-tangent,
+//                   --sc-parameter-hessian,
 //                   --dump-source-terms,
 //                   --source-oracle; each with or without --pc where it takes
 //                   it), nevpt2_demo (--gradient-source, whose y_I and forward
@@ -146,6 +163,9 @@ constexpr std::array kFlagTable{
     FlagSpec{"--sc-hessian-kk-int", "", kScPd},
     FlagSpec{"--sc-hessian-kk", "", kScPd},
     FlagSpec{"--sc-source-tangent", "path", kScPd},
+    FlagSpec{"--sc-parameter-hessian", "path", kScPd},
+    FlagSpec{"--parameter-hessian-out", "path", kScPd},
+    FlagSpec{"--parameter-hessian-coords", "LIST", kScPd},
     FlagSpec{"--gradgold", "path", kDemo | kScPd | kPcTangent},
     FlagSpec{"--erigold", "path", kScPd},
     FlagSpec{"--dump-source-terms", "path", kScPd},
@@ -211,6 +231,32 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
     opt.scHessianKk = true;
   } else if (a == "--sc-source-tangent") {
     opt.scSourceTangentPath = std::string(args[++i]);
+  } else if (a == "--sc-parameter-hessian") {
+    opt.scParameterHessianPath = std::string(args[++i]);
+  } else if (a == "--parameter-hessian-out") {
+    opt.parameterHessianOutPath = std::string(args[++i]);
+  } else if (a == "--parameter-hessian-coords") {
+    // A comma-separated, strictly increasing list of coordinate indices; the
+    // range against 3 natm is the response sidecar's, checked where it is read.
+    const std::string_view list = args[++i];
+    opt.parameterHessianCoords.clear();
+    std::size_t start = 0;
+    while (true) {
+      const std::size_t comma = list.find(',', start);
+      const std::string_view item =
+          list.substr(start, comma == std::string_view::npos ? std::string_view::npos
+                                                             : comma - start);
+      const Result<std::int64_t> v = parseInteger<std::int64_t>(a, item);
+      if (!v) return std::unexpected(v.error());
+      if (*v < 0 || (!opt.parameterHessianCoords.empty() && *v <= opt.parameterHessianCoords.back()))
+        return err_config(std::format(
+            "--parameter-hessian-coords takes non-negative coordinate indices in strictly "
+            "increasing order, not \"{}\"",
+            list));
+      opt.parameterHessianCoords.push_back(*v);
+      if (comma == std::string_view::npos) break;
+      start = comma + 1;
+    }
   } else if (a == "--gradgold") {
     opt.gradgoldPath = std::string(args[++i]);
   } else if (a == "--erigold") {
@@ -246,16 +292,22 @@ Status parseOwnFlag(const std::span<const std::string_view> args, std::size_t& i
 
 // Every Hessian flag, of every binary (docs/hessian-theory.md, Sec. 9.1) --
 // and --sc-source-tangent (#220), a mixed second derivative of the energy in
-// the integrals and the parameters, refused the approximate digests alike.
-constexpr std::array<std::string_view, 8> kHessianFlags{
-    "--sc-hessian",    "--sc-hessian-vector", "--sc-hessian-kc",     "--sc-hessian-kk-int",
-    "--sc-hessian-kk", "--pc-hessian",        "--pc-hessian-vector", "--sc-source-tangent"};
+// the integrals and the parameters, refused the approximate digests alike --
+// and --sc-parameter-hessian (#222), the whole parameter Hessian as a
+// bilinear form.
+constexpr std::array<std::string_view, 9> kHessianFlags{
+    "--sc-hessian",        "--sc-hessian-vector", "--sc-hessian-kc",
+    "--sc-hessian-kk-int", "--sc-hessian-kk",     "--pc-hessian",
+    "--pc-hessian-vector", "--sc-source-tangent", "--sc-parameter-hessian"};
 
 // The first Hessian flag `opt` sets, in kHessianFlags' order; empty for none.
 std::string_view hessianFlagOf(const Options& opt) {
   const std::array<bool, kHessianFlags.size()> set{
-      opt.scHessian,   opt.scHessianVector, opt.scHessianKc,     opt.scHessianKkInt,
-      opt.scHessianKk, opt.pcHessian,       opt.pcHessianVector, !opt.scSourceTangentPath.empty()};
+      opt.scHessian,       opt.scHessianVector,
+      opt.scHessianKc,     opt.scHessianKkInt,
+      opt.scHessianKk,     opt.pcHessian,
+      opt.pcHessianVector, !opt.scSourceTangentPath.empty(),
+      !opt.scParameterHessianPath.empty()};
   for (std::size_t k = 0; k < set.size(); ++k)
     if (set[k]) return kHessianFlags[k];
   return {};
@@ -438,6 +490,30 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
             "perturbation; --kappa-act, --kappa-full, --sc-hessian-kc, --sc-hessian-kk-int, "
             "--sc-hessian-kk, --dump-source-terms and --source-oracle are jobs of their own -- "
             "run one at a time");
+      // --sc-parameter-hessian (#222) likewise: one job per run, SC only
+      // (PC's bilinear form is not built), and --parameter-hessian-out is
+      // where it writes its matrix.
+      if (!opt.scParameterHessianPath.empty() &&
+          (opt.kappaAct || opt.kappaFull || opt.scHessianKc || opt.scHessianKkInt ||
+           opt.scHessianKk || !opt.scSourceTangentPath.empty() ||
+           !opt.dumpSourceTermsPath.empty() || !opt.sourceOraclePath.empty()))
+        return err_config(
+            "--sc-parameter-hessian forms the whole parameter Hessian over a response "
+            "sidecar's directions; --kappa-act, --kappa-full, --sc-hessian-kc, "
+            "--sc-hessian-kk-int, --sc-hessian-kk, --sc-source-tangent, --dump-source-terms and "
+            "--source-oracle are jobs of their own -- run one at a time");
+      if (c.pc && !opt.scParameterHessianPath.empty())
+        return err_unsupported(
+            "--sc-parameter-hessian --pc: the parameter Hessian over the responses is SC's "
+            "here; PC's bilinear form is not built");
+      if (!opt.parameterHessianOutPath.empty() && opt.scParameterHessianPath.empty())
+        return err_config(
+            "--parameter-hessian-out is where --sc-parameter-hessian writes its matrix; it does "
+            "nothing on its own");
+      if (!opt.parameterHessianCoords.empty() && opt.scParameterHessianPath.empty())
+        return err_config(
+            "--parameter-hessian-coords restricts --sc-parameter-hessian's direction set; it "
+            "does nothing on its own");
       // --pc picks PC-NEVPT2's source terms (#74), PC's orbital curvature
       // (#200), PC's mixed block (#201), PC's sandwich and Eddot_kk (#202) and
       // PC's source terms' tangent along an integral perturbation (#234): only
@@ -451,18 +527,20 @@ Status checkOwnFlags(const Binary b, const Options& opt) {
             "identities, --kappa-act and --kappa-full are the SC energy's and have no --pc path");
       if (!opt.gradgoldPath.empty() && !opt.kappaFull && !opt.scHessianKc &&
           !opt.scHessianKkInt && !opt.scHessianKk && opt.dumpSourceTermsPath.empty() &&
-          opt.sourceOraclePath.empty() && opt.scSourceTangentPath.empty())
+          opt.sourceOraclePath.empty() && opt.scSourceTangentPath.empty() &&
+          opt.scParameterHessianPath.empty())
         return err_config(
             "--gradgold is the sidecar --kappa-full, --sc-hessian-kc, --sc-hessian-kk-int, "
-            "--sc-hessian-kk, --sc-source-tangent, --dump-source-terms and --source-oracle "
-            "read; it does nothing on its own");
-      // --erigold (#180) is --sc-hessian-kk-int's alone: the one job whose
-      // K2 reads the full tensor.
-      if (!opt.erigoldPath.empty() && !opt.scHessianKkInt)
+            "--sc-hessian-kk, --sc-source-tangent, --sc-parameter-hessian, --dump-source-terms "
+            "and --source-oracle read; it does nothing on its own");
+      // --erigold (#180) is the full tensor K2 reads: --sc-hessian-kk-int's,
+      // and --sc-parameter-hessian's (#222), whose response directions have
+      // no active-active member.
+      if (!opt.erigoldPath.empty() && !opt.scHessianKkInt && opt.scParameterHessianPath.empty())
         return err_config(
-            "--erigold is the full MO-integral tensor --sc-hessian-kk-int's K2 reads for a "
-            "pair with no active-active member; it does nothing on its own or beside another "
-            "job");
+            "--erigold is the full MO-integral tensor --sc-hessian-kk-int's and "
+            "--sc-parameter-hessian's K2 reads for a pair with no active-active member; it does "
+            "nothing on its own or beside another job");
       // --sc-hessian-kc / -kk-int / -kk with an approximate digest never get
       // here: checkHessianDigests refused them before finalize(), as
       // Unsupported (docs/hessian-theory.md, Sec. 9.1).

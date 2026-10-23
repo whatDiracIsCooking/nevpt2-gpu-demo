@@ -944,6 +944,88 @@ if(NEVPT2_BUILD_TESTING)
       "PASS: the PC source terms' tangent along the integral perturbation agrees with itself by duality to 1e-07 .* on 6 of 6 coordinates \\(orbital energies FULL\\)")
   endif()
 
+  # --- the parameter Hessian over the responses, --sc-parameter-hessian (#222) -----
+  #
+  # nevpt2_sc_pseudodensity --sc-parameter-hessian PATH (apps/sc_pseudodensity/
+  # parameter_hessian_check.cppm; docs/hessian-theory.md, Sec. 8): the SC
+  # level-1 parameter Hessian as a bilinear form over the committed `.respgold`'s
+  # response directions, E_thth[Theta_A, Theta_B], the orbital energies
+  # responding throughout, K2 from the full MO-integral tensor (--erigold).
+  # Every entry against the per-block flags' scalars on the same pair (1e-7),
+  # the matrix's symmetry (1e-7), Richardson-verified ladders of the gated Y
+  # and y recomputed at (C exp(h kappa_B), c + h c_B) out of the full tensor
+  # (seeded columns), the no-tensor refusal, and the written `.parhess` read
+  # back bit for bit.
+  #
+  # N2 CAS(4,4) on CASSCF orbitals: the whole 3N set is REFUSED whole -- the x
+  # and y responses populate the H classes' empty perturbers with
+  # non-proportional tables along each x-y pair (Sec. 5.6), so the matrix has
+  # no element there and none is returned (the _refused entry) -- and the z
+  # block, --parameter-hessian-coords 2,5, which populates none, is computed
+  # and laddered. The C1 case, HSOH CAS(6,6), runs all twelve coordinates; its
+  # .erigold is gitignored (25 MB: docs/reference-data.md, "The full
+  # MO-integral tensor sidecar"), so that entry is registered only when it has
+  # been regenerated, and is `slow` (docs/testing.md, "The parameter Hessian
+  # over the responses", has the wall times).
+  set(_nevpt2_parhess_dir "${CMAKE_CURRENT_BINARY_DIR}/parhess")
+  file(MAKE_DIRECTORY "${_nevpt2_parhess_dir}")
+  set(_nevpt2_ph_pass
+      "PASS: the SC parameter Hessian over the [0-9]+ response directions matches the per-block flags' scalars on every entry to 1e-07, is symmetric to 1e-07, and the ladders of the gated Y and y converge to it \\(orbital energies responding throughout")
+  set(_ph_stem "${CMAKE_CURRENT_SOURCE_DIR}/golden/n2_ccpvdz_cas44_casscf")
+  foreach(_ph_ext gradgold respgold erigold)
+    if(NOT EXISTS "${_ph_stem}.${_ph_ext}")
+      message(FATAL_ERROR "nevpt2: committed sidecar missing: ${_ph_stem}.${_ph_ext}")
+    endif()
+  endforeach()
+  _add_golden_test_with(nevpt2_sc_pseudodensity
+                        nevpt2_sc_pseudodensity_cas44_casscf_sc_parameter_hessian
+                        "${_ph_stem}.nevpt2gold" --tiles 3
+                        --sc-parameter-hessian "${_ph_stem}.respgold"
+                        --erigold "${_ph_stem}.erigold" --parameter-hessian-coords 2,5
+                        --parameter-hessian-out "${_nevpt2_parhess_dir}/n2_ccpvdz_cas44_casscf_z.parhess")
+  if(TEST nevpt2_sc_pseudodensity_cas44_casscf_sc_parameter_hessian)
+    set_tests_properties(nevpt2_sc_pseudodensity_cas44_casscf_sc_parameter_hessian PROPERTIES
+      PASS_REGULAR_EXPRESSION "${_nevpt2_ph_pass}")
+  endif()
+  _add_golden_test_with(nevpt2_sc_pseudodensity
+                        nevpt2_sc_pseudodensity_cas44_casscf_sc_parameter_hessian_refused
+                        "${_ph_stem}.nevpt2gold" --tiles 3
+                        --sc-parameter-hessian "${_ph_stem}.respgold"
+                        --erigold "${_ph_stem}.erigold")
+  if(TEST nevpt2_sc_pseudodensity_cas44_casscf_sc_parameter_hessian_refused)
+    set_tests_properties(nevpt2_sc_pseudodensity_cas44_casscf_sc_parameter_hessian_refused
+      PROPERTIES PASS_REGULAR_EXPRESSION
+      "numerical error: the parameter Hessian is refused whole -- 4 of its 21 orbital-block pairs A <= B have no second derivative here, .* entry \\(0, 1\\): .* the SC energy is not twice differentiable along this pair")
+  endif()
+  set(_ph_stem "${CMAKE_CURRENT_SOURCE_DIR}/golden/hsoh_def2svp_cas66_casscf")
+  if(NOT EXISTS "${_ph_stem}.erigold")
+    message(WARNING "nevpt2: ${_ph_stem}.erigold missing (gitignored; regenerate it with "
+                    "docs/reference-data.md's command), test "
+                    "'nevpt2_sc_pseudodensity_hsoh_cas66_casscf_sc_parameter_hessian' not "
+                    "registered")
+  else()
+    _add_golden_test_with(nevpt2_sc_pseudodensity
+                          nevpt2_sc_pseudodensity_hsoh_cas66_casscf_sc_parameter_hessian
+                          "${_ph_stem}.nevpt2gold" --tiles 3
+                          --sc-parameter-hessian "${_ph_stem}.respgold"
+                          --erigold "${_ph_stem}.erigold"
+                          --parameter-hessian-out "${_nevpt2_parhess_dir}/hsoh_def2svp_cas66_casscf.parhess")
+    if(TEST nevpt2_sc_pseudodensity_hsoh_cas66_casscf_sc_parameter_hessian)
+      set_tests_properties(nevpt2_sc_pseudodensity_hsoh_cas66_casscf_sc_parameter_hessian
+        PROPERTIES PASS_REGULAR_EXPRESSION "${_nevpt2_ph_pass}" LABELS "gpu;slow")
+      # About two hours on the RX 9060 XT (docs/performance.md, "The parameter
+      # Hessian over the responses"): six times the tree's timeout.
+      math(EXPR _ph_timeout "6 * ${_nevpt2_timeout}")
+      set_tests_properties(nevpt2_sc_pseudodensity_hsoh_cas66_casscf_sc_parameter_hessian
+        PROPERTIES TIMEOUT ${_ph_timeout})
+      unset(_ph_timeout)
+    endif()
+  endif()
+  unset(_ph_stem)
+  unset(_ph_ext)
+  unset(_nevpt2_ph_pass)
+  unset(_nevpt2_parhess_dir)
+
   # --- PC's mixed orbital-CI block H_kc, --pc --sc-hessian-kc (#201) --------------
   #
   # The same binary and flag with --pc (apps/sc_pseudodensity/

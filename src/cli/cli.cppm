@@ -206,11 +206,26 @@ struct Options {
   // refusal); with --pc, PC's source terms' tangent (#234). It reads the
   // gradient sidecar (required).
   std::string scSourceTangentPath;
+  // nevpt2_sc_pseudodensity: --sc-parameter-hessian PATH, the SC level-1
+  // parameter Hessian as a bilinear form over the response directions of the
+  // `.respgold` at PATH (#222; docs/hessian-theory.md, Sec. 8); one job at a
+  // time with the eight above, exact digests only, SC only. It reads the
+  // gradient sidecar (required) and, for K2, the full tensor (--erigold).
+  // --parameter-hessian-out PATH, only beside it: where the matrix is
+  // written, as a `.parhess`. --parameter-hessian-coords LIST, only beside it
+  // too: the coordinates (k = 3 atom + axis, comma-separated, strictly
+  // increasing) the direction set is restricted to -- a block that keeps the
+  // point group, where the whole set has no Hessian (a symmetric molecule's
+  // symmetry-breaking pairs, docs/hessian-theory.md, Sec. 5.6). Empty: every
+  // coordinate.
+  std::string scParameterHessianPath;
+  std::string parameterHessianOutPath;
+  std::vector<std::int64_t> parameterHessianCoords;
   std::string gradgoldPath;
   // nevpt2_sc_pseudodensity: --erigold PATH, only with --sc-hessian-kk-int
-  // (#180): the `.erigold` full MO-integral tensor sidecar, from which K2 is
-  // computed for a direction pair with no active-active member on a
-  // conventional case -- refused without it.
+  // (#180) or --sc-parameter-hessian (#222): the `.erigold` full MO-integral
+  // tensor sidecar, from which K2 is computed for a direction pair with no
+  // active-active member on a conventional case -- refused without it.
   std::string erigoldPath;
   std::string dumpSourceTermsPath;
   // nevpt2_sc_pseudodensity: --probed-y, only with --dump-source-terms (#240):

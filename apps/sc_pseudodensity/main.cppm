@@ -156,6 +156,9 @@ export import :source_tangent_check;
 // --pc --sc-source-tangent PATH: the PC source terms' (#234). Its own PASS
 // line.
 export import :source_tangent_pc_check;
+// --sc-parameter-hessian PATH: the SC parameter Hessian as a bilinear form over
+// a response sidecar's directions (#222). Its own PASS line.
+export import :parameter_hessian_check;
 
 import std;
 // nevpt2.cli: every flag this binary takes, and the ones it refuses.
@@ -539,6 +542,49 @@ int main(int argc, char** argv) {
                                       rdm, opt.rdm, *res)
                : checkScSourceTangent(g, gg, parsedOpts.scSourceTangentPath, dInts, dDm1, dDm2,
                                       rdm, opt.rdm, *res);
+    if (!ok) {
+      nevpt2::report(ok.error());
+      return 1;
+    }
+    nevpt2::printPoolHighWater("for the whole run", *res);
+    return *ok ? 0 : 1;
+  }
+
+  // --sc-parameter-hessian PATH (#222): the SC parameter Hessian as a bilinear
+  // form over the response directions of the `.respgold` at PATH
+  // (:parameter_hessian_check). Level 1, so the source-term gate; the
+  // gradient sidecar is required, and --erigold is the full tensor K2 reads
+  // for the responses' pairs (none of which has an active-active member) --
+  // without it the matrix is refused whole, Unsupported.
+  if (!parsedOpts.scParameterHessianPath.empty()) {
+    if (const nevpt2::Status st = g.requireSourceTermReference("--sc-parameter-hessian"); !st) {
+      nevpt2::report(st.error());
+      return 1;
+    }
+    nevpt2::Result<nevpt2::GradGoldFile> sidecar = loadSidecar();
+    if (!sidecar) {
+      nevpt2::report(sidecar.error());
+      return 1;
+    }
+    const nevpt2::GradGoldFile gg = *std::move(sidecar);
+    std::optional<nevpt2::EriGoldFile> eri;
+    if (!parsedOpts.erigoldPath.empty()) {
+      std::printf("full MO-integral tensor: %s\n", parsedOpts.erigoldPath.c_str());
+      nevpt2::Result<nevpt2::EriGoldFile> loadedEri = nevpt2::loadEriGold(parsedOpts.erigoldPath);
+      if (!loadedEri) {
+        nevpt2::report(loadedEri.error());
+        return 1;
+      }
+      if (const nevpt2::Status st = loadedEri->checkAgainst(g, gg); !st) {
+        nevpt2::report(st.error());
+        return 1;
+      }
+      eri = *std::move(loadedEri);
+    }
+    const nevpt2::Result<bool> ok = checkScParameterHessian(
+        g, gg, parsedOpts.scParameterHessianPath, eri ? &*eri : nullptr,
+        parsedOpts.parameterHessianOutPath, parsedOpts.parameterHessianCoords, dInts, dDm1,
+        dDm2, rdm, opt.rdm, *res);
     if (!ok) {
       nevpt2::report(ok.error());
       return 1;

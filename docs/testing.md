@@ -445,7 +445,7 @@ added):
 | `n2_ccpvdz_cas44.nevpt2gold`, `.gradgold`, `.erigold`; `n2_ccpvdz_cas88.nevpt2gold`, `.gradgold` | `generate_golden.py --gradgold`, CAS(4,4)'s with `--erigold` too (#180), which changes no byte of the other two |
 | `n2_ccpvdz_cas44_df.nevpt2gold`, `.gradgold`; `n2_ccpvdz_cas88_df.nevpt2gold`, `.gradgold` | `generate_golden.py --df --gradgold` (the density-fitted `NEVPT2F1` sidecar, #164); for CAS(4,4), then `nevpt2_numgrad.py --df` on the sidecar it just wrote, in the same run, so its `grad_num*` arrays are regenerated too (#167) |
 | `n2_ccpvdz_cas44_casscf[_df].mogold` | `generate_golden.py --casscf --mo-out` (a fresh optimisation) |
-| `n2_ccpvdz_cas44_casscf[_df].nevpt2gold`, `n2_ccpvdz_cas44_casscf_df.gradgold` | `generate_golden.py --mo-from` the **committed** sidecar, so a drifted sidecar fails as itself and not as its golden too; the fitted run with `--gradgold`, writing the `NEVPT2F1` sidecar committed for #220 |
+| `n2_ccpvdz_cas44_casscf[_df].nevpt2gold`, `n2_ccpvdz_cas44_casscf.erigold`, `n2_ccpvdz_cas44_casscf_df.gradgold` | `generate_golden.py --mo-from` the **committed** sidecar, so a drifted sidecar fails as itself and not as its golden too; the fitted run with `--gradgold`, writing the `NEVPT2F1` sidecar committed for #220; the conventional one with `--gradgold --erigold` (#222), its full tensor compared and the `.gradgold` it also writes not |
 | `n2_ccpvdz_cas44.srcgold`, `n2_ccpvdz_cas44_pc.srcgold` | `sc_source_oracle.py [--pc]`, reading the committed golden |
 | `n2_ccpvdz_cas44_dir.srcgold`, `n2_ccpvdz_cas44_pc_dir.srcgold` | `sc_source_oracle.py --directional [--pc]` (#105) |
 | `n2_ccpvdz_cas44_casscf[_pc][_dir].srcgold` | `sc_source_oracle.py --case n2_ccpvdz_cas44_casscf --mo-from` the **committed** sidecar `[--pc] [--directional]` (#117) |
@@ -462,7 +462,7 @@ four the state fields must be byte-identical, the new `reference_kind` must
 be `casci`, and everything from the array count on byte-identical, each
 file's header length read with `golden_format.py arrays-at`. It prints one
 `PASS:`/`FAIL:` line per file (naming it) and exits 0 only if all
-twenty-nine reproduce. `--committed DIR` compares against a copy instead of `golden/`
+thirty reproduce. `--committed DIR` compares against a copy instead of `golden/`
 (the generator inputs stay `golden/`'s), `--only REGEX` narrows the set,
 `--out DIR` keeps the regenerated files and each run's log.
 
@@ -491,6 +491,7 @@ before #105 added the two directional files:
 | `-j 6`, twenty-five files, the two `.respgold` added, #219 (the 12-core reference box, a sibling build sharing it) | 236 s, all twenty-five `PASS:`; `cas44_casscf_resp` 4 s, `hsoh_casscf_resp` 11 s |
 | `-j 6`, twenty-eight files, the fitted CASSCF `.gradgold` and the two `.pertgold` added, #220 (the 12-core reference box, a sibling agent's offline job sharing it) | 236 s, all twenty-eight `PASS:`; `cas44_casscf_pert` and `cas44_casscf_df_pert` 2 s each, `cas44_casscf_df` (now with `--gradgold`) 27 s |
 | `-j 6`, twenty-nine files, `n2_ccpvdz_cas44.erigold` added to the `cas44` run, #180 (the 12-core reference box, another job sharing it) | 229 s, all twenty-nine `PASS:`; the `cas44` run, now with `--erigold`, 28 s (its golden and `.gradgold` byte-identical, as before) |
+| `-j 6`, thirty files, `n2_ccpvdz_cas44_casscf.erigold` added to the `cas44_casscf` run, #222 (the RX 9060 XT box's CPU, a GPU job sharing it) | 231 s, all thirty `PASS:`; the `cas44_casscf` run, now with `--gradgold --erigold`, 28 s |
 
 Per generator run (the `-j 1` run): `--casscf` sidecars 2–3 s,
 `n2_ccpvdz_cas44.srcgold` 9 s, the CAS(4,4) goldens 26–27 s, the CAS(8,8)
@@ -1322,6 +1323,88 @@ its absence.
 The flag's parsing is `test/cli/`'s `CliScPseudodensityFlagTests`
 (`ScSourceTangentTakesPc`, and `--pc` in `ScSourceTangentRefusesTheOtherJobs`
 and `ScSourceTangentRefusesTheApproximateDigests`).
+
+## The parameter Hessian over the responses
+
+`nevpt2_sc_pseudodensity_cas44_casscf_sc_parameter_hessian` (`gpu`) and
+`nevpt2_sc_pseudodensity_hsoh_cas66_casscf_sc_parameter_hessian` (`gpu;slow`)
+run `nevpt2_sc_pseudodensity --golden <case>_casscf --tiles 3
+--sc-parameter-hessian golden/<case>_casscf.respgold --erigold
+golden/<case>_casscf.erigold --parameter-hessian-out <build>/parhess/...`.
+N2's adds `--parameter-hessian-coords 2,5`. Both match `PASS: the SC
+parameter Hessian over the N response directions matches the per-block
+flags' scalars on every entry to 1e-07, is symmetric to 1e-07, and the
+ladders of the gated Y and y converge to it` (#222). They check
+`scParameterHessianDevice`, the bilinear form `E_θθ[Θ_A, Θ_B]` over #219's
+responses with the orbital energies responding throughout
+([`hessian-theory.md`](hessian-theory.md), §8;
+`apps/sc_pseudodensity/parameter_hessian_check.cppm` has the checks). HSOH's
+`.erigold` is gitignored, so its entry is registered only once that file is
+regenerated ([`reference-data.md`](reference-data.md), "The full MO-integral
+tensor sidecar").
+
+**N2's whole response set has no Hessian, and
+`nevpt2_sc_pseudodensity_cas44_casscf_sc_parameter_hessian_refused` (`gpu`)
+holds it to that.** The `x` and `y` responses of N2 are pure orbital
+rotations, the two atoms' equal and opposite. Each populates the H classes'
+integral-empty perturbers, and an `x` and a `y` response populate them with
+non-proportional tables. So the four `x`–`y` pairs `A ≤ B` of the 21 are
+refused, with the Srs `rho_t` up to 0.12 and the Sir `rho_t` up to 0.50
+([`hessian-theory.md`](hessian-theory.md), §5.6). The matrix is then refused
+whole as a Numerical Error naming entry `(0, 1)`. The `z` block populates
+none, and is what the passing entry computes and ladders.
+
+RX 9060 XT (HIP, `hip` preset), 2026-10-22, one run each. The RTX 3080 was
+not available to the container:
+
+| check | N2 CAS(4,4) `z` block (2 directions) | HSOH CAS(6,6) (12) | gate |
+|---|---|---|---|
+| 0: the responses' `kappa` antisymmetric / zero on the diagonal blocks; `max \|<c, c_A>\|` | 0 / 0; 2.2e-17 | 0 / 0; 1.3e-16 | 0 / 0; 1e-10 |
+| 0: the gradient sidecar against itself, worst family (relative) | 4.6e-14 | 1.1e-13 | 1e-10 |
+| 1: every `H_cc` walk's `y` against the gated `y` | 5.5e-14 | 3.0e-12 | 1e-7 |
+| 2: `h_kc` against `--sc-hessian-kc`'s forward scalar, every ordered pair | 1.7e-15 | 2.2e-14 | 1e-7 |
+| 2: `h_cc` against `--sc-hessian`'s FULL-mode scalar, every pair, both orders | 4.6e-14 | 2.4e-13 | 1e-7 |
+| 2: the entry assembled from the scalars (`h_kk` being `--sc-hessian-kk`'s own) | 4.8e-14 | 2.4e-13 | 1e-7 |
+| 3: `h_cc` symmetry, every entry | 1.8e-14 | 1.1e-13 | 1e-7 |
+| 3: `h_kk`'s swapped walks, `(B, A)` against `(A, B)` (N2: the one pair; HSOH: 4 of 66, seeded) | 3.1e-13 | 5.8e-15 | 1e-7 |
+| 3: `max \|E_θθ − E_θθᵀ\|` | 1.8e-14 | 1.1e-13 | 1e-7 |
+| 4: the ladders' host builder at `U = 1` against the golden's blocks and the sidecar's rows, worst array (relative) | 1.1e-13 (`e_virt`) | 8.0e-14 (`h1e_v_Sr`) | 1e-10 |
+| 4: `Edot(Θ_A)` from the rebuilt inputs at `U = 1` against the state's (relative) | 2.2e-13 | 8.0e-12 | 1e-10 |
+| 5: no full tensor | refused whole, Unsupported (3 of 3 pairs) | refused whole, Unsupported (78 of 78) | must refuse |
+| the written `.parhess` read back; `golden_layout_check.py --parhess` | bit for bit; `write_parhess`'s bytes | bit for bit; `write_parhess`'s bytes | — |
+
+`max |E_θθ|` is 7.19 on N2's block, `[[−a, a], [a, −a]]` since the two `z`
+responses are equal and opposite. On HSOH it is 2.14, with `max |h_kk|` =
+2.26, `max |h_cc|` = 0.41 and `max |h_kc|` = 0.029.
+
+**The ladders.** `<Y, κ_A> + <y, c_A>` at `(C exp(h κ_B), c + h c_B)` is
+recomputed in full and central-differenced against `E_θθ[A, B] + (1/2)
+Edot([κ_B, κ_A])`, for `h = 2^-k`, `k = 10…20`. The best error is taken
+relative to `max(|target|, |Edot(Θ_A)|)`; the gate is 1e-6 and a run of
+three fourfold halvings. The columns `B` are seeded, and every `A` is checked
+in each:
+
+| | N2 `z` block | HSOH |
+|---|---|---|
+| columns `B`; entries laddered | `0.z`, `1.z`; all 4 | `0.x`, `0.z`; 24 of 144, the two diagonal entries among them |
+| entries converging | 4 of 4 | 24 of 24 |
+| best error, worst entry (relative) | 1.1e-8 | 4.7e-8 (`(0.y, 0.x)`) |
+| fourfold halvings, fewest | 8 | 3 (`(1.z, 0.x)`) |
+| the BCH term `(1/2) Edot([κ_B, κ_A])`, largest | 2e-18 (the two `z` responses commute) | 4.0e-4 |
+| a diagonal entry's rungs, `k = 10…20` | 4.3e-3, 1.9e-3, 5.8e-4, 1.6e-4, 4.0e-5, 1.0e-5, 2.5e-6, 6.2e-7, 1.6e-7, 3.9e-8, 1.0e-8 (`0.z`) | 2.5e-4, 6.5e-5, 1.7e-5, 4.2e-6, 1.0e-6, 2.6e-7, 6.5e-8, 1.6e-8, 2.9e-9, 2.0e-9, 7.3e-10 (`0.x`) |
+
+On HSOH the BCH term is four decades above the ladders' best errors. A ladder
+run without it would therefore stand off its entry, so the convergence also
+confirms the parameterisation term. Below `k = 10` N2's errors are not yet
+`O(h²)`: on a first run from `k = 4` they read 8.3e+1, then 3.8e-2 to 7.8e-3
+for `k = 5…9`. That is the same structure at `h ~ 1e-3` that "The source
+terms' tangent along an integral perturbation" records, so the ladders start
+at `2^-10` as those do.
+
+**What a run costs** is [`performance.md`](performance.md), "The parameter
+Hessian over the responses": 16 s for N2's entry and about two hours for
+HSOH's on the RX 9060 XT. That is why HSOH's is `slow`. Its own `TIMEOUT` is
+six times the tree's, since the default 30 minutes would cut it off.
 
 ## The orbital block's integral curvature
 
@@ -2589,7 +2672,7 @@ difference can be formed there.
 
 ## The Hessian tier's entries
 
-Every ctest entry the Hessian milestones added (#150–#158, #184, #190, #200–#203, #214, #220), in
+Every ctest entry the Hessian milestones added (#150–#158, #184, #190, #200–#203, #214, #220, #222), in
 one place: its binary and flag, its gate (the `PASS_REGULAR_EXPRESSION` the
 entry matches) and its labels. What each one checks, and every number it
 comes out at, is in the section the last column names, not here.
@@ -2619,6 +2702,8 @@ exact digests:
 | `nevpt2_pc_hessian_vector_cas44_full`, `nevpt2_pc_hessian_vector_cas44_casscf_full` | `nevpt2_pc_tangent --pc-hessian-vector --gradgold <sidecar>` | `PASS: the PC-NEVPT2 Hessian-vector product H_cc u matches … (orbital-energy mode: FULL, …`, likewise | `gpu;small` | "The CI block in FULL mode" |
 | `nevpt2_sc_pseudodensity_cas44_casscf_sc_source_tangent`, `nevpt2_sc_pseudodensity_cas44_casscf_df_sc_source_tangent` | `nevpt2_sc_pseudodensity --sc-source-tangent <pertgold>` (#220) | `PASS: the SC source terms' tangent along the integral perturbation agrees with itself by duality to 1e-07 … on 2 of 6 coordinates; 4 refused, populating empty perturbers (Sec. 5.6)`, the fitted entry's line ending `(density-fitted)` | `gpu` | "The source terms' tangent along an integral perturbation" |
 | `nevpt2_sc_pseudodensity_cas44_casscf_pc_source_tangent` | `nevpt2_sc_pseudodensity --pc --sc-source-tangent <pertgold>` (#234) | `PASS: the PC source terms' tangent along the integral perturbation agrees with itself by duality to 1e-07 … on 6 of 6 coordinates (orbital energies FULL)` | `gpu` | "PC's source terms' tangent along an integral perturbation" |
+| `nevpt2_sc_pseudodensity_cas44_casscf_sc_parameter_hessian`, `nevpt2_sc_pseudodensity_hsoh_cas66_casscf_sc_parameter_hessian` | `nevpt2_sc_pseudodensity --sc-parameter-hessian <respgold> --erigold <erigold> --parameter-hessian-out <parhess>` (#222), N2's with `--parameter-hessian-coords 2,5` | `PASS: the SC parameter Hessian over the N response directions matches the per-block flags' scalars on every entry to 1e-07, is symmetric to 1e-07, and the ladders of the gated Y and y converge to it (orbital energies responding throughout` | `gpu` / `gpu;slow` (HSOH's, registered only when its gitignored `.erigold` exists) | "The parameter Hessian over the responses" |
+| `nevpt2_sc_pseudodensity_cas44_casscf_sc_parameter_hessian_refused` | the same on N2's whole `3N` set | the error: `the parameter Hessian is refused whole -- 4 of its 21 orbital-block pairs A <= B have no second derivative here, … entry (0, 1): … not twice differentiable along this pair` | `gpu` | "The parameter Hessian over the responses" |
 
 There is no CAS(8,8) entry for PC's CI block: there both second-order checks
 converge to a value standing off the analytic one, for a conditioning reason
@@ -2646,6 +2731,8 @@ build sets each flag's tile floor is [`performance.md`](performance.md),
 | `CliHessianRefusalTests` | `cli_tests` | every Hessian flag against every approximate digest, in both orders, refused as `err_unsupported`; each flag one binary's; the exact digests accepted |
 | `CliScPseudodensityFlagTests` (`ScSourceTangent*`, #220, #234) | `cli_tests` | `--sc-source-tangent PATH` sets its path, needs one, takes `--gradgold`, the exact digests and `--pc` (#234), refuses the other jobs (`err_config`) and the approximate digests (`err_unsupported`, the Hessian flags' message), with `--pc` too, and is `nevpt2_sc_pseudodensity`'s alone |
 | `EriGoldRoundTripTests`, `EriGoldLoadErrorTests`, `EriGoldCommittedTests` | `erigold_tests` | the `.erigold` reader (#180): a written sidecar's header and values read back; every malformed file an IO Error, either array missing refused whole; the committed N2 CAS(4,4) tensor's `(x a | a a)` rows against its gradient sidecar's `g_xa_aa`, paired with its own golden and sidecar and refused beside the CASSCF-orbital pair (another frame) and the density-fitted one |
+| `CliScPseudodensityFlagTests` (`ScParameterHessian*`, `ErigoldRides*`, #222) | `cli_tests` | `--sc-parameter-hessian PATH` sets its path and takes `--gradgold`, `--erigold`, `--parameter-hessian-out` and `--parameter-hessian-coords` (a strictly increasing list, every malformed one `err_config`), the last two only beside it; refuses the other jobs (`err_config`), `--pc` and the approximate digests (`err_unsupported`); `nevpt2_sc_pseudodensity`'s alone |
+| `RespGoldLoadErrorTests`, `RespGoldCommittedTests`, `ParHessRoundTripTests`, `ParHessLoadErrorTests` | `respgold_tests` | the `.respgold` reader (#222): every malformed file an IO Error, any array missing refused whole; the two committed sidecars against their golden and gradient sidecar (each `kappa` antisymmetric and zero on its diagonal blocks, each CI response orthogonal to `ci`) and refused beside the CASCI state; the `.parhess` writer's file read back bit for bit and its bytes the format's, every malformed one refused |
 | `PertGoldRoundTripTests`, `PertGoldLoadErrorTests`, `PertGoldCommittedTests` | `pertgold_tests` | the `.pertgold` reader (#220): a written sidecar's header, arrays and per-coordinate slices read back; every malformed file an IO Error, and the sidecar with **any one** of its 22 arrays missing refused whole; the two committed sidecars paired with their own golden and gradient sidecar and refused beside the CASCI state's (another frame) and the other calculation's |
 
 ## The density-fitted orbital source term

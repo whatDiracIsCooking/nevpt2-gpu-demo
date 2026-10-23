@@ -41,7 +41,14 @@ golden/salicylaldimine_*
 # docs/reference-data.md, "The gradient sidecar".
 golden/acrolein_def2svp_cas65.gradgold
 
-# ... and its CASSCF-orbital twin's (#123), 57 MB for the same reason; the
+# The C1 case's FULL MO-INTEGRAL TENSOR sidecar (#222): 42^4 doubles, 25 MB,
+# past the repository's 10 MB file limit. Its golden, gradient sidecar and
+# response sidecar ARE committed; the tensor regenerates byte-identically from
+# the committed .mogold in ~30 s. See docs/reference-data.md, "The full
+# MO-integral tensor sidecar".
+golden/hsoh_def2svp_cas66_casscf.erigold
+
+# ... and acrolein's CASSCF-orbital twin's (#123), 57 MB for the same reason; the
 # .mogold (47 KB) and the golden (7.1 MB) beside it ARE committed. Regenerates
 # byte-identically from the committed .mogold in ~39 s. See
 # docs/reference-data.md, "LiF and acrolein on CASSCF orbitals".

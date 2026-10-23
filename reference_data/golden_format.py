@@ -4,9 +4,10 @@ formats in ``golden/``: the ``*.nevpt2gold`` golden, the ``*.gradgold``
 gradient sidecar (conventional or density-fitted) and the ``*.mogold`` MO
 sidecar -- and of the
 ``*.srcgold`` source-term oracle, the ``*.respgold`` CASSCF response
-sidecar, the ``*.pertgold`` integral perturbation sidecar and the
-``*.erigold`` full MO-integral tensor sidecar, which end in the same array
-section. It
+sidecar, the ``*.pertgold`` integral perturbation sidecar, the
+``*.erigold`` full MO-integral tensor sidecar and the ``*.parhess``
+parameter Hessian sidecar (the GPU's output, #222), which end in the same
+array section. It
 also reads ``states.json``, the manifest a CASSCF-reference sweep keeps its
 displaced states' ``.mogold`` files under (:func:`read_states_manifest`).
 
@@ -15,7 +16,7 @@ header, or seeks to an offset, of its own. The scalar header of each format is
 written down **once**, as a field table keyed by magic (:data:`GOLDEN_HEADERS`,
 :data:`GRADGOLD_HEADERS`, :data:`MO_SIDECAR_HEADERS`,
 :data:`SRCGOLD_HEADERS`, :data:`RESPGOLD_HEADERS`, :data:`PERTGOLD_HEADERS`,
-:data:`ERIGOLD_HEADERS`), and
+:data:`ERIGOLD_HEADERS`, :data:`PARHESS_HEADERS`), and
 both directions are
 driven by that table: :func:`pack_header` writes it, :func:`_read_header`
 reads it, and where the array table begins is wherever the header read stopped
@@ -144,6 +145,17 @@ PERTGOLD_MAGIC = b"NEVPT2I1"
 #: byte. A density-fitted case needs none: its ``B`` is already the whole
 #: tensor in three-index form.
 ERIGOLD_MAGIC = b"NEVPT2E1"
+
+#: Magic bytes identifying a **parameter Hessian sidecar** (``*.parhess``,
+#: #222): the GPU's level-1 parameter Hessian as a bilinear form over a
+#: ``.respgold``'s response directions, E_thth[Theta_A, Theta_B], with its
+#: three blocks (:data:`PARHESS_ARRAYS`). The one format here the C++ side
+#: WRITES (``nevpt2_sc_pseudodensity --sc-parameter-hessian
+#: --parameter-hessian-out``, ``src/golden/parhess.cpp``'s ``writeParHess``);
+#: :func:`write_parhess` writes the same bytes, and :func:`read_parhess` is
+#: what a Python consumer (the nuclear Hessian's assembly) reads it with. None
+#: is committed: it is an output, like the ``.gradsrc`` dump.
+PARHESS_MAGIC = b"NEVPT2H1"
 
 #: A source-term oracle's ``(scheme, flavour)``, by magic: what
 #: :func:`read_srcgold` reports as ``header["scheme"]`` /
@@ -304,6 +316,33 @@ ERIGOLD_ARRAYS = (
     # for bit)
     ("mo_coeff", ("nao", "nmo")),
     ("eri", ("nmo", "nmo", "nmo", "nmo")),
+)
+
+#: THE parameter Hessian sidecar's scalar header: the atom count (``3 natm``
+#: is both extents of every array), the orbital-space partition and the
+#: determinant count of the state the directions were taken at.
+PARHESS_HEADERS: dict[bytes, tuple[tuple[str, str], ...]] = {
+    PARHESS_MAGIC: tuple((n, "i") for n in ("natm", "nmo", "ncore", "nact", "nvirt"))
+    + (("ndet", "q"),),
+}
+
+#: The arrays a parameter Hessian sidecar holds, in file order. ``nsel`` is
+#: ``coords``' length: the response sidecar's coordinates (``k = 3 atom +
+#: axis``) the matrix is over -- all ``3 natm``, or the point-group-keeping
+#: block ``--parameter-hessian-coords`` chose -- strictly increasing, stored
+#: as doubles. The orbital energies respond throughout:
+#: ``hessian = h_kk + h_kc + h_kc^T + h_cc``.
+PARHESS_ARRAYS = (
+    ("coords", ("nsel",)),
+    # E_thth[Theta_A, Theta_B] (Eh/bohr^2 for unit nuclear displacements)
+    ("hessian", ("nsel", "nsel")),
+    # Eddot_kk(kappa_A, kappa_B), the orbital block
+    ("h_kk", ("nsel", "nsel")),
+    # Eddot_kc(kappa_A, c_B) = <H_kc^T kappa_A, c_B>, the mixed block (not
+    # symmetric on its own)
+    ("h_kc", ("nsel", "nsel")),
+    # Eddot_cc(c_A, c_B), the CI block
+    ("h_cc", ("nsel", "nsel")),
 )
 
 #: No array the generator writes has more than a handful of axes; a rank past
@@ -667,6 +706,61 @@ def read_erigold(path) -> tuple[dict, dict[str, np.ndarray]]:
         del header["magic"]
         arrays = _read_arrays(f, path, None)
     _check_erigold(path, header, arrays)
+    return header, arrays
+
+
+def _check_parhess(path, header: dict, arrays: dict[str, np.ndarray]) -> None:
+    """Exactly the :data:`PARHESS_ARRAYS`, in order, ``coords`` strictly
+    increasing integers within ``[0, 3 natm)`` and every matrix ``(nsel,
+    nsel)``; a header that is not a usable partition is refused before any
+    shape is read against it -- the same refusals ``loadParHess`` makes."""
+    if (header["ncore"] + header["nact"] + header["nvirt"] != header["nmo"]
+            or header["natm"] < 1 or header["nmo"] < 1 or header["nact"] < 1
+            or header["ncore"] < 0 or header["nvirt"] < 0 or header["ndet"] < 1):
+        raise FormatError(f"{path}: header {header} is not a usable partition")
+    names = [n for n, _s in PARHESS_ARRAYS]
+    if list(arrays) != names:
+        missing = [n for n in names if n not in arrays]
+        raise FormatError(f"{path}: arrays {list(arrays)}, expected {names}"
+                          + (f" (missing {', '.join(missing)})" if missing else ""))
+    coords = arrays["coords"]
+    if (coords.ndim != 1 or coords.size < 1 or np.any(coords != np.floor(coords))
+            or np.any(coords < 0) or np.any(coords >= 3 * header["natm"])
+            or np.any(np.diff(coords) <= 0)):
+        raise FormatError(f"{path}: coords {coords} are not strictly increasing coordinate "
+                          f"indices within [0, {3 * header['natm']})")
+    dims = dict(header, nsel=coords.size)
+    for name, shape in PARHESS_ARRAYS:
+        want = tuple(dims[d] for d in shape)
+        if arrays[name].shape != want:
+            raise FormatError(f"{path}: {name} is {arrays[name].shape}, expected {shape} = {want}")
+
+
+def write_parhess(path, *, header: dict, arrays: dict[str, np.ndarray]) -> None:
+    """Write a parameter Hessian sidecar (``*.parhess``, ``NEVPT2H1``): the
+    :data:`PARHESS_HEADERS` scalar header from ``header``, then the
+    :data:`PARHESS_ARRAYS` in their order -- byte for byte what
+    ``writeParHess`` writes, held to their shapes before a byte is written.
+    :func:`read_parhess` reads it back into the same ``(header, arrays)``."""
+    names = [n for n, _s in PARHESS_ARRAYS]
+    if set(arrays) != set(names):
+        raise FormatError(f"{path}: arrays {sorted(arrays)}, expected {sorted(names)}")
+    arrays = {n: np.asarray(arrays[n], dtype=np.float64) for n in names}
+    _check_parhess(path, header, arrays)
+    with open(path, "wb") as f:
+        f.write(pack_header(PARHESS_HEADERS, PARHESS_MAGIC, header))
+        write_arrays(f, arrays)
+
+
+def read_parhess(path) -> tuple[dict, dict[str, np.ndarray]]:
+    """``(header, arrays)`` from a parameter Hessian sidecar, every array held
+    to :data:`PARHESS_ARRAYS`' order and shapes, so :func:`write_parhess`
+    writes the same file back."""
+    with open(path, "rb") as f:
+        header = _read_header(f, path, PARHESS_HEADERS, "parameter Hessian sidecar")
+        del header["magic"]
+        arrays = _read_arrays(f, path, None)
+    _check_parhess(path, header, arrays)
     return header, arrays
 
 

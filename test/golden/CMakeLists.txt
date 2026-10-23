@@ -191,3 +191,44 @@ unset(_file)
 add_gtest_suite_tests(
   TARGET erigold_tests
   SUITES EriGoldRoundTripTests EriGoldLoadErrorTests EriGoldCommittedTests)
+
+# Host-only suites for the CASSCF response sidecar reader (loadRespGold, #219's
+# `*.respgold`, read by #222) and the parameter Hessian sidecar's writer and
+# reader (writeParHess / loadParHess, `*.parhess`, #222). The same contract --
+# a malformed file is a value-tier IO Error, never an abort, and one missing
+# an array is refused whole -- plus the two committed response sidecars against
+# the golden and gradient sidecar each belongs to, and the writer's bytes
+# against the format's. No device, so NOT REQUIRES_GPU.
+add_gtest_executable(
+  NAME respgold_tests
+  SOURCES respgold_tests.cpp
+  LINK nevpt2::golden)
+
+set(_resp_defs "")
+foreach(_spec "RESPGOLD_CASSCF|n2_ccpvdz_cas44_casscf.respgold"
+              "GOLDEN_CASSCF|n2_ccpvdz_cas44_casscf.nevpt2gold"
+              "GRADGOLD_CASSCF|n2_ccpvdz_cas44_casscf.gradgold"
+              "GOLDEN_CAS44|n2_ccpvdz_cas44.nevpt2gold"
+              "RESPGOLD_HSOH|hsoh_def2svp_cas66_casscf.respgold"
+              "GOLDEN_HSOH|hsoh_def2svp_cas66_casscf.nevpt2gold"
+              "GRADGOLD_HSOH|hsoh_def2svp_cas66_casscf.gradgold")
+  string(REPLACE "|" ";" _spec "${_spec}")
+  list(GET _spec 0 _tag)
+  list(GET _spec 1 _name)
+  set(_file "${PROJECT_SOURCE_DIR}/golden/${_name}")
+  if(NOT EXISTS "${_file}")
+    message(FATAL_ERROR "test/golden: committed file missing: ${_file}")
+  endif()
+  list(APPEND _resp_defs "NEVPT2_TEST_${_tag}=\"${_file}\"")
+endforeach()
+target_compile_definitions(respgold_tests PRIVATE ${_resp_defs})
+unset(_resp_defs)
+unset(_spec)
+unset(_tag)
+unset(_name)
+unset(_file)
+
+add_gtest_suite_tests(
+  TARGET respgold_tests
+  SUITES RespGoldLoadErrorTests RespGoldCommittedTests ParHessRoundTripTests
+         ParHessLoadErrorTests)

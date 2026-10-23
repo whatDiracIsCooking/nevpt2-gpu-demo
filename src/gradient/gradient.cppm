@@ -1364,11 +1364,12 @@ Result<std::vector<ScOrbitalSandwichResult>> scOrbitalSandwichDevice(
 // Eddot_kk(u, v) assembled: the curvature's two terms (with `setup.ci` the
 // digests' forward term too) and the sandwich, per pair. The curvature's
 // refusal stands -- a conventional pair with neither member active-active has
-// no K2 without the full tensor (GeneralIntegralsDevice::eri, which no caller
-// of this one uploads: --sc-hessian-kk's ladders displace stored blocks only),
-// and is refused as Unsupported before any device work, never answered
-// without it (Sec. 9.1). `setup.ci` is required (the sandwich's digests); a
-// request's `tangent` asks for both terms' second mode.
+// no K2 without the full tensor (GeneralIntegralsDevice::eri, which
+// --sc-hessian-kk never uploads: its ladders displace stored blocks only; the
+// parameter Hessian below, #222, does), and is refused as Unsupported before
+// any device work, never answered without it (Sec. 9.1). `setup.ci` is
+// required (the sandwich's digests); a request's `tangent` asks for both
+// terms' second mode.
 struct ScOrbitalHessianResult {
   ScOrbitalCurvatureResult curvature;
   ScOrbitalSandwichResult sandwich;
@@ -1378,6 +1379,108 @@ struct ScOrbitalHessianResult {
 Result<std::vector<ScOrbitalHessianResult>> scOrbitalHessianDevice(
     const ScOrbitalCurvatureSetup& setup, const std::vector<ScOrbitalCurvatureRequest>& pairs,
     const DeviceResources& res);
+
+// --- the parameter Hessian as a bilinear form over supplied directions (#222) -
+//
+// docs/hessian-theory.md, Sec. 8: the nuclear Hessian CONSUMES level 1, as
+// the bilinear form E_thth[Theta_A, Theta_B] over the reference's first-order
+// responses Theta_A = (kappa_A, c_A), one per nuclear coordinate (#219's
+// `.respgold`). With theta = (kappa, c),
+//
+//   E_thth[A, B] = Eddot_kk(kappa_A, kappa_B) + Eddot_kc(kappa_A, c_B)
+//                + Eddot_kc(kappa_B, c_A)     + Eddot_cc(c_A, c_B),
+//
+// every block the one the tree already gates, in the mode a nuclear Hessian
+// consumes: the orbital energies RESPONDING THROUGHOUT -- to kappa (the
+// orbital block's own mode, deps out of the sidecar), to c through W (#214's
+// FULL mode of H_cc) and to both (#184's FULL mode of H_kc, C5 on). So the
+// matrix is the Hessian of ONE functional, the one the gated Y and y are the
+// gradient of (--dump-source-terms').
+//
+// HOW IT IS FORMED (Sec. 4.4 and 5.3's cost argument; docs/gradients.md, Sec.
+// 1.1 records the choice). The CI block and the mixed block have a vector
+// orientation in tree -- H_cc u by reverse over forward (#156) and H_kc^T w,
+// R1 (#184) -- so they are formed as 3N vector products, one per direction,
+// and every entry is then a determinant-space dot: 2 x 3N walks for the
+// (3N)^2 entries of both blocks, where per-pair scalars would be (3N)^2 F
+// walks and 3N(3N+1)/2 three-vector Hessian walks. The orbital block has NO
+// vector orientation (Sec. 5.3: the orbital blocks exist only as an action,
+// and the tree's action is the scalar Eddot_kk(u, v)), so it is formed per
+// pair: scOrbitalHessianDevice, the curvature with K2 from the full tensor
+// and the sandwich, on every pair A <= B, the (B, A) entry its mirror -- the
+// orbital Hessian is a symmetric bilinear form wherever it exists, and one
+// pair walk is the block's whole cost (docs/performance.md, "The parameter
+// Hessian over the responses"), so the swap is the caller's check on a seeded
+// subset of pairs (apps/sc_pseudodensity/:parameter_hessian_check), not a
+// second walk per entry.
+//
+// REFUSALS (Sec. 9.1), per pair, and propagated: the matrix is refused WHOLE,
+// never handed back with a zero entry. A conventional pair with neither member
+// active-active and no full tensor (GeneralIntegralsDevice::eri) is
+// Unsupported, as K2's refusal; a (class, pair) whose empty perturbers are
+// populated non-proportionally (rho_t), and any tuple empty by the state, is
+// Numerical, as the sandwich's. The returned Error names the first refused
+// entry and counts them all. Every orbital pair is evaluated before the
+// refusal returns, so the count is the whole block's. A direction whose
+// kappa is identically zero has a zero orbital row and column by
+// bilinearity, and is not handed to the orbital block (which refuses a zero
+// direction as malformed). The CI and mixed blocks need no census of their
+// own: a tuple empty by the state is refused by every orbital pair's census
+// (it is a property of the state), and a tuple empty by the integrals is
+// empty at every CI vector (Sec. 4.1, Sec. 5.5).
+//
+// A density-fitted case is refused (Unsupported): the mixed block is
+// integral-direct (scMixedHessianDevice's Data), and the response sidecars
+// are the conventional `_casscf` states'. Approximate digests never reach
+// here (nevpt2.cli refuses them with every Hessian flag).
+//
+// Integral-direct, one slab per block, every device tensor from res's pool and
+// everything on res.stream(); exact digests only (`opt`), at `opt.nTiles` --
+// the tangent build's floors (H_cc's tangent RDMs; docs/performance.md,
+// "Which build sets a Hessian flag's floor").
+struct ScParameterDirection {
+  Tensor kappa;  // (n_mo, n_mo), antisymmetric
+  Tensor ci;     // shaped like the state's CI vector
+};
+
+struct ScParameterHessianSetup {
+  const NevptIntegralsDevice& ints;
+  const GeneralIntegralsDevice& gen;  // the sidecar, the full tensor uploaded for K2
+  const RdmTensors& rdm;              // the state's five RDMs
+  const Tensor& ci;                   // (nstringsA, nstringsB)
+  int64_t nelecA = 0;
+  int64_t nelecB = 0;
+  const Tensor& h2e;                  // the active h2e, host: the tangent RDM builds'
+  const RdmBuildOptions& opt;         // exact digests only, at opt.nTiles
+  const OrbitalEnergyResponse& eps;   // W: the orbital energies' response to c
+  const DeviceTensor& hbar;           // dE/d(h2e) through the digests (scDigestAdjointDevice)
+};
+
+struct ScParameterHessianResult {
+  // (n, n), n the number of directions, entry [A][B]:
+  Tensor hessian;  // E_thth[A, B] = kk + kc + kc^T + cc
+  Tensor kk;       // Eddot_kk(kappa_A, kappa_B), computed on A <= B and mirrored
+  Tensor kc;       // Eddot_kc(kappa_A, c_B) = <H_kc^T kappa_A, c_B>
+  Tensor cc;       // <c_B, H_cc c_A>
+  // The 3N vectors, each shaped like the CI vector: what the CI and mixed
+  // blocks' dots were taken from.
+  std::vector<Tensor> hkcT;  // H_kc^T kappa_A
+  std::vector<Tensor> hcc;   // H_cc c_A
+  // The orbital block's per-pair results, row-major over (A, B), filled for
+  // A <= B; a zero-kappa row or column, and A > B, are default (all zero).
+  std::vector<ScOrbitalHessianResult> kkPairs;
+  // y from every H_cc walk (the gated y, FULL mode), the worst spread between
+  // them: the free check that the 3N walks ran one state in one mode.
+  Tensor y;
+  double ySpread = 0.0;
+  // Wall time of each block's formation, seconds (what docs/performance.md
+  // records the cost choice against).
+  double secondsKk = 0.0, secondsKc = 0.0, secondsCc = 0.0;
+};
+
+Result<ScParameterHessianResult> scParameterHessianDevice(
+    const ScParameterHessianSetup& setup, const std::vector<ScParameterDirection>& dirs,
+    const SigmaVectorOptions& sigma, const DeviceResources& res);
 
 // --- the source terms' tangent along a SUPPLIED integral perturbation (#220) --
 //

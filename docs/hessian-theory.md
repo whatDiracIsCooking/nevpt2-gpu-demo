@@ -13,8 +13,9 @@ and it carries **no measured numbers**. Level 1 (§2–§6) has since been built
 what is in the tree, what is refused and what is deliberately not built is
 [`gradients.md`](gradients.md), §1.1, and the "as built" notes below
 (§9.1's second table among them) say where the code sits. Levels 2 and 3
-(§7–§8) are not in the tree, but for §8's one "as built" piece, the NEVPT2
-half of `L_{R Θ}` (#220 for SC, #234 for PC), and the offline, reference-side pieces §7's and
+(§7–§8) are not in the tree, but for §8's two "as built" pieces, the NEVPT2
+half of `L_{R Θ}` (#220 for SC, #234 for PC) and level 1 consumed as the
+bilinear form over the responses (#222, SC), and the offline, reference-side pieces §7's and
 §8's as-built notes name. Size formulas in `n_mo`, `n_core`, `n_act`,
 `n_virt` and `ndet` are algebra and stay here; what any of them works out to in bytes or seconds belongs in
 [`performance.md`](performance.md) or [`reference-data.md`](reference-data.md).
@@ -2371,6 +2372,35 @@ along `Idot` either: the dropped space is the state's, and no lift test runs
 on that leg. And PC has no empty-perturber term (§6.6), so no perturbation is
 refused, symmetry-breaking ones included.
 
+**As built (#222): level 1 consumed as the bilinear form.** For SC,
+`nevpt2_sc_pseudodensity --sc-parameter-hessian` forms
+`theta^(1)_A . E_{theta theta} . theta^(1)_B` over the `3N` responses
+`casscf_nuclear_hessian.py` writes (the `.respgold`, #219):
+
+```
+  E_thth[A, B] = Eddot_kk(kappa_A, kappa_B) + Eddot_kc(kappa_A, c_B)
+               + Eddot_kc(kappa_B, c_A)     + Eddot_cc(c_A, c_B)
+```
+
+with the orbital energies responding throughout, so the matrix is the Hessian
+of the one functional the gated `Y` and `y` are the gradient of. The responses
+are full range, with no active–active member, so K2 reads the full tensor
+(§5.4) on every pair. §4.4's and §5.3's cost argument picks the orientation
+per block: `H_cc` and `H_kc` as `3N` vectors (§4.2, §5.5's R1) dotted with
+the CI responses, `H_kk` per pair, since it exists only as an action
+([`gradients.md`](gradients.md), §1.1, records the choice). The matrix is
+checked per entry against the scalars, by its symmetry, and by ladders of
+the gated `Y` and `y`. Each ladder runs at `(C exp(h kappa_B), c + h
+c_B)`, with every input rebuilt out of the full tensor, and is dotted with
+`Theta_A`. Displacing along `exp(h kappa_B) exp(s kappa_A)` gives the entry
+plus `(1/2) Edot([kappa_B, kappa_A])`, §5.1's parameterisation term, which
+the ladder's target carries. §9.1's refusals apply per pair, and any one
+refuses the whole matrix. On a symmetric molecule a response along a
+coordinate that leaves the point group populates §5.6's empty perturbers.
+Two such responses of different irreps are refused (N2's `x`–`y` pairs), so
+there the matrix exists only over a block of coordinates that keeps the point
+group, which the flag can be restricted to.
+
 Three things are needed that the gradient did not need:
 
 1. **Second-derivative integrals** — `d^2 h / dR_A dR_B` and
@@ -2554,20 +2584,26 @@ flags are #152–#158, #184, #190 and #200–#202). Seven Hessian flags exist:
 `nevpt2_pc_tangent --pc-hessian` / `--pc-hessian-vector` (PC's `H_cc`). The
 three orbital-block flags also take `--pc`, which makes them PC's `H_kc`,
 curvature and `H_kk` (#200–#202) under every row below unchanged; `--pc` is
-not a Hessian flag of its own and adds no binary. Each row above, as the tree
-has it:
+not a Hessian flag of its own and adds no binary. An eighth,
+`nevpt2_sc_pseudodensity --sc-parameter-hessian` (#222, §8), assembles all
+three blocks over a response sidecar's directions. Every row reaches it
+through the block flags' own code, and **a refused pair refuses the whole
+matrix** (`scParameterHessianDevice` evaluates every orbital pair, then
+returns the first refusal's kind, naming its entry and counting the rest).
+It is SC's alone: `--pc` beside it is `err_unsupported`. Each row above, as
+the tree has it:
 
 | row | as built | held by |
 |---|---|---|
-| approximate digest with any Hessian | `nevpt2.cli`'s `checkHessianDigests`, run in `parseArgs` **before** `finalize()`, so the kind is `err_unsupported` whatever else the digest flags would have drawn (`--fused-digest` with no GEMM digest, `--cublas` on HIP). `nevpt2_pc_tangent` implements none of the three, so it refuses the digest flag itself — `err_unsupported` too | `test/cli`'s `CliHessianRefusalTests`, every flag × every digest, both orders, and each orbital-block flag with `--pc` in every order |
+| approximate digest with any Hessian | `nevpt2.cli`'s `checkHessianDigests`, run in `parseArgs` **before** `finalize()`, so the kind is `err_unsupported` whatever else the digest flags would have drawn (`--fused-digest` with no GEMM digest, `--cublas` on HIP). `nevpt2_pc_tangent` implements none of the three, so it refuses the digest flag itself — `err_unsupported` too | `test/cli`'s `CliHessianRefusalTests`, every flag × every digest, both orders, and each orbital-block flag with `--pc` in every order; `CliScPseudodensityFlagTests`' `ScParameterHessianRefusesTheApproximateDigests` for #222's flag |
 | a Hessian flag on the wrong binary | the binary/flag table (`nevpt2.cli:binary_flags`; README.md, "Which binary takes which flag"): `err_unsupported`, "only `<binary>`", with `--pc` beside it or not | `CliHessianRefusalTests`, `CliMatrixTests` |
 | a PC class the gap or denominator check refuses | the class comes back `PcStatus::Refused` with its reason, through the status the energy, tangent and adjoint use; the run FAILs | the PC Hessian entries' own tables |
 | the PC Schur lift above round-off | `pcHessianDevice` (`P S_u P`, `P S_v P`, `L_uv`, `L_uu`, `L_vv`) and `pcCiHessianVectorDevice` (`P S_u P` and `L_uu`), relative to `s_max` against `PC_LIFT_TOL`, `err_numerical` through the class's status (#152, #155); and `pcMixedHessianDevice` (the CI leg's `P S_u P` and `L_uu`, the same test, #201), which returns the refusal as an `err_numerical` naming each refused class. Each check's negative control — a symmetry-breaking direction — must be refused for its lift, or the run FAILs. The separation the threshold sits in is [`pc-nevpt2.md`](pc-nevpt2.md), "What the cut drops, and how it moves" | `nevpt2_pc_hessian_cas44`, `nevpt2_pc_hessian_vector_cas44` and their `_casscf` twins; `nevpt2_sc_pseudodensity_cas44_pc_hessian_kc` and its fitted twin |
 | PC conditioning | printed, never refused: each PC Hessian table has a `kept s` and a `gap` column, and each PASS line names the smallest kept `s / s_max`, its class, and the smallest gap against `PC_MIN_GAP`. What that conditioning costs is #194's | the PC Hessian entries' regexes ([`testing.md`](testing.md), "The Hessian on CASSCF orbitals") |
-| K2 with neither direction active–active, conventional | `scOrbitalCurvatureDevice` refuses the pair as `err_unsupported`, never K1 alone, unless the full tensor was uploaded (#154; a fitted case takes the three-index route instead). With `--erigold` (#180) such a pair takes the four-index jets of the `.erigold` tensor, and the `FullTensor` route asked for without one is refused the same way. `Eddot_kk` keeps the refusal, SC's and PC's (`pcOrbitalHessianDevice`, #202) alike: `--sc-hessian-kk` takes no `--erigold` | `--sc-hessian-kk-int`'s refusal checks, with and without `--erigold`; `--pc --sc-hessian-kk`'s check 7 |
+| K2 with neither direction active–active, conventional | `scOrbitalCurvatureDevice` refuses the pair as `err_unsupported`, never K1 alone, unless the full tensor was uploaded (#154; a fitted case takes the three-index route instead). With `--erigold` (#180) such a pair takes the four-index jets of the `.erigold` tensor, and the `FullTensor` route asked for without one is refused the same way. `Eddot_kk` keeps the refusal, SC's and PC's (`pcOrbitalHessianDevice`, #202) alike: `--sc-hessian-kk` takes no `--erigold`. `--sc-parameter-hessian` (#222) does: no response pair has an active–active member, so without the tensor every orbital pair is refused and so is the whole matrix | `--sc-hessian-kk-int`'s refusal checks, with and without `--erigold`; `--pc --sc-hessian-kk`'s check 7; `--sc-parameter-hessian`'s check 5 |
 | a sidecar missing an array | `GradGoldFile::requireGeneralInventory` (`nevpt2.golden`), which every reader of the general-range inventory — `--kappa-full`, `--source-oracle`, all three orbital Hessian flags — calls before uploading any of it: `err_io` naming the array, the whole sidecar refused | `test/golden`'s `GradGoldCas44Tests` / `GradGoldDfCas44Tests`: the committed sidecars with each array erased in turn |
-| the four guarded-tuple rows | `scOrbitalSandwichDevice` (`nevpt2.gradient_plan`'s `emptyTermPacked`, #190). A small tuple contributes zero and is never scored. An integral-empty tuple both directions populate adds K6 at the ray-limit multipliers. Sijrs takes its own `P = -1/Delta` on every guarded tuple, through an unguarded finish at every order (`sijrsMultipliers`), so its first-order terms are exact too. A (class, pair) whose worst `rho_t` exceeds `kRhoTol` is refused as `err_numerical`, naming the class, the tuple count and the worst `rho_t`, and so is any tuple empty by the state | `--sc-hessian-kk`'s entries, whose PASS line counts the refused pairs; the thresholds and separations are [`testing.md`](testing.md), "The orbital block's sandwich" |
-| Euler with the orbital-energy response on | two blocks have a responding mode. `H_kc`: `--sc-hessian-kc` runs its FULL mode (the orbital energies responding to `kappa` and to `c`), prints that Euler is **skipped** there and why, and gates Euler in its EULER mode (held fixed in `c`); its PASS line names both. `H_cc` (#214): the four CI flags (`--sc-hessian`, `--sc-hessian-vector`, `--pc-hessian`, `--pc-hessian-vector`) run at fixed orbital energies, Euler gated, or — with `--gradgold` beside them — in FULL mode, the orbital energies responding to `c`, Euler **skipped** and said to be; each PASS line names its mode. With `--pc`, `--sc-hessian-kc`'s scalar and vector run with the orbital energies responding to `kappa` (EULER) or frozen (FROZEN), and the responding-in-`c` mode is refused, `err_unsupported` (along an orbital `w` it has no gate; the walk's FULL mode runs, gated, only under `--pc --sc-source-tangent`, #234, where Euler has no role); `--sc-hessian-kk-int` runs EULER, `--sc-hessian-kk` both | `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kc`'s regex, the three `_cas44_casscf_pc_*` entries', and the eight `H_cc` FULL entries' (`*_full`, CASCI and CASSCF) |
+| the four guarded-tuple rows | `scOrbitalSandwichDevice` (`nevpt2.gradient_plan`'s `emptyTermPacked`, #190). A small tuple contributes zero and is never scored. An integral-empty tuple both directions populate adds K6 at the ray-limit multipliers. Sijrs takes its own `P = -1/Delta` on every guarded tuple, through an unguarded finish at every order (`sijrsMultipliers`), so its first-order terms are exact too. A (class, pair) whose worst `rho_t` exceeds `kRhoTol` is refused as `err_numerical`, naming the class, the tuple count and the worst `rho_t`, and so is any tuple empty by the state | `--sc-hessian-kk`'s entries, whose PASS line counts the refused pairs; the thresholds and separations are [`testing.md`](testing.md), "The orbital block's sandwich"; `nevpt2_sc_pseudodensity_cas44_casscf_sc_parameter_hessian_refused`, N2's whole response set refused for its `x`–`y` pairs (#222) |
+| Euler with the orbital-energy response on | two blocks have a responding mode. `H_kc`: `--sc-hessian-kc` runs its FULL mode (the orbital energies responding to `kappa` and to `c`), prints that Euler is **skipped** there and why, and gates Euler in its EULER mode (held fixed in `c`); its PASS line names both. `H_cc` (#214): the four CI flags (`--sc-hessian`, `--sc-hessian-vector`, `--pc-hessian`, `--pc-hessian-vector`) run at fixed orbital energies, Euler gated, or — with `--gradgold` beside them — in FULL mode, the orbital energies responding to `c`, Euler **skipped** and said to be; each PASS line names its mode. With `--pc`, `--sc-hessian-kc`'s scalar and vector run with the orbital energies responding to `kappa` (EULER) or frozen (FROZEN), and the responding-in-`c` mode is refused, `err_unsupported` (along an orbital `w` it has no gate; the walk's FULL mode runs, gated, only under `--pc --sc-source-tangent`, #234, where Euler has no role); `--sc-hessian-kk-int` runs EULER, `--sc-hessian-kk` both. `--sc-parameter-hessian` (#222) runs every block in its responding mode and gates no Euler; its PASS line says the orbital energies respond throughout | `nevpt2_sc_pseudodensity_cas44_casscf_sc_hessian_kc`'s regex, the three `_cas44_casscf_pc_*` entries', and the eight `H_cc` FULL entries' (`*_full`, CASCI and CASSCF) |
 | a `casscf`-kind golden | every Hessian flag, with `--pc` or without, passes `requireSourceTermReference`, which accepts both kinds, before any card is touched; `requireLagrangianReference` still has no call site in `src/` | one entry per flag on `n2_ccpvdz_cas44_casscf`, and one per orbital-block flag with `--pc` ([`testing.md`](testing.md), "The Hessian on CASSCF orbitals") |
 
 ## 10. What this settles, and what it does not

@@ -300,8 +300,10 @@ ignores it. `test/cli/` holds this matrix against the table:
 | `--kappa-act`, `--kappa-full` | refused | refused | ✓ | refused |
 | `--sc-hessian-kc`, `--sc-hessian-kk-int`, `--sc-hessian-kk` | refused | refused | ✓ (exact digests; SC's, or PC's with `--pc`) | refused |
 | `--sc-source-tangent` | refused | refused | ✓ (exact digests; SC's, or PC's with `--pc`) | refused |
+| `--sc-parameter-hessian` | refused | refused | ✓ (exact digests; SC only, `--pc` refused) | refused |
+| `--parameter-hessian-out`, `--parameter-hessian-coords` | refused | refused | ✓ (with `--sc-parameter-hessian` only) | refused |
 | `--gradgold` | ✓ | refused | ✓ | ✓ (`--pc-hessian`, `--pc-hessian-vector`) |
-| `--erigold` | refused | refused | ✓ (`--sc-hessian-kk-int` only) | refused |
+| `--erigold` | refused | refused | ✓ (`--sc-hessian-kk-int`, `--sc-parameter-hessian`) | refused |
 | `--dump-source-terms`, `--source-oracle` | refused | refused | ✓ | refused |
 | `--probed-y` | refused | refused | ✓ (with `--dump-source-terms` only) | refused |
 | `--fd-steps`, `--fd-start-pow` | refused | refused | refused | ✓ |
@@ -348,10 +350,13 @@ four (#184),
 `--sc-hessian-kk-int` with any of the five (#154),
 `--sc-hessian-kk` with any of the six (#158),
 `--sc-source-tangent` with any of the seven (#220),
-`--erigold` without `--sc-hessian-kk-int` (#180),
+`--sc-parameter-hessian` with any of the eight, and
+`--parameter-hessian-out` or `--parameter-hessian-coords` without it (#222),
+`--erigold` without `--sc-hessian-kk-int` or `--sc-parameter-hessian`
+(#180, #222),
 `--gradgold` without `--kappa-full`, `--sc-hessian-kc`, `--sc-hessian-kk-int`,
-`--sc-hessian-kk`, `--sc-source-tangent`, `--dump-source-terms` or
-`--source-oracle`, or in
+`--sc-hessian-kk`, `--sc-source-tangent`, `--sc-parameter-hessian`,
+`--dump-source-terms` or `--source-oracle`, or in
 `nevpt2_demo` without `--gradient-source`, `--sc-hessian` or
 `--sc-hessian-vector`, or in `nevpt2_pc_tangent` without `--pc-hessian` or
 `--pc-hessian-vector`, `--check-blocks` with
@@ -364,13 +369,15 @@ four (#184),
 `--sc-hessian-vector` with any of those three), and
 `--sc-tangent` / `--gradient-source` / `--sc-hessian` / `--sc-hessian-vector`
 with `--profile` is
-refused as *unsupported*, since none prints the tables, as is `nevpt2_df_demo
---gradient-source --pc` (the PC source term has no density-fitted slab path).
+refused as *unsupported*, since none prints the tables, as are `nevpt2_df_demo
+--gradient-source --pc` (the PC source term has no density-fitted slab path)
+and `--sc-parameter-hessian --pc` (PC's bilinear form is not built).
 
 **The Hessian flags** (`--sc-hessian`, `--sc-hessian-vector`,
 `--sc-hessian-kc`, `--sc-hessian-kk-int`, `--sc-hessian-kk`, `--pc-hessian`,
-`--pc-hessian-vector`, and `--sc-source-tangent`, #220's mixed derivative in
-the integrals and the parameters) are each one binary's, as the table says, and refuse
+`--pc-hessian-vector`, `--sc-source-tangent`, #220's mixed derivative in
+the integrals and the parameters, and `--sc-parameter-hessian`, #222's whole
+parameter Hessian over the response directions) are each one binary's, as the table says, and refuse
 `--cublas`, `--ozaki` and `--fused-digest` — with or without the flags that
 ride on them, in any order, on either backend — as *unsupported*, before any
 other check on the digest flags: a second derivative of an approximate digest
@@ -403,6 +410,7 @@ against the other. They read the same reference files, and each prints its own
 | `nevpt2_sc_pseudodensity --sc-hessian-kk-int` | `[--gradgold PATH]`, `[--erigold PATH]`, `[--pc]` | the first term of the orbital block `H_kk` of the SC total's Hessian, the integrals' own curvature `<Ehat', I''[u, v]> = K1 + K2` ([`docs/hessian-theory.md`](docs/hessian-theory.md), §5.1 and §5.4), each term's adjoint against its forward tangent, with exact zeros and Richardson-verified ladders of the fixed-pseudodensity pairing along `exp(s u + t v)`; out of the `*.gradgold` sidecar (required). A pair with neither direction active–active is refused on a conventional case unless `--erigold` hands it the `*.erigold` full MO-integral tensor, from whose four-index jets K2 then comes for any pair, every pair laddered (#180); on a `*_df` golden K2 is the three-index jet of `B` for any pair (#154). With `--pc`, PC-NEVPT2's `<Ehat'_pc, I''>`, after gating PC's first-order orbital source term, on a `*_df` golden too (§6.7; #200) |
 | `nevpt2_sc_pseudodensity --sc-hessian-kk` | `[--gradgold PATH]`, `[--pc]` | the orbital block `H_kk`'s second term, the sandwich `I'^T Ehat'' I' = K3 + K4 + K5 + K6` ([`docs/hessian-theory.md`](docs/hessian-theory.md), §5.1 and §5.6), forward against reverse, and the whole `Eddot_kk(u, v)` against Richardson-extrapolated ladders of the SC total along `exp(s u + t v)`; out of the `*.gradgold` sidecar (required). A pair along which the energy has no Hessian (§5.6's `rho_t` test on the empty perturbers) is refused, and `Eddot_kk` keeps `--sc-hessian-kk-int`'s refusal (#158, #190). With `--pc`, PC-NEVPT2's: the solve's sandwich forward against reverse with the orbital energies responding and frozen, ladders of the PC total, and the step-free gauge against `H_kc`; PC refuses no pair for its empty perturbers (§6.4–§6.8; #202) |
 | `nevpt2_sc_pseudodensity --sc-source-tangent PATH` | `[--gradgold PATH]`, `[--pc]` | the SC source terms' tangent along every nuclear coordinate of the integral perturbation sidecar at `PATH` (a `golden/*.pertgold`, #220): `Ydot` probed and `ydot` by reverse over forward, against `d^2E/dh dtheta` forward over forward by duality, and against Richardson-verified ladders of the gated `Y` and `y` recomputed at `I +- h Idot`; out of the `*.gradgold` sidecar (required), on a `*_df` golden too. A coordinate that populates empty perturbers (a displacement leaving the point group) is refused and counted ([`docs/hessian-theory.md`](docs/hessian-theory.md), §8). With `--pc`, PC-NEVPT2's `Y_pc` and three-term `y_pc`, the orbital energies responding to `c` (PC's mixed block in its FULL mode): the first derivative along each perturbation three ways, the same duality and ladders from `h = 2^-4`, and no coordinate refused, PC having no empty-perturber term (§6.4, §6.7 and §8; #234) |
+| `nevpt2_sc_pseudodensity --sc-parameter-hessian PATH` | `[--gradgold PATH]`, `--erigold PATH`, `[--parameter-hessian-coords LIST]`, `[--parameter-hessian-out PATH]` | the SC parameter Hessian as a bilinear form over the response directions of the CASSCF response sidecar at `PATH` (a `golden/*_casscf.respgold`, #219), `E_θθ[Θ_A, Θ_B]`, the orbital energies responding throughout ([`docs/hessian-theory.md`](docs/hessian-theory.md), §8; #222): every entry against the per-block flags' scalars on the same pair, its symmetry, and Richardson-verified ladders of the gated `Y` and `y` recomputed at orbitals displaced out of the `*.erigold` full MO-integral tensor (without which the matrix is refused whole: K2 reads it for every pair). A pair with no Hessian (§5.6) refuses the whole matrix, never a zero entry; `--parameter-hessian-coords` restricts the directions to a block that keeps the point group, and `--parameter-hessian-out` writes the matrix as a `.parhess` and reads it back |
 | `nevpt2_sc_pseudodensity --source-oracle PATH` | `[--gradgold PATH]` | the GPU's own `Y_xy` and `y_I` against PySCF's exact ones, committed as a `golden/*.srcgold`, block by block: every block must stay within the measured tolerance (the known-gap list is empty since #89) ([`docs/testing.md`](docs/testing.md), "The SC source terms against PySCF's, on a card"). With `--pc`, PC-NEVPT2's against block2's, `golden/n2_ccpvdz_cas44_pc.srcgold` (#74; docs/testing.md, "The PC source terms' oracle"); the oracle's scheme must be the run's. A directional oracle (`golden/*_dir.srcgold`, #105) is compared along its seeded directions per block instead (docs/testing.md, "The directional source-term oracle") |
 | `nevpt2_sc_pseudodensity --dump-source-terms PATH` | `[--gradgold PATH]`, `[--pc]` | writes the GPU's own `Y_xy` and `y_I` to a `.gradsrc` (a NumPy `.npz`) for `reference_data/nevpt2_grad.py --source dump` / `both`, and reads it back; what a nuclear gradient built from it comes out at is [`docs/testing.md`](docs/testing.md), "The GPU as the source-term provider". With `--pc`, PC-NEVPT2's, marked as such, with the PC adjoint held to the PC forward tangent along seeded rotations (#74; [`docs/pc-nevpt2.md`](docs/pc-nevpt2.md), "The source terms by reverse mode"). `Y` comes from one reverse pass (#240; [`docs/gradients.md`](docs/gradients.md), §6), its Dyall blocks' transposes held to their builders by duality; `--probed-y` also probes `Y` one basis direction per MO pair, the route it replaced, and holds the two element by element |
 | `nevpt2_pc_tangent` | `--fd-steps N` (3..8, default 4), `--fd-start-pow N` (1..30, default 12: the first step is `2^-N`) | PC's derivative with respect to the CI vector, against a Richardson-verified finite difference |
@@ -415,10 +423,11 @@ Everything that builds a *tangent* — the first four rows and
 of an approximate digest is not the derivative of what the energy stage
 computed. `nevpt2_sc_pseudodensity` builds no tangent RDMs and takes any
 digest, except with `--kappa-full`, `--dump-source-terms`,
-`--sc-hessian-kc`, `--sc-hessian-kk-int`, `--sc-hessian-kk` and
-`--sc-source-tangent`, which build the digests' tangent
-(and `--sc-hessian-kc` and `--sc-source-tangent` the tangent RDM build) and
-refuse them too — the first two as an invalid combination, the other four as
+`--sc-hessian-kc`, `--sc-hessian-kk-int`, `--sc-hessian-kk`,
+`--sc-source-tangent` and `--sc-parameter-hessian`, which build the digests'
+tangent (and `--sc-hessian-kc`, `--sc-source-tangent` and
+`--sc-parameter-hessian` the tangent RDM build) and
+refuse them too — the first two as an invalid combination, the other five as
 *unsupported*. `--sc-tangent` and `--gradient-source` run on both demos and refuse
 each other; `--gradient-source` has a `--pc` path (#74) on the integral-direct
 demo only, `--sc-tangent` none (the PC tangent's own check is

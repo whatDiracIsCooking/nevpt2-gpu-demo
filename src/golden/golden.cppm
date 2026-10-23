@@ -23,6 +23,13 @@
 //   loadEriGold    `*.erigold`: the full MO-integral tensor sidecar (#180),
 //                  every (pq|rs) of a conventional state, written by
 //                  generate_golden.py --erigold.
+//   loadRespGold   `*.respgold`: the CASSCF response sidecar (#219), the 3N
+//                  first-order parameter responses of a `_casscf` state,
+//                  written by reference_data/casscf_nuclear_hessian.py.
+//   writeParHess / loadParHess
+//                  `*.parhess`: the parameter Hessian sidecar (#222), the
+//                  GPU's bilinear form over those responses -- the one
+//                  format here the C++ side WRITES (and reads back).
 //
 // They are two files and not one on purpose: the golden format is extensible
 // (magic + array count), but adding arrays would change every committed
@@ -339,6 +346,114 @@ struct EriGoldFile {
 // one of its two -- or lacks either -- or one shaped otherwise than its header
 // says.
 [[nodiscard]] Result<EriGoldFile> loadEriGold(const std::string& path);
+
+// ---------------------------------------------------------------------------
+// The CASSCF response sidecar (`*.respgold`, #219).
+// ---------------------------------------------------------------------------
+
+// The 3N first-order parameter responses of a `_casscf` state to its nuclear
+// coordinates, written by reference_data/casscf_nuclear_hessian.py --write
+// (golden_format.py's RESPGOLD_HEADERS / RESPGOLD_ARRAYS):
+//
+//   mo_coeff     [nao, nmo]              the frame: the gradient sidecar's own
+//   ci           the golden's ci shape   the frame's CI vector: the golden's
+//   kappa        [ncoord, nmo, nmo]      kappa^(1)_k, antisymmetric, zero on
+//                                        the core-core, active-active and
+//                                        virtual-virtual blocks
+//   ci_response  [ncoord, ndet]          c^(1)_k, orthogonal to ci
+//   hessian      [ncoord, ncoord]        d^2 E_CASSCF / dR dR (Eh/bohr^2)
+//   l_rr         [ncoord, ncoord]        its skeleton half
+//   gradient     [ncoord]                dE_CASSCF / dR
+//   kept         [ncoord]                1.0 where the coordinate keeps the
+//                                        point group
+//
+// with ncoord = 3 natm, coordinate k = 3 atom + axis (bohr). What
+// nevpt2_sc_pseudodensity --sc-parameter-hessian reads its direction set from
+// (#222; docs/hessian-theory.md, Sec. 8).
+struct RespGoldFile {
+  // Stored as int32 (ndet int64) in the file; held as int64_t like every host
+  // size.
+  int64_t natm = 0;
+  int64_t nao = 0;
+  int64_t nmo = 0;  // = ncore + nact + nvirt, checked on load
+  int64_t ncore = 0;
+  int64_t nact = 0;
+  int64_t nvirt = 0;
+  int64_t nelecA = 0;
+  int64_t nelecB = 0;
+  int64_t ndet = 0;
+  double eCasscf = 0.0;
+  std::unordered_map<std::string, Tensor> arrays;
+
+  [[nodiscard]] int64_t ncoord() const { return 3 * natm; }
+
+  // An IO Error unless these responses were written for `golden`'s state and
+  // `sidecar`'s frame: the same partition and electron counts, a
+  // conventional sidecar, `ci` the golden's and `mo_coeff` the sidecar's, both
+  // bit for bit -- directions in another basis would be contracted against
+  // the wrong Hessian with nothing downstream to notice.
+  [[nodiscard]] Status checkAgainst(const GoldenFile& golden, const GradGoldFile& sidecar) const;
+
+  // Coordinate k's orbital response, (nmo, nmo), and its CI response, in the
+  // golden ci's shape: fresh host tensors. loadRespGold has held every array
+  // to its shape, so a k out of range is our bug (check).
+  [[nodiscard]] Tensor kappa(int64_t k) const;
+  [[nodiscard]] Tensor ciResponse(int64_t k) const;
+
+  // The array `name`; our bug if absent.
+  const Tensor& get(const std::string& name) const;
+};
+
+// The parsed sidecar, or an IO Error if it cannot be opened, ends early, has
+// another magic than "NEVPT2R1", carries a partition that does not add up (or
+// no atom, or no determinant), a malformed array header, bytes after its last
+// array, an array that is not one of its eight -- or lacks any of them -- or
+// one shaped otherwise than its header says.
+[[nodiscard]] Result<RespGoldFile> loadRespGold(const std::string& path);
+
+// ---------------------------------------------------------------------------
+// The parameter Hessian sidecar (`*.parhess`, #222): the GPU's OUTPUT.
+// ---------------------------------------------------------------------------
+
+// The level-1 parameter Hessian as a bilinear form over a response sidecar's
+// directions, E_thth[Theta_A, Theta_B] (docs/hessian-theory.md, Sec. 8), as
+// nevpt2_sc_pseudodensity --sc-parameter-hessian --parameter-hessian-out
+// writes it and golden_format.py's read_parhess reads it
+// (PARHESS_HEADERS / PARHESS_ARRAYS):
+//
+//   header     natm, nmo, ncore, nact, nvirt (int32), ndet (int64)
+//   coords     [n]       the response sidecar's coordinates the matrix is
+//                        over (k = 3 atom + axis, strictly increasing, as
+//                        doubles): every one of the 3 natm, or the block
+//                        --parameter-hessian-coords chose
+//   hessian    [n, n]    E_thth[A, B] = h_kk + h_kc + h_kc^T + h_cc
+//   h_kk       [n, n]    Eddot_kk(kappa_A, kappa_B)
+//   h_kc       [n, n]    Eddot_kc(kappa_A, c_B)
+//   h_cc       [n, n]    Eddot_cc(c_A, c_B)
+//
+// the orbital energies responding throughout. The same named-array section as
+// every format here.
+struct ParHessFile {
+  int64_t natm = 0;
+  int64_t nmo = 0;
+  int64_t ncore = 0;
+  int64_t nact = 0;
+  int64_t nvirt = 0;
+  int64_t ndet = 0;
+  std::vector<int64_t> coords;  // n of them
+  Tensor hessian, kk, kc, cc;   // each (n, n)
+};
+
+// Writes `p` to `path`: the magic "NEVPT2H1", the header, then the five
+// arrays in the order above. A partition that does not add up, coordinates
+// that are not strictly increasing within [0, 3 natm), or an array that is
+// not (n, n) is the caller's bug (check()); a file that cannot be opened or
+// written is an IO Error.
+[[nodiscard]] Status writeParHess(const std::string& path, const ParHessFile& p);
+
+// Reads what writeParHess writes, every refusal loadRespGold makes for its own
+// format (an IO Error), the four arrays required and nothing else carried.
+[[nodiscard]] Result<ParHessFile> loadParHess(const std::string& path);
 
 // ---------------------------------------------------------------------------
 // The source-term oracle (`*.srcgold`), SC and PC.
